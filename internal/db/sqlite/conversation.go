@@ -2092,6 +2092,17 @@ func (s *conversationStore) WithdrawPendingInputSystem(ctx context.Context, orgI
 	return nil
 }
 
+func (s *conversationStore) WithdrawSystemUpdateSystem(ctx context.Context, orgID, conversationID string, id int) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	_, err := s.q.ExecContext(ctx, `
+		UPDATE messages SET delivered = 0, window_state = 'inactive'
+		WHERE conversation_id = ? AND id = ? AND role = 'system' AND subtype = ?
+	`, conversationID, id, domain.MessageSubtypeInjectionSystemUpdate)
+	return err
+}
+
 func (s *conversationStore) CompleteForClaimSystem(ctx context.Context, orgID, conversationID, claimID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) (*domain.Conversation, error) {
 	if err := db.ValidateConversationEnding(status); err != nil {
 		return nil, err

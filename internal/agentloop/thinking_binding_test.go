@@ -497,6 +497,47 @@ func TestThinkingBinding_CompactionAdoptsTheCurrentSystemText(t *testing.T) {
 	}
 }
 
+// A warm engagement runs each later turn on the system text the last one ended
+// on, with the update already told. After a compaction that text is this
+// claim's composition, and the thinking produced since is bound to it.
+func TestThinkingBinding_ALaterTurnSendsTheTextTheLastOneEndedOn(t *testing.T) {
+	tr := newMemTranscript(pendingUser("go"))
+	p := newBindingProvider(
+		thinking(scriptedTurn{calls: []domain.ToolCall{{ID: "c1", Name: "bash"}}, usage: inference.Usage{PromptTokens: overThresholdFor(t, fableParams().Model)}}),
+		thinking(summaryReply("everything that happened")),
+		thinking(scriptedTurn{text: "done"}),
+		thinking(scriptedTurn{text: "done again"}),
+	)
+	params := fableParams()
+	params.SystemUpdate = systemUpdateText
+	params.CurrentSystem = changedSystem()
+	first := newTestEngine(tr, p, newScriptedToolHost()).Run(context.Background(), params)
+	if first.Kind != ResultConcluded {
+		t.Fatalf("first turn = %v, want concluded (err: %v)", first.Kind, first.Err)
+	}
+	if first.SystemPrompt != params.CurrentSystem.Prompt || first.SystemAddendum != params.CurrentSystem.Block {
+		t.Fatalf("the turn reports system text %q / %q, want the composition its compaction adopted", first.SystemPrompt, first.SystemAddendum)
+	}
+
+	// The next turn as the warm engagement composes it.
+	_, _ = tr.Insert(context.Background(), "org", &domain.Message{
+		ConversationID: "conv", Role: "user", Content: "one more thing", Delivered: boolPtr(false),
+	})
+	params.SystemPrompt, params.SystemAddendum, params.SystemUpdate = first.SystemPrompt, first.SystemAddendum, ""
+	runEngagement(t, tr, p, newScriptedToolHost(), params)
+	p.assertBound(t)
+
+	updates := 0
+	for _, r := range tr.rows {
+		if r.Subtype == domain.MessageSubtypeInjectionSystemUpdate {
+			updates++
+		}
+	}
+	if updates != 1 {
+		t.Errorf("system updates = %d, want the first turn's alone", updates)
+	}
+}
+
 // A resume that compacts before its first call has already made this claim's
 // composition the conversation's text, so there is nothing left to tell.
 func TestThinkingBinding_AResumeCompactionLeavesNoUpdate(t *testing.T) {

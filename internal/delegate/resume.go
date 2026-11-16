@@ -400,16 +400,6 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 	}
 	agentBin := agentproc.AgentVisibleBinary(selfBin)
 
-	// What changed in the conversation's instructions since it last heard
-	// ends this turn's message, and its row is what the next claim compares
-	// against. Recorded here rather than by the dispatcher because the text
-	// names this process's binary. A fence refusal leaves it out with its row,
-	// and the resume meets the same fence at its first write.
-	if update := resolveCLIPath(opts.system.update, agentBin); update != "" &&
-		!s.insertClaimNote(ctx, orgID, opts.claimID, systemUpdateRow(conversationID, update, opts.system.current.Parts)) {
-		message = joinTurnText(message, update)
-	}
-
 	runURL := s.publishedRunURLFor(orgID, conversationID)
 	extraEnv := []string{
 		"TRIAGE_FACTORY_CONVERSATION_ID=" + conversationID,
@@ -551,6 +541,22 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 		perms = s.AutoApprovePermissionHandler(conversationID)
 	} else {
 		perms = s.BrowserPermissionHandler(orgID, conversationID, opts.claimID, s.resolveAbsentAutoDeny(ctx, opts.TeamID))
+	}
+
+	// What changed in the conversation's instructions since it last heard
+	// ends this turn's message, and its row is what the next claim compares
+	// against. Recorded here, last before the launch, because the text names
+	// this process's binary and because a turn that never reaches the agent
+	// takes the row back (withdrawIfUnsent). A fence refusal leaves it out
+	// with its row, and the resume meets the same fence at its first write.
+	if update := resolveCLIPath(opts.system.update, agentBin); update != "" {
+		row := systemUpdateRow(conversationID, update, opts.system.current.Parts)
+		if !s.insertClaimNote(ctx, orgID, opts.claimID, row) {
+			baseOpts.Message = joinTurnText(baseOpts.Message, update)
+			if row.ID != 0 {
+				baseOpts.OnOpeningUnsent = s.withdrawIfUnsent(baseOpts.OnOpeningUnsent, orgID, conversationID, row.ID)
+			}
+		}
 	}
 
 	// Resume executes as a LiveRun (re-registered in procs, so a resumed run

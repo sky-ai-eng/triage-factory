@@ -3102,6 +3102,14 @@ func (s *conversationStore) WithdrawPendingInputSystem(ctx context.Context, orgI
 	return err
 }
 
+func (s *conversationStore) WithdrawSystemUpdateSystem(ctx context.Context, orgID, conversationID string, id int) error {
+	_, err := s.admin.ExecContext(ctx, `
+		UPDATE messages SET delivered = false, window_state = 'inactive'
+		WHERE org_id = $1 AND conversation_id = $2 AND id = $3 AND role = 'system' AND subtype = $4
+	`, orgID, conversationID, id, domain.MessageSubtypeInjectionSystemUpdate)
+	return err
+}
+
 // CompactForClaimSystem commits one compaction atomically, behind the fence —
 // see the interface doc for the full contract. The re-seq reads the queued
 // rows inside the same transaction that inserts the result row, so the

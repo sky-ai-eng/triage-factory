@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentloop"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -143,5 +144,32 @@ func TestNativeTranscript_NotesAPersonsMessageDelivered(t *testing.T) {
 	}
 	if tr.takePersonDelivered() {
 		t.Error("the count did not start again after it was read")
+	}
+}
+
+// A warm engagement's later turn runs in the sandbox and tree the last one
+// left, after the update was told, on the system text the last turn ended on:
+// a turn that sent the first turn's text again after a compaction would replay
+// thinking under a system prompt it was not produced under.
+func TestNextTurnParams(t *testing.T) {
+	asOf := float64(time.Now().Unix())
+	first := agentloop.Params{
+		SystemPrompt:    "frozen prompt",
+		SystemAddendum:  "frozen block",
+		SystemUpdate:    "<instructions_update>the branch convention changed</instructions_update>",
+		NewSandbox:      true,
+		Workspace:       domain.WorkspaceProvenanceRehydrated,
+		WorkspaceAsOf:   &asOf,
+		ExecutorChanged: true,
+	}
+	got := nextTurnParams(first, agentloop.Result{SystemPrompt: "adopted prompt", SystemAddendum: "adopted block"})
+	if got.SystemPrompt != "adopted prompt" || got.SystemAddendum != "adopted block" {
+		t.Errorf("system text = %q / %q, want what the last turn ended on", got.SystemPrompt, got.SystemAddendum)
+	}
+	if got.SystemUpdate != "" {
+		t.Error("a later turn tells the update again")
+	}
+	if got.NewSandbox || got.ExecutorChanged || got.Workspace != domain.WorkspaceProvenanceUnknown || got.WorkspaceAsOf != nil {
+		t.Errorf("a later turn asserts how the engagement started: %+v", got)
 	}
 }

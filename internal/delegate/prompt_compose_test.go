@@ -180,3 +180,13 @@ func TestRunContext_OmitsAbsentFacts(t *testing.T) {
 		t.Errorf("a run context with nothing to say rendered %q, want empty", got)
 	}
 }
+
+// runContext is the <run_context> block runContextParts' lines render to.
+func runContext(scope, taskState, siblingWork, runRoot, prCheckout, baseCheckout, branchTemplate, runURL, sourceNotes string) string {
+	parts := runContextParts(scope, taskState, siblingWork, runRoot, prCheckout, baseCheckout, branchTemplate, runURL, sourceNotes)
+	lines := make([]string, len(parts))
+	for i, p := range parts {
+		lines[i] = p.Text
+	}
+	return renderRunContext(lines)
+}

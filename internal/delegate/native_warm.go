@@ -115,14 +115,7 @@ func (s *Spawner) runNativeTail(ctx context.Context, n nativeTail) engagementDis
 			// was not. The loop reads the note at the turn's first model
 			// call, with the person's message.
 			s.tellTaskResolved(context.WithoutCancel(ctx), n.orgID, n.conversationID, n.task.ID)
-			// The first turn's params say how this engagement started: in a
-			// sandbox launched for it, in a workspace built or restored for
-			// it. Neither is true of a later turn, which runs in the sandbox and
-			// tree the last one left, so it asserts neither.
-			params.NewSandbox = false
-			params.Workspace = domain.WorkspaceProvenanceUnknown
-			params.WorkspaceAsOf = nil
-			params.ExecutorChanged = false
+			params = nextTurnParams(params, result)
 			result = accumulateTurns(result, n.run(ctx, params))
 		case warmLetGo:
 			return s.letGoWarm(ctx, n, result)
@@ -146,6 +139,24 @@ func (s *Spawner) endNativeTurn(ctx context.Context, n nativeTail, result agentl
 // accumulateTurns is the engagement's result after another turn: that turn's
 // ending, carrying the turns, time and spend of every Run before it. The time
 // spent waiting between them is in no Run, so it is in neither figure.
+// nextTurnParams is the params of a warm engagement's turn after the one that
+// ended in last. The first turn's params say how this engagement started: in
+// a sandbox launched for it, in a workspace built or restored for it, with a
+// system update to tell. None of that is true of a later turn, which runs in
+// the sandbox and tree the last one left, after the update was told, so it
+// asserts none of it. It sends the system text the last turn ended on, which
+// a compaction may have made this claim's composition, because the thinking
+// blocks since are bound to it.
+func nextTurnParams(params agentloop.Params, last agentloop.Result) agentloop.Params {
+	params.NewSandbox = false
+	params.Workspace = domain.WorkspaceProvenanceUnknown
+	params.WorkspaceAsOf = nil
+	params.ExecutorChanged = false
+	params.SystemUpdate = ""
+	params.SystemPrompt, params.SystemAddendum = last.SystemPrompt, last.SystemAddendum
+	return params
+}
+
 func accumulateTurns(earlier, next agentloop.Result) agentloop.Result {
 	next.NumTurns += earlier.NumTurns
 	next.DurationMs += earlier.DurationMs

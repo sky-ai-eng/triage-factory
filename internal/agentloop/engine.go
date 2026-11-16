@@ -337,6 +337,12 @@ type Result struct {
 	ParkGuard Guard
 	// Model is the model a ResultProviderSwitch is for.
 	Model string
+	// SystemPrompt and SystemAddendum are the system text the run's requests
+	// carried when it ended: the text it was handed, or CurrentSystem once a
+	// compaction made that the conversation's text. A later run of the same
+	// engagement sends them, since the thinking blocks the run produced are
+	// bound to them.
+	SystemPrompt, SystemAddendum string
 	// Err carries the underlying cause on ResultFailed,
 	// ResultUpstreamUnavailable and ResultToolHostLost.
 	Err error
@@ -439,6 +445,7 @@ type Logger interface {
 func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 	started := e.now()
 	params.sent = &sentSystem{prompt: params.SystemPrompt, addendum: params.SystemAddendum}
+	defer func() { result.SystemPrompt, result.SystemAddendum = params.sent.prompt, params.sent.addendum }()
 
 	// The engagement's spend, in this frame because the Engine is shared
 	// across engagements. Stamped by one deferred assignment so every exit
@@ -998,9 +1005,14 @@ func (e *Engine) buildRequest(params Params, provider schemas.ModelProvider, row
 		SystemPrompt:   prompt,
 		SystemAddendum: addendum,
 		Rows:           rows,
-		Tools:          e.toolSchemas(params),
-		Effort:         params.Effort,
-		MaxTokens:      maxTokens,
+		// TODO(TFAC-1459): the provider binds thinking blocks to the tool
+		// definitions as it does to the system prompt, so a release that
+		// changes a tool's name, description or schema breaks every parked
+		// conversation's next call; the system text is kept fixed and these
+		// are not.
+		Tools:     e.toolSchemas(params),
+		Effort:    params.Effort,
+		MaxTokens: maxTokens,
 	}
 }
 

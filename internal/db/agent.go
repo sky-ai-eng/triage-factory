@@ -1233,6 +1233,19 @@ type ConversationStore interface {
 	// Exempt from the returned-row rule: a batch flip, like the two above.
 	WithdrawPendingInputSystem(ctx context.Context, orgID, conversationID string, ids []int) error
 
+	// WithdrawSystemUpdateSystem takes back the system update an SDK turn
+	// carried, when the turn never reached the agent: the row with this id,
+	// if it is one of the conversation's system updates, becomes undelivered
+	// and inactive, a row that never happened. The next claim then compares
+	// against what the conversation was told. Any other id is left alone.
+	//
+	// Unfenced, as the return of a turn's staged notes is: it runs as the
+	// engagement that composed the turn fails or ends.
+	//
+	// Exempt from the returned-row rule: bookkeeping on the way out of a turn
+	// that failed to start, whose caller has no use for the row.
+	WithdrawSystemUpdateSystem(ctx context.Context, orgID, conversationID string, id int) error
+
 	// CompactForClaimSystem commits one compaction atomically: optionally
 	// insert the reconstructed reply row (forced inactive — it is history the
 	// moment it exists, never part of any assembly), insert the result row,

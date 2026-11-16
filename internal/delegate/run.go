@@ -844,13 +844,18 @@ func (s *Spawner) composeLaunchTurn(
 		if err := s.recordLaunchNote(sink, conversationID, creatorUserID, domain.MessageSubtypeInjectionNudge, note); err != nil {
 			return err
 		}
+		var updateRow *domain.Message
 		if update.text != "" {
-			if err := sink.OnMessage(systemUpdateRow(conversationID, update.text, update.parts)); err != nil {
+			updateRow = systemUpdateRow(conversationID, update.text, update.parts)
+			if err := sink.OnMessage(updateRow); err != nil {
 				return err
 			}
 		}
 		notes, unsent := s.stagedInjectionsForEngagement(ctx, orgID, conversationID)
 		opts.OnOpeningUnsent = unsent
+		if updateRow != nil {
+			opts.OnOpeningUnsent = s.withdrawIfUnsent(unsent, orgID, conversationID, updateRow.ID)
+		}
 		opts.OpeningBlocks = nil
 		opts.Message = joinTurnText(workspaceNote, notes, note, update.text)
 		return nil

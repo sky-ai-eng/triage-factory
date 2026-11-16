@@ -588,6 +588,16 @@ func TestComposeLaunchTurn_AResumedSessionCarriesTheUpdate(t *testing.T) {
 	if told := lastToldParts(rows); len(told) != len(parts) || told[len(told)-1] != parts[len(parts)-1] {
 		t.Errorf("the recorded parts do not read back as what the conversation was told")
 	}
+
+	// The turn never reaches the agent: the update was not told, so the next
+	// claim must not count it.
+	if resumed.OnOpeningUnsent == nil {
+		t.Fatal("the launch carries no hook to take the update back")
+	}
+	resumed.OnOpeningUnsent()
+	if told := lastToldParts(allRows(t, s, "r-sdk-update")); told != nil {
+		t.Errorf("an update whose turn never reached the agent still reads as told: %+v", told)
+	}
 }
 
 // storeReadDown is a conversation store with one read broken and the rest of

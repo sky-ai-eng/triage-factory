@@ -239,6 +239,24 @@ func systemUpdateRow(conversationID, update string, parts []domain.SystemPart) *
 	}
 }
 
+// withdrawIfUnsent extends unsent, which runs when a turn's opening never
+// reaches the agent, to take back the system-update row id the turn carried:
+// an update the agent never read was not told, and the next claim compares
+// against what was.
+func (s *Spawner) withdrawIfUnsent(unsent func(), orgID, conversationID string, id int) func() {
+	return func() {
+		if unsent != nil {
+			unsent()
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), detachedWriteDeadline)
+		defer cancel()
+		if err := s.conversations.WithdrawSystemUpdateSystem(ctx, orgID, conversationID, id); err != nil {
+			delegateLog.Warn("withdraw a system update whose turn never reached the agent failed; the next claim counts it as told",
+				"conversation", conversationID, "message", id, "error", err)
+		}
+	}
+}
+
 // composeConversationSystemBlock assembles the conversation's own system block —
 // everything the framework prompt refers to but cannot contain, because it
 // differs per run and the framework prompt has to stay byte-identical to remain
@@ -277,8 +295,10 @@ func resolveCLIPath(text, binaryPath string) string {
 	return strings.ReplaceAll(text, "triagefactory exec", binaryPath+" exec")
 }
 
-// runContext renders what the framework prompt refers to but cannot contain:
-// the facts of this particular run. agentprompt.Build is byte-identical for a
+// runContextParts renders what the framework prompt refers to but cannot
+// contain, the facts of this particular run, one <run_context> line per part,
+// in render order, keyed so a later claim can tell the conversation which line
+// changed. agentprompt.Build is byte-identical for a
 // fixed Spec so the fleet shares one cached prefix, which leaves anything that
 // differs between two runs — what this one is pointed at, where its tree and
 // the checkout its setup built are, what the team calls its branches — to
@@ -298,26 +318,15 @@ func resolveCLIPath(text, binaryPath string) string {
 // (domain.SiblingWorkRunContext): which other tasks bear on this run's pull
 // request or issue, who holds each, and whether work is going on it are facts
 // about one launch. The block names tasks by id and entities by key, and no
-// person, so nothing in it is text a source or a person authored. It is read
-// once, at the launch; who takes a task on afterwards reaches the run as a
-// note.
+// person, so nothing in it is text a source or a person authored. Every claim
+// composes it again, so a conversation that has run hears of a change in a
+// system update, beside the note an assignment sends.
 //
 // The source notes arrive here for the same reason: which sources this run's
 // sandbox holds a credential for, and why each other one is unavailable, is a
 // fact about one engagement (its source manifest), so a line per source that
 // is not sealed goes here and never into an agentprompt block. A run whose
 // every source is sealed says nothing about sources at all.
-func runContext(scope, taskState, siblingWork, runRoot, prCheckout, baseCheckout, branchTemplate, runURL, sourceNotes string) string {
-	parts := runContextParts(scope, taskState, siblingWork, runRoot, prCheckout, baseCheckout, branchTemplate, runURL, sourceNotes)
-	lines := make([]string, len(parts))
-	for i, p := range parts {
-		lines[i] = p.Text
-	}
-	return renderRunContext(lines)
-}
-
-// runContextParts is runContext one line per part, in render order, keyed so a
-// later claim can tell the conversation which line changed.
 func runContextParts(scope, taskState, siblingWork, runRoot, prCheckout, baseCheckout, branchTemplate, runURL, sourceNotes string) []domain.SystemPart {
 	var parts []domain.SystemPart
 	add := func(key, name, text string) {

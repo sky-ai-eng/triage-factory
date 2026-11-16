@@ -2904,6 +2904,48 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
+	// An SDK turn records its system update before the turn reaches the
+	// agent. When it never does, the row is taken back, so the next claim
+	// does not count it as told; nothing else is touched.
+	t.Run("WithdrawSystemUpdate_TakesBackThatRowAlone", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		conversationID := seedConversationForTest(t, orgID, seed, "running")
+		insert := func(m domain.Message) int {
+			t.Helper()
+			m.ConversationID = conversationID
+			id, err := store.InsertMessage(ctx, orgID, &m)
+			if err != nil {
+				t.Fatalf("InsertMessage %q: %v", m.Content, err)
+			}
+			return int(id)
+		}
+		update := insert(domain.Message{Role: "system", Subtype: domain.MessageSubtypeInjectionSystemUpdate, Content: "an update"})
+		said := insert(domain.Message{Role: "user", Content: "a person's message"})
+
+		for _, id := range []int{update, said} {
+			if err := store.WithdrawSystemUpdateSystem(ctx, orgID, conversationID, id); err != nil {
+				t.Fatalf("WithdrawSystemUpdateSystem(%d): %v", id, err)
+			}
+		}
+		msgs, err := store.MessagesForConversations(ctx, orgID, []string{conversationID})
+		if err != nil {
+			t.Fatalf("MessagesForConversations: %v", err)
+		}
+		for _, m := range msgs {
+			switch m.ID {
+			case update:
+				if m.WindowState != domain.MessageWindowInactive || (m.Delivered != nil && *m.Delivered) {
+					t.Errorf("update = %s delivered=%v, want withdrawn (inactive, undelivered)", m.WindowState, m.Delivered)
+				}
+			case said:
+				if m.WindowState == domain.MessageWindowInactive || (m.Delivered != nil && !*m.Delivered) {
+					t.Errorf("a row that is not a system update was withdrawn")
+				}
+			}
+		}
+	})
+
 	// The half of SetExecutorForClaimSystem's contract that is NOT the fence,
 	// so both dialects owe it: it writes the claim the caller named and mints
 	// nothing. Its unfenced twin does neither — it resolves the active claim
