@@ -1141,12 +1141,12 @@ func closeTaskRow(ctx context.Context, q queryer, taskID, closeReason, closeEven
 	var t domain.Task
 	row, err := scanTaskBareRow(q.QueryRowContext(ctx, `
 		UPDATE tasks
-		   SET `+db.TaskSetSQL(
-		db.TaskAssign{Col: "status", Expr: "'done'"},
-		db.TaskAssign{Col: "close_reason", Expr: "?1"},
-		db.TaskAssign{Col: "close_event_type", Expr: "?2"},
-		db.TaskAssign{Col: "closed_at", Expr: "?3"},
-	)+`
+		   SET `+db.TaskSetSQL(append([]db.TaskAssign{
+		{Col: "status", Expr: "'done'"},
+		{Col: "close_reason", Expr: "?1"},
+		{Col: "close_event_type", Expr: "?2"},
+		{Col: "closed_at", Expr: "?3"},
+	}, db.CloseTaskAssigns...)...)+`
 		WHERE id = ?4 AND status NOT IN ('done', 'dismissed')
 		RETURNING `+sqliteTaskBareColumns,
 		closeReason, cet, time.Now().UTC(), taskID), &t)
@@ -1259,13 +1259,6 @@ func closeTaskOnEvent(ctx context.Context, q queryer, taskID, closeReason, close
 			VALUES (?, ?, 'closed', ?)
 		`, taskID, closingEventID, time.Now().UTC()); err != nil {
 			return db.TaskCloseOutcome{}, fmt.Errorf("record close audit: %w", err)
-		}
-	}
-	if mode == applyHeldClose {
-		if _, err := q.ExecContext(ctx, `
-			UPDATE tasks SET close_deferred_event_id = NULL, close_deferred_at = NULL WHERE id = ?
-		`, taskID); err != nil {
-			return db.TaskCloseOutcome{}, fmt.Errorf("clear hold: %w", err)
 		}
 	}
 	return db.TaskCloseOutcome{Closed: true, WorkingConversationIDs: working}, nil
@@ -1412,13 +1405,13 @@ func (s *taskStore) CloseByUser(ctx context.Context, orgID, taskID, status strin
 	var t domain.Task
 	row, err := scanTaskBareRow(s.q.QueryRowContext(ctx, `
 		UPDATE tasks
-		   SET `+db.TaskSetSQL(
-		db.TaskAssign{Col: "status", Expr: "?1"},
-		db.TaskAssign{Col: "snooze_until", Expr: "NULL"},
-		db.TaskAssign{Col: "closed_at", Expr: "?2"},
-		db.TaskAssign{Col: "close_reason", Expr: "?3"},
-		db.TaskAssign{Col: "close_event_type", Expr: "NULL"},
-	)+`
+		   SET `+db.TaskSetSQL(append([]db.TaskAssign{
+		{Col: "status", Expr: "?1"},
+		{Col: "snooze_until", Expr: "NULL"},
+		{Col: "closed_at", Expr: "?2"},
+		{Col: "close_reason", Expr: "?3"},
+		{Col: "close_event_type", Expr: "NULL"},
+	}, db.CloseTaskAssigns...)...)+`
 		 WHERE id = ?4
 		   AND version = ?5
 		   AND status NOT IN ('done', 'dismissed')

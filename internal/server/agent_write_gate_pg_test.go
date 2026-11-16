@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -16,6 +17,7 @@ import (
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/llm/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
@@ -36,6 +38,13 @@ func newConversationGateRig(t *testing.T) *conversationGateRig {
 	otherTeam := pgtest.SeedTeam(t, r.h, r.orgID, "other-team")
 	outsider := pgtest.SeedUser(t, r.h, "outsider")
 	pgtest.AddOrgMember(t, r.h, outsider, r.orgID, otherTeam, "member", "member")
+
+	// The org has Anthropic connected and Bedrock not. A multi-mode org with no
+	// provider connected is refused every message, which would stand in for the
+	// gate's answer on the routes these tests are about.
+	pgtest.MustExec(t, r.h.AdminDB, `
+		INSERT INTO org_settings (org_id, anthropic_api_key_ref) VALUES ($1, 'anthropic_api_key')
+		ON CONFLICT (org_id) DO UPDATE SET anthropic_api_key_ref = EXCLUDED.anthropic_api_key_ref`, r.orgID)
 
 	stores := pgstore.New(r.h.AdminDB, r.h.AppDB, pgtest.SecretKey)
 	spawner := delegate.NewSpawner(r.h.AdminDB, stores, nil, r.s.ws, "claude-sonnet-4-6")
@@ -195,6 +204,29 @@ func TestConversationWriteGate_Postgres(t *testing.T) {
 	}
 	if rec := r.do(t, r.member, http.MethodPost, "/api/agent/conversations/"+fresh+"/stop", nil); rec.Code != http.StatusOK {
 		t.Errorf("member stop of the team conversation = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// A message that names a model whose provider the organization has not
+// connected is refused at the route with 409 NOT_CONFIGURED on the model field,
+// naming the provider, and writes no row. Multi mode, because only a native id
+// names a provider and only this universe accepts one in a message body.
+func TestHandleMessage_Postgres_NamedModelOnAnUnconnectedProviderIsNotConfigured(t *testing.T) {
+	r := newConversationGateRig(t)
+	conversationID := r.seedConversation(t, "team", r.admin)
+
+	rec := r.do(t, r.member, http.MethodPost, "/api/agent/conversations/"+conversationID+"/message", map[string]string{
+		"text": "carry on", "model": modelKeyOn(t, modelcatalog.ProviderBedrock),
+	})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	httpxtest.AssertFirstError(t, rec, httpx.ReasonNotConfigured, "model")
+	if !strings.Contains(rec.Body.String(), modelcatalog.ProviderDisplayName(modelcatalog.ProviderBedrock)) {
+		t.Errorf("refusal does not name the provider to connect: %s", rec.Body.String())
+	}
+	if n := r.messageRows(t, conversationID); n != 0 {
+		t.Errorf("a refused send recorded %d message rows", n)
 	}
 }
 

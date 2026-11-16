@@ -106,6 +106,38 @@ var commitSHAPattern = regexp.MustCompile(`^([0-9a-f]{40}|[0-9a-f]{64})$`)
 // so a test of a restore that fails partway can tell it got that far.
 var errRestoreInput = errors.New("invalid checkout restore")
 
+// MissingCommitKind says which of the commits a snapshot needs a restore could
+// not obtain.
+type MissingCommitKind string
+
+const (
+	// MissingHead is the captured HEAD: in neither the bare nor the bundle, and
+	// not a commit origin would send.
+	MissingHead MissingCommitKind = "head"
+	// MissingPrerequisite is a commit the bundle stops at, which the bare has
+	// to hold before the bundle's commits can be used.
+	MissingPrerequisite MissingCommitKind = "prerequisite"
+)
+
+// MissingCommitError is a restore that failed because origin would not send a
+// commit the snapshot needs and the bare lacks. Every later attempt gets the
+// same answer.
+type MissingCommitError struct {
+	Kind MissingCommitKind
+	OID  string
+	// Err is the fetch's failure.
+	Err error
+}
+
+func (e *MissingCommitError) Error() string {
+	if e.Kind == MissingPrerequisite {
+		return fmt.Sprintf("bundle prerequisite %s is not in the bare and could not be fetched: %v", e.OID, e.Err)
+	}
+	return fmt.Sprintf("captured HEAD %s is not in the bare after refreshing and importing the bundle: %v", e.OID, e.Err)
+}
+
+func (e *MissingCommitError) Unwrap() error { return e.Err }
+
 // RestoreCheckout rebuilds one checkout the way `workspace add` builds it — a
 // self-contained clone from the shared bare when the run is sandboxed, a linked
 // worktree otherwise — positioned at the captured HEAD, with the captured Git
@@ -116,19 +148,22 @@ var errRestoreInput = errors.New("invalid checkout restore")
 //
 // The order inside the per-repo lock:
 //
-//  1. Refresh what the checkout tracks upstream — the PR's head for a pr-<N>
-//     checkout, the branch for ref-*/default, and the captured branch when it
-//     was pushed — so the bundle's prerequisites are in the bare. A bare that
-//     exists is not one that has them: a fresh executor's bare was cloned
-//     without any refs/pull, and a surviving one may not have fetched since
-//     the agent last pushed.
-//  2. Import the bundle's objects. HEAD must then resolve in the bare.
+//  1. Refresh what the checkout tracks upstream — the PR's head and base
+//     branch for a pr-<N> checkout, the branch for ref-*/default, and the
+//     captured branch when it was pushed — so the bundle's prerequisites are
+//     in the bare. A bare that exists is not one that has them: a fresh
+//     executor's bare was cloned without any refs/pull, and a surviving one
+//     may not have fetched since the agent last pushed.
+//  2. Fetch by id any prerequisite the bare still lacks, which is one no ref
+//     names any more, and import the bundle's objects. HEAD must then resolve
+//     in the bare, and is fetched by id as well when it does not.
 //  3. Build the checkout. A self-contained clone takes a transient run-scoped
 //     branch at HEAD — the createCheckoutCloneAt pattern — which is dropped
 //     from the bare once the clone has copied the objects.
-//  4. Re-derive push settings: a pr-<N> checkout gets the push tracking a
-//     fresh --pr checkout gets, a ref-*/default one the origin fetch refspec a
-//     fresh checkout leaves.
+//  4. Re-derive push and fetch settings: a pr-<N> checkout gets the push
+//     tracking a fresh --pr checkout gets, and every checkout the origin fetch
+//     refspec a fresh one leaves, in the clone or, for a linked worktree, in
+//     the bare.
 
 // Nothing of TF's is written into the checkout. On any failure the checkout,
 // its registration in the bare and the per-run refs and push config it wrote
@@ -297,17 +332,22 @@ func restoreCheckoutLocked(ctx context.Context, r CheckoutRestore, ref string, p
 
 	// 2. The bundle's objects, then HEAD must resolve.
 	if r.BundlePath != "" {
-		if err := importBundle(ctx, bareDir, r.BundlePath); err != nil {
+		if err := importBundle(ctx, bareDir, r.BundlePath, r.Auth); err != nil {
 			return fmt.Errorf("import bundle: %w", err)
 		}
 	}
-	if err := gitRunCtx(ctx, bareDir, "cat-file", "-e", r.Head+"^{commit}"); err != nil {
-		return fmt.Errorf("captured HEAD %s is not in the bare after refreshing and importing the bundle: %w", r.Head, err)
+	if err := obtainCommit(ctx, bareDir, r.Auth, MissingHead, r.Head); err != nil {
+		return err
 	}
 
 	// 3. The checkout.
 	if selfContainedRunTrees() {
 		return restoreSelfContainedLocked(ctx, r, bareDir, wtDir, trackBranch, prNumber, prKey, prLocal, prHead)
+	}
+	if trackBranch != "" {
+		if err := trackOriginBranchInBareLocked(ctx, bareDir, trackBranch); err != nil {
+			return err
+		}
 	}
 	return restoreLinkedLocked(ctx, r, bareDir, wtDir, prNumber, prKey, prLocal, prHead, res)
 }
@@ -376,7 +416,7 @@ func restoreSelfContainedLocked(ctx context.Context, r CheckoutRestore, bareDir,
 		return nil
 	}
 	// The PR head is on a remote-tracking ref, as in a fresh clone of it: the
-	// next snapshot's bundle stops at what GitHub already has.
+	// next snapshot carries the Git LFS objects of the commits past it only.
 	if err := gitRunCtx(ctx, wtDir, "update-ref", "refs/remotes/origin/"+prLocal, prHead); err != nil {
 		return fmt.Errorf("record PR head in restored clone: %w", err)
 	}
@@ -484,43 +524,129 @@ func PRBranchKey(branch string, prNumber int) (string, bool) {
 // so an object fsck would reject must fail the restore rather than enter it.
 //
 // It does what `git fetch <bundle>` does — verify the prerequisites, then
-// index the pack, completing its thin deltas from the bare — with the pack
-// indexed by --fsck-objects. fetch.fsckObjects would say the same thing, but
-// git before 2.48 does not apply it to a bundle, and the executor image's git
-// is older than that. --strict is not used either: it also checks that every
-// object the pack points at exists, which a blobless bare cannot answer
-// without fetching every unchanged blob of the checkout.
-func importBundle(ctx context.Context, bareDir, bundlePath string) error {
-	if err := gitRunCtx(ctx, bareDir, "bundle", "verify", "-q", bundlePath); err != nil {
-		return fmt.Errorf("verify: %w", err)
-	}
+// index the pack — with two differences. A prerequisite the bare lacks is
+// fetched from origin by id first: it is a commit no ref names any more, which
+// no fetch of a ref brings. And the pack is indexed by --fsck-objects rather
+// than --strict, which also checks that every object the pack points at
+// exists: a blobless bare cannot answer that without fetching every unchanged
+// blob of the checkout.
+//
+// auth is the credential the restore's fetches use. A bundle the capture wrote
+// holds its own delta bases and its import fetches nothing. A stored bundle
+// written by `git bundle create` is thin, and completing it (--fix-thin) reads
+// bases the blobless bare has to fetch.
+func importBundle(ctx context.Context, bareDir, bundlePath string, auth CloneAuth) error {
 	f, err := os.Open(bundlePath)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = f.Close() }()
 	br := bufio.NewReader(f)
-	if _, err := readBundleHeader(br); err != nil {
+	header, err := readBundleHeader(br)
+	if err != nil {
 		return err
 	}
-	return indexBundlePack(ctx, bareDir, br)
+	prerequisites, err := bundlePrerequisites(header)
+	if err != nil {
+		return err
+	}
+	for _, oid := range prerequisites {
+		if err := obtainCommit(ctx, bareDir, auth, MissingPrerequisite, oid); err != nil {
+			return err
+		}
+	}
+	if err := gitRunCtx(ctx, bareDir, "bundle", "verify", "-q", bundlePath); err != nil {
+		return fmt.Errorf("verify: %w", err)
+	}
+	return indexBundlePack(ctx, bareDir, br, auth)
+}
+
+// bundlePrerequisites reads the commits a bundle stops at out of its header:
+// the lines that begin with "-", each an object id and, in a bundle git wrote,
+// the commit's subject after it.
+func bundlePrerequisites(header []byte) ([]string, error) {
+	var oids []string
+	for _, line := range strings.Split(string(header), "\n") {
+		rest, ok := strings.CutPrefix(line, "-")
+		if !ok {
+			continue
+		}
+		oid, _, _ := strings.Cut(rest, " ")
+		// The id is spelled into a fetch's arguments, and the header is the
+		// agent's to write.
+		if !commitSHAPattern.MatchString(oid) {
+			return nil, fmt.Errorf("bundle prerequisite %q is not an object id", oid)
+		}
+		oids = append(oids, oid)
+	}
+	return oids, nil
+}
+
+// obtainCommit makes sure the bare holds commit oid, fetching it from origin by
+// id when it does not. A ref's fetch brings a commit only while a ref reaches
+// it, so this is what restores a snapshot whose pull request was force-pushed
+// or whose branch was rewritten after the capture.
+//
+// A commit origin will not send is a *MissingCommitError of kind. A fetch that
+// never got an answer (an unreachable host, the deadline) is returned as the
+// fetch's own failure, since the next attempt may get the commit.
+func obtainCommit(ctx context.Context, bareDir string, auth CloneAuth, kind MissingCommitKind, oid string) error {
+	if bareHasCommit(ctx, bareDir, oid) {
+		return nil
+	}
+	err := gitRunCtxAuth(ctx, bareDir, auth, "fetch", "origin", oid)
+	if err == nil {
+		if bareHasCommit(ctx, bareDir, oid) {
+			worktreeLog.InfoContext(ctx, "fetched by id a commit no ref the restore fetched reaches", "kind", string(kind), "commit", oid)
+			return nil
+		}
+		err = errors.New("origin sent an object that is not a commit")
+	}
+	if ctx.Err() != nil || IsTransientGitError(err) {
+		return fmt.Errorf("fetch %s: %w", oid, err)
+	}
+	return &MissingCommitError{Kind: kind, OID: oid, Err: err}
+}
+
+// bareHasCommit reports whether the bare holds commit oid now. GIT_NO_LAZY_FETCH
+// keeps the question from starting a fetch of its own: in a partial clone git
+// otherwise asks the promisor remote for any object it is asked about and
+// lacks, without the credential.
+func bareHasCommit(ctx context.Context, bareDir, oid string) bool {
+	args := []string{"cat-file", "-e", oid + "^{commit}"}
+	ctx, span := startGitSpan(ctx, args)
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = bareDir
+	cmd.Env = append(gitBaseEnv(), "GIT_NO_LAZY_FETCH=1")
+	err := cmd.Run()
+	endGitSpan(ctx, span, err)
+	return err == nil
 }
 
 // indexBundlePack indexes into bareDir the pack a bundle carries after its
 // header, checking every object.
-func indexBundlePack(ctx context.Context, bareDir string, pack io.Reader) (err error) {
-	args := []string{"index-pack", "--stdin", "--fix-thin", "--fsck-objects"}
+//
+// --promisor records the pack as one whose missing references origin supplies.
+// That is what the capture assumed of every object it left out of the pack
+// (--missing=allow-promisor), and it is what lets the next capture of a
+// checkout built from this bare leave the same objects out again: git accepts
+// a missing object only when a promisor pack accounts for it.
+func indexBundlePack(ctx context.Context, bareDir string, pack io.Reader, auth CloneAuth) (err error) {
+	args := []string{"index-pack", "--stdin", "--fix-thin", "--fsck-objects", "--promisor"}
 	ctx, span := startGitSpan(ctx, args)
 	defer func() { endGitSpan(ctx, span, err) }()
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = bareDir
 	cmd.Env = gitBaseEnv()
+	if env, ok := auth.gitConfigEnviron(cmd.Env); ok {
+		cmd.Env = env
+	}
 	cmd.Stdin = pack
 	if out, err := cmd.CombinedOutput(); err != nil {
 		if ctx.Err() != nil {
 			err = ctx.Err()
 		}
-		return &GitError{Args: args, Output: string(out), Err: err}
+		return &GitError{Args: args, Output: string(out), Err: err, Proxy: auth.proxyBase}
 	}
 	return nil
 }

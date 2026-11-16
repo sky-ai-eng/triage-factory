@@ -26,6 +26,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventing/eventsource"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/llm/modelaccess"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/skills"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
@@ -795,23 +796,23 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 
 	// Past the authorization gate, so this claim will really run — decide the
 	// model it runs on before either arm below picks it up. A refusal here is a
-	// model the team's enable-set no longer includes, the one the newest
-	// person message asked for or the team's default: nothing has run under
-	// this claim, so it is disposed of without retries and the note names the
-	// model.
+	// model the team's enable-set no longer includes, or one whose provider the
+	// org has not connected: the one the newest person message asked for, the
+	// team's default, or a step's. Nothing has run under this claim, so it is
+	// disposed of without retries and the note names the model.
 	model, err := s.modelForClaim(ctx, orgID, br, *conv)
 	if err != nil {
 		if fencedAtGate() {
 			return
 		}
 		s.failEngagement(conv.ID, err)
-		// An enable-set refusal is settled, not transient: every retry re-reads
-		// the same rows and refuses again, so the retry ladder would spend the
+		// Both refusals are settled, not transient: every retry re-reads the
+		// same rows and refuses again, so the retry ladder would spend the
 		// claim budget to arrive here anyway — and then say the runtime failed
-		// to start, which is not what happened and points at the wrong fix. It
-		// takes the exhausted disposition directly instead, which parks a
+		// to start, which is not what happened and points at the wrong fix.
+		// They take the exhausted disposition directly instead, which parks a
 		// conversation with a transcript and fails a step that never ran.
-		if errors.Is(err, domain.ErrModelNotEnabled) {
+		if isModelRefusal(err) {
 			s.disposeOfModelRefusal(orgID, br, *conv, err)
 			return
 		}
@@ -1945,7 +1946,29 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 // claim by name (domain.ErrModelNotEnabled), which the dispatch parks without
 // spending retries. A conversation no person row has given a model to
 // resolves as claimModelWithoutPersonRow does.
+//
+// Whichever arm answered, the model is then held to the providers the org has
+// connected (checkModelProvider), a step's frozen model included: a step's
+// model is not re-decided, and it still cannot run without a credential. The
+// control half seals no bundle for a model it cannot resolve a credential for,
+// so a claim let through here would wait for one until its engagement timed
+// out, and so would every claim after it. The refusal is modelaccess's, and
+// the dispatch parks on it as it does on the enable-set's.
 func (s *Spawner) modelForClaim(ctx context.Context, orgID string, br *domain.BlueprintRun, conv domain.Conversation) (string, error) {
+	model, err := s.enabledModelForClaim(ctx, orgID, br, conv)
+	if err != nil {
+		return "", err
+	}
+	if err := s.checkModelProvider(ctx, orgID, model); err != nil {
+		return "", err
+	}
+	return model, nil
+}
+
+// enabledModelForClaim is modelForClaim's answer before the provider check:
+// a running step's frozen model, or the claim's model held to the team's
+// enabled set.
+func (s *Spawner) enabledModelForClaim(ctx context.Context, orgID string, br *domain.BlueprintRun, conv domain.Conversation) (string, error) {
 	if br != nil && br.Status == domain.BlueprintRunStatusRunning {
 		return conv.Model, nil
 	}
@@ -2770,26 +2793,46 @@ func (s *Spawner) parkAfterLaunchExhaustion(orgID string, conv domain.Conversati
 		fmt.Sprintf("The runtime failed to start after %d attempts: %s. Send a message to retry.", conv.SetupFailures+1, cause))
 }
 
+// isModelRefusal reports whether err is a settled refusal of the model a claim
+// would run on: the team no longer enables it, its provider is not connected,
+// or the org has no credentials at all.
+func isModelRefusal(err error) bool {
+	return errors.Is(err, domain.ErrModelNotEnabled) ||
+		errors.Is(err, modelaccess.ErrProviderUnconfigured) ||
+		errors.Is(err, modelaccess.ErrNoCredentials)
+}
+
+// modelRefusalParkReason is the park reason a model refusal's cause maps to.
+// The two differ in who fixes them: a model the team does not enable is a team
+// setting, and a provider nobody connected is the org's credentials.
+func modelRefusalParkReason(cause error) domain.ParkReason {
+	if errors.Is(cause, domain.ErrModelNotEnabled) {
+		return domain.ParkReasonModelNotEnabled
+	}
+	return domain.ParkReasonProviderNotConnected
+}
+
 // disposeOfModelRefusal answers for a claim whose model its team may no longer
-// pick. It is disposeOfExhaustedConversation's split — park what has a
-// transcript, fail a step that never ran — reached without the retries, since
-// re-reading the same two settings rows cannot produce a different answer.
+// pick, or whose model's provider the org has not connected. It is
+// disposeOfExhaustedConversation's split — park what has a transcript, fail a
+// step that never ran — reached without the retries, since re-reading the same
+// settings rows cannot produce a different answer.
 //
-// The note is the refusal itself, which already names the model and the set
-// that excludes it, so the person reading the transcript is told the one thing
-// that fixes it. "Send a message to retry" is deliberately absent: a message
-// that names no model inherits the refused one, and the send refuses it; the
-// message that clears this names an enabled model, and the claim after it
-// runs on that.
+// The note is the refusal itself, which already names the model and either the
+// set that excludes it or the provider to connect, so the person reading the
+// transcript is told the one thing that fixes it. "Send a message to retry" is
+// deliberately absent: a message that names no model inherits the refused one,
+// and the send refuses it; the message that clears this names a model the
+// claim can run on.
 func (s *Spawner) disposeOfModelRefusal(orgID string, br *domain.BlueprintRun, conv domain.Conversation, cause error) {
 	if br == nil || s.conversationHasWork(orgID, conv.ID) {
-		dispatchLog.Warn("claim refused: the model this conversation would run on is not enabled for its team; parking",
+		dispatchLog.Warn("claim refused: the model this conversation would run on cannot be run; parking",
 			"conversation", conv.ID, "team", conv.TeamID, "error", cause)
-		s.parkWithStopNote(orgID, conv, domain.ParkReasonModelNotEnabled,
+		s.parkWithStopNote(orgID, conv, modelRefusalParkReason(cause),
 			fmt.Sprintf("This conversation cannot continue: %s", cause))
 		return
 	}
-	dispatchLog.Error("blueprint step refused: the model it would run on is not enabled for its team",
+	dispatchLog.Error("blueprint step refused: the model it would run on cannot be run",
 		"conversation", conv.ID, "blueprint_run", br.ID, "team", conv.TeamID, "error", cause)
 	s.failUnstartedStep(orgID, br, conv, cause.Error())
 }

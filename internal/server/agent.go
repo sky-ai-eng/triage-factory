@@ -15,6 +15,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/llm/modelaccess"
 	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/deliverables"
@@ -164,16 +165,19 @@ func addCacheWarmUntil(resp map[string]any, newestAssistant *domain.Message) {
 // opens with: next_message_model, and next_message_effort when the effort is
 // not the provider's default. Both are omitted when the send would refuse
 // such a message, as it does on a team whose default model is no longer
-// enabled, and the composer then asks for a model; and, best-effort like the
-// read's other enrichment, when a read fails.
+// enabled or on a model whose provider the organization has not connected,
+// and the composer then asks for a model; and, best-effort like the read's
+// other enrichment, when a read fails.
 func addNextMessageSettings(ctx context.Context, resp map[string]any, orgID string, conv *domain.Conversation, spawner *delegate.Spawner) {
 	if spawner == nil || conv == nil {
 		return
 	}
 	settings, err := spawner.NextMessageSettings(ctx, orgID, *conv)
 	if err != nil {
+		// An organization with no credentials is a refusal as well, one that
+		// names no field.
 		var refusal *delegate.SettingsFieldError
-		if !errors.As(err, &refusal) {
+		if !errors.As(err, &refusal) && !errors.Is(err, modelaccess.ErrNoCredentials) {
 			serverLog.Warn("next message settings lookup failed; omitting next_message_model and next_message_effort", "conversation", conv.ID, "error", err)
 		}
 		return
@@ -1128,9 +1132,10 @@ func (ag *agentHandler) handleMessage(w http.ResponseWriter, r *http.Request) {
 			internalError(w, "agent", err)
 			return
 		}
-		// The 4xx arms are all delegate sentinels — author-written state
-		// descriptions with nothing internal in them, and the text is the
-		// answer ("this conversation has moved on"), so it is surfaced.
+		// The 4xx arms are all delegate and modelaccess sentinels —
+		// author-written state descriptions with nothing internal in them,
+		// and the text is the answer ("this conversation has moved on"), so
+		// it is surfaced.
 		httpx.WriteErrors(w, status, httpx.ErrorItem{Reason: reason, Message: err.Error(), Field: steerErrorField(err)})
 		return
 	}
@@ -1200,6 +1205,14 @@ func steerErrorField(err error) string {
 // the fix, so the client re-reads the conversation rather than being told the
 // body was malformed.
 //
+// A model the organization cannot authenticate is 409 NOT_CONFIGURED, the
+// status delegate and the settings saves give it: a model whose provider is
+// not connected (modelaccess.ErrProviderUnconfigured), which names the model
+// field, and an organization that brings its own credentials and has
+// connected none (modelaccess.ErrNoCredentials), which names no field because
+// no choice of model fixes it. A message to a blueprint step names no field
+// for either, because its model cannot change.
+//
 // A concluded conversation (ErrConversationConcluded) is 409 as well, but it
 // carries its own message: this conversation's blueprint will never drive it
 // again (it has moved past this step). A cancelled one (ErrBlueprintCancelled)
@@ -1228,6 +1241,9 @@ func steerErrorStatus(err error) (int, string) {
 		errors.Is(err, delegate.ErrBlueprintCancelled),
 		errors.Is(err, delegate.ErrConversationEnded):
 		return http.StatusConflict, httpx.ReasonAlreadyTerminal
+	case errors.Is(err, modelaccess.ErrProviderUnconfigured),
+		errors.Is(err, modelaccess.ErrNoCredentials):
+		return http.StatusConflict, httpx.ReasonNotConfigured
 	case errors.Is(err, delegate.ErrNoLiveProcess),
 		errors.Is(err, delegate.ErrConversationNotSteerable),
 		errors.Is(err, delegate.ErrConversationNotResumable),

@@ -114,12 +114,17 @@ describe('persistOrgFields — each org step saves only what it owns', () => {
   // On a conflict the row is re-read and the fresh token folded into state
   // before the error surfaces, so the user's immediate retry can succeed —
   // "reload and re-apply" without a page reload.
-  it('re-reads the fresh version on a 409 so a retry can succeed', async () => {
+  it('re-reads the fresh version on a version conflict so a retry can succeed', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (_url: string, init?: RequestInit) =>
         init?.method === 'PATCH'
-          ? new Response(JSON.stringify({ errors: [] }), { status: 409 })
+          ? new Response(
+              JSON.stringify({
+                errors: [{ reason: 'VERSION_CONFLICT', message: 'The settings changed.' }],
+              }),
+              { status: 409 },
+            )
           : new Response(JSON.stringify({ version: 9 }), { status: 200 }),
       ),
     )

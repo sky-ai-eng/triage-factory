@@ -27,7 +27,7 @@ var callTimeout = 60 * time.Second
 // client-side budget IPCClient.CaptureRunTree gives the whole streamed
 // round trip — the RPC itself, the socket accept, and the capped read all
 // share this one budget. Unlike the other host operations it shells out to
-// git (a bundle of local-only commits plus a full binary diff) against a
+// git (a pack of the checkout's commits plus a full binary diff) against a
 // worktree whose size the run dictates, so it gets a budget sized for a
 // large tree rather than a wedged syscall. A var (like callTimeout above)
 // so tests can shrink it.

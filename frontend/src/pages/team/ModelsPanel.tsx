@@ -2,7 +2,8 @@ import { useMemo } from 'react'
 import Table from '../../ui/table/Table'
 import type { TableColumn, TableRow } from '../../ui/table/Table'
 import type { ModelCatalogEntry } from '../../lib/models'
-import { providerLabel } from '../../lib/models'
+import { availabilityHelp, providerLabel } from '../../lib/models'
+import ModelAvailabilityBadge from '../../components/ModelAvailabilityBadge'
 import type { TeamModelConfig, TeamModelPatch } from '../../hooks/useTeamModelConfig'
 import type { TeamUsage } from '../../hooks/useTeamUsage'
 import { effectiveModelKeys, money, spendShares } from './models'
@@ -23,9 +24,16 @@ import { toast } from '../../components/Toast/toastStore'
 // The share column is % OF SPEND, deliberately not the mock's share of runs: no
 // per-model run count exists, and the usage node's by_model cut is money. A
 // column labeled for what it shows is the only honest version of the bar.
+//
+// A model whose provider the organization has not connected carries the "Not
+// connected" badge every model picker shows. The team may still enable it, and
+// a run or a message on it is refused until the provider is connected. No
+// other availability is badged here: the other values refuse nothing.
 
 /** The price ink one step below a reading — cache rates, the wire id. */
 const DIM_INK = 'color-mix(in srgb, var(--color-ink-3) 41%, var(--color-ink-2))'
+
+const nameInk = (r: TableRow) => (r.on ? 'var(--color-ink-1)' : 'var(--color-ink-2)')
 
 export default function ModelsPanel({
   models,
@@ -55,6 +63,8 @@ export default function ModelsPanel({
       def: m.key === config.defaultModel,
       on: on.has(m.key),
       name: m.display_name,
+      unconnected: m.availability === 'unconfigured',
+      help: availabilityHelp(m),
       wire: m.key,
       provider: providerLabel(m) || '—',
       in: m.prices_per_mtok?.input ?? null,
@@ -111,7 +121,21 @@ export default function ModelsPanel({
         label: 'MODEL',
         width: '268px',
         mono: false,
-        color: (r) => (r.on ? 'var(--color-ink-1)' : 'var(--color-ink-2)'),
+        // Plain text unless the cell also holds the badge: a text cell keeps
+        // the table's type, ink, ellipsis, and clipped-name hover, and a node
+        // cell owns its own, so the name then carries the cell's type itself.
+        render: (r) =>
+          r.unconnected ? (
+            <>
+              <span className="ts-model-name" style={{ color: nameInk(r) }}>
+                {r.name}
+              </span>
+              <ModelAvailabilityBadge state="unconfigured" help={r.help} />
+            </>
+          ) : (
+            r.name
+          ),
+        color: nameInk,
       },
       // The id is the only thing that says what this row will put on the wire —
       // the same display name is spelled many ways across providers, and the id

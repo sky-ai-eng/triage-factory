@@ -362,16 +362,21 @@ export default function Factory() {
       //   - Network error (fetch throws) — caught below.
       //   - Pre-claim rejection — input/state validation failures (entity not
       //     found, no matching event, viewer, an agent still running on the
-      //     task) as 400/403/404/409/422. Nothing landed on the claim axis;
-      //     toast and stop.
-      //   - Post-claim spawn failure — reason SPAWN_FAILED (422 bad blueprint
-      //     reference, 409 another run became active on the task in the gap or
-      //     its team was archived, 500 spawn/DB fault) AFTER the claim stamped. The task is bot-claimed with no
-      //     run, so refetch (the bot-claimed card must surface immediately) and
-      //     tell the user to retry. The reason is the discriminator — pre-claim
-      //     faults answer 409 and 500 too, so status alone can't tell the two
-      //     apart.
+      //     task, a bad blueprint reference, a model the team can't run, a
+      //     reached spend cap) as 400/403/404/409/422. Nothing landed on the
+      //     claim axis, and a task the create made stays queued and
+      //     unclaimed; refetch so it shows, and toast.
+      //   - Post-claim spawn failure — reason SPAWN_FAILED (409 another run
+      //     became active on the task in the gap or its team was archived,
+      //     500 spawn/DB fault) AFTER the claim stamped. The task is
+      //     bot-claimed with no run, so refetch (the bot-claimed card must
+      //     surface immediately) and tell the user to retry. The reason is
+      //     the discriminator — pre-claim faults answer 409 and 500 too, so
+      //     status alone can't tell the two apart.
       const label = entityLabel(pd.entity)
+      // Whether the create landed. A delegate refused after it leaves the
+      // task it made or found on the floor, so the floor reloads either way.
+      let created = false
       try {
         const task = await apiJSON<Task>('/api/tasks', {
           method: 'POST',
@@ -385,13 +390,16 @@ export default function Factory() {
         })
         // The create's answer carries the version the delegate names: the
         // task as this gesture found or made it.
+        created = true
         await delegateTask(task, promptId)
       } catch (err) {
-        const spawnFailed = apiErrors(err).some((it) => it.reason === 'SPAWN_FAILED')
-        if (spawnFailed) {
+        if (created) {
           if (delegateTeam) noteWrittenTeam(delegateTeam)
           const refetch = (window as unknown as { __factoryRefetch?: () => void }).__factoryRefetch
           refetch?.()
+        }
+        const spawnFailed = apiErrors(err).some((it) => it.reason === 'SPAWN_FAILED')
+        if (spawnFailed) {
           toast.error(
             `${label} is bot-claimed but the run didn't start: ${httpErrorMessage(err, 'spawn failed')}. Retry from the Board.`,
             'Delegate run failed',

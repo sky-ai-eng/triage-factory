@@ -125,6 +125,44 @@ func TestCreateForPR_SelfContainedClone_MultiMode(t *testing.T) {
 	}
 }
 
+// TestCreateForPR_SelfContainedClone_FetchRefspecNamesTheBase: a fresh pull
+// request clone's origin fetches the base branch, whatever became of the head
+// repository, so `git fetch origin <base>` moves origin/<base>, the ref a
+// snapshot's bundle stops at. With no known base the refspec is the one the
+// clone was made with.
+func TestCreateForPR_SelfContainedClone_FetchRefspecNamesTheBase(t *testing.T) {
+	const cloned = "+refs/heads/triagefactory/conv-a/pr-7:refs/remotes/origin/triagefactory/conv-a/pr-7"
+	for _, tc := range []struct {
+		name string
+		head func(upstream string) string
+		base string
+		want string
+	}{
+		{"own repository", func(upstream string) string { return upstream }, "main", "+refs/heads/main:refs/remotes/origin/main"},
+		{"fork", func(string) string { return "https://example.invalid/fork/repo.git" }, "main", "+refs/heads/main:refs/remotes/origin/main"},
+		{"deleted fork", func(string) string { return "" }, "main", "+refs/heads/main:refs/remotes/origin/main"},
+		{"no known base", func(upstream string) string { return upstream }, "", cloned},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withTestHome(t)
+			sandboxingMode(t)
+			t.Setenv("TF_STATE_ROOT", t.TempDir())
+			upstream := makeSkillsTrackingUpstream(t)
+			var opts []CloneOption
+			if tc.base != "" {
+				opts = append(opts, WithBaseBranch(tc.base))
+			}
+			wtDir, err := CreateForPRInRoot(context.Background(), testRepo("acme", "repo"), upstream, tc.head(upstream), "feature", 7, "conv-a", t.TempDir(), opts...)
+			if err != nil {
+				t.Fatalf("CreateForPRInRoot: %v", err)
+			}
+			if spec := gitCfgValue(t, wtDir, "remote.origin.fetch"); spec != tc.want {
+				t.Errorf("remote.origin.fetch = %q, want %q", spec, tc.want)
+			}
+		})
+	}
+}
+
 // gitCfgValue reads a single git config value from dir, returning "" when the
 // key is unset or the read fails.
 func gitCfgValue(t *testing.T, dir, key string) string {
@@ -134,4 +172,15 @@ func gitCfgValue(t *testing.T, dir, key string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// gitCfgValues reads every value of a multi-valued git config key from dir,
+// one per line, returning "" when the key is unset.
+func gitCfgValues(t *testing.T, dir, key string) string {
+	t.Helper()
+	out, err := exec.Command("git", "-C", dir, "config", "--get-all", key).Output()
+	if err != nil {
+		return ""
+	}
+	return string(out)
 }

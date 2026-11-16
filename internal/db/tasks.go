@@ -980,9 +980,8 @@ type TaskStore interface {
 	// task in every org that is not deleted and that nothing holds any more,
 	// ordered by org then task id, for the router's deferral sweep: none of
 	// the task's deliverables awaits a person, by the predicate
-	// CloseOrHoldSystem holds on. A deferral left on a task that closed by
-	// another path is never returned, and neither is one in a deleted org,
-	// whose tasks no close should reach any more. A deliverable can be
+	// CloseOrHoldSystem holds on. A deferral in a deleted org, whose tasks no
+	// close should reach any more, is never returned. A deliverable can be
 	// recorded after this read, so ApplyHeldCloseSystem decides again under
 	// the task's lock. Admin pool, org-wide by design: the sweep is one brain
 	// loop over all orgs, and the partial index on the deferral column keeps

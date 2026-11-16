@@ -259,6 +259,7 @@ export const PARK_REASON_LABELS: Record<string, string> = {
   blueprint_terminal: 'workflow ended first',
   launch_failed: 'the runtime could not start',
   model_not_enabled: 'its model is no longer one this team can pick',
+  provider_not_connected: 'its model’s provider is not connected',
   stalled: 'stalled',
   upstream_unavailable: 'Paused: provider unavailable',
   sandbox_lost: 'its sandbox stopped too many times — send a message to try again',

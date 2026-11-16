@@ -220,9 +220,10 @@ func assertFieldError(t *testing.T, rec *httptest.ResponseRecorder, field string
 	t.Errorf("no error names field %q: %s", field, rec.Body.String())
 }
 
-// A manual delegation refused for its model's provider answers 422 naming the
-// provider to connect, not a 500 whose message multi mode redacts. The model is
-// a step pin whose provider was disconnected after the save.
+// A manual delegation refused for its model's provider answers 409
+// NOT_CONFIGURED naming the provider to connect, not a 500 whose message multi
+// mode redacts. The model is a step pin whose provider was disconnected after
+// the save.
 func TestDelegate_ModelProviderUnavailable_SurfacesTheRemedy(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -274,13 +275,11 @@ func TestDelegate_ModelProviderUnavailable_SurfacesTheRemedy(t *testing.T) {
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/delegate", withTaskVersion(t, s, taskID, map[string]any{
 		"blueprint_id": blueprintID,
 	}))
-	if rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("delegate = %d, want 422 (the refusal is the request's fault, not a spawn fault); body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("delegate = %d, want 409 (setup the org has not done); body=%s", rec.Code, rec.Body.String())
 	}
-	// SPAWN_FAILED, like the other 422 arm: the claim stamped before Delegate
-	// ran, and the reason is what tells the client it survived. No field —
-	// nothing the caller sent is wrong.
-	httpxtest.AssertFirstError(t, rec, "SPAWN_FAILED", "")
+	// No field: nothing the caller sent is wrong.
+	httpxtest.AssertFirstError(t, rec, "NOT_CONFIGURED", "")
 	body := rec.Body.String()
 	for _, want := range []string{modelcatalog.ProviderDisplayName(modelcatalog.ProviderBedrock), bedrockModel, "Settings"} {
 		if !strings.Contains(body, want) {

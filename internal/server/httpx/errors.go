@@ -88,11 +88,13 @@ const (
 	ReasonKeyNotFound           = "KEY_NOT_FOUND"
 	ReasonCommitUnverified      = "COMMIT_UNVERIFIED"
 
-	// Partial success reported as an error: the delegation's claim stamped
-	// but the agent run could not be spawned (bad blueprint reference at
-	// 422, spawn/DB fault at 500). Clients key the claim-survived retry
-	// affordance on this reason, never on a bare status — a 500 without it
-	// means the claim may not have landed at all.
+	// Partial success reported as an error: the delegation's claim landed and
+	// the run did not start (another run took the task or its team was
+	// archived in the gap at 409, a spawn or DB fault at 500). The claim
+	// stays, so the caller re-reads the task to learn its version and state
+	// before it retries. Clients key the claim-survived retry affordance on
+	// this reason, never on a bare status: a refusal that came before the
+	// claim wrote nothing and carries another reason.
 	ReasonSpawnFailed = "SPAWN_FAILED"
 
 	// Upstream and transport.

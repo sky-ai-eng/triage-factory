@@ -373,8 +373,9 @@ func (s *Spawner) readWarmWait(ctx context.Context, n nativeTail) db.WarmWaitSta
 // which the engine moves to at its next call. Otherwise it returns nil and
 // the claim is let go: the resumed conversation is left queued with no claim,
 // and the cold claim that drives it makes the decision as every claim does,
-// sealing another provider's credentials or refusing the model the team no
-// longer enables. A failed read answers nil too, so the cold claim decides.
+// sealing another provider's credentials or refusing a model the team no
+// longer enables or whose provider is no longer connected. A failed read
+// answers nil too, so the cold claim decides.
 func (s *Spawner) warmResumeModelHolds(ctx context.Context, n nativeTail) *domain.Conversation {
 	conv, err := s.conversations.GetSystem(ctx, n.orgID, n.conversationID)
 	if err != nil || conv == nil {

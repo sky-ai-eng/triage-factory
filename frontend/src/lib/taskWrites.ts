@@ -63,8 +63,8 @@ export function reassignTask(task: TaskRef, targetUserID: string): Promise<Task>
   })
 }
 
-/** Hands the task to the agent and starts its run. Without a blueprint the
- *  server runs the team's default. */
+/** Hands the task to the agent and starts its run on blueprintID. The server
+ *  refuses a delegate that names no blueprint. */
 export function delegateTask(task: TaskRef, blueprintID?: string): Promise<DelegateResult> {
   return apiJSON<DelegateResult>(taskPath(task, '/delegate'), {
     method: 'POST',
