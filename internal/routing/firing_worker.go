@@ -274,12 +274,17 @@ func (r *Router) processFiring(ctx context.Context, cf dbpkg.ClaimedFiring) {
 			loser(termCtx, "requeue", err)
 		})
 	}
-	skip := func(reason string) {
+	// skip reports whether the row completed as skipped, for a caller with
+	// something to do once it has.
+	skip := func(reason string) (completed bool) {
 		span.SetAttributes(telemetry.Outcome("skipped_" + reason))
 		routerLog.InfoContext(unitCtx, "firing-queue: skipped firing", "firing_id", f.ID, "task_id", f.TaskID, "trigger", f.TriggerID, "skip_reason", reason)
 		terminal(func(termCtx context.Context) {
-			loser(termCtx, "mark skipped", r.firings.MarkSkipped(termCtx, receipt, reason))
+			err := r.firings.MarkSkipped(termCtx, receipt, reason)
+			loser(termCtx, "mark skipped", err)
+			completed = err == nil
 		})
+		return completed
 	}
 
 	// reroute sends an event back through the router, for a task its
@@ -426,8 +431,27 @@ func (r *Router) processFiring(ctx context.Context, cf dbpkg.ClaimedFiring) {
 	// the admission that queued the firing, and re-imposing either here
 	// would fight a user's requeue.
 	blueprintRunID, err := r.fireDelegate(unitCtx, f.OrgID, task, *trigger, f.TriggeringEventID, task.ClaimedByAgentID, dbpkg.AgentClaimStamp{}, "")
+	refusal, refused := delegate.RefusalCause(err)
 	switch {
 	case err == nil:
+	case refused:
+		// The plan refused the run for a setting a person has to change, so
+		// every retry would be refused the same way. Completing the row
+		// releases its key, and the task's next event is decided afresh
+		// rather than queued behind a row that can never fire.
+		//
+		// The bot's claim stays, as every skip leaves it. A refused row
+		// usually queued behind a run the bot was already working on the
+		// task, and the claim is that run's. A row whose own admission
+		// stamped the claim leaves the task claimed with no run; the row does
+		// not record which case it is, and the notice tells the trigger's
+		// team admins either way.
+		if skip(domain.PendingFiringSkipRefused) {
+			terminal(func(termCtx context.Context) {
+				r.postTriggerRefused(termCtx, f.OrgID, task, *trigger, refusal, err)
+			})
+		}
+		return
 	case errors.Is(err, delegate.ErrAlreadyFired):
 		// A run for this (event, trigger) already committed: a previous
 		// holder fired it and lost its lease before the terminal write, or

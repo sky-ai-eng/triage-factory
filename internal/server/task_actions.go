@@ -14,7 +14,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/eventing/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
-	"github.com/sky-ai-eng/triage-factory/internal/llm/modelaccess"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/wsevent/conversationframe"
@@ -1194,11 +1193,14 @@ func (s *Server) firstStepConversationID(ctx context.Context, orgID, userID, blu
 // done, CONFLICT for a decision somebody made (a model taken out of the
 // team's set, a spend cap reached). Their messages are TF's own and name the
 // model, the provider, or the setting to change, so they go out verbatim; a
-// spend cap's is the exception, below.
+// spend cap's is the exception, below. The refusals are the ones
+// delegate.RefusalCause classifies, which is also how the router tells them
+// from a fault.
 func writeDelegatePlanRefusal(w http.ResponseWriter, err error) {
+	cause, _ := delegate.RefusalCause(err)
 	var capErr *delegate.CostCapError
 	switch {
-	case errors.As(err, &capErr):
+	case cause == domain.DelegationRefusedSpendCap && errors.As(err, &capErr):
 		// Spend is an org admin's read, so the figures stay in the server log,
 		// and in local mode, where the one person is the admin, the message.
 		delegateSpawnLog.Info("delegate refused by a daily spend cap", "error", err)
@@ -1206,21 +1208,17 @@ func writeDelegatePlanRefusal(w http.ResponseWriter, err error) {
 			Reason:  httpx.ReasonConflict,
 			Message: costCapRefusal(capErr) + localDetail(err),
 		})
-	case errors.Is(err, domain.ErrNoDefaultModel),
-		errors.Is(err, modelaccess.ErrNoCredentials),
-		errors.Is(err, modelaccess.ErrProviderUnconfigured):
+	case cause == domain.DelegationRefusedNoDefaultModel, cause == domain.DelegationRefusedProviderNotConnected:
 		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
 			Reason:  httpx.ReasonNotConfigured,
 			Message: err.Error(),
 		})
-	case errors.Is(err, domain.ErrModelNotEnabled):
+	case cause == domain.DelegationRefusedModelNotEnabled:
 		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
 			Reason:  httpx.ReasonConflict,
 			Message: err.Error(),
 		})
-	case errors.Is(err, delegate.ErrBlueprintNotFound), errors.Is(err, delegate.ErrBlueprintUnspecified),
-		errors.Is(err, delegate.ErrBlueprintNoSteps),
-		errors.Is(err, delegate.ErrPromptNotFound), errors.Is(err, delegate.ErrPromptUnspecified):
+	case cause == domain.DelegationRefusedBlueprintUnusable:
 		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
 			Reason:  httpx.ReasonInvalidField,
 			Message: err.Error(),

@@ -90,6 +90,10 @@ type injectCall struct {
 	firing                                delegate.AdditiveFiringRef
 }
 
+func (s *injectingStubDelegator) PlanDelegation(domain.Task, string, delegate.DelegateOpts) (delegate.DelegationPlan, error) {
+	return delegate.DelegationPlan{}, nil
+}
+
 func (s *injectingStubDelegator) Delegate(task domain.Task, opts delegate.DelegateOpts) (string, error) {
 	if !s.allowFire {
 		return "", fmt.Errorf("unexpected Delegate call: this test only exercises the busy-task branch")

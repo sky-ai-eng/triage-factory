@@ -89,10 +89,14 @@ func (tracksEveryLinearTeam) TracksTeamSystem(context.Context, string, string, s
 	return true, nil
 }
 
-// refusingDelegator is the Spawner of a test that starts no run: Delegate
-// refuses, the stops succeed with nothing to stop, and an additive event is
-// never delivered.
+// refusingDelegator is the Spawner of a test that starts no run: every plan
+// passes, Delegate fails as a fault, the stops succeed with nothing to stop,
+// and an additive event is never delivered.
 type refusingDelegator struct{}
+
+func (refusingDelegator) PlanDelegation(domain.Task, string, delegate.DelegateOpts) (delegate.DelegationPlan, error) {
+	return delegate.DelegationPlan{}, nil
+}
 
 var errNoTestDelegator = errors.New("test router: no delegator for this test")
 

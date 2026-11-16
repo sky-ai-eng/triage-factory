@@ -76,8 +76,8 @@ const (
 // PendingFiring skip reasons, set on a done row that did not fire. Each is a
 // definitive answer: retrying could not come out differently, so the row is
 // settled rather than requeued. A failure that could come out differently —
-// a store read, a spawner refusal — is a typed requeue outcome on the block
-// instead, never a skip reason.
+// a store read, a firing transaction that failed — is a typed requeue outcome
+// on the block instead, never a skip reason.
 const (
 	// PendingFiringSkipTaskClosed: the task is done, dismissed or snoozed.
 	// A task its run's finish closed is
@@ -113,4 +113,11 @@ const (
 	// newest event was routed again, once for the task. The task and run that
 	// produced are the router's to name, not this row's.
 	PendingFiringSkipRerouted = "rerouted"
+	// PendingFiringSkipRefused: the spawner's plan refused the run for one of
+	// the domain.DelegationRefused* causes — a daily spend cap, the team's
+	// models, a provider the org has not connected, or a missing blueprint or
+	// prompt. A retry is refused the same way until a person changes the
+	// setting, so the firing is dropped rather than held: the task stays on
+	// the board, and a person can delegate it once the cause is fixed.
+	PendingFiringSkipRefused = "refused"
 )

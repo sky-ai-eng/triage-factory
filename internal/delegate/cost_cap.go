@@ -14,8 +14,10 @@ import (
 // max_daily_cost_usd cap, the org-wide one or a per-team one. The refusal itself
 // is a *CostCapError, which says which. Callers test errors.Is: the delegate
 // route answers 409 CONFLICT with a message naming the cap and who can raise
-// it, and the event router logs it and leaves the task queued for a later
-// retry once the UTC day rolls over or an admin raises the cap.
+// it. The router drops a trigger's firing the cap refuses rather than holding
+// it until the UTC day rolls over or an admin raises the cap, and tells the
+// trigger's team admins; the task stays on the board, for a person to delegate
+// once the cap allows it.
 var ErrDailyCostCapReached = errors.New("daily spend cap reached")
 
 // CostCapScope is which daily spend cap refused a delegation.

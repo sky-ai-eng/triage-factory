@@ -12,9 +12,14 @@ import (
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/db/workitem"
 	"github.com/sky-ai-eng/triage-factory/internal/db/workkinds"
+	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
+	"github.com/sky-ai-eng/triage-factory/internal/llm/modelcatalog"
+	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
+	"github.com/sky-ai-eng/triage-factory/internal/notify/notifytest"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 	_ "modernc.org/sqlite"
 )
 
@@ -567,5 +572,47 @@ func TestReDeriveWorker_MatchesThroughTheCurrentView(t *testing.T) {
 
 	if firings := firingsForTask(t, database, task.ID); len(firings) != 1 || firings[0].TriggerID != "t-view" {
 		t.Errorf("firings = %+v, want one for t-view", firings)
+	}
+}
+
+// TestReDeriveWorker_ARefusedRunAdmitsNoFiring: a score-gated trigger whose
+// run the spawner's plan would refuse admits no firing. The org has connected
+// Bedrock and not Anthropic, which serves the team's default model, so the
+// plan the re-evaluation makes before admitting refuses the run. Nothing is
+// admitted and no claim is stamped, so the task stays queued and unclaimed
+// rather than in progress with no run, and the trigger's team admins are told
+// once.
+func TestReDeriveWorker_ARefusedRunAdmitsNoFiring(t *testing.T) {
+	database := newTestDB(t)
+	rec := notifytest.Record(t)
+	taskID, triggerID := setupReDeriveScenario(t, database, 0.6)
+	if _, err := sqlitestore.New(database).Orgs.SetBedrockCredentialsRef(t.Context(), runmode.LocalDefaultOrgID, "aws_bearer_token_bedrock"); err != nil {
+		t.Fatalf("connect bedrock: %v", err)
+	}
+	spawner := delegate.NewSpawner(database, sqlitestore.New(database), nil, websocket.NewHub(), domain.ModelSonnet)
+	scoreTask(t, database, taskID, 0.8)
+
+	drainReDeriveOnce(t, reDeriveRouter(t, database, spawner))
+
+	requireNoFirings(t, database, taskID)
+	requireReDeriveDone(t, database, taskID)
+	task, err := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrgID, taskID)
+	if err != nil || task == nil {
+		t.Fatalf("get task: %v", err)
+	}
+	if task.Status != "queued" || task.ClaimedByAgentID != "" || task.ClaimedByUserID != "" {
+		t.Errorf("task = %s claimed by agent %q / user %q, want queued and unclaimed", task.Status, task.ClaimedByAgentID, task.ClaimedByUserID)
+	}
+
+	open := rec.Open(runmode.LocalDefaultOrgID, kinds.TriggerRefused)
+	if len(open) != 1 || open[0].Seen != 1 || open[0].Key != triggerID+":"+domain.DelegationRefusedProviderNotConnected {
+		t.Fatalf("open = %+v, want one notice for the trigger's provider refusal", open)
+	}
+	n := open[0].Params.(kinds.TriggerRefusal)
+	if n.TriggerID != triggerID || n.TeamID != runmode.LocalDefaultTeamID || n.Subject != "owner/repo#1" {
+		t.Errorf("notice = %+v, want the trigger, its team, and the task's entity", n)
+	}
+	if !strings.Contains(n.Detail, modelcatalog.ProviderDisplayName(modelcatalog.ProviderAnthropic)) {
+		t.Errorf("notice detail %q does not carry the refusal's message naming the provider", n.Detail)
 	}
 }

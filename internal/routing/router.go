@@ -28,6 +28,12 @@ type Scorer interface {
 // wiring passes a *delegate.Spawner.
 type Delegator interface {
 	Delegate(task domain.Task, opts delegate.DelegateOpts) (string, error)
+	// PlanDelegation makes every check Delegate makes ahead of its firing,
+	// for teamID, the team the run will belong to, and writes nothing. The
+	// score re-evaluation asks it before it admits a firing, so a run the
+	// plan would refuse is never admitted and its task never claimed for it.
+	// Signature matches *delegate.Spawner's method exactly.
+	PlanDelegation(task domain.Task, teamID string, opts delegate.DelegateOpts) (delegate.DelegationPlan, error)
 	// ReviewsDismissedSystem follows a terminating close that dismissed the
 	// closed pull request's pending reviews (TerminalCloseResult.DismissedReviews),
 	// once it has committed: each review is announced on the conversation that

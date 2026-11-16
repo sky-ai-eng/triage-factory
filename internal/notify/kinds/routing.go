@@ -2,6 +2,9 @@ package kinds
 
 import (
 	"strconv"
+	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/notify"
@@ -88,6 +91,106 @@ var AutomationConflict = notify.Notice(notify.NoticeSpec[Conflict]{
 		},
 	},
 })
+
+// TriggerRefusal is one firing of a trigger that the spawner's plan refused,
+// so no run started. Its cause is a setting a person changes, and the firing
+// was dropped rather than retried.
+type TriggerRefusal struct {
+	TriggerID string `json:"trigger_id"`
+	// TeamID is the trigger's team.
+	TeamID string `json:"team_id"`
+	// EventType is the event the trigger fires on. Display only.
+	EventType string `json:"event_type"`
+	// Subject is the task's entity key, e.g. owner/repo#18. Display only.
+	Subject string `json:"subject"`
+	// Cause is one of the domain.DelegationRefused* causes.
+	Cause string `json:"cause"`
+	// TeamCap is whether the spend cap that refused the run is a team's
+	// rather than the organization's. The spend_cap cause only.
+	TeamCap bool `json:"team_cap,omitempty"`
+	// CapTeamName is the capped team's name, for a team's cap. Display only.
+	CapTeamName string `json:"cap_team_name,omitempty"`
+	// Detail is the refusal's own message, for a model or a provider cause,
+	// which names the model, the provider, and the setting to change. The
+	// copy shows it for those causes alone: a spend cap's message carries the
+	// day's figures, which are an org admin's read.
+	Detail string `json:"detail,omitempty"`
+}
+
+// TriggerRefused tells a trigger's team admins that a firing of it started no
+// run: the spawner's plan refused it for a spend cap, the team's models, a
+// provider the org has not connected, or a missing blueprint or prompt. The
+// firing is dropped, so it is something that happened once, a notice; the key
+// is the trigger and the cause, so the refusals of every later firing coalesce
+// into it while the cause stands. Admins, because each cause is a setting.
+var TriggerRefused = notify.Notice(notify.NoticeSpec[TriggerRefusal]{
+	Name:     "routing.trigger_refused",
+	Priority: notify.Always(notify.High),
+	TTL:      notify.DefaultNoticeTTL,
+	Key:      func(r TriggerRefusal) string { return r.TriggerID + ":" + r.Cause },
+	Audience: notify.TeamAdmins(func(r TriggerRefusal) string { return r.TeamID }),
+	Render:   renderTriggerRefused,
+	Example: TriggerRefusal{
+		TriggerID: "00000000-0000-0000-0000-000000000004",
+		TeamID:    "00000000-0000-0000-0000-000000000003",
+		EventType: domain.EventGitHubPRCICheckFailed,
+		Subject:   "acme/widgets#18",
+		Cause:     domain.DelegationRefusedProviderNotConnected,
+		Detail:    "cannot dispatch: model's provider is not connected: claude-sonnet-5 is served by Anthropic, which this organization has not connected — connect it in Settings → Claude credentials",
+	},
+})
+
+// renderTriggerRefused is TriggerRefused's copy, the same for every admin.
+func renderTriggerRefused(r TriggerRefusal, _ notify.Recipient) notify.Content {
+	subject := "this task"
+	if r.Subject != "" {
+		subject = r.Subject
+	}
+	return notify.Content{
+		Title: "Automation could not start on " + subject,
+		Body: "This team's trigger for " + eventLabel(r.EventType) + " matched " + subject + ", and no run started. " +
+			r.reason() + " The run is not retried. Once this is fixed, the trigger runs on its next event, or the task can be delegated by hand.",
+		Actions: []notify.Action{notify.Link("Open the trigger", notify.Routes.Trigger(r.TriggerID))},
+	}
+}
+
+// reason is the sentence that says why the plan refused the run.
+func (r TriggerRefusal) reason() string {
+	switch r.Cause {
+	case domain.DelegationRefusedSpendCap:
+		capped := "The organization's daily spend cap"
+		switch {
+		case r.TeamCap && r.CapTeamName != "":
+			capped = "Team " + r.CapTeamName + "'s daily spend cap"
+		case r.TeamCap:
+			capped = "The team's daily spend cap"
+		}
+		return capped + " is reached. An org admin can raise it in Settings."
+	case domain.DelegationRefusedNoDefaultModel, domain.DelegationRefusedProviderNotConnected, domain.DelegationRefusedModelNotEnabled:
+		if r.Detail != "" {
+			return sentence(r.Detail)
+		}
+		return "The team's model settings refused it. Check its models in Settings."
+	case domain.DelegationRefusedBlueprintUnusable:
+		return "The trigger's blueprint, or one of its prompts, is missing."
+	}
+	return "Its settings refused it."
+}
+
+// sentence renders an error message as a sentence: capitalized, and ending in
+// a full stop.
+func sentence(msg string) string {
+	msg = strings.TrimSpace(msg)
+	if msg == "" {
+		return msg
+	}
+	first, size := utf8.DecodeRuneInString(msg)
+	msg = string(unicode.ToUpper(first)) + msg[size:]
+	if !strings.HasSuffix(msg, ".") {
+		msg += "."
+	}
+	return msg
+}
 
 // Breaker is one trigger's breaker, tripped on one entity: the runs the
 // trigger fired there kept failing, so it fires there no more.

@@ -9,6 +9,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
+	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
@@ -50,8 +51,10 @@ import (
 // only if that note goes unread. Every other exit — already claimed by
 // another team or by a person, the bot disabled for the team, no agent
 // bootstrapped, the breaker tripped, a duplicate already queued, a replay
-// hitting ErrAlreadyFired, or a task that closed under the fire — returns
-// (false, nil): nothing new happened on this call, and nothing should.
+// hitting ErrAlreadyFired, a task that closed under the fire, or a run the
+// spawner's plan refused (delegate.RefusalCause), which tells the trigger's
+// team admins — returns (false, nil): nothing new happened on this call, and
+// nothing should.
 //
 // A non-nil error is the third outcome, and it means something else: a
 // dependency this decision rests on failed, so whether the trigger should
@@ -211,6 +214,17 @@ func (r *Router) tryAutoDelegateTrackingInjection(ctx context.Context, orgID str
 			routerLog.Info("auto-delegate deferred: task went busy under the fire (gate race)",
 				"entity", entityID, "task_id", task.ID, "trigger", trigger.ID, "event_id", triggeringEventID)
 			return r.enqueueBusyFiring(ctx, orgID, entityID, task, trigger, triggeringEventID, actingTeamID, agentID)
+		}
+		// The plan refused the run for a setting a person has to change: a
+		// spend cap, the team's models, a provider, a missing blueprint. A
+		// replay would be refused the same way, so the event is not replayed
+		// for it, and the next trigger gets its turn. The refusal wrote
+		// nothing: the claim rides the run's transaction.
+		if cause, ok := delegate.RefusalCause(err); ok {
+			routerLog.Info("auto-delegate skipped: the run was refused",
+				"task_id", task.ID, "trigger", trigger.ID, "event_id", triggeringEventID, "cause", cause, "error", err)
+			r.postTriggerRefused(ctx, orgID, task, trigger, cause, err)
+			return false, nil
 		}
 		routerLog.Error("fire failed", "task_id", task.ID, "trigger", trigger.ID, "error", err)
 		return false, fmt.Errorf("fire delegate: %w", err)
@@ -662,16 +676,7 @@ func (r *Router) fireDelegate(ctx context.Context, orgID string, task *domain.Ta
 		return "", fmt.Errorf("task %s disappeared before spawn", task.ID)
 	}
 
-	blueprintRunID, err := r.spawner.Delegate(*fresh, delegate.DelegateOpts{
-		OrgID:               orgID,
-		ExplicitBlueprintID: trigger.BlueprintID,
-		TriggerType:         "event",
-		TriggerID:           trigger.ID,
-		TriggeringEventID:   triggeringEventID,
-		ActorAgentID:        actorAgentID,
-		TaskClaim:           claim,
-		OwnerTeamID:         ownerTeamID,
-	})
+	blueprintRunID, err := r.spawner.Delegate(*fresh, triggerDelegateOpts(orgID, trigger, triggeringEventID, actorAgentID, claim, ownerTeamID))
 	if err != nil {
 		// Post-B+: nothing to revert status-wise (status stayed 'queued').
 		// The claim didn't land either — it rides the blueprint-run insert, so a
@@ -680,9 +685,10 @@ func (r *Router) fireDelegate(ctx context.Context, orgID string, task *domain.Ta
 		// correct.
 		//
 		// The anticipated refusals — a replay hitting the fence, a task that
-		// went busy or closed under the fire — are outcomes both callers handle
-		// by design, so they name themselves instead of colouring the trace
-		// red and diluting "traces with errors".
+		// went busy or closed under the fire, a run the plan refused — are
+		// outcomes both callers handle by design, so they name themselves
+		// instead of colouring the trace red and diluting "traces with errors".
+		_, refused := delegate.RefusalCause(err)
 		switch {
 		case errors.Is(err, delegate.ErrAlreadyFired):
 			span.SetAttributes(telemetry.Outcome("already_fired"))
@@ -692,6 +698,8 @@ func (r *Router) fireDelegate(ctx context.Context, orgID string, task *domain.Ta
 			span.SetAttributes(telemetry.Outcome("task_closed"))
 		case errors.Is(err, delegate.ErrTeamArchived):
 			span.SetAttributes(telemetry.Outcome("team_archived"))
+		case refused:
+			span.SetAttributes(telemetry.Outcome("refused"))
 		default:
 			span.SetStatus(codes.Error, "delegate")
 		}
@@ -700,4 +708,52 @@ func (r *Router) fireDelegate(ctx context.Context, orgID string, task *domain.Ta
 	span.SetAttributes(telemetry.BlueprintRunID(blueprintRunID))
 	routerLog.InfoContext(ctx, "started blueprint run for task", "blueprint_run", blueprintRunID, "task_id", task.ID)
 	return blueprintRunID, nil
+}
+
+// triggerDelegateOpts is the DelegateOpts a trigger's firing is fired with,
+// and the one the score re-evaluation plans it with before admitting it: one
+// builder, so the gate and the fire check the same blueprint under the same
+// trigger type. fireDelegate documents each argument.
+func triggerDelegateOpts(orgID string, trigger domain.EventHandler, triggeringEventID, actorAgentID string, claim dbpkg.AgentClaimStamp, ownerTeamID string) delegate.DelegateOpts {
+	return delegate.DelegateOpts{
+		OrgID:               orgID,
+		ExplicitBlueprintID: trigger.BlueprintID,
+		TriggerType:         "event",
+		TriggerID:           trigger.ID,
+		TriggeringEventID:   triggeringEventID,
+		ActorAgentID:        actorAgentID,
+		TaskClaim:           claim,
+		OwnerTeamID:         ownerTeamID,
+	}
+}
+
+// triggerRefusal is the notice of a firing of trigger on task that the
+// spawner's plan refused with err, whose cause RefusalCause gave. A spend cap
+// is named by its scope and team alone: its message carries the day's figures,
+// which are an org admin's read, and the notice goes to team admins.
+func triggerRefusal(task *domain.Task, trigger domain.EventHandler, cause string, err error) kinds.TriggerRefusal {
+	subject := task.EntitySourceID
+	if subject == "" {
+		subject = task.Title
+	}
+	n := kinds.TriggerRefusal{
+		TriggerID: trigger.ID, TeamID: trigger.TeamID, EventType: trigger.EventType,
+		Subject: subject, Cause: cause,
+	}
+	switch cause {
+	case domain.DelegationRefusedSpendCap:
+		var capErr *delegate.CostCapError
+		if errors.As(err, &capErr) && capErr.Scope == delegate.CostCapScopeTeam {
+			n.TeamCap, n.CapTeamName = true, capErr.TeamName
+		}
+	case domain.DelegationRefusedNoDefaultModel, domain.DelegationRefusedProviderNotConnected, domain.DelegationRefusedModelNotEnabled:
+		n.Detail = err.Error()
+	}
+	return n
+}
+
+// postTriggerRefused tells trigger's team admins that the plan refused its
+// firing on task, so no run started.
+func (r *Router) postTriggerRefused(ctx context.Context, orgID string, task *domain.Task, trigger domain.EventHandler, cause string, err error) {
+	kinds.TriggerRefused.Post(ctx, orgID, triggerRefusal(task, trigger, cause, err))
 }
