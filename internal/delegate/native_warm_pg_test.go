@@ -799,6 +799,39 @@ func TestWarmClaim_LetGoWithAnUnchangedTreeUploadsNothing(t *testing.T) {
 	}
 }
 
+// A warm claim whose ending finds no checkpoint slot is let go anyway, on the
+// turn-end snapshot, once the slot wait runs out.
+func TestWarmClaim_LetGoWithNoCheckpointSlotReleasesAnyway(t *testing.T) {
+	orig := warmEndSlotWait
+	warmEndSlotWait = 200 * time.Millisecond
+	t.Cleanup(func() { warmEndSlotWait = orig })
+
+	f := startWarmEngagement(t, warmOpts{window: time.Hour, turns: []gateTurn{{text: "fixed it"}}})
+	f.awaitWarm(t, 1)
+	writeFile(t, filepath.Join(f.wtPath, "_tfac", "notes.md"), "written while the claim was warm")
+	for i := 0; i < checkpointHostSlots; i++ {
+		if !f.x.acquireCheckpointSlot() {
+			t.Fatalf("checkpoint slot %d was already taken", i)
+		}
+		t.Cleanup(f.x.releaseCheckpointSlot)
+	}
+
+	f.gate.hold()
+	if _, ok := f.x.warmWaits.LetGoOldest(); !ok {
+		t.Fatal("the registry held no warm claim to let go")
+	}
+	if d := f.await(t, 15*time.Second); d.fenced || d.handedBack {
+		t.Fatalf("disposition = %+v, want the release", d)
+	}
+	select {
+	case <-f.gate.entered:
+		t.Error("the ending uploaded a snapshot without a checkpoint slot")
+	default:
+	}
+	f.assertReleased(t)
+	f.assertState(t, domain.WorkspaceSnapshotWritten, f.claim.ClaimID)
+}
+
 // A lease fence writes nothing: the claim is someone else's to release.
 func TestWarmClaim_LeaseFenceWritesNothing(t *testing.T) {
 	f := startWarmEngagement(t, warmOpts{window: time.Hour, turns: []gateTurn{{text: "fixed it"}}})

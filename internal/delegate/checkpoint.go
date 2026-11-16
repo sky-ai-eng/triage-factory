@@ -292,9 +292,9 @@ func (s *Spawner) checkpointerFor(conversationID string) *checkpointer {
 // writes included, and takes no more. Every ending calls it before its own
 // snapshot; see the file comment for why waiting, not just cancelling, is the
 // point. A warm claim's ending has no snapshot of its own: it takes this
-// checkpointer's last one (checkpointWarmEnd) and then calls stop. Cancelling rather than letting the upload finish keeps a shutdown's
-// hand-back inside its grace period: the ending's snapshot supersedes the
-// checkpoint anyway.
+// checkpointer's last one (checkpointWarmEnd) and then calls stop. Cancelling
+// rather than letting the upload finish keeps a shutdown's hand-back inside
+// its grace period: the ending's snapshot supersedes the checkpoint anyway.
 func (c *checkpointer) stop() {
 	if c == nil {
 		return
@@ -407,6 +407,13 @@ func (c *checkpointer) checkpointTurnEnd(position float64) bool {
 	return res.recorded && (res.outcome == checkpointWritten || res.outcome == checkpointSkippedUnchanged)
 }
 
+// warmEndSlotWait bounds how long a warm claim's ending waits for a host slot
+// before it lets the claim go without a checkpoint. It is short because the
+// ending holds what something else is waiting for: a dispatch slot queued work
+// was promised, a stop a person asked for, or a place in a shutdown's join. A
+// var so tests can shorten it.
+var warmEndSlotWait = 5 * time.Second
+
 // checkpointWarmEnd writes the checkpoint a warm claim's ending takes, after
 // the engagement has stopped its jail and while it still holds its claim: the
 // tree as the warm wait left it, at the position the turn-end checkpoint
@@ -423,6 +430,9 @@ func (c *checkpointer) checkpointTurnEnd(position float64) bool {
 // ctx is the ending's: a shutdown or a stop has cancelled the engagement's
 // own by the time this runs. reason names the ending on the snapshot's span.
 // The jail is stopped, so the capture does not freeze it.
+//
+// With no host slot inside warmEndSlotWait the claim is let go without the
+// checkpoint, and the turn-end one stands.
 func (c *checkpointer) checkpointWarmEnd(ctx context.Context, reason string) {
 	if c == nil {
 		return
@@ -430,8 +440,10 @@ func (c *checkpointer) checkpointWarmEnd(ctx context.Context, reason string) {
 	end := c.activity.begin("checkpoint", turnEndCheckpointBound)
 	defer end()
 	c.wg.Wait()
-	if !c.s.waitCheckpointSlot(ctx, turnEndSlotWait) {
+	if !c.s.waitCheckpointSlot(ctx, warmEndSlotWait) {
 		recordWorkspaceCheckpoint(checkpointSkippedBusy)
+		delegateLog.Warn("no checkpoint slot came free for a warm claim's ending; the claim is let go on its turn-end checkpoint",
+			"conversation", c.w.conversationID, "claim", c.w.claimID, "reason", reason, "waited", warmEndSlotWait)
 		return
 	}
 	c.mu.Lock()
