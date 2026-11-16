@@ -957,9 +957,9 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	}
 	// A session that took no turn is not resumed: the launch opens a fresh
 	// one and sends the whole of what the person has asked so far.
-	priorSessionID := conv.SessionID
+	priorSessionID, priorSessionCostUSD := conv.SessionID, conv.SessionCostUSD
 	if firstTurn {
-		priorSessionID = ""
+		priorSessionID, priorSessionCostUSD = "", 0
 	}
 
 	// The per-conversation cancel handle, registered HERE — before the
@@ -1255,7 +1255,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	if conv.Runtime == domain.ConversationRuntimeNative {
 		disp = s.runNativeAgent(stepCtx, conv.ID, *task, mission, cfg, time.Now(), conv.Model, conv.TriggerType, actingUserID)
 	} else {
-		disp = s.runAgent(stepCtx, conv.ID, *task, mission, cfg, time.Now(), conv.Model, conv.TriggerType, actingUserID, priorSessionID)
+		disp = s.runAgent(stepCtx, conv.ID, *task, mission, cfg, time.Now(), conv.Model, conv.TriggerType, actingUserID, priorSessionID, priorSessionCostUSD)
 	}
 
 	// A stop during bring-up produces neither of the dispositions below — both
@@ -1662,6 +1662,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 		sidecar:           sidecar,
 		localGit:          localGit,
 		claimID:           conv.ClaimID,
+		sessionCostUSD:    conv.SessionCostUSD,
 		mirror:            mirror,
 		openingUnsent:     prependsUnsent,
 		nudge:             nudge,

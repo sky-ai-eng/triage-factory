@@ -51,6 +51,10 @@ type conversationSink struct {
 	// Because each agentproc.Run call gets a fresh sink, this does
 	// not deduplicate across separate resume invocations.
 	sessionDelivered bool
+
+	// sessionID is the session OnSession handled, which OnSessionCost records
+	// the SDK's running total against. Empty until the stream's init.
+	sessionID string
 }
 
 func newConversationSink(s *Spawner, orgID, conversationID, claimID, triggerType, creatorUserID string) *conversationSink {
@@ -83,6 +87,7 @@ func (k *conversationSink) OnSession(sessionID string) error {
 		return nil
 	}
 	k.sessionDelivered = true
+	k.sessionID = sessionID
 	bgCtx := context.Background()
 	// broadcastStatus prefers the just-written row's derived display status
 	// over a hardcoded "running" guess — SetSession only touches
@@ -122,6 +127,31 @@ func (k *conversationSink) OnSession(sessionID string) error {
 	}
 	k.spawner.broadcastConversationUpdate(k.orgID, k.conversationID, broadcastStatus)
 	return nil
+}
+
+// OnSessionCost stores the SDK's running total for this process's session as
+// the conversation's sdk_session_cost_usd, the total the session's next resume
+// measures its own spend from.
+//
+// One door for every engagement, fenced or not: the write is keyed on the
+// session and only ever raises the stored total (RecordSessionCostSystem), so
+// a process that lost its claim still records what its session cost and
+// cannot lower a total a newer process wrote. If the fence discarded this
+// process's session, the row names another one and the write changes nothing.
+//
+// The reader goroutine has no caller context, so the write gets its own bound,
+// and a failure is logged rather than returned: losing the total costs the
+// next resume an over-count, while failing the turn would lose the turn.
+func (k *conversationSink) OnSessionCost(totalUSD float64) {
+	if k.sessionID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), detachedWriteDeadline)
+	defer cancel()
+	if err := k.spawner.conversations.RecordSessionCostSystem(ctx, k.orgID, k.conversationID, k.sessionID, totalUSD); err != nil {
+		delegateLog.Warn("record session cost failed",
+			"conversation", k.conversationID, "session", k.sessionID, "total_cost_usd", totalUSD, "error", err)
+	}
 }
 
 // OnMessage inserts the parsed assistant/tool message into

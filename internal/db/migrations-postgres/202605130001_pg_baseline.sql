@@ -1475,6 +1475,11 @@ CREATE TABLE public.conversations (
     model text,
     -- SDK resume handle. NULL under runtime='native', where messages are truth.
     sdk_session_id text,
+    -- The running total the SDK last reported for the session in
+    -- sdk_session_id, which a resumed process's own spend is measured from.
+    -- Nothing here writes it above zero, since a multi delegation mints
+    -- runtime='native'; it keeps the row the shape SQLite's is.
+    sdk_session_cost_usd double precision DEFAULT 0 NOT NULL,
     -- This conversation's own system block (the run's facts, its verb
     -- reference, its mission and its step addendum) as the launch composed it —
     -- a fourth SDK resume coordinate beside sdk_session_id, worktree_path and

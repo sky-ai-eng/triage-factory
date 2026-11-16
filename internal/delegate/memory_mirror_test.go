@@ -268,6 +268,8 @@ type recordingSink struct {
 
 func (r *recordingSink) OnSession(string) error { return nil }
 
+func (r *recordingSink) OnSessionCost(float64) {}
+
 func (r *recordingSink) OnMessage(m *domain.Message) error {
 	r.msgs = append(r.msgs, m)
 	return r.err

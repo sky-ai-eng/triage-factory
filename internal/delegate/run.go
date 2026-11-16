@@ -218,13 +218,15 @@ func stampCommitIdentity(opts *agentproc.RunOptions, id githooks.CommitIdentity)
 // conversation stranded mid-flight by a crash. When present and the session
 // transcript survived alongside the warm worktree, the agent resumes that
 // session instead of starting fresh, so a restart continues the conversation
-// rather than re-running it from scratch.
+// rather than re-running it from scratch. priorSessionCostUSD is that
+// session's running total (domain.Conversation's SessionCostUSD), which a
+// launch resuming it measures its own spend from.
 //
 // Returns fenced: true when the DB refused this engagement's writes because
 // its claim was released out from under it. Nothing was recorded and nothing
 // may be — the caller must stop too, rather than reacting to a terminal that
 // belongs to whoever owns the conversation now.
-func (s *Spawner) runAgent(ctx context.Context, conversationID string, task domain.Task, mission string, cfg runConfig, startTime time.Time, model string, triggerType string, creatorUserID string, priorSessionID string) engagementDisposition {
+func (s *Spawner) runAgent(ctx context.Context, conversationID string, task domain.Task, mission string, cfg runConfig, startTime time.Time, model string, triggerType string, creatorUserID string, priorSessionID string, priorSessionCostUSD float64) engagementDisposition {
 	orgID := cfg.orgID
 
 	// The config is built, so whatever this engagement was going to write about
@@ -544,9 +546,9 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// fails in ensureWorkspace before reaching here), so the transcript is
 	// present exactly when it's safe to resume; otherwise we fall back to a
 	// fresh session, which is correct, just re-does the step's work.
-	resumeSession := ""
+	resumeSession, resumeSessionCostUSD := "", 0.0
 	if !opens {
-		resumeSession = priorSessionID
+		resumeSession, resumeSessionCostUSD = priorSessionID, priorSessionCostUSD
 		delegateLog.Info("conversation re-claimed mid-flight; resuming session", "conversation", conversationID, "session", priorSessionID)
 	}
 
@@ -605,12 +607,13 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	delegateLog.Info("claude starting for conversation", "conversation", conversationID, "cwd", claudeCwd)
 	teamOpts := s.resolveSDKTeamOptions(ctx, teamID)
 	baseOpts := agentproc.RunOptions{
-		Cwd:                claudeCwd,
-		Model:              model,
-		Effort:             s.claimEffort(ctx, orgID, conversationID, model),
-		PermissionMode:     teamOpts.permissionMode,
-		ClaudeAIConnectors: teamOpts.claudeAIConnectors,
-		SessionID:          resumeSession,
+		Cwd:                    claudeCwd,
+		Model:                  model,
+		Effort:                 s.claimEffort(ctx, orgID, conversationID, model),
+		PermissionMode:         teamOpts.permissionMode,
+		ClaudeAIConnectors:     teamOpts.claudeAIConnectors,
+		SessionID:              resumeSession,
+		SessionCostBaselineUSD: resumeSessionCostUSD,
 		// The gh subcommands are granted only when the channel is actually
 		// live: without one, `gh` on a local host would resolve to the user's
 		// own installation under the user's own auth, so the allowlist must

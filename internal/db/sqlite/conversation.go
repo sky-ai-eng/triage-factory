@@ -457,8 +457,11 @@ func (s *conversationStore) SetSession(ctx context.Context, orgID, conversationI
 		return nil, err
 	}
 	row := s.q.QueryRowContext(ctx, `
-		UPDATE conversations SET sdk_session_id = ? WHERE id = ?
-		RETURNING `+sqliteConversationReturningColumns, sessionID, conversationID)
+		UPDATE conversations
+		   SET sdk_session_cost_usd = CASE WHEN sdk_session_id IS ? THEN sdk_session_cost_usd ELSE 0 END,
+		       sdk_session_id = ?
+		 WHERE id = ?
+		RETURNING `+sqliteConversationReturningColumns, sessionID, sessionID, conversationID)
 	return scanConversationReturning(row)
 }
 
@@ -859,7 +862,7 @@ var sqliteConversationColumns = `
 	(SELECT SUM(cl.duration_ms) FROM claims cl WHERE cl.conversation_id = r.id) AS duration_ms,
 	(SELECT SUM(cl.num_turns) FROM claims cl WHERE cl.conversation_id = r.id)   AS num_turns,
 	r.park_reason, r.worktree_path,
-	r.result_summary, r.outcome, r.outcome_reason, r.failure_kind, r.sdk_session_id, r.actor_agent_id,
+	r.result_summary, r.outcome, r.outcome_reason, r.failure_kind, r.sdk_session_id, r.sdk_session_cost_usd, r.actor_agent_id,
 	COALESCE(r.trigger_type, ''),
 	r.creator_user_id,
 	COALESCE(r.team_id, ''),
@@ -992,7 +995,7 @@ var sqliteConversationReturningColumns = `
 	(SELECT SUM(cl.duration_ms) FROM claims cl WHERE cl.conversation_id = conversations.id) AS duration_ms,
 	(SELECT SUM(cl.num_turns) FROM claims cl WHERE cl.conversation_id = conversations.id)   AS num_turns,
 	park_reason, worktree_path,
-	result_summary, outcome, outcome_reason, failure_kind, sdk_session_id, actor_agent_id,
+	result_summary, outcome, outcome_reason, failure_kind, sdk_session_id, sdk_session_cost_usd, actor_agent_id,
 	COALESCE(trigger_type, ''),
 	creator_user_id,
 	COALESCE(team_id, ''),
@@ -1904,6 +1907,17 @@ func (s *conversationStore) taskHasClaim(ctx context.Context, orgID, taskID, cla
 
 func (s *conversationStore) SetSessionSystem(ctx context.Context, orgID, conversationID, sessionID string) (*domain.Conversation, error) {
 	return s.SetSession(ctx, orgID, conversationID, sessionID)
+}
+
+func (s *conversationStore) RecordSessionCostSystem(ctx context.Context, orgID, conversationID, sessionID string, totalUSD float64) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	_, err := s.q.ExecContext(ctx, `
+		UPDATE conversations SET sdk_session_cost_usd = ?
+		WHERE id = ? AND sdk_session_id = ? AND sdk_session_cost_usd < ?
+	`, totalUSD, conversationID, sessionID, totalUSD)
+	return err
 }
 
 func (s *conversationStore) SetWorktreePathSystem(ctx context.Context, orgID, conversationID, path string) (*domain.Conversation, error) {
@@ -3115,7 +3129,7 @@ func scanConversation(sc conversationScanner, r *domain.Conversation) error {
 	if err := sc.Scan(
 		&r.ID, &r.TaskID, &r.Runtime, &r.Status, &model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &parkReason, &worktreePath,
-		&resultSummary, &outcome, &outcomeReason, &failureKind, &sessionID, &actorAgentID, &r.TriggerType, &creatorUserID, &r.TeamID, &executorID, &r.Attempts, &blueprintRunID, &blueprintStep,
+		&resultSummary, &outcome, &outcomeReason, &failureKind, &sessionID, &r.SessionCostUSD, &actorAgentID, &r.TriggerType, &creatorUserID, &r.TeamID, &executorID, &r.Attempts, &blueprintRunID, &blueprintStep,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
 		&r.MemoryMissing, &r.ActorAgentName, &endedAt, &endedReason,
 		&stopRequestedAt, &r.StopRequestedBy, &r.StopRequestedReason,

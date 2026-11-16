@@ -617,7 +617,7 @@ func TestRunAgent_AResumedSessionRetainsItsOpeningRow(t *testing.T) {
 		surface:     agentprompt.SurfaceWorkbench,
 		interactive: true,
 		prSkeleton:  prSkeletonSource{client: ghclient.NewClient(srv.URL, "t"), owner: "owner", repo: "repo", prNumber: 7},
-	}, time.Now(), "claude-sonnet-4-6", "manual", runmode.LocalDefaultUserID, session)
+	}, time.Now(), "claude-sonnet-4-6", "manual", runmode.LocalDefaultUserID, session, 0)
 
 	if resumed.opts.SessionID != session {
 		t.Fatalf("the re-claim launched session %q, want %q resumed", resumed.opts.SessionID, session)

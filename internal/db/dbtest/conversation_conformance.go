@@ -1118,6 +1118,89 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
+	// sdk_session_cost_usd is the running total the SDK last reported for the
+	// session in sdk_session_id, which a resumed launch subtracts from what its
+	// process reports. Each subtest starts from a conversation on session
+	// sess-a whose stored total is 0.5.
+	sessionCostAt := func(t *testing.T, store db.ConversationStore, orgID, conversationID string) float64 {
+		t.Helper()
+		got, err := store.Get(context.Background(), orgID, conversationID)
+		if err != nil || got == nil {
+			t.Fatalf("Get: %v (row %v)", err, got)
+		}
+		return got.SessionCostUSD
+	}
+	onSessionA := func(t *testing.T) (db.ConversationStore, string, string) {
+		t.Helper()
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		conversationID := seedConversationForTest(t, orgID, seed, "running")
+		if _, err := store.SetSession(ctx, orgID, conversationID, "sess-a"); err != nil {
+			t.Fatalf("SetSession: %v", err)
+		}
+		if err := store.RecordSessionCostSystem(ctx, orgID, conversationID, "sess-a", 0.5); err != nil {
+			t.Fatalf("RecordSessionCostSystem: %v", err)
+		}
+		if got := sessionCostAt(t, store, orgID, conversationID); got != 0.5 {
+			t.Fatalf("seeded sdk_session_cost_usd = %v, want 0.5", got)
+		}
+		return store, orgID, conversationID
+	}
+
+	t.Run("SetSession_ANewSessionStartsItsCostAtZero", func(t *testing.T) {
+		store, orgID, conversationID := onSessionA(t)
+		row, err := store.SetSession(context.Background(), orgID, conversationID, "sess-b")
+		if err != nil {
+			t.Fatalf("SetSession: %v", err)
+		}
+		if row.SessionCostUSD != 0 {
+			t.Errorf("returned sdk_session_cost_usd = %v, want 0", row.SessionCostUSD)
+		}
+		if got := sessionCostAt(t, store, orgID, conversationID); got != 0 {
+			t.Errorf("sdk_session_cost_usd after a new session = %v, want 0", got)
+		}
+	})
+
+	t.Run("SetSession_TheSameSessionKeepsItsCost", func(t *testing.T) {
+		store, orgID, conversationID := onSessionA(t)
+		if _, err := store.SetSession(context.Background(), orgID, conversationID, "sess-a"); err != nil {
+			t.Fatalf("SetSession: %v", err)
+		}
+		if got := sessionCostAt(t, store, orgID, conversationID); got != 0.5 {
+			t.Errorf("sdk_session_cost_usd after the same session = %v, want 0.5", got)
+		}
+	})
+
+	t.Run("RecordSessionCostSystem_RaisesTheTotal", func(t *testing.T) {
+		store, orgID, conversationID := onSessionA(t)
+		if err := store.RecordSessionCostSystem(context.Background(), orgID, conversationID, "sess-a", 0.75); err != nil {
+			t.Fatalf("RecordSessionCostSystem: %v", err)
+		}
+		if got := sessionCostAt(t, store, orgID, conversationID); got != 0.75 {
+			t.Errorf("sdk_session_cost_usd = %v, want 0.75", got)
+		}
+	})
+
+	t.Run("RecordSessionCostSystem_IgnoresALowerTotal", func(t *testing.T) {
+		store, orgID, conversationID := onSessionA(t)
+		if err := store.RecordSessionCostSystem(context.Background(), orgID, conversationID, "sess-a", 0.25); err != nil {
+			t.Fatalf("RecordSessionCostSystem: %v", err)
+		}
+		if got := sessionCostAt(t, store, orgID, conversationID); got != 0.5 {
+			t.Errorf("sdk_session_cost_usd = %v, want 0.5", got)
+		}
+	})
+
+	t.Run("RecordSessionCostSystem_IgnoresAnotherSession", func(t *testing.T) {
+		store, orgID, conversationID := onSessionA(t)
+		if err := store.RecordSessionCostSystem(context.Background(), orgID, conversationID, "sess-other", 0.9); err != nil {
+			t.Fatalf("RecordSessionCostSystem: %v", err)
+		}
+		if got := sessionCostAt(t, store, orgID, conversationID); got != 0.5 {
+			t.Errorf("sdk_session_cost_usd = %v, want 0.5", got)
+		}
+	})
+
 	// worktree_path is half of what an SDK wake needs: the cwd `claude
 	// --resume` keys its session storage by. Every claim of a conversation
 	// re-stamps it — a warm re-claim with the same value, a cold rehydrate with

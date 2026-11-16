@@ -321,6 +321,11 @@ type ResumeOptions struct {
 	// the turn's measured sandbox cost by id; empty records nothing.
 	claimID string
 
+	// sessionCostUSD is the running total of the session being resumed
+	// (domain.Conversation's SessionCostUSD), which the resumed process's own
+	// spend is measured from (agentproc.RunOptions.SessionCostBaselineUSD).
+	sessionCostUSD float64
+
 	// mirror files the agent's memory file as this turn writes it. Built by
 	// the dispatcher rather than here because it outlives the turn: the same
 	// mirror takes the final check at every exit the dispatcher owns, from a
@@ -502,14 +507,15 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 
 	teamOpts := s.resolveSDKTeamOptions(ctx, opts.TeamID)
 	baseOpts := agentproc.RunOptions{
-		Cwd:                cwd,
-		Model:              model,
-		Effort:             opts.Effort,
-		PermissionMode:     teamOpts.permissionMode,
-		ClaudeAIConnectors: teamOpts.claudeAIConnectors,
-		SessionID:          sessionID,
-		Message:            message,
-		OnOpeningUnsent:    opts.openingUnsent,
+		Cwd:                    cwd,
+		Model:                  model,
+		Effort:                 opts.Effort,
+		PermissionMode:         teamOpts.permissionMode,
+		ClaudeAIConnectors:     teamOpts.claudeAIConnectors,
+		SessionID:              sessionID,
+		SessionCostBaselineUSD: opts.sessionCostUSD,
+		Message:                message,
+		OnOpeningUnsent:        opts.openingUnsent,
 		// The append the launch gave this conversation, through the composer the
 		// launch used. The harness replays the session's own history but not the
 		// prompt that was appended to it, so a turn sent without this one wakes

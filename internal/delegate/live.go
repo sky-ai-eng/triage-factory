@@ -998,6 +998,10 @@ func (a *activitySink) OnSession(id string) error {
 	return a.inner.OnSession(id)
 }
 
+func (a *activitySink) OnSessionCost(totalUSD float64) {
+	a.inner.OnSessionCost(totalUSD)
+}
+
 func (a *activitySink) OnMessage(m *domain.Message) error {
 	if err := a.inner.OnMessage(m); err != nil {
 		// The row did not land, so this one is not a moment to file anything.

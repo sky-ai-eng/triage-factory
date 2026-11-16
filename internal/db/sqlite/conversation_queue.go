@@ -304,7 +304,7 @@ func EpisodeJailLossesSQL(convAlias string) string {
 // freshly minted claims row, not this projection.
 var conversationQueueClaimCols = `r.id, r.org_id, COALESCE(r.type, ''), COALESCE(r.task_id, ''), COALESCE(r.prompt_id, ''),
 	COALESCE(r.model, ''), COALESCE(r.runtime, ''),
-	COALESCE(r.worktree_path, ''), COALESCE(r.sdk_session_id, ''), r.trigger_type, COALESCE(r.trigger_id, ''),
+	COALESCE(r.worktree_path, ''), COALESCE(r.sdk_session_id, ''), r.sdk_session_cost_usd, r.trigger_type, COALESCE(r.trigger_id, ''),
 	COALESCE(r.creator_user_id, ''), COALESCE(r.team_id, ''),
 	COALESCE(r.blueprint_run_id, ''), r.blueprint_step_index,
 	` + db.ConversationHasRunSQL("r")
@@ -1784,7 +1784,7 @@ func scanSqliteClaimedConversation(row *sql.Row) (*domain.Conversation, error) {
 		stepIdx sql.NullInt64
 	)
 	err := row.Scan(&r.ID, &r.OrgID, &r.Type, &r.TaskID, &r.PromptID, &r.Model, &r.Runtime,
-		&r.WorktreePath, &r.SessionID, &r.TriggerType, &r.TriggerID,
+		&r.WorktreePath, &r.SessionID, &r.SessionCostUSD, &r.TriggerType, &r.TriggerID,
 		&r.CreatorUserID, &r.TeamID, &r.BlueprintRunID, &stepIdx, &r.HasRun)
 	if err == sql.ErrNoRows {
 		return nil, nil

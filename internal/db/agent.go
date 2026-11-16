@@ -355,6 +355,10 @@ type ConversationStore interface {
 	// write-gate retry loop can resume a conversation whose initial
 	// invocation failed the memory check.
 	//
+	// A session id other than the stored one starts sdk_session_cost_usd over
+	// at zero in the same statement, since that total belongs to the session
+	// it was reported for; the same id leaves it as it is.
+	//
 	// Returns the conversation row as it reads immediately after this call —
 	// same shape as Get. ErrNoSuchConversation if conversationID names no row
 	// in the org.
@@ -950,6 +954,23 @@ type ConversationStore interface {
 	//
 	// Return shape and miss semantics match SetSession.
 	SetSessionSystem(ctx context.Context, orgID, conversationID, sessionID string) (*domain.Conversation, error)
+
+	// RecordSessionCostSystem records totalUSD, the running total the SDK
+	// reported for session sessionID, as conversations.sdk_session_cost_usd:
+	// it raises the stored value to totalUSD and never lowers it, and only
+	// while the row's sdk_session_id is sessionID. A call naming another
+	// session changes nothing. A resumed launch reads the stored value back
+	// as the total its own spend is measured from (domain.Conversation's
+	// SessionCostUSD).
+	//
+	// Keyed on the session rather than a claim on purpose: what a session has
+	// cost is a fact about the session, so a process that has lost its claim
+	// still records it, and the raise-only rule keeps a late writer from
+	// lowering what a newer one wrote.
+	//
+	// Bookkeeping with no returned row, and no miss: a write that changes
+	// nothing is not an error.
+	RecordSessionCostSystem(ctx context.Context, orgID, conversationID, sessionID string, totalUSD float64) error
 	// SetActiveClaimPhaseSystem writes claims.phase on the conversation's
 	// ACTIVE claim — the setup/parked sub-state of a live engagement
 	// (fetching, cloning, agent_starting, awaiting_credentials). Empty
