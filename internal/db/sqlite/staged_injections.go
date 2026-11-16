@@ -79,9 +79,8 @@ func (s *stagedInjectionStore) FlushPendingSystem(ctx context.Context, orgID, co
 // withdrawProducerNotesForTask withdraws the notes producer staged on the
 // task's conversations that are still waiting, under any of the staged
 // subtypes, as DeleteSystem withdraws one: delivered stays 0 and the row
-// leaves the window. The task store's clears of a held close call it in
-// their own transactions, since a hold cleared without its close makes its
-// notes false.
+// leaves the window. The task store's reopen calls it in its own transaction,
+// since a reopen undoes the close its close notes tell of.
 func withdrawProducerNotesForTask(ctx context.Context, q queryer, taskID, producer string) error {
 	subtypes, args := inListArgs(domain.StagedInjectionSubtypes)
 	args = append(args, producer, taskID)

@@ -1010,7 +1010,7 @@ func escalateMaxTokens(current int, model string) int {
 // list does not vary with the step's position — only the system prompt does.
 func (e *Engine) toolSchemas(params Params) []schemas.ChatTool {
 	sandboxed := SandboxTools()
-	tf := tfTools(params)
+	tf := TFTools(params)
 	out := make([]schemas.ChatTool, 0, len(sandboxed)+len(tf))
 	out = append(out, sandboxed...)
 	out = append(out, tf...)

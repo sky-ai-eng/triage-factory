@@ -110,10 +110,9 @@ func (s *Spawner) runNativeTail(ctx context.Context, n nativeTail) engagementDis
 			// An assignment note staged while the claim was warm can have
 			// stopped being true by now, and the turn is about to read it.
 			s.retireStaleAssignmentNotes(context.WithoutCancel(ctx), n.orgID, n.conversationID)
-			// A close, or a close beginning to hold, while the claim was warm
-			// told only the conversations that were working, which this one
-			// was not. The loop reads the note at the turn's first model
-			// call, with the person's message.
+			// A close while the claim was warm told only the conversations
+			// that were working, which this one was not. The loop reads the
+			// note at the turn's first model call, with the person's message.
 			s.tellTaskResolved(context.WithoutCancel(ctx), n.orgID, n.conversationID, n.task.ID)
 			// The first turn's params say how this engagement started: in a
 			// sandbox launched for it, in a workspace built or restored for

@@ -20,7 +20,6 @@ type TaskCloseDeferral struct {
 	// EventID is the closing event whose close is held.
 	EventID string `json:"event_id"`
 	// HeldSince is when the hold began. A later closing event takes the
-	// hold's place and keeps this time, so it identifies the hold: the note
-	// telling a conversation of it is sent once per hold (TaskCloseHoldKey).
+	// hold's place and keeps this time, so it identifies the hold.
 	HeldSince time.Time `json:"held_since"`
 }

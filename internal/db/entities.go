@@ -243,9 +243,6 @@ type HeldTaskClose struct {
 	TaskID string
 	// NewlyHeld reports that the task held no close before this call.
 	NewlyHeld bool
-	// WorkingConversationIDs are the task's working conversations: the set
-	// the caller tells.
-	WorkingConversationIDs []string
 }
 
 type EntityStore interface {

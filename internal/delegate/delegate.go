@@ -166,6 +166,14 @@ func (c runConfig) container() string {
 	return c.jiraProject
 }
 
+// hasBlueprint is whether the launch's conversation belongs to a blueprint
+// run. It decides the TF tools either runtime offers it (tooldefs.TFTools):
+// the native loop's through agentloop.Params.HasBlueprint, the SDK's through
+// liveRunSpec.hasBlueprint.
+func (c runConfig) hasBlueprint() bool {
+	return c.blueprintRunID != ""
+}
+
 // ErrTaskBusy is returned by FireDelegation, on either path, when the insert
 // loses to the one-active-run-per-task index: something already holds this
 // task's single live engagement. On the event path that is a different (event,

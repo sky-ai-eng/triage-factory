@@ -1263,9 +1263,7 @@ func (s *entityStore) CloseTerminalSystem(ctx context.Context, orgID, entityID s
 			}
 			switch {
 			case out.Held:
-				res.HeldTasks = append(res.HeldTasks, db.HeldTaskClose{
-					TaskID: taskID, NewlyHeld: out.NewlyHeld, WorkingConversationIDs: out.WorkingConversationIDs,
-				})
+				res.HeldTasks = append(res.HeldTasks, db.HeldTaskClose{TaskID: taskID, NewlyHeld: out.NewlyHeld})
 			case out.Closed:
 				res.ClosedTaskIDs = append(res.ClosedTaskIDs, taskID)
 				res.WorkingConversationIDs[taskID] = out.WorkingConversationIDs

@@ -109,9 +109,6 @@ func (refusingDelegator) StageOrDeliverAdditiveEvent(context.Context, string, st
 func (refusingDelegator) TellTaskClosed(context.Context, string, string, []string) {
 }
 
-func (refusingDelegator) TellTaskCloseHeld(context.Context, string, string, []string) {
-}
-
 // discardPublisher is the Publisher of a test that does not read the
 // disposition sentinel.
 type discardPublisher struct{}

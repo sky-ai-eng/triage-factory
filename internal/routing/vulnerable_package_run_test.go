@@ -97,8 +97,8 @@ func TestVulnerablePackage_ResolutionTellsTheWorkingRun(t *testing.T) {
 }
 
 // A resolution while the run's own pull request awaits a person's verdict
-// closes the package and holds the task's close. The run is told the close is
-// held, and told the task closed once the person resolves the pull request.
+// closes the package and holds the task's close. The run is told the task
+// closed once the person resolves the pull request, and not before.
 func TestVulnerablePackage_ResolutionHeldWhileTheRunsPullRequestAwaitsAPerson(t *testing.T) {
 	d := newDelegatedPackage(t)
 	pr, _, err := sqlitestore.New(d.db).Entities.FindOrCreate(t.Context(), runmode.LocalDefaultOrgID,
@@ -122,9 +122,6 @@ func TestVulnerablePackage_ResolutionHeldWhileTheRunsPullRequestAwaitsAPerson(t 
 	}
 	if status, _, _ := taskRow(t, d.db, d.taskID); status == "done" {
 		t.Error("the task closed while the run's pull request awaits a person")
-	}
-	if got := d.sp.heldNotedIDs(); !slices.Equal(got, []string{d.convID}) {
-		t.Errorf("told of the held close = %v, want [%s]", got, d.convID)
 	}
 	if got := d.sp.notedIDs(); len(got) != 0 {
 		t.Errorf("told the task closed = %v before it did", got)

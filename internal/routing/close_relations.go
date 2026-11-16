@@ -606,9 +606,6 @@ func (r *Router) runTerminatingClose(ctx context.Context, orgID string, evt doma
 	}
 	for _, h := range res.HeldTasks {
 		routerLog.InfoContext(ctx, "held task close: a deliverable awaits a person", "task_id", h.TaskID, "on_event", evt.EventType, "newly_held", h.NewlyHeld)
-		if h.NewlyHeld {
-			r.spawner.TellTaskCloseHeld(ctx, orgID, h.TaskID, h.WorkingConversationIDs)
-		}
 	}
 	// The close obligation stands in for a close that was lost, so it is not
 	// what a reader would recognize as the closer: to them the entity closed.
@@ -890,11 +887,10 @@ func keepReassign(poolType string) func(domain.Event, closeContext, closeTarget)
 // (TaskStore.CloseOrHoldSystem). Without, it closes at once
 // (TaskStore.CloseOnEventSystem), which a reassignment needs.
 //
-// The close stops nothing. The conversations working on the task are told,
-// after the commit: that the task closed, or, the first time the close
-// holds, that the event resolved the situation and the task stays open for
-// a person. A closing event that finds the close already held only takes
-// its place.
+// The close stops nothing. When the task closed, the conversations working
+// on it are told so after the commit. A held close tells nothing: the task
+// stays open, so the agent's instructions have not changed. A closing event
+// that finds the close already held only takes its place.
 func (r *Router) closeTaskOnEvent(ctx context.Context, orgID, taskID string, evt domain.Event, closeReason string, mayHold bool) (dbpkg.TaskCloseOutcome, error) {
 	closeFn := r.tasks.CloseOnEventSystem
 	if mayHold {
@@ -904,11 +900,8 @@ func (r *Router) closeTaskOnEvent(ctx context.Context, orgID, taskID string, evt
 	if err != nil {
 		return dbpkg.TaskCloseOutcome{}, err
 	}
-	switch {
-	case out.Closed:
+	if out.Closed {
 		r.spawner.TellTaskClosed(ctx, orgID, taskID, out.WorkingConversationIDs)
-	case out.NewlyHeld:
-		r.spawner.TellTaskCloseHeld(ctx, orgID, taskID, out.WorkingConversationIDs)
 	}
 	return out, nil
 }

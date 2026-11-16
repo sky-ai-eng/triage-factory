@@ -705,7 +705,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		sink:         sink,
 		mirror:       mirror,
 		nudge:        turnEndNudge(s.turnEndNudges(orgID, conversationID, task, finalBlueprintStepOf(cfg), cfg.interactive)),
-		hasBlueprint: cfg.blueprintRunID != "",
+		hasBlueprint: cfg.hasBlueprint(),
 	})
 
 	// Fenced out mid-stream: the claim this engagement holds was released and

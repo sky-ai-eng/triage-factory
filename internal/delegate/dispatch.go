@@ -848,8 +848,8 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	// Ahead of the fork between the resume path and the step launch, so the
 	// notes reach the agent whichever one drives it. The queued events go
 	// first: staged notes are read oldest first, and an event still queued
-	// on the task came before anything that closed it or resolved it, so
-	// the agent reads them in the order they happened.
+	// on the task came before anything that closed it, so the agent reads
+	// them in the order they happened.
 	s.handOffQueuedFirings(gateCtx, orgID, br, conv, task)
 	s.retireStaleAssignmentNotes(gateCtx, orgID, conv.ID)
 	s.tellTaskResolved(gateCtx, orgID, conv.ID, task.ID)
@@ -1148,18 +1148,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 		s.handlePreAgentFailure(orgID, br, *conv, err)
 		return
 	}
-	cfg.orgID = orgID
-	cfg.teamID = conv.TeamID
-	cfg.claimID = conv.ClaimID
-	cfg.upstreamHandBacks = conv.UpstreamHandBacks
-	cfg.jailLosses = conv.JailLosses
-	cfg.lastHandBackOutcome = conv.LastHandBackOutcome
-	cfg.surface = surfaceFor(conv.Type)
-	cfg.interactive = interactive
-	if !interactive {
-		cfg.blueprintRunID = br.ID
-		cfg.blueprintStep = stepIdx
-	}
+	cfg.bindConversation(orgID, *conv, br, stepIdx)
 	cfg.sidecar = sidecar
 	cfg.localGit = localGit
 
@@ -2191,6 +2180,27 @@ func (s *Spawner) freshStepWorkspace(ctx context.Context, orgID string, task dom
 // br is nil for a conversation a person works in. Its workspace is the task's
 // all the same, so it is built or restored as a step's is, from the
 // conversation and the task alone, and nothing is stamped on a run.
+// bindConversation sets on cfg what the claimed conversation conv decides
+// about its launch: who it runs for, under which framework prompt, and, for
+// a conversation that belongs to a blueprint run, the run br and the step
+// stepIdx it executes. A conversation a person works in belongs to none, and
+// br is nil for it, so it is bound none, which is what offers it no TF tool
+// on either runtime (hasBlueprint).
+func (cfg *runConfig) bindConversation(orgID string, conv domain.Conversation, br *domain.BlueprintRun, stepIdx int) {
+	cfg.orgID = orgID
+	cfg.teamID = conv.TeamID
+	cfg.claimID = conv.ClaimID
+	cfg.upstreamHandBacks = conv.UpstreamHandBacks
+	cfg.jailLosses = conv.JailLosses
+	cfg.lastHandBackOutcome = conv.LastHandBackOutcome
+	cfg.surface = surfaceFor(conv.Type)
+	cfg.interactive = conv.Type == domain.ConversationTypeInteractive
+	if !cfg.interactive {
+		cfg.blueprintRunID = br.ID
+		cfg.blueprintStep = stepIdx
+	}
+}
+
 func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.BlueprintRun, task domain.Task, conv domain.Conversation, gh *ghclient.Client, sidecar *runSidecar, localChannels ...*localGitChannel) (runConfig, error) {
 	var localGit *localGitChannel
 	if len(localChannels) > 0 {

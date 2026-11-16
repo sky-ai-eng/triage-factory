@@ -22,10 +22,9 @@ import (
 // never holds either (closeRelation.reassigns), and neither does a person's
 // own close.
 //
-// The conversations working on the task are told twice, of two things: when
-// the hold begins, that the event resolved the situation and the task stays
-// open for the person (Delegator.TellTaskCloseHeld), and when the close
-// applies, that the task closed, as any close tells them.
+// The conversations working on the task are told nothing when the hold
+// begins: the task stays open, so their instructions have not changed. When
+// the close applies, they are told the task closed, as any close tells them.
 
 // DefaultCloseDeferralSweepInterval is how often the brain looks at the held
 // closes of tasks nothing holds any more.
