@@ -75,6 +75,14 @@ type RunOptions struct {
 	// session.
 	SessionID string
 
+	// SessionCostBaselineUSD is the running total the session in SessionID
+	// had reached before this process. Claude Code restores a session's total
+	// on a resume and reports it in every result's total_cost_usd, so the
+	// reader subtracts this to give the process's own spend as
+	// Result.CostUSD. Meaningful only with SessionID: a process that resumes
+	// nothing starts its session at zero, and this is ignored.
+	SessionCostBaselineUSD float64
+
 	// Message is the value passed to `-p`, and the opening user message of
 	// an interactive run that carries no OpeningBlocks. What it holds follows
 	// from what the session on the other side already knows: a resume sends
@@ -424,6 +432,7 @@ type NoopSink struct{}
 
 func (NoopSink) OnSession(string) error          { return nil }
 func (NoopSink) OnMessage(*domain.Message) error { return nil }
+func (NoopSink) OnSessionCost(float64)           {}
 
 // UsageSink accumulates aggregate token usage across one Run. It's the
 // drop-in replacement for NoopSink at the one-shot system-job call sites
@@ -448,6 +457,8 @@ type UsageSink struct {
 }
 
 func (s *UsageSink) OnSession(string) error { return nil }
+
+func (s *UsageSink) OnSessionCost(float64) {}
 
 func (s *UsageSink) OnMessage(m *domain.Message) error {
 	if m == nil {
@@ -487,6 +498,13 @@ type Sink interface {
 	// logged and skipped; the run does not abort because a single
 	// row failed to insert.
 	OnMessage(msg *domain.Message) error
+
+	// OnSessionCost fires once for each result the stream reports, with the
+	// session's running total as the SDK reported it (Result.SessionCostUSD),
+	// so the caller can keep it as the total the session's next resume
+	// measures its spend from. It has nothing to return: a failure to keep
+	// it is the implementation's to log, and it never fails the turn.
+	OnSessionCost(totalUSD float64)
 }
 
 // StreamObserver is an optional extension of Sink, for a caller that has to
@@ -615,7 +633,7 @@ func Run(ctx context.Context, opts RunOptions, sink Sink) (*Outcome, error) {
 		return &Outcome{Stderr: proc.Stderr()}, fmt.Errorf("start agent runtime: %w", err)
 	}
 
-	stream := NewStreamState()
+	stream := newStreamStateFor(opts)
 	result, streamErr := consumeStream(proc.Stdout(), sink, stream, opts.TraceID)
 
 	// If the stream reader bailed before a terminal result, the
@@ -888,6 +906,7 @@ func consumeStream(stdout io.Reader, sink Sink, stream *StreamState, traceID str
 			deliverMessages(sink, messages)
 
 			if result != nil {
+				sink.OnSessionCost(result.SessionCostUSD)
 				return result, nil
 			}
 		}

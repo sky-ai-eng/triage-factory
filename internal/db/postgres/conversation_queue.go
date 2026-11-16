@@ -455,6 +455,7 @@ const conversationQueueClaimSelect = `r.id, r.org_id, r.status, r.queued_at, r.s
 	COALESCE(r.runtime, '')               AS runtime,
 	COALESCE(r.worktree_path, '')         AS worktree_path,
 	COALESCE(r.sdk_session_id, '')        AS sdk_session_id,
+	r.sdk_session_cost_usd,
 	r.trigger_type,
 	COALESCE(r.trigger_id::text, '')      AS trigger_id,
 	COALESCE(r.creator_user_id::text, '') AS creator_user_id,
@@ -573,7 +574,7 @@ func EpisodeJailLossesSQL(convAlias string) string {
 // The claim minted in this statement is not among them: it is unreleased, and
 // the subquery reads the statement's snapshot, which does not hold it.
 var conversationQueueClaimReturning = `candidate.id::text, candidate.org_id::text, candidate.type, candidate.task_id, candidate.prompt_id,
-	candidate.model, candidate.runtime, candidate.worktree_path, candidate.sdk_session_id,
+	candidate.model, candidate.runtime, candidate.worktree_path, candidate.sdk_session_id, candidate.sdk_session_cost_usd,
 	candidate.trigger_type, candidate.trigger_id, candidate.creator_user_id,
 	candidate.team_id,
 	candidate.blueprint_run_id, candidate.blueprint_step_index,
@@ -2247,7 +2248,7 @@ func scanPgClaimedConversation(row *sql.Row) (*domain.Conversation, error) {
 		claimedAt time.Time
 	)
 	err := row.Scan(&r.ID, &r.OrgID, &r.Type, &r.TaskID, &r.PromptID, &r.Model, &r.Runtime,
-		&r.WorktreePath, &r.SessionID, &r.TriggerType, &r.TriggerID,
+		&r.WorktreePath, &r.SessionID, &r.SessionCostUSD, &r.TriggerType, &r.TriggerID,
 		&r.CreatorUserID, &r.TeamID, &r.BlueprintRunID, &stepIdx,
 		&r.ClaimID, &claimedAt, &r.Attempts, &r.SetupFailures, &r.LostEngagements, &r.UpstreamHandBacks,
 		&r.JailLosses, &r.LastHandBackOutcome, &r.HasRun)

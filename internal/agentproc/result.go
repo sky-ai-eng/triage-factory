@@ -10,10 +10,14 @@ package agentproc
 // contains every earlier one, and the fold takes it as-is rather than adding.
 // Summing would bill a three-turn process a + (a+b) + (a+b+c).
 //
-// A fresh process starts that accumulator at zero, including one resumed by
-// session id: the SDK restores a prior total only for a session the
-// interactive REPL recorded as its last, which a headless run never is. So a
-// process's final total is that engagement's own spend, and engagements add.
+// The cost accumulator is the session's, not the process's: Claude Code
+// keeps a session's running total in the session and restores it on
+// --resume, headless runs included, so a resumed process's total_cost_usd
+// starts from what earlier processes on the session spent. The reader
+// subtracts the total the launch was given (RunOptions.SessionCostBaselineUSD)
+// before a Result reaches this fold, so CostUSD is the process's own spend and
+// engagements add; SessionCostUSD keeps the raw total. duration_ms and
+// num_turns are not restored, and each process reports its own.
 //
 // Disposition is sticky the other way: IsError and Interrupted, once seen,
 // stay set, and the result text / subtype are the newest non-empty ones — a
@@ -21,6 +25,7 @@ package agentproc
 func MergeResult(base, resume *Result) *Result {
 	merged := *base
 	merged.CostUSD = resume.CostUSD
+	merged.SessionCostUSD = resume.SessionCostUSD
 	merged.DurationMs = resume.DurationMs
 	merged.NumTurns = resume.NumTurns
 	if resume.IsError {

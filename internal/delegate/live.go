@@ -257,6 +257,7 @@ func (s *Spawner) runLiveAndDrive(ctx context.Context, spec liveRunSpec) liveOut
 func foldAccounting(classified, merged *agentproc.Result) *agentproc.Result {
 	r := *classified
 	r.CostUSD = merged.CostUSD
+	r.SessionCostUSD = merged.SessionCostUSD
 	r.DurationMs = merged.DurationMs
 	r.NumTurns = merged.NumTurns
 	return &r
@@ -996,6 +997,10 @@ func newActivitySink(inner agentproc.Sink, mirror *memoryMirror, tracker *activi
 
 func (a *activitySink) OnSession(id string) error {
 	return a.inner.OnSession(id)
+}
+
+func (a *activitySink) OnSessionCost(totalUSD float64) {
+	a.inner.OnSessionCost(totalUSD)
 }
 
 func (a *activitySink) OnMessage(m *domain.Message) error {

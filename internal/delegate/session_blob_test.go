@@ -235,7 +235,7 @@ func TestRunAgent_ResumesASessionFromItsBlob(t *testing.T) {
 		runRoot:     root,
 		surface:     agentprompt.SurfaceWorkbench,
 		interactive: true,
-	}, time.Now(), "claude-sonnet-4-6", "manual", runmode.LocalDefaultUserID, session)
+	}, time.Now(), "claude-sonnet-4-6", "manual", runmode.LocalDefaultUserID, session, 0)
 
 	if resumed.opts.SessionID != session {
 		t.Fatalf("the launch ran session %q, want %q resumed", resumed.opts.SessionID, session)

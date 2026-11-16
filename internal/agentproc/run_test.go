@@ -50,8 +50,9 @@ func TestRun_RefusesOpeningBlocks(t *testing.T) {
 // captureSink records what consumeStream delivered, so a test can
 // assert the regression-case message survived the stream reader.
 type captureSink struct {
-	sessionID string
-	messages  []*domain.Message
+	sessionID    string
+	messages     []*domain.Message
+	sessionCosts []float64
 }
 
 func (c *captureSink) OnSession(sid string) error {
@@ -62,6 +63,10 @@ func (c *captureSink) OnSession(sid string) error {
 func (c *captureSink) OnMessage(m *domain.Message) error {
 	c.messages = append(c.messages, m)
 	return nil
+}
+
+func (c *captureSink) OnSessionCost(totalUSD float64) {
+	c.sessionCosts = append(c.sessionCosts, totalUSD)
 }
 
 // TestConsumeStream_HandlesOversizedToolResult is the SKY-* regression

@@ -307,7 +307,7 @@ func RunInteractive(ctx context.Context, opts RunOptions, sink Sink, perms Permi
 		cleanup:   func() {},
 		done:      make(chan struct{}),
 		ready:     make(chan struct{}),
-		stream:    NewStreamState(),
+		stream:    newStreamStateFor(opts),
 		toolBatch: opts.OnToolBatch,
 		tfTools:   tfToolsByName(opts.TFTools),
 		tfRun:     tooldefs.Run{OrgID: opts.OrgID, ConversationID: opts.ConversationID, ClaimID: opts.ClaimID},
@@ -750,6 +750,7 @@ func (l *LiveRun) consumeStreamInteractive(stdout io.Reader, sink Sink, stream *
 				deliverMessages(sink, messages)
 
 				if result != nil {
+					sink.OnSessionCost(result.SessionCostUSD)
 					if interruptPending {
 						// This result closes the turn our interrupt() ended.
 						// parseResult already marks Interrupted from the SDK's

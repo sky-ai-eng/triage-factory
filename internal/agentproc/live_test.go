@@ -144,9 +144,9 @@ func TestConsumeStreamInteractive_InterruptMarksResult(t *testing.T) {
 
 // TestConsumeStreamInteractive_FoldTakesNewestRunningTotal pins the
 // accounting the merged result hands the driver: the SDK's total_cost_usd is
-// a process-wide running total on every result, so after two turns
-// reporting 0.10 then 0.30 the process spent 0.30. Each per-turn result
-// still reaches OnResult with its own wire figure.
+// a running total on every result, so after two turns reporting 0.10 then
+// 0.30 a process that resumed nothing spent 0.30. Each per-turn result still
+// reaches OnResult with its own wire figure.
 func TestConsumeStreamInteractive_FoldTakesNewestRunningTotal(t *testing.T) {
 	input := strings.Join([]string{
 		`{"type":"result","subtype":"success","is_error":false,"num_turns":1,"duration_ms":1000,"total_cost_usd":0.10,"result":"one"}`,
@@ -165,6 +165,48 @@ func TestConsumeStreamInteractive_FoldTakesNewestRunningTotal(t *testing.T) {
 	if merged == nil || merged.CostUSD != 0.30 || merged.DurationMs != 2600 || merged.NumTurns != 2 {
 		t.Errorf("merged accounting must be the newest running total, got %+v", merged)
 	}
+}
+
+// TestConsumeStreamInteractive_SubtractsTheSessionBaseline: a resumed
+// process reports its session's running total, the earlier processes' spend
+// included, so the reader measures the process's own spend from the total
+// the launch gave it. With a baseline of 0.25 and results of 0.5 then 0.75,
+// the process has spent 0.5, the session stands at 0.75, and the sink hears
+// each raw total. A total below the baseline is no spend at all, never a
+// negative one.
+func TestConsumeStreamInteractive_SubtractsTheSessionBaseline(t *testing.T) {
+	opts := RunOptions{SessionID: "sess-resumed", SessionCostBaselineUSD: 0.25}
+
+	t.Run("newest total less the baseline", func(t *testing.T) {
+		input := strings.Join([]string{
+			`{"type":"result","subtype":"success","is_error":false,"num_turns":1,"total_cost_usd":0.5,"result":"one"}`,
+			`{"type":"result","subtype":"success","is_error":false,"num_turns":1,"total_cost_usd":0.75,"result":"two"}`,
+		}, "\n") + "\n"
+		sink := &captureSink{}
+		l := &LiveRun{ready: make(chan struct{}), done: make(chan struct{})}
+		merged, err := l.consumeStreamInteractive(strings.NewReader(input), sink, newStreamStateFor(opts), nil, nil, "t")
+		if err != nil {
+			t.Fatalf("consumeStreamInteractive: %v", err)
+		}
+		if merged == nil || merged.CostUSD != 0.5 || merged.SessionCostUSD != 0.75 {
+			t.Errorf("merged = %+v, want CostUSD 0.5 and SessionCostUSD 0.75", merged)
+		}
+		if !slices.Equal(sink.sessionCosts, []float64{0.5, 0.75}) {
+			t.Errorf("OnSessionCost heard %v, want each raw total [0.5 0.75]", sink.sessionCosts)
+		}
+	})
+
+	t.Run("a total below the baseline is zero", func(t *testing.T) {
+		input := `{"type":"result","subtype":"success","is_error":false,"num_turns":1,"total_cost_usd":0.125,"result":"one"}` + "\n"
+		l := &LiveRun{ready: make(chan struct{}), done: make(chan struct{})}
+		merged, err := l.consumeStreamInteractive(strings.NewReader(input), NoopSink{}, newStreamStateFor(opts), nil, nil, "t")
+		if err != nil {
+			t.Fatalf("consumeStreamInteractive: %v", err)
+		}
+		if merged == nil || merged.CostUSD != 0 || merged.SessionCostUSD != 0.125 {
+			t.Errorf("merged = %+v, want CostUSD 0 and SessionCostUSD 0.125", merged)
+		}
+	})
 }
 
 // TestLiveRun_SendRefusedOnceClosing: from the moment Close begins, a Send is

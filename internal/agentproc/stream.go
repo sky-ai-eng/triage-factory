@@ -93,6 +93,11 @@ type StreamState struct {
 	// retryNotice is whether the line ParseLine read last was a retry notice,
 	// which the readers keep from the observer's OnLine.
 	retryNotice bool
+
+	// sessionCostBaselineUSD is the session's running total before this
+	// process (RunOptions.SessionCostBaselineUSD), subtracted from every
+	// result's total so Result.CostUSD is the process's own spend.
+	sessionCostBaselineUSD float64
 }
 
 // observeSink installs sink as this stream's observer when it implements
@@ -117,6 +122,17 @@ func NewStreamState() *StreamState {
 		toolDispatchedAt: map[string]time.Time{},
 	}
 	s.MarkRequest()
+	return s
+}
+
+// newStreamStateFor is NewStreamState for the stream of a process launched
+// with opts: one resuming a session measures its spend from the total the
+// launch gave it.
+func newStreamStateFor(opts RunOptions) *StreamState {
+	s := NewStreamState()
+	if opts.SessionID != "" {
+		s.sessionCostBaselineUSD = opts.SessionCostBaselineUSD
+	}
 	return s
 }
 
@@ -326,6 +342,9 @@ func (s *StreamState) ParseLine(line []byte, traceID string) ([]*domain.Message,
 			s.observer.OnTurnEnd()
 		}
 		res := parseResult(raw)
+		// Floored because no spend is negative: a total below the baseline
+		// means the baseline was not this session's total.
+		res.CostUSD = max(res.SessionCostUSD-s.sessionCostBaselineUSD, 0)
 		if res.IsError {
 			res.APIError = s.apiError
 		}
@@ -618,8 +637,18 @@ type Result struct {
 	IsError    bool
 	DurationMs int
 	NumTurns   int
-	CostUSD    float64
-	Result     string
+
+	// CostUSD is the process's own spend so far: SessionCostUSD less the
+	// session's total before the process (RunOptions.SessionCostBaselineUSD),
+	// floored at zero.
+	CostUSD float64
+
+	// SessionCostUSD is the result's total_cost_usd as the SDK reported it:
+	// the session's running total, which Claude Code restores on a resume,
+	// so it includes what earlier processes on the session spent.
+	SessionCostUSD float64
+
+	Result string
 
 	// Subtype mirrors the SDK result event's `subtype` field
 	// ("success", "error_during_execution", "error_max_turns", ...).
@@ -698,7 +727,7 @@ func parseResult(raw map[string]any) *Result {
 		rc.NumTurns = int(n)
 	}
 	if c, ok := raw["total_cost_usd"].(float64); ok {
-		rc.CostUSD = c
+		rc.SessionCostUSD = c
 	}
 	rc.Result, _ = raw["result"].(string)
 	rc.Subtype, _ = raw["subtype"].(string)

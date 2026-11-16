@@ -37,7 +37,7 @@ func TestRunAgent_FailedCommitIdentityReadHandsBack(t *testing.T) {
 
 			disp := f.s.runAgent(context.Background(), conv.ID, loadTask(t, f.s, conv.TaskID), "mission",
 				runConfig{orgID: org, claimID: conv.ClaimID, teamID: conv.TeamID, runRoot: f.worktree, surface: agentprompt.SurfaceMachinist},
-				time.Now(), conv.Model, conv.TriggerType, conv.CreatorUserID, "")
+				time.Now(), conv.Model, conv.TriggerType, conv.CreatorUserID, "", 0)
 
 			if !errors.Is(disp.launchErr, tc.readErr) {
 				t.Fatalf("disposition = %+v, want a launch failure carrying the identity read's error", disp)

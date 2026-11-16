@@ -521,6 +521,13 @@ type Conversation struct {
 	// legacy failed rows, and failures nothing classified.
 	FailureKind ConversationFailureKind `json:"failure_kind"`
 	SessionID   string                  `json:"session_id"` // Claude Code session_id captured from `claude -p --output-format json`, used for --resume
+	// SessionCostUSD is the running total the SDK last reported for the
+	// session in SessionID (conversations.sdk_session_cost_usd). Claude Code
+	// restores a session's total on --resume, so a launch resuming SessionID
+	// hands this to the process as the total its own spend is measured from.
+	// Bookkeeping for that subtraction, never a spend figure: the spend is
+	// TotalCostUSD.
+	SessionCostUSD float64 `json:"-"`
 	// MemoryMissing — the agent did not write its own memory: the conversation
 	// has no conversation_memory row whose Source is MemorySourceAgent. A
 	// generated row (the provisioner standing in) and a `none` row (a run that

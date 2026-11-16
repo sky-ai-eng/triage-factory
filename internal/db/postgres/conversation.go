@@ -1071,6 +1071,17 @@ func (s *conversationStore) SetSessionSystem(ctx context.Context, orgID, convers
 	return setConversationSession(ctx, s.admin, orgID, conversationID, sessionID)
 }
 
+func (s *conversationStore) RecordSessionCostSystem(ctx context.Context, orgID, conversationID, sessionID string, totalUSD float64) error {
+	if !isValidUUID(conversationID) {
+		return nil
+	}
+	_, err := s.admin.ExecContext(ctx, `
+		UPDATE conversations SET sdk_session_cost_usd = $1
+		WHERE org_id = $2 AND id = $3 AND sdk_session_id = $4 AND sdk_session_cost_usd < $1
+	`, totalUSD, orgID, conversationID, sessionID)
+	return err
+}
+
 // SetSessionForClaimSystem is SetSessionSystem behind the fence. The write is
 // byte-identical; what the transaction adds is that a zombie's late init can no
 // longer land the successor's resume coordinate on a dead session.
@@ -1110,7 +1121,10 @@ func (s *conversationStore) ClearNextAttempt(ctx context.Context, orgID, convers
 
 func setConversationSession(ctx context.Context, q queryer, orgID, conversationID, sessionID string) (*domain.Conversation, error) {
 	return writeConversationReturning(ctx, q, `
-		UPDATE conversations SET sdk_session_id = $1 WHERE org_id = $2 AND id = $3
+		UPDATE conversations
+		   SET sdk_session_cost_usd = CASE WHEN sdk_session_id IS NOT DISTINCT FROM $1 THEN sdk_session_cost_usd ELSE 0 END,
+		       sdk_session_id = $1
+		 WHERE org_id = $2 AND id = $3
 		RETURNING *
 	`, sessionID, orgID, conversationID)
 }
@@ -1594,6 +1608,7 @@ var pgConversationColumns = `
 	COALESCE(r.outcome, ''), COALESCE(r.outcome_reason, ''),
 	COALESCE(r.failure_kind, ''),
 	COALESCE(r.sdk_session_id, ''),
+	r.sdk_session_cost_usd,
 	COALESCE(r.actor_agent_id::text, ''),
 	COALESCE(r.trigger_type, ''),
 	COALESCE(r.creator_user_id::text, ''),
@@ -3247,7 +3262,7 @@ func scanConversation(sc conversationScanner, r *domain.Conversation, extra ...a
 	dest := []any{
 		&r.ID, &r.TaskID, &r.Runtime, &r.Status, &r.Model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &parkReason, &r.WorktreePath,
-		&r.ResultSummary, &r.Outcome, &r.OutcomeReason, &failureKind, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &r.CreatorUserID, &r.TeamID, &r.ExecutorID, &r.Attempts, &blueprintRunID, &blueprintStep,
+		&r.ResultSummary, &r.Outcome, &r.OutcomeReason, &failureKind, &r.SessionID, &r.SessionCostUSD, &r.ActorAgentID, &r.TriggerType, &r.CreatorUserID, &r.TeamID, &r.ExecutorID, &r.Attempts, &blueprintRunID, &blueprintStep,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
 		&r.MemoryMissing, &r.ActorAgentName, &endedAt, &endedReason,
 		&stopRequestedAt, &r.StopRequestedBy, &r.StopRequestedReason,

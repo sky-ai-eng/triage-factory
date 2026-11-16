@@ -1303,6 +1303,8 @@ func newLiveSink() *liveSink {
 
 func (s *liveSink) OnSession(string) error { return nil }
 
+func (s *liveSink) OnSessionCost(float64) {}
+
 func (s *liveSink) OnMessage(m *domain.Message) error {
 	s.mu.Lock()
 	s.messages = append(s.messages, m)
