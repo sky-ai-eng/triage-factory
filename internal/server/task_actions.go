@@ -446,10 +446,10 @@ func linearUserCredentialMissingMessage(err error) string {
 // target; self-claim/takeover instead (409), the caller being neither the
 // current claimant nor an admin of the task's owning team (403), a task that
 // changed between that read and the CAS (409 VERSION_CONFLICT), and a target
-// who is an admin or member of no team that can see the task (422). Handing off to the current claimant
-// is treated as an idempotent no-op, matching the self-claim idempotency in
-// selfClaim. Returns the version the handoff left, and false when it already
-// wrote an error response.
+// who is an admin or member of no team that can see the task (422). Handing
+// off to the current claimant is treated as an idempotent no-op, matching the
+// self-claim idempotency in selfClaim. Returns the version the handoff left,
+// and false when it already wrote an error response.
 //
 // Why the mutation runs on the admin pool (ReassignClaimToUserSystem, not
 // ReassignClaimToUser): every other claim mutation ties "who's authorized to

@@ -1587,9 +1587,8 @@ func (s *taskStore) VisibilityTeams(ctx context.Context, orgID, taskID string) (
 // preferring the current owner and otherwise the lowest id so the result is
 // deterministic; with none, the current owner while it is active. The
 // visibility set offers only a team the claimant can write, never one they
-// can only view. An archived
-// team is neither chosen nor kept. NULL when neither applies; every write's
-// WHERE clause refuses that case.
+// can only view. An archived team is neither chosen nor kept. NULL when
+// neither applies; every write's WHERE clause refuses that case.
 func sqliteClaimTeamExpr(task, user string) string {
 	return `COALESCE(
 		(SELECT tt.team_id
@@ -1891,10 +1890,9 @@ func (s *taskStore) ReassignClaimToUserSystem(ctx context.Context, orgID, taskID
 // membership guard directly into the WHERE clause — an EXISTS against
 // memberships requiring toUserID to be an admin or member of an active team
 // associated with the task (its task_teams visibility set or its current
-// team_id) —
-// atomically with the CAS itself, mirroring the Postgres impl. Local mode is N=1 in
-// practice (no real cross-user memberships), but the guard keeps the SQLite
-// store conformant with the interface contract.
+// team_id) — atomically with the CAS itself, mirroring the Postgres impl.
+// Local mode is N=1 in practice (no real cross-user memberships), but the
+// guard keeps the SQLite store conformant with the interface contract.
 func reassignClaimToUserSQLite(ctx context.Context, q queryer, taskID, fromUserID, toUserID string, version int64) (bool, error) {
 	if fromUserID == "" {
 		return false, fmt.Errorf("ReassignClaimToUser: empty fromUserID")
