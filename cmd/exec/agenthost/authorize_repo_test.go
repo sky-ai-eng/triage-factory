@@ -11,6 +11,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/github/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -300,5 +301,40 @@ func TestLocalClient_GateDenialNamesTheResolvedCredential(t *testing.T) {
 	}
 	if want := []string{domain.CredentialGitHubPAT}; !slices.Equal(credentials, want) {
 		t.Errorf("git_denied credentials = %v, want %v", credentials, want)
+	}
+}
+
+// tierAskingResolver counts the tier lookups a denial makes.
+type tierAskingResolver struct {
+	fakeGitHubResolver
+	asks *int
+}
+
+func (r tierAskingResolver) TokenForWithIdentity(ctx context.Context, orgID, target string) (githubapp.Token, ghclient.Identity, error) {
+	*r.asks++
+	return r.fakeGitHubResolver.TokenForWithIdentity(ctx, orgID, target)
+}
+
+// TestLocalClient_GateDenialKeepsAReportedCredential: a client told its
+// credential, by a sidecar or by its proxy coordinates, never asks the resolver
+// for one. On an executor that resolver would read the disabled secret store.
+func TestLocalClient_GateDenialKeepsAReportedCredential(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	for name, setup := range map[string]func(*LocalClient){
+		"credential_reported": func(c *LocalClient) { c.SetGitHubCredential(domain.CredentialGitHubApp) },
+		"proxy_credentials":   func(c *LocalClient) { c.proxyCreds = &ProxyCredentials{} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			var asks int
+			c := newGateClient(&gateRuntime{tracks: false})
+			c.ghResolver = tierAskingResolver{fakeGitHubResolver{identity: ghclient.IdentityPAT}, &asks}
+			setup(c)
+			if err := c.authorizeRepo(context.Background(), "acme", "widgets"); err == nil {
+				t.Fatal("authorizeRepo on an untracked repo = nil, want the refusal")
+			}
+			if asks != 0 {
+				t.Errorf("resolver asked for a tier %d times, want none", asks)
+			}
+		})
 	}
 }

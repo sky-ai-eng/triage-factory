@@ -1639,10 +1639,9 @@ func (c *LocalClient) noteGitHubCredential(identity ghclient.Identity) {
 
 // learnGitHubCredential learns the label from the tier the resolver holds for
 // owner, when this client has none yet. A denial needs it: the repository gate
-// refuses before any client is resolved. It is the read the local gh channel
-// labels its own rows with, so a denial here and one through the channel name
-// the same credential for the same org and owner. A tier the resolver cannot
-// report leaves the label unlearned.
+// refuses before any client is resolved, and the owner's tier is the credential
+// the refused request would have acted under. A tier the resolver cannot report
+// leaves the label unlearned.
 func (c *LocalClient) learnGitHubCredential(ctx context.Context, owner string) {
 	if c.ghCredential != "" || c.proxyCreds != nil {
 		return
