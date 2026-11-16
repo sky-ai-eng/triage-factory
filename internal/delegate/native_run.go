@@ -65,12 +65,11 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	// after that, so none of them sees it nil.
 	var mirror *memoryMirror
 
-	// The park a stop lands on when it catches this engagement before the
-	// loop runs, so no turn ran (stoppedBeforeTurnPark). A LEASE fence is not
-	// a stop and never reaches the park: this engagement no longer owns the
-	// conversation, so recording a user cancellation on it would be recording
-	// a stop nobody made. Neither is the dispatcher shutting down, which hands
-	// the conversation back instead.
+	// The park a stop lands on, wherever the stop catches this engagement. A
+	// LEASE fence is not a stop and never reaches the park: this engagement
+	// no longer owns the conversation, so recording a user cancellation on it
+	// would be recording a stop nobody made. Neither is the dispatcher
+	// shutting down, which hands the conversation back instead.
 	stopped := func() engagementDisposition {
 		if leaseFenced(ctx) {
 			return engagementDisposition{fenced: true}
@@ -81,7 +80,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 			namespace:      namespace,
 			claudeCwd:      claudeCwd,
 			claimID:        cfg.claimID,
-			reason:         stoppedBeforeTurnPark(ctx),
+			reason:         db.ParkStopped(stopParkReason(ctx), ""),
 			runtime:        domain.ConversationRuntimeNative,
 			mirror:         mirror,
 			cell:           cfg.sidecar.treeHandOff(),
@@ -351,17 +350,18 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 		NewSandbox: true,
 	}
 
-	// A turn of a conversation a person works in records the answer the person
+	// Every turn, the first and each one a warm claim resumes, starts when the
+	// engine does: what the engine runs before it drains the waiting input
+	// (the transcript repair, a cold-resume compaction) is that turn's work. A
+	// turn of a conversation a person works in records the answer the person
 	// got as its summary, not the agent's reply to the memory note.
-	run := engine.Run
-	if cfg.interactive {
-		run = func(ctx context.Context, params agentloop.Params) agentloop.Result {
-			result := engine.Run(ctx, params)
-			if result.Kind == agentloop.ResultConcluded {
-				result.ResultSummary = s.turnAnswer(context.WithoutCancel(ctx), orgID, conversationID, result.ResultSummary)
-			}
-			return result
+	run := func(ctx context.Context, params agentloop.Params) agentloop.Result {
+		s.startTurn(conversationID, cfg.claimID)
+		result := engine.Run(ctx, params)
+		if cfg.interactive && result.Kind == agentloop.ResultConcluded {
+			result.ResultSummary = s.turnAnswer(context.WithoutCancel(ctx), orgID, conversationID, result.ResultSummary)
 		}
+		return result
 	}
 
 	return s.runNativeTail(ctx, nativeTail{

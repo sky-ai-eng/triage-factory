@@ -276,13 +276,11 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	//
 	// sessionID and costUSD ride in from the caller because they are only
 	// known once the agent has actually started — the pre-launch cancel below
-	// (cancelledBeforeLaunch) passes "" and 0 and snapshots a workspace with
-	// no transcript to carry. That one ran no turn, so its park is
-	// stoppedBeforeTurnPark.
+	// passes "" and 0 and snapshots a workspace with no transcript to carry.
 	//
 	// A LEASE fence arrives as a cancelled ctx too, and is not a cancel: this
 	// engagement has lost the conversation, so it records nothing.
-	parkCancelled := func(sessionID string, costUSD float64, reason db.Park) engagementDisposition {
+	cancelled := func(sessionID string, costUSD float64) engagementDisposition {
 		if leaseFenced(ctx) {
 			s.releaseActivity(conversationID, cfg.claimID)
 			return engagementDisposition{fenced: true}
@@ -293,7 +291,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 			namespace:      workspaceKey(task.ID),
 			claudeCwd:      cfg.runRoot,
 			claimID:        cfg.claimID,
-			reason:         reason,
+			reason:         db.ParkStopped(stopParkReason(ctx), ""),
 			runtime:        domain.ConversationRuntimeSDK,
 			costUSD:        costUSD,
 			mirror:         mirror,
@@ -302,12 +300,6 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 			return engagementDisposition{fenced: s.handBackOnShutdown(ctx, park, sessionID), handedBack: true}
 		}
 		return engagementDisposition{fenced: s.parkConversationOpen(ctx, park, sessionID)}
-	}
-	cancelled := func(sessionID string, costUSD float64) engagementDisposition {
-		return parkCancelled(sessionID, costUSD, db.ParkStopped(stopParkReason(ctx), ""))
-	}
-	cancelledBeforeLaunch := func() engagementDisposition {
-		return parkCancelled("", 0, stoppedBeforeTurnPark(ctx))
 	}
 
 	// Initial cwd for the child claude: the run root, for every run. The agent
@@ -415,7 +407,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// over one that exists.
 	if err := s.restoreSession(ctx, orgID, conversationID, claudeCwd, priorSessionID); err != nil {
 		if ctx.Err() != nil {
-			return cancelledBeforeLaunch()
+			return cancelled("", 0)
 		}
 		return engagementDisposition{launchErr: err}
 	}
@@ -494,7 +486,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	commitIdentity, signer, err := s.resolveCommitIdentity(ctx, orgID, triggerType, creatorUserID)
 	if err != nil {
 		if ctx.Err() != nil {
-			return cancelledBeforeLaunch()
+			return cancelled("", 0)
 		}
 		return engagementDisposition{launchErr: err}
 	}
@@ -503,7 +495,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// during bring-up parks here without ever asking the fence — their refusal
 	// is then reserved for a claim that went away with no cancel behind it.
 	if ctx.Err() != nil {
-		return cancelledBeforeLaunch()
+		return cancelled("", 0)
 	}
 	// Block 2 goes on the row before the agent gets it. The harness is handed
 	// its append once, at launch, and replays only the session transcript
@@ -666,7 +658,9 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// The first user message this launch sends, composed onto the options and
 	// recorded through the sink's own insert door. Last before the launch, so
 	// the rows a crashed bring-up leaves behind are the rows of a conversation
-	// that really was about to speak.
+	// that really was about to speak. The turn starts here, where it takes the
+	// person's waiting messages.
+	s.startTurn(conversationID, cfg.claimID)
 	if err := s.composeLaunchTurn(ctx, &baseOpts, sink, orgID, conversationID, creatorUserID, cfg.lastHandBackOutcome, workspaceNote(cfg.runRoot, cfg.workspace), cfg.interactive, taskMemories, taskContext); err != nil {
 		if errors.Is(err, db.ErrClaimReleased) {
 			// Fenced out before the first turn: a successor owns the

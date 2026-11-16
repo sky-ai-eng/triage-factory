@@ -286,6 +286,7 @@ const (
 // still reaches it, and a message or ending that landed before registration
 // is seen by the read.
 func (s *Spawner) waitWarm(ctx context.Context, n nativeTail, deadline time.Time) warmEnd {
+	s.endTurn(n.conversationID, n.cfg.claimID)
 	wait := s.warmWaits.Register(n.conversationID, n.orgID)
 	defer wait.Unregister()
 	defer s.activityFor(n.conversationID).begin(warmWaitOp, time.Until(deadline)+backstopMargin)()

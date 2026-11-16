@@ -631,6 +631,11 @@ func (s *Spawner) markConversationOpenFlipped(ctx context.Context, park livePark
 	// stop IS a cancel) — expressed as WithoutCancel so the write stays inside
 	// the engagement's trace rather than orphaning into one of its own.
 	bgCtx := context.WithoutCancel(ctx)
+	// A stop that reached this engagement with no turn running ended the
+	// person messages waiting in front of it, wherever the stop caught the
+	// engagement: in bring-up, at launch, or between two turns on a warm
+	// claim. Decided here, once, for every park the engagement writes.
+	park.reason.NoTurnRan = !s.turnRunning(park.conversationID, park.claimID)
 	s.releaseActivity(park.conversationID, park.claimID)
 	flipped, err := s.conversations.ParkOpenForClaimSystem(bgCtx, park.orgID, park.conversationID, park.claimID, park.reason)
 	if errors.Is(err, db.ErrClaimReleased) {

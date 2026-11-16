@@ -76,15 +76,15 @@ type Park struct {
 	// in place. The field stays because a future deliberate park with an
 	// actual conclusion to state would want it.
 	ResultSummary string
-	// NoTurnRan says this park settles a stop that ended the conversation's
-	// work before any turn ran: the engagement was cancelled while its agent
-	// was still being brought up. The person messages in front of the stop
-	// were that work, so the park moves the conversation's wake position to
-	// where the stop was sent and they no longer wake it. They stay
-	// undelivered, and the next engagement reads them with whatever wakes the
-	// conversation.
+	// NoTurnRan says the parking engagement had no turn running: it was still
+	// bringing its agent up, or it was holding its claim between two turns. A
+	// pending stop then ended the person messages in front of it, so the park
+	// moves the conversation's wake position to where the stop was sent and
+	// they no longer wake it. They stay undelivered, and the next engagement
+	// reads them with whatever wakes the conversation. With no stop pending it
+	// changes nothing.
 	//
-	// False on every park after a turn ran, including one the stop ended: a
+	// False when the park ends a running turn, a stopped one included: a
 	// message waiting behind that turn was not in front of the stop, and it
 	// runs next.
 	NoTurnRan bool

@@ -2,6 +2,7 @@ package dbtest
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -113,13 +114,6 @@ func RunStopWakeConformance(t *testing.T, mk ClaimLeaseFactory) {
 		}
 		return msg
 	}
-	join := func(parts ...string) string {
-		out := parts[0]
-		for _, p := range parts[1:] {
-			out += db.PendingInputSeparator + p
-		}
-		return out
-	}
 
 	t.Run("Settle_TheMessageInFrontOfTheStopNoLongerWakes", func(t *testing.T) {
 		f := mk(t)
@@ -142,7 +136,7 @@ func RunStopWakeConformance(t *testing.T, mk ClaimLeaseFactory) {
 		settle(t, f, id)
 		send(t, f, id, "actually, fix the test")
 
-		want := join("fix the null check", stopWakeNote, "actually, fix the test")
+		want := strings.Join([]string{"fix the null check", stopWakeNote, "actually, fix the test"}, db.PendingInputSeparator)
 		if got := peek(t, f, id); got != want {
 			t.Errorf("Peek = %q, want %q (the stopped message, the stop note, and the new message)", got, want)
 		}

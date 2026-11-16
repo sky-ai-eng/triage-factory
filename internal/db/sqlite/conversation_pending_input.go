@@ -55,10 +55,17 @@ func (s *conversationPendingInputStore) Consume(ctx context.Context, orgID, conv
 	if err := assertLocalOrg(orgID); err != nil {
 		return "", "", false, err
 	}
-	flushed, err := flushPendingInput(ctx, s.q, orgID, conversationID, []string{""})
-	if err == nil {
-		flushed, err = withStopNotesBetween(ctx, s.q, orgID, conversationID, flushed)
-	}
+	// One transaction, so a failed read of the stop notes rolls the flush back
+	// and the messages stay waiting, as a failed Consume always leaves them.
+	var flushed []db.PendingRow
+	err := inTx(ctx, s.q, func(q queryer) error {
+		rows, err := flushPendingInput(ctx, q, orgID, conversationID, []string{""})
+		if err != nil {
+			return err
+		}
+		flushed, err = withStopNotesBetween(ctx, q, orgID, conversationID, rows)
+		return err
+	})
 	return db.ConsumePendingInput(flushed, err)
 }
 
@@ -86,7 +93,6 @@ func withStopNotesBetween(ctx context.Context, q queryer, orgID, conversationID 
 	return append(queued, notes...), nil
 }
 
-// scanPendingRows reads (id, content, user_id) rows into PendingRows.
 func scanPendingRows(rows *sql.Rows, err error) ([]db.PendingRow, error) {
 	if err != nil {
 		return nil, err

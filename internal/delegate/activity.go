@@ -98,16 +98,6 @@ func stopParkReason(ctx context.Context) domain.ParkReason {
 	return domain.ParkReasonUserCancelled
 }
 
-// stoppedBeforeTurnPark is the park a cancelled engagement writes when the
-// cancel caught it before its agent started. No turn ran, so the work the
-// stop ended is the person messages waiting in front of it, and the park
-// keeps them from waking the conversation again (db.Park.NoTurnRan).
-func stoppedBeforeTurnPark(ctx context.Context) db.Park {
-	park := db.ParkStopped(stopParkReason(ctx), "")
-	park.NoTurnRan = true
-	return park
-}
-
 // stallCause is what the watchdog decided on: the operation that outlived its
 // deadline and how long it had been in flight, or, with no operation, how
 // long the engagement had been idle.
@@ -147,6 +137,11 @@ type activityTracker struct {
 	// overrunGrace to return before the stall is decided after all.
 	overrun      func(stallCause) bool
 	overrunGrace time.Duration
+	// turnRunning is whether the engagement's agent has a turn in progress:
+	// from the moment the turn takes its input until it ends with the claim
+	// kept warm. False through the bring-up. It decides what a stop ended
+	// (db.Park.NoTurnRan).
+	turnRunning bool
 }
 
 type inflightOp struct {
@@ -450,6 +445,42 @@ func (s *Spawner) activityFor(conversationID string) *activityTracker {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.activity[conversationID]
+}
+
+// startTurn and endTurn record the engagement holding claimID on
+// conversationID starting a turn, at the point the turn takes its input, and
+// that turn ending with the claim kept. A person's message sent while a turn runs waits behind it,
+// so a stop of that turn leaves the message to run next; one sent while no
+// turn runs is the work a stop ends.
+func (s *Spawner) startTurn(conversationID, claimID string) {
+	s.setTurnRunning(conversationID, claimID, true)
+}
+
+func (s *Spawner) endTurn(conversationID, claimID string) {
+	s.setTurnRunning(conversationID, claimID, false)
+}
+
+func (s *Spawner) setTurnRunning(conversationID, claimID string, running bool) {
+	a := s.activityFor(conversationID)
+	if a == nil || a.claimID != claimID {
+		return
+	}
+	a.mu.Lock()
+	a.turnRunning = running
+	a.mu.Unlock()
+}
+
+// turnRunning reports whether the engagement holding claimID on
+// conversationID has a turn in progress. An engagement with no tracker in
+// this process has started none.
+func (s *Spawner) turnRunning(conversationID, claimID string) bool {
+	a := s.activityFor(conversationID)
+	if a == nil || a.claimID != claimID {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.turnRunning
 }
 
 // releaseActivity ends the watchdog of the engagement holding claimID on

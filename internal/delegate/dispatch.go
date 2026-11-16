@@ -1030,7 +1030,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 			orgID:          orgID,
 			conversationID: conv.ID,
 			claimID:        conv.ClaimID,
-			reason:         stoppedBeforeTurnPark(stepCtx),
+			reason:         db.ParkStopped(stopParkReason(stepCtx), ""),
 			runtime:        conv.Runtime,
 		}) {
 			return true
@@ -1439,7 +1439,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 			disposed = true
 			return
 		}
-		disposed = s.markConversationOpen(ctx, resumeStoppedBeforeTurnPark(stepCtx, orgID, conv, userID))
+		disposed = s.markConversationOpen(ctx, resumeParkContext(stepCtx, orgID, conv, userID))
 		return
 	}
 
@@ -1495,7 +1495,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 				s.releaseClaimOnShutdown(ctx, resumeParkContext(stepCtx, orgID, conv, userID))
 				return
 			}
-			disposed = s.markConversationOpen(ctx, resumeStoppedBeforeTurnPark(stepCtx, orgID, conv, userID))
+			disposed = s.markConversationOpen(ctx, resumeParkContext(stepCtx, orgID, conv, userID))
 			return
 		}
 		s.failEngagement(conv.ID, cause)
@@ -1616,7 +1616,8 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 	}
 
 	// Past every hand-back: this claim now owns the conversation's outcome, so
-	// the queued rows become this turn's message.
+	// the queued rows become this turn's message, and the turn starts.
+	s.startTurn(conv.ID, conv.ClaimID)
 	flushPendingInput()
 
 	// A tree restored or rebuilt under the session is one the model remembers
@@ -1744,15 +1745,6 @@ func resumeParkContext(ctx context.Context, orgID string, conv *domain.Conversat
 		reason:         db.ParkStopped(stopParkReason(ctx), ""),
 		runtime:        conv.Runtime,
 	}
-}
-
-// resumeStoppedBeforeTurnPark is resumeParkContext for a stop that caught the
-// resume before it took the queued messages: no turn ran on them, so they no
-// longer wake the conversation (stoppedBeforeTurnPark).
-func resumeStoppedBeforeTurnPark(ctx context.Context, orgID string, conv *domain.Conversation, userID string) liveParkContext {
-	park := resumeParkContext(ctx, orgID, conv, userID)
-	park.reason = stoppedBeforeTurnPark(ctx)
-	return park
 }
 
 // reactToStepTerminal is the blueprint state-machine reactor: given a step run

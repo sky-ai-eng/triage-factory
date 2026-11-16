@@ -15,7 +15,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// claimNext is the dispatcher's next claim, or nil when nothing is claimable.
 func claimNext(t *testing.T, s *Spawner) *domain.Conversation {
 	t.Helper()
 	conv, err := s.conversationQueue.ClaimNextConversation(context.Background(), "stop-wake-exec", 1, db.ClaimPlacement{}, db.DefaultClaimLease)
@@ -25,7 +24,6 @@ func claimNext(t *testing.T, s *Spawner) *domain.Conversation {
 	return conv
 }
 
-// queueMessage puts a person's message on the conversation, unread.
 func queueMessage(t *testing.T, s *Spawner, conversationID, text string) {
 	t.Helper()
 	if _, err := s.conversations.InsertMessageSystem(context.Background(), runmode.LocalDefaultOrgID,
@@ -113,6 +111,7 @@ func TestDispatchResumeClaim_AStopBeforeItTakesTheMessageKeepsItFromWaking(t *te
 		t.Fatalf("ClaimNextConversation = %+v, want conversation %s", conv, convID)
 	}
 	conv.OrgID = org
+	defer s.startActivityTracker(conv, func(error) {})()
 	if err := s.Stop(org, convID, runmode.LocalDefaultUserID); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
@@ -138,16 +137,19 @@ func TestDispatchResumeClaim_AStopBeforeItTakesTheMessageKeepsItFromWaking(t *te
 	}
 }
 
-// TestStop_ANativeTurnStoppedWithAMessageWaitingRunsItNext: a person's message
-// sent while a native turn runs waits behind it, and a stop of that turn ends
-// the turn, not the message. The conversation parks and the message wakes it
-// for the next engagement, which is how a person redirects a working agent.
-func TestStop_ANativeTurnStoppedWithAMessageWaitingRunsItNext(t *testing.T) {
+// stopNativeEngagement stages a native engagement holding the conversation,
+// with turn() run against its activity tracker, a person's message queued and
+// a stop requested, and then parks it the way the engine's cancelled result
+// does. It returns the conversation's id.
+func stopNativeEngagement(t *testing.T, suffix string, turn func(s *Spawner, conversationID, claimID string)) (*Spawner, string) {
+	t.Helper()
 	paths.SetForTest(t, t.TempDir())
 	org := runmode.LocalDefaultOrgID
-	s, database, conversationID, taskID := setupAdvanceFixture(t, "native-redirect")
+	s, database, conversationID, taskID := setupAdvanceFixture(t, suffix)
 	markNative(t, database, conversationID)
 	claimID := markEngaged(t, database, conversationID)
+	defer s.startActivityTracker(&domain.Conversation{ID: conversationID, ClaimID: claimID}, func(error) {})()
+	turn(s, conversationID, claimID)
 
 	queueMessage(t, s, conversationID, "do this instead")
 	if err := s.Stop(org, conversationID, runmode.LocalDefaultUserID); err != nil {
@@ -158,14 +160,41 @@ func TestStop_ANativeTurnStoppedWithAMessageWaitingRunsItNext(t *testing.T) {
 		runConfig{orgID: org, claimID: claimID, blueprintRunID: namespace},
 		namespace, t.TempDir(), runmode.LocalDefaultUserID, time.Now(),
 		agentloop.Result{Kind: agentloop.ResultCancelled, Err: context.Canceled}, nil).fenced; fenced {
-		t.Fatal("the stopped turn's teardown reported a fence trip while holding the claim")
+		t.Fatal("the stopped engagement's teardown reported a fence trip while holding the claim")
 	}
-
 	if st := storedStatus(t, database, conversationID); st != domain.StatusOpen {
 		t.Fatalf("stored status = %q, want open (a stop is a park)", st)
 	}
+	return s, conversationID
+}
+
+// TestStop_ANativeTurnStoppedWithAMessageWaitingRunsItNext: a person's message
+// sent while a native turn runs waits behind it, and a stop of that turn ends
+// the turn, not the message. The conversation parks and the message wakes it
+// for the next engagement, which is how a person redirects a working agent.
+func TestStop_ANativeTurnStoppedWithAMessageWaitingRunsItNext(t *testing.T) {
+	s, conversationID := stopNativeEngagement(t, "native-redirect", func(s *Spawner, conversationID, claimID string) {
+		s.startTurn(conversationID, claimID)
+	})
 	if got := claimNext(t, s); got == nil || got.ID != conversationID {
 		t.Fatalf("ClaimNextConversation = %+v, want conversation %s: the message waiting behind the stopped turn runs next", got, conversationID)
+	}
+}
+
+// TestStop_BetweenTurnsKeepsTheWaitingMessageFromWaking: a stop that reaches
+// an engagement holding its claim between two turns, with a person's message
+// waiting that no turn has read, ends that message as a stop in bring-up does.
+func TestStop_BetweenTurnsKeepsTheWaitingMessageFromWaking(t *testing.T) {
+	s, conversationID := stopNativeEngagement(t, "native-between-turns", func(s *Spawner, conversationID, claimID string) {
+		s.startTurn(conversationID, claimID)
+		s.endTurn(conversationID, claimID)
+	})
+	if got := claimNext(t, s); got != nil {
+		t.Fatalf("ClaimNextConversation = %s, want nothing: no turn was running, so the message was the work the stop ended", got.ID)
+	}
+	queueMessage(t, s, conversationID, "actually, fix the test")
+	if got := claimNext(t, s); got == nil || got.ID != conversationID {
+		t.Fatalf("ClaimNextConversation after a follow-up = %+v, want conversation %s", got, conversationID)
 	}
 }
 

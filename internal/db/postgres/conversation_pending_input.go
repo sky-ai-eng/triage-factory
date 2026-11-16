@@ -50,10 +50,17 @@ func (s *conversationPendingInputStore) Peek(ctx context.Context, orgID, convers
 }
 
 func (s *conversationPendingInputStore) Consume(ctx context.Context, orgID, conversationID string) (string, string, bool, error) {
-	flushed, err := flushPendingInput(ctx, s.admin, orgID, conversationID, []string{""})
-	if err == nil {
-		flushed, err = withStopNotesBetween(ctx, s.admin, orgID, conversationID, flushed)
-	}
+	// One transaction, so a failed read of the stop notes rolls the flush back
+	// and the messages stay waiting, as a failed Consume always leaves them.
+	var flushed []db.PendingRow
+	err := inTx(ctx, s.admin, func(q queryer) error {
+		rows, err := flushPendingInput(ctx, q, orgID, conversationID, []string{""})
+		if err != nil {
+			return err
+		}
+		flushed, err = withStopNotesBetween(ctx, q, orgID, conversationID, rows)
+		return err
+	})
 	return db.ConsumePendingInput(flushed, err)
 }
 
@@ -81,7 +88,6 @@ func withStopNotesBetween(ctx context.Context, q queryer, orgID, conversationID 
 	return append(queued, notes...), nil
 }
 
-// scanPendingRows reads (id, content, user_id) rows into PendingRows.
 func scanPendingRows(rows *sql.Rows, err error) ([]db.PendingRow, error) {
 	if err != nil {
 		return nil, err
