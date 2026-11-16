@@ -32,6 +32,10 @@ type fenceStubDelegator struct {
 	calls int64
 }
 
+func (s *fenceStubDelegator) PlanDelegation(domain.Task, string, delegate.DelegateOpts) (delegate.DelegationPlan, error) {
+	return delegate.DelegationPlan{}, nil
+}
+
 func (s *fenceStubDelegator) Delegate(task domain.Task, opts delegate.DelegateOpts) (string, error) {
 	atomic.AddInt64(&s.calls, 1)
 	return stubDelegateRun(s.db, task, opts)

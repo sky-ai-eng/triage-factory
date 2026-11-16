@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -17,7 +18,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/workitem"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
+	"github.com/sky-ai-eng/triage-factory/internal/notify/notifytest"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
 // stubDelegator records every Delegate call and creates a real
@@ -45,13 +49,28 @@ type stubDelegator struct {
 	// firing transaction, which is where a concurrent write such as a team
 	// archive lands between the two.
 	beforeRun func()
+	// planErr, when set, is what PlanDelegation answers and Delegate, which
+	// plans first, returns: a refusal, or a fault in one of the plan's reads.
+	planErr error
 }
 
 var errStubDelegate = errors.New("stub: delegation refused")
 
+// PlanDelegation passes every plan unless a test set planErr.
+func (s *stubDelegator) PlanDelegation(domain.Task, string, delegate.DelegateOpts) (delegate.DelegationPlan, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return delegate.DelegationPlan{}, s.planErr
+}
+
 func (s *stubDelegator) Delegate(task domain.Task, opts delegate.DelegateOpts) (string, error) {
 	atomic.AddInt64(&s.calls, 1)
 	s.mu.Lock()
+	if s.planErr != nil {
+		err := s.planErr
+		s.mu.Unlock()
+		return "", err
+	}
 	if s.failFor[task.ID] {
 		s.mu.Unlock()
 		return "", errStubDelegate
@@ -854,4 +873,107 @@ func TestFiringWorker_FiresAsTheClaimedAgent(t *testing.T) {
 	if actor.String != runmode.LocalDefaultAgentID {
 		t.Errorf("run actor = %q, want the task's claimed agent %q", actor.String, runmode.LocalDefaultAgentID)
 	}
+}
+
+// TestFiringWorker_ARefusedRowCompletesOnItsFirstAttempt: a firing queued
+// behind a busy task, whose run the plan refuses once the task goes idle
+// because the team's daily spend cap was reached in between, completes on its
+// first attempt as skipped `refused` rather than spending its attempts and
+// parking with its key held. The bot's claim stays as it was, the task reports
+// no queued work, so its next event is decided afresh, and the trigger's team
+// admins are told without the day's figures.
+func TestFiringWorker_ARefusedRowCompletesOnItsFirstAttempt(t *testing.T) {
+	database := newTestDB(t)
+	rec := notifytest.Record(t)
+	entityID, taskID, triggerID, eventID := setupDrainScenario(t, database)
+	if _, err := database.Exec(`INSERT INTO prompts (id, name, body, creator_user_id, team_id) VALUES ('p-live', 'L', 'x', ?, ?)`,
+		runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID); err != nil {
+		t.Fatalf("seed prompt: %v", err)
+	}
+	dbtest.SeedConversation(t, database, domain.Conversation{ID: "c-live", TaskID: taskID, PromptID: "p-live", Model: "m", TriggerType: "event"})
+	enqueueFiring(t, database, entityID, taskID, triggerID, eventID)
+	stub := &stubDelegator{db: database}
+	router := drainRouter(database, sqlitestore.New(database).PendingFirings, stub)
+
+	drainOnce(t, router)
+	if f := firingsFor(t, database, entityID)[0]; f.Status != workitem.StatusReady || f.Attempt != 0 {
+		t.Fatalf("firing behind the busy task = %+v, want it held, ready and uncharged", f)
+	}
+	before, err := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrgID, taskID)
+	if err != nil || before == nil {
+		t.Fatalf("get task: %v", err)
+	}
+
+	stub.mu.Lock()
+	stub.planErr = &delegate.CostCapError{Scope: delegate.CostCapScopeTeam, TeamName: "Default", SpentUSD: 12.34, CapUSD: 10}
+	stub.mu.Unlock()
+	endTaskConversations(t, database, taskID)
+	drainOnce(t, router)
+
+	f := firingsFor(t, database, entityID)[0]
+	requireSkipped(t, f, domain.PendingFiringSkipRefused)
+	if f.Attempt != 1 {
+		t.Errorf("refused firing charged %d attempts, want 1", f.Attempt)
+	}
+	after, err := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrgID, taskID)
+	if err != nil || after == nil {
+		t.Fatalf("get task: %v", err)
+	}
+	if after.ClaimedByAgentID != before.ClaimedByAgentID || after.ClaimedByUserID != before.ClaimedByUserID || after.Status != before.Status {
+		t.Errorf("task after the refusal = %s claimed by agent %q / user %q, want it as before: %s claimed by agent %q / user %q",
+			after.Status, after.ClaimedByAgentID, after.ClaimedByUserID, before.Status, before.ClaimedByAgentID, before.ClaimedByUserID)
+	}
+	queued, err := sqlitestore.New(database).PendingFirings.HasUnsettledForTask(t.Context(), runmode.LocalDefaultOrgID, taskID)
+	if err != nil {
+		t.Fatalf("HasUnsettledForTask: %v", err)
+	}
+	if queued {
+		t.Error("the task still reports queued work after its refused firing completed")
+	}
+
+	open := rec.Open(runmode.LocalDefaultOrgID, kinds.TriggerRefused)
+	if len(open) != 1 || open[0].Key != triggerID+":"+domain.DelegationRefusedSpendCap {
+		t.Fatalf("open = %+v, want one notice for the trigger's spend cap refusal", open)
+	}
+	want := kinds.TriggerRefusal{
+		TriggerID: triggerID, TeamID: runmode.LocalDefaultTeamID, EventType: domain.EventGitHubPRCICheckFailed,
+		Subject: "owner/repo#1", Cause: domain.DelegationRefusedSpendCap, TeamCap: true, CapTeamName: "Default",
+	}
+	if got := open[0].Params.(kinds.TriggerRefusal); got != want {
+		t.Errorf("notice = %+v, want %+v, with no figures", got, want)
+	}
+}
+
+// failingFiringTx is a BlueprintStore whose firing transaction fails.
+type failingFiringTx struct{ dbpkg.BlueprintStore }
+
+var errFiringTx = errors.New("stub: the firing transaction failed")
+
+func (failingFiringTx) CreateRunWithFirstStepSystem(context.Context, string, domain.BlueprintRun, dbpkg.AgentClaimStamp, string, domain.Conversation) (bool, bool, *domain.Conversation, []domain.Conversation, error) {
+	return false, false, nil, nil, errFiringTx
+}
+
+// TestFiringWorker_AFailedFiringTransactionIsRetried: a fault is still a
+// fault. The real spawner's plan passes and its firing transaction fails, so
+// the row is requeued with its attempt charged, not completed as refused, and
+// nobody is told of a refusal.
+func TestFiringWorker_AFailedFiringTransactionIsRetried(t *testing.T) {
+	database := newTestDB(t)
+	rec := notifytest.Record(t)
+	entityID, taskID, triggerID, eventID := setupDrainScenario(t, database)
+	enqueueFiring(t, database, entityID, taskID, triggerID, eventID)
+	stores := sqlitestore.New(database)
+	stores.Blueprints = failingFiringTx{stores.Blueprints}
+	spawner := delegate.NewSpawner(database, stores, nil, websocket.NewHub(), "claude-sonnet-4-6")
+
+	drainOnce(t, drainRouter(database, sqlitestore.New(database).PendingFirings, spawner))
+
+	f := firingsFor(t, database, entityID)[0]
+	if f.Status != workitem.StatusReady || f.Attempt != 1 || f.SkipReason != "" || f.LastOutcome != "transient" || f.NextAttemptAt == nil {
+		t.Errorf("firing after a failed firing transaction = %+v, want ready, charged, with a backoff and the transient outcome", f)
+	}
+	if !strings.Contains(f.LastError, errFiringTx.Error()) {
+		t.Errorf("last_error = %q, want the firing transaction's failure", f.LastError)
+	}
+	rec.Inactive(t, runmode.LocalDefaultOrgID, kinds.TriggerRefused)
 }

@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"slices"
 
+	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
+	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
 )
 
 // The post-scoring re-evaluation. The ranked trigger walk (walkTriggers) holds
@@ -35,20 +38,23 @@ type reDeriveFiring struct {
 // when it is gone; Firings is empty for the many decided outcomes that fire
 // nothing. Conflict is the automation conflict the walk decided between one
 // identity's teams, nil when it decided none; the completion posts it once
-// the firings it rests on have landed.
+// the firings it rests on have landed. Refusals are the firings the
+// spawner's plan refused, which admit nothing; the completion posts them once
+// it commits.
 type reDerivePlan struct {
 	Task     *domain.Task
 	Firings  []reDeriveFiring
 	Conflict *automationConflict
+	Refusals []kinds.TriggerRefusal
 }
 
 // evaluateReDerive runs the task's ranked trigger walk against the score it
 // carries now. Every decided outcome — including "nothing to fire" and "task
 // gone" — returns a plan and nil. err is non-nil only where a read failed
 // before a verdict could be reached: the task load, the primary event read,
-// handler matching, owner resolution, an unreadable per-team switch, or a
-// preflight read; the caller retries those rather than treating them as a
-// decision.
+// handler matching, owner resolution, an unreadable per-team switch, a
+// preflight read, or a read the spawner's plan needed; the caller retries
+// those rather than treating them as a decision.
 //
 // The walk is the event-time path's own, resumed where it held: the matched
 // handlers and the routing are recomputed from the task's primary event by
@@ -65,9 +71,12 @@ type reDerivePlan struct {
 //
 // orgID is the scoring context — every task the scorer writes belongs to the
 // org whose runner wrote it. A trigger the walk fires is planned only after
-// the preflight the event-time path runs (autoDelegatePreflight) and the
-// breaker (breakerGate), so a re-derived firing passes exactly the gates an
-// event-time one does.
+// the preflight the event-time path runs (autoDelegatePreflight), the breaker
+// (breakerGate), and the spawner's plan (PlanDelegation), so a re-derived
+// firing passes exactly the gates an event-time one does. The plan matters
+// more here than at event time: there the claim rides the run's own
+// transaction, while here the admission stamps it, so a run the plan would
+// refuse would leave the task claimed and in progress with no run.
 func (r *Router) evaluateReDerive(ctx context.Context, orgID, taskID string) (reDerivePlan, error) {
 	task, err := r.tasks.GetSystem(ctx, orgID, taskID)
 	if err != nil {
@@ -148,6 +157,21 @@ func (r *Router) evaluateReDerive(ctx context.Context, orgID, taskID string) (re
 		}
 		if tripped, err := r.breakerGate(ctx, orgID, task, trigger, task.EntityID); err != nil || tripped {
 			return false, err
+		}
+		// The plan the firing worker's fire will make, made now, with the
+		// options it will pass and for the team the admission moves the task
+		// to. Its result is not kept: the fire plans again against the
+		// settings it finds then. A refusal plans no firing, and the walk
+		// moves on as it does for a tripped breaker.
+		if _, err := r.spawner.PlanDelegation(*task, acting, triggerDelegateOpts(orgID, trigger, task.PrimaryEventID, agentID, dbpkg.AgentClaimStamp{}, "")); err != nil {
+			cause, refused := delegate.RefusalCause(err)
+			if !refused {
+				return false, fmt.Errorf("plan delegation: %w", err)
+			}
+			routerLog.Info("re-derive: the run would be refused; planning no firing",
+				"task_id", taskID, "trigger_id", trigger.ID, "team", acting, "cause", cause, "error", err)
+			plan.Refusals = append(plan.Refusals, triggerRefusal(task, trigger, cause, err))
+			return false, nil
 		}
 		routerLog.Info("re-derive: planning a firing", "task_id", taskID, "suitability", *task.AutonomySuitability, "trigger_id", trigger.ID, "team", acting)
 		plan.Firings = append(plan.Firings, reDeriveFiring{Trigger: trigger, FiringTeam: acting, AgentID: agentID})

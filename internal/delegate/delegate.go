@@ -405,8 +405,8 @@ type DelegationPlan struct {
 // (ErrDailyCostCapReached), domain.ErrNoDefaultModel, ErrBlueprintNotFound,
 // ErrBlueprintUnspecified, ErrBlueprintNoSteps, ErrPromptNotFound,
 // ErrPromptUnspecified, modelaccess.ErrNoCredentials,
-// modelaccess.ErrProviderUnconfigured, and domain.ErrModelNotEnabled. Anything
-// else is a read that failed.
+// modelaccess.ErrProviderUnconfigured, and domain.ErrModelNotEnabled.
+// RefusalCause classifies them. Anything else is a read that failed.
 //
 // No GitHub client is resolved here: the dispatcher resolves one per claim.
 func (s *Spawner) PlanDelegation(task domain.Task, teamID string, opts DelegateOpts) (DelegationPlan, error) {
