@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -117,6 +118,45 @@ func TestTaskVersion_Postgres(t *testing.T) {
 			Exec: func(t *testing.T, query string) {
 				t.Helper()
 				pgtest.MustExec(t, h.AdminDB, query)
+			},
+		}
+	})
+}
+
+// TestTaskClaimTeam_Postgres runs the claim-team suite against the Postgres
+// impl, both pools on AdminDB like the suite above. The claimant is admin of
+// the org's default team and of a second one, and a viewer of a third.
+func TestTaskClaimTeam_Postgres(t *testing.T) {
+	h := pgtest.Shared(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+
+	dbtest.RunClaimTeamConformance(t, func(t *testing.T) dbtest.ClaimTeamFixture {
+		t.Helper()
+		h.Reset(t)
+		orgID, userID, agentID := seedPgOrgUserAgent(t, h)
+		write := [2]string{firstTeamForOrg(t, h, orgID), seedPgDefaultTeam(t, h, orgID, userID)}
+		slices.Sort(write[:])
+		view := pgtest.SeedTeam(t, h, orgID, "view")
+		pgtest.MustExec(t, h.AdminDB,
+			`INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'viewer')`, userID, view)
+
+		return dbtest.ClaimTeamFixture{
+			Store:        stores.Tasks,
+			OrgID:        orgID,
+			AgentID:      agentID,
+			UserID:       userID,
+			WriteTeamIDs: write,
+			ViewTeamID:   view,
+			SeedTask: func(t *testing.T, ownerTeamID string, visibleTeams []string) string {
+				t.Helper()
+				_, _, taskID := seedPgTaskChain(t, h.AdminDB, orgID, userID, "claim-team-"+uuid.NewString()[:8])
+				pgtest.MustExec(t, h.AdminDB, `UPDATE tasks SET team_id = NULLIF($1, '')::uuid WHERE id = $2`, ownerTeamID, taskID)
+				pgtest.MustExec(t, h.AdminDB, `DELETE FROM task_teams WHERE task_id = $1`, taskID)
+				for _, team := range visibleTeams {
+					pgtest.MustExec(t, h.AdminDB,
+						`INSERT INTO task_teams (task_id, team_id) VALUES ($1, $2)`, taskID, team)
+				}
+				return taskID
 			},
 		}
 	})
@@ -313,7 +353,7 @@ func TestTaskStore_Postgres_ReturnedRowUnderRLS(t *testing.T) {
 	if err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
 		tasks := pgstore.NewForTx(tx, pgtest.SecretKey).Tasks
 		for _, want := range []db.HandoffResult{db.HandoffChanged, db.HandoffNoOp} {
-			result, got, err := tasks.HandoffAgentClaim(ctx, orgID, handedID, agentID, userID, dbtest.TaskVersion(t, tasks, orgID, handedID))
+			result, got, err := tasks.HandoffAgentClaim(ctx, orgID, handedID, agentID, userID, dbtest.ClaimTeam(t, tasks, orgID, handedID, userID), dbtest.TaskVersion(t, tasks, orgID, handedID))
 			if err != nil || result != want {
 				t.Fatalf("HandoffAgentClaim = (%v, %v), want result %v", result, err, want)
 			}
@@ -334,11 +374,11 @@ func TestTaskStore_Postgres_ReturnedRowUnderRLS(t *testing.T) {
 // the lower-id team on a shared task and is a member of the other claims the
 // task, and the claim lands on the team they can write. Run under the person's
 // own claims, so tasks_update's check on the team the row lands on applies:
-// picking the view-only team fails the write with 42501. The task has no owner,
-// or is owned by the team the person only views, which the claim team would
-// otherwise prefer. The person's claim and the delegate's handoff to the agent
-// each run on a task of their own, and each lands on the team ResolveClaimTeam
-// answered before it.
+// landing on the view-only team would fail the write with 42501. The task has
+// no owner, or is owned by the team the person only views, which the task
+// has as its lower id. The person's claim and the delegate's handoff to the
+// agent each run on a task of their own, and each lands on the one team
+// ClaimTeamCandidates answered before it.
 func TestTaskStore_Postgres_ClaimSkipsViewOnlyTeam(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -358,14 +398,14 @@ func TestTaskStore_Postgres_ClaimSkipsViewOnlyTeam(t *testing.T) {
 		claim func(tasks db.TaskStore, taskID string, version int64) error
 	}{
 		{"claim", func(tasks db.TaskStore, taskID string, version int64) error {
-			ok, err := tasks.ClaimQueuedForUser(ctx, orgID, taskID, person, version)
+			ok, err := tasks.ClaimQueuedForUser(ctx, orgID, taskID, person, dbtest.ClaimTeam(t, tasks, orgID, taskID, person), version)
 			if err == nil && !ok {
 				err = errors.New("ok = false")
 			}
 			return err
 		}},
 		{"delegate", func(tasks db.TaskStore, taskID string, version int64) error {
-			result, _, err := tasks.HandoffAgentClaim(ctx, orgID, taskID, agentID, person, version)
+			result, _, err := tasks.HandoffAgentClaim(ctx, orgID, taskID, agentID, person, dbtest.ClaimTeam(t, tasks, orgID, taskID, person), version)
 			if err == nil && result != db.HandoffChanged {
 				err = fmt.Errorf("result = %v, want %v", result, db.HandoffChanged)
 			}
@@ -388,12 +428,12 @@ func TestTaskStore_Postgres_ClaimSkipsViewOnlyTeam(t *testing.T) {
 
 			if err := h.WithUser(t, person, orgID, func(tx *sql.Tx) error {
 				tasks := pgstore.NewForTx(tx, pgtest.SecretKey).Tasks
-				resolved, err := tasks.ResolveClaimTeam(ctx, orgID, taskID, person)
+				candidates, err := tasks.ClaimTeamCandidates(ctx, orgID, taskID, person)
 				if err != nil {
-					return fmt.Errorf("ResolveClaimTeam: %w", err)
+					return fmt.Errorf("ClaimTeamCandidates: %w", err)
 				}
-				if resolved != writeTeam {
-					t.Errorf("%s: ResolveClaimTeam = %s, want the team the person can write (%s)", name, resolved, writeTeam)
+				if !slices.Equal(candidates, []string{writeTeam}) {
+					t.Errorf("%s: ClaimTeamCandidates = %v, want only the team the person can write (%s)", name, candidates, writeTeam)
 				}
 				if err := write.claim(tasks, taskID, dbtest.TaskVersion(t, tasks, orgID, taskID)); err != nil {
 					return fmt.Errorf("%s: %w", write.name, err)
@@ -618,7 +658,7 @@ func TestTaskStore_Postgres_ReassignClaimToUser(t *testing.T) {
 
 	t.Run("lands_then_refuses_stale_expectation", func(t *testing.T) {
 		_, _, taskID := seedPgTaskChain(t, h.AdminDB, orgID, userA, "reassign-happy")
-		if ok, err := stores.Tasks.ClaimQueuedForUser(ctx, orgID, taskID, userA, dbtest.TaskVersion(t, stores.Tasks, orgID, taskID)); err != nil || !ok {
+		if ok, err := stores.Tasks.ClaimQueuedForUser(ctx, orgID, taskID, userA, dbtest.ClaimTeam(t, stores.Tasks, orgID, taskID, userA), dbtest.TaskVersion(t, stores.Tasks, orgID, taskID)); err != nil || !ok {
 			t.Fatalf("seed claim: ok=%v err=%v", ok, err)
 		}
 		ok, err := stores.Tasks.ReassignClaimToUser(ctx, orgID, taskID, userA, userB, dbtest.TaskVersion(t, stores.Tasks, orgID, taskID))
@@ -690,7 +730,7 @@ func TestTaskStore_Postgres_ReassignClaimToUser(t *testing.T) {
 
 	t.Run("refuses_terminal_task", func(t *testing.T) {
 		_, _, taskID := seedPgTaskChain(t, h.AdminDB, orgID, userA, "reassign-term")
-		if ok, err := stores.Tasks.ClaimQueuedForUser(ctx, orgID, taskID, userA, dbtest.TaskVersion(t, stores.Tasks, orgID, taskID)); err != nil || !ok {
+		if ok, err := stores.Tasks.ClaimQueuedForUser(ctx, orgID, taskID, userA, dbtest.ClaimTeam(t, stores.Tasks, orgID, taskID, userA), dbtest.TaskVersion(t, stores.Tasks, orgID, taskID)); err != nil || !ok {
 			t.Fatalf("seed claim: ok=%v err=%v", ok, err)
 		}
 		if _, err := stores.Tasks.Close(ctx, orgID, taskID, "test", ""); err != nil {
@@ -711,7 +751,7 @@ func TestTaskStore_Postgres_ReassignClaimToUser(t *testing.T) {
 	// membership on a claimed task).
 	t.Run("refuses_target_with_no_team_membership", func(t *testing.T) {
 		_, _, taskID := seedPgTaskChain(t, h.AdminDB, orgID, userA, "reassign-no-team")
-		if ok, err := stores.Tasks.ClaimQueuedForUser(ctx, orgID, taskID, userA, dbtest.TaskVersion(t, stores.Tasks, orgID, taskID)); err != nil || !ok {
+		if ok, err := stores.Tasks.ClaimQueuedForUser(ctx, orgID, taskID, userA, dbtest.ClaimTeam(t, stores.Tasks, orgID, taskID, userA), dbtest.TaskVersion(t, stores.Tasks, orgID, taskID)); err != nil || !ok {
 			t.Fatalf("seed claim: ok=%v err=%v", ok, err)
 		}
 		ok, err := stores.Tasks.ReassignClaimToUser(ctx, orgID, taskID, userA, userC, dbtest.TaskVersion(t, stores.Tasks, orgID, taskID))
@@ -736,7 +776,7 @@ func TestTaskStore_Postgres_ReassignClaimToUser(t *testing.T) {
 	// silently diverging.
 	t.Run("system_variant_matches_plain", func(t *testing.T) {
 		_, _, taskID := seedPgTaskChain(t, h.AdminDB, orgID, userA, "reassign-system")
-		if ok, err := stores.Tasks.ClaimQueuedForUser(ctx, orgID, taskID, userA, dbtest.TaskVersion(t, stores.Tasks, orgID, taskID)); err != nil || !ok {
+		if ok, err := stores.Tasks.ClaimQueuedForUser(ctx, orgID, taskID, userA, dbtest.ClaimTeam(t, stores.Tasks, orgID, taskID, userA), dbtest.TaskVersion(t, stores.Tasks, orgID, taskID)); err != nil || !ok {
 			t.Fatalf("seed claim: ok=%v err=%v", ok, err)
 		}
 		ok, err := stores.Tasks.ReassignClaimToUserSystem(ctx, orgID, taskID, userA, userB, dbtest.TaskVersion(t, stores.Tasks, orgID, taskID))
@@ -775,7 +815,7 @@ func TestTaskStore_Postgres_ReassignClaimRefusesViewOnlyTarget(t *testing.T) {
 	ctx := context.Background()
 	_, _, taskID := seedPgTaskChain(t, h.AdminDB, orgID, holder, "reassign-viewer")
 	pgtest.MustExec(t, h.AdminDB, `INSERT INTO task_teams (task_id, team_id) VALUES ($1, $2)`, taskID, teamID)
-	if ok, err := stores.Tasks.ClaimQueuedForUser(ctx, orgID, taskID, holder, dbtest.TaskVersion(t, stores.Tasks, orgID, taskID)); err != nil || !ok {
+	if ok, err := stores.Tasks.ClaimQueuedForUser(ctx, orgID, taskID, holder, dbtest.ClaimTeam(t, stores.Tasks, orgID, taskID, holder), dbtest.TaskVersion(t, stores.Tasks, orgID, taskID)); err != nil || !ok {
 		t.Fatalf("seed claim: ok=%v err=%v", ok, err)
 	}
 	before, err := stores.Tasks.Get(ctx, orgID, taskID)

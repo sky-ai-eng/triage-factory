@@ -50,7 +50,7 @@ func TestTaskAssigned_PublishedWhenTheAgentsStampLands(t *testing.T) {
 		{name: "a fire whose stamp lands", act: fire, want: 1},
 		{name: "a fire whose stamp a person's claim refused", act: func(t *testing.T, s claimScenario) {
 			tasks := testTaskStore(s.db)
-			if ok, err := tasks.ClaimQueuedForUser(t.Context(), runmode.LocalDefaultOrgID, s.task.ID, runmode.LocalDefaultUserID,
+			if ok, err := tasks.ClaimQueuedForUser(t.Context(), runmode.LocalDefaultOrgID, s.task.ID, runmode.LocalDefaultUserID, dbtest.ClaimTeam(t, tasks, runmode.LocalDefaultOrgID, s.task.ID, runmode.LocalDefaultUserID),
 				dbtest.TaskVersion(t, tasks, runmode.LocalDefaultOrgID, s.task.ID)); err != nil || !ok {
 				t.Fatalf("ClaimQueuedForUser: ok=%v err=%v", ok, err)
 			}

@@ -123,6 +123,12 @@ export interface Task {
   // the server did not answer, and consumers offer the control, whose route
   // still refuses with a 403.
   can_write?: boolean
+  // claim_team_ids is the teams the caller's claim of the task, or their
+  // delegate of it, may land it on: what those routes accept as team_id. On
+  // the detail read (GET /api/tasks/{id}) only. An empty list means no team
+  // of the caller's can take the task; ABSENT means the server did not
+  // answer, and a gesture sends no team and shows what the route says.
+  claim_team_ids?: string[]
 }
 
 // TranscriptPage is GET /api/agent/conversations/{id}/messages.

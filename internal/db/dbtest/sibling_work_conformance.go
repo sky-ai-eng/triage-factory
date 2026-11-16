@@ -44,7 +44,7 @@ func RunSiblingWorkConformance(t *testing.T, mk SiblingWorkFactory) {
 
 	claim := func(t *testing.T, stores TaskCloseDeferralStores, orgID, taskID string) {
 		t.Helper()
-		if ok, err := stores.Tasks.ClaimQueuedForUser(ctx, orgID, taskID, stores.UserID, TaskVersion(t, stores.Tasks, orgID, taskID)); err != nil || !ok {
+		if ok, err := stores.Tasks.ClaimQueuedForUser(ctx, orgID, taskID, stores.UserID, ClaimTeam(t, stores.Tasks, orgID, taskID, stores.UserID), TaskVersion(t, stores.Tasks, orgID, taskID)); err != nil || !ok {
 			t.Fatalf("ClaimQueuedForUser(%s) = %v (err %v)", taskID, ok, err)
 		}
 	}

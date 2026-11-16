@@ -5,7 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
+
+	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
@@ -42,6 +45,11 @@ type taskClaimRequest struct {
 	// self-claim would hand the task to whoever asked instead of erroring on
 	// a client that lost track of its target.
 	TargetUserID *string `json:"target_user_id,omitempty"`
+	// TeamID is the team the caller's own claim lands the task on, one of
+	// the caller's candidates (resolveClaimTeam). It may be absent when the
+	// caller has one candidate. Refused beside target_user_id: a handoff
+	// lands on a team derived from its target.
+	TeamID *string `json:"team_id,omitempty"`
 	// Version is the task version the caller read (taskJSON.Version), on both
 	// arms.
 	Version *int64 `json:"version"`
@@ -75,6 +83,11 @@ func (s *Server) handleTaskClaim(w http.ResponseWriter, r *http.Request) {
 	if req.TargetUserID != nil && strings.TrimSpace(*req.TargetUserID) == "" {
 		v.Invalid("target_user_id", "target_user_id must name a user; omit it to claim the task yourself")
 	}
+	if req.TargetUserID != nil && req.TeamID != nil {
+		v.Invalid("team_id", "team_id applies only when you claim the task yourself")
+	} else {
+		claimTeamField(&v, req.TeamID)
+	}
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
@@ -99,7 +112,7 @@ func (s *Server) handleTaskClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	claim, ok := s.selfClaim(w, r, orgID, userID, id, version)
+	claim, ok := s.selfClaim(w, r, orgID, userID, id, req.TeamID, version)
 	if !ok {
 		return
 	}
@@ -232,12 +245,16 @@ func mintForPersonClaim(ctx context.Context, tx db.TxStores, orgID, taskID, user
 // service account). Returns what landed (selfClaimed), and ok=false when it
 // already wrote an error response.
 //
+// pickedTeam is the body's team_id. Every accept path resolves the team the
+// claim lands on from it (resolveClaimTeam) before anything is written, the
+// claim the caller already holds included, which names the team it is on.
+//
 // The version is compared on the read before anything else, and again by the
 // write every accept path makes. The idempotent path's write changes nothing,
 // but it is still a write at the version the caller read: what the claim route
 // does after it (stopping runs, assigning the Jira or Linear issue) must not
 // act on a task that moved after the read.
-func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID, id string, version int64) (selfClaimed, bool) {
+func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID, id string, pickedTeam *string, version int64) (selfClaimed, bool) {
 	var task *domain.Task
 	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -260,6 +277,19 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 	// that the task is closed.
 	if isTerminalTaskStatus(task.Status) {
 		writeTaskTerminal(w, "claim")
+		return selfClaimed{}, false
+	}
+	// Ahead of the team: a task somebody else holds is refused whatever team
+	// the body names.
+	if task.ClaimedByUserID != "" && task.ClaimedByUserID != userID {
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+			Reason:  httpx.ReasonConflict,
+			Message: "task is already claimed by another user",
+		})
+		return selfClaimed{}, false
+	}
+	teamID, ok := s.resolveClaimTeam(w, r, orgID, userID, id, pickedTeam)
+	if !ok {
 		return selfClaimed{}, false
 	}
 
@@ -314,21 +344,15 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 		write = func(tx db.TxStores) (bool, error) {
 			return tx.Tasks.AdvanceStatusForUser(r.Context(), orgID, id, userID, taskStatusInProgress, version)
 		}
-	case task.ClaimedByUserID != "":
-		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
-			Reason:  httpx.ReasonConflict,
-			Message: "task is already claimed by another user",
-		})
-		return selfClaimed{}, false
 	case task.ClaimedByAgentID != "":
 		landing = claimLandingFromAgent
 		write = func(tx db.TxStores) (bool, error) {
-			return tx.Tasks.TakeoverClaimFromAgent(r.Context(), orgID, id, userID, version)
+			return tx.Tasks.TakeoverClaimFromAgent(r.Context(), orgID, id, userID, teamID, version)
 		}
 	default:
 		landing = claimLandingFromUnclaimed
 		write = func(tx db.TxStores) (bool, error) {
-			return tx.Tasks.ClaimQueuedForUser(r.Context(), orgID, id, userID, version)
+			return tx.Tasks.ClaimQueuedForUser(r.Context(), orgID, id, userID, teamID, version)
 		}
 	}
 	// One transaction: the firings' cancellation requests, the claim, the
@@ -368,8 +392,7 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 	} else if errors.Is(err, db.ErrTaskVersion) {
 		writeTaskVersionConflict(w)
 		return selfClaimed{}, false
-	} else if errors.Is(err, db.ErrNoActiveClaimTeam) {
-		writeNoActiveClaimTeam(w)
+	} else if writeClaimTeamRefusal(w, err) {
 		return selfClaimed{}, false
 	} else if err != nil {
 		taskActionLog.Error("claim write failed", "task", id, "error", err)
@@ -648,6 +671,10 @@ type taskDelegateRequest struct {
 	// BlueprintID names the blueprint the run executes. Required: an absent
 	// one is refused with the other blueprint refusals, 422 on blueprint_id.
 	BlueprintID string `json:"blueprint_id,omitempty"`
+	// TeamID is the team the task lands on and the run belongs to, one of
+	// the caller's candidates (resolveClaimTeam). It may be absent when the
+	// caller has one candidate. The blueprint must be that team's.
+	TeamID *string `json:"team_id,omitempty"`
 	// Version is the task version the caller read (taskJSON.Version).
 	Version *int64 `json:"version"`
 }
@@ -678,6 +705,7 @@ func (s *Server) handleTaskDelegate(w http.ResponseWriter, r *http.Request) {
 	}
 	var v httpx.Validation
 	version := taskWriteVersion(&v, req.Version)
+	claimTeamField(&v, req.TeamID)
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
@@ -696,12 +724,12 @@ func (s *Server) handleTaskDelegate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	target, ok := s.readAgentClaimTarget(w, r, orgID, userID, id, version)
+	target, ok := s.readAgentClaimTarget(w, r, orgID, userID, id, req.TeamID, version)
 	if !ok {
 		return
 	}
 
-	// The run is planned for the team the claim will consolidate onto, before
+	// The run is planned for the team the claim will land the task on, before
 	// the claim, so every refusal the spawner makes comes before anything is
 	// written. It is not planned again after the claim: the firing
 	// transaction refuses what it can see of the task's state (another run,
@@ -726,7 +754,7 @@ func (s *Server) handleTaskDelegate(w http.ResponseWriter, r *http.Request) {
 
 	// The handoff comes before the stop below, because its version check is
 	// what keeps a stale caller from stopping another person's run.
-	handed, ok := s.handOffAgentClaim(w, r, orgID, userID, id, version, target.agentID)
+	handed, ok := s.handOffAgentClaim(w, r, orgID, userID, id, version, target.agentID, target.teamID)
 	if !ok {
 		return
 	}
@@ -766,8 +794,8 @@ func (s *Server) handleTaskDelegate(w http.ResponseWriter, r *http.Request) {
 }
 
 // agentClaimTarget is what a delegate's claim will write, read before it
-// writes: the task as the caller's claims read it, the team the claim
-// consolidates the task onto, and the agent that takes it.
+// writes: the task as the caller's claims read it, the team the claim lands
+// the task on, and the agent that takes it.
 type agentClaimTarget struct {
 	task    domain.Task
 	teamID  string
@@ -776,9 +804,11 @@ type agentClaimTarget struct {
 
 // readAgentClaimTarget makes every read and check the delegate's claim makes
 // before its write, and writes nothing: the task exists and is at the version
-// the caller read, it isn't terminal, it has an active team to land on, and the
-// bot is enabled for that team. ok=false once it has written the refusal.
-func (s *Server) readAgentClaimTarget(w http.ResponseWriter, r *http.Request, orgID, userID, id string, version int64) (agentClaimTarget, bool) {
+// the caller read, it isn't terminal, nobody else holds it, the team the body
+// names (pickedTeam, or the caller's one candidate) is one it can land on and
+// the one it will be on after the handoff, and the bot is enabled for that
+// team. ok=false once it has written the refusal.
+func (s *Server) readAgentClaimTarget(w http.ResponseWriter, r *http.Request, orgID, userID, id string, pickedTeam *string, version int64) (agentClaimTarget, bool) {
 	// Pre-load to disambiguate HandoffRefused (404 missing / 409 terminal /
 	// 409 theft) and to gate the bot-enablement check on the task's own team.
 	var task *domain.Task
@@ -801,26 +831,22 @@ func (s *Server) readAgentClaimTarget(w http.ResponseWriter, r *http.Request, or
 		writeTaskTerminal(w, "delegate")
 		return agentClaimTarget{}, false
 	}
-
-	// Gate on the team HandoffAgentClaim will consolidate onto, not the
-	// pre-handoff task.TeamID: for an unclaimed task visible to several teams
-	// the latter can be a team the caller isn't in, whose team_agents row RLS
-	// hides — wrongly reporting the bot disabled and rejecting a legit delegate.
-	// The same read refuses a delegation with no active team to land on before
-	// anything is written.
-	var claimTeamID string
-	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		var e error
-		claimTeamID, e = tx.Tasks.ResolveClaimTeam(r.Context(), orgID, id, userID)
-		return e
-	}); errors.Is(err, db.ErrNoActiveClaimTeam) {
-		writeNoActiveClaimTeam(w)
+	// Ahead of the team, as on the claim route: a task another person holds
+	// is refused whatever team the body names, so the caller is never asked
+	// to select a team for a delegate the handoff would refuse.
+	if task.ClaimedByUserID != "" && task.ClaimedByUserID != userID {
+		writeClaimedByAnotherUser(w)
 		return agentClaimTarget{}, false
-	} else if err != nil {
-		taskActionLog.Error("delegate aborted", "task", id, "error", err)
-		httpx.WriteErrors(w, http.StatusInternalServerError, httpx.ErrorItem{
-			Reason: httpx.ReasonInternal, Message: "delegate failed" + localDetail(err),
-		})
+	}
+
+	// Gate on the team the claim will land the task on, not the pre-handoff
+	// task.TeamID: for an unclaimed task visible to several teams the latter
+	// can be a team the caller isn't in, whose team_agents row RLS hides —
+	// wrongly reporting the bot disabled and rejecting a legit delegate. The
+	// same read refuses a delegation with no team to land on before anything
+	// is written.
+	claimTeamID, ok := s.resolveClaimTeam(w, r, orgID, userID, id, pickedTeam)
+	if !ok {
 		return agentClaimTarget{}, false
 	}
 	a, enabled, err := s.agentEnabledForTeam(r.Context(), orgID, userID, claimTeamID)
@@ -829,6 +855,14 @@ func (s *Server) readAgentClaimTarget(w http.ResponseWriter, r *http.Request, or
 		httpx.WriteErrors(w, http.StatusInternalServerError, httpx.ErrorItem{
 			Reason: httpx.ReasonInternal, Message: "delegate failed" + localDetail(err),
 		})
+		return agentClaimTarget{}, false
+	}
+	// A task the agent already holds stays on its team: the handoff writes
+	// nothing, and the run belongs to the task's team. That team differs from
+	// the one resolved above only when the caller does not write it, so the
+	// run would execute under a team the caller cannot delegate for.
+	if task.ClaimedByAgentID == a.ID && (task.TeamID == nil || *task.TeamID != claimTeamID) {
+		writeNoClaimTeam(w)
 		return agentClaimTarget{}, false
 	}
 	if !enabled {
@@ -841,26 +875,28 @@ func (s *Server) readAgentClaimTarget(w http.ResponseWriter, r *http.Request, or
 	return agentClaimTarget{task: *task, teamID: claimTeamID, agentID: a.ID}, true
 }
 
-// handOffAgentClaim moves the task to bot ownership: HandoffAgentClaim handles
-// unclaimed→bot, my-claim→bot and idempotent bot-owns, and refuses a
-// different-user claim and a task past the version the caller read, each
-// writing nothing. Its caller has made readAgentClaimTarget's checks. Returns the
-// row the handoff left, and ok=false when it already wrote an error response.
-func (s *Server) handOffAgentClaim(w http.ResponseWriter, r *http.Request, orgID, userID, id string, version int64, agentID string) (domain.Task, bool) {
+// handOffAgentClaim moves the task to bot ownership on teamID:
+// HandoffAgentClaim handles unclaimed→bot, my-claim→bot and idempotent
+// bot-owns, and refuses a different-user claim, a task past the version the
+// caller read, and a team that stopped being one the caller can land the
+// task on, each writing nothing. Its caller has made readAgentClaimTarget's
+// checks. Returns the row the handoff left, and ok=false when it already
+// wrote an error response.
+func (s *Server) handOffAgentClaim(w http.ResponseWriter, r *http.Request, orgID, userID, id string, version int64, agentID, teamID string) (domain.Task, bool) {
 	var result db.HandoffResult
 	var handed domain.Task
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		result, handed, e = tx.Tasks.HandoffAgentClaim(r.Context(), orgID, id, agentID, userID, version)
+		result, handed, e = tx.Tasks.HandoffAgentClaim(r.Context(), orgID, id, agentID, userID, teamID, version)
 		return e
 	}); errors.Is(err, db.ErrTaskVersion) {
 		// Changed since the caller's read. Nothing was written, and the route
 		// stops and spawns nothing.
 		writeTaskVersionConflict(w)
 		return domain.Task{}, false
-	} else if errors.Is(err, db.ErrNoActiveClaimTeam) {
-		// The owner team was archived since readAgentClaimTarget read it.
-		writeNoActiveClaimTeam(w)
+	} else if writeClaimTeamRefusal(w, err) {
+		// The caller's candidates changed since readAgentClaimTarget read
+		// them.
 		return domain.Task{}, false
 	} else if err != nil {
 		taskActionLog.Error("failed to stamp agent claim", "task", id, "error", err)
@@ -870,12 +906,11 @@ func (s *Server) handOffAgentClaim(w http.ResponseWriter, r *http.Request, orgID
 		return domain.Task{}, false
 	}
 	if result == db.HandoffRefused {
-		// readAgentClaimTarget ruled out missing + terminal, so the only remaining
-		// refusal is "different user owns the claim." The TOCTOU window is
-		// narrow but real; the user retries from a fresh view either way.
-		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
-			Reason: httpx.ReasonConflict, Message: "task is claimed by another user; refusing to steal",
-		})
+		// readAgentClaimTarget ruled out missing, terminal and another
+		// person's claim as it read them, so what remains is a claim that
+		// landed since. The TOCTOU window is narrow but real; the user
+		// retries from a fresh view either way.
+		writeClaimedByAnotherUser(w)
 		return domain.Task{}, false
 	}
 
@@ -1190,8 +1225,11 @@ func (s *Server) firstStepConversationID(ctx context.Context, orgID, userID, blu
 // the fix needs no re-read.
 //
 // A refusal about the blueprint the body named is the request's fault, 422 on
-// blueprint_id. The rest are 409s with no field, because nothing in the body
-// names a model or a cap: NOT_CONFIGURED for setup the org or team has not
+// blueprint_id: INVALID_FIELD for one that can't be used at all, and
+// CROSS_TEAM_REF for one that belongs to another team than the task lands
+// on, which is what a trigger naming another team's blueprint answers. The
+// rest are 409s with no field, because nothing in the body names a model or
+// a cap: NOT_CONFIGURED for setup the org or team has not
 // done, CONFLICT for a decision somebody made (a model taken out of the
 // team's set, a spend cap reached). Their messages are TF's own and name the
 // model, the provider, or the setting to change, so they go out verbatim; a
@@ -1202,6 +1240,8 @@ func writeDelegatePlanRefusal(w http.ResponseWriter, err error) {
 	cause, _ := delegate.RefusalCause(err)
 	var capErr *delegate.CostCapError
 	switch {
+	case errors.Is(err, delegate.ErrBlueprintOtherTeam):
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, crossTeamBlueprintFault)
 	case cause == domain.DelegationRefusedSpendCap && errors.As(err, &capErr):
 		// Spend is an org admin's read, so the figures stay in the server log,
 		// and in local mode, where the one person is the admin, the message.
@@ -1277,10 +1317,123 @@ func writeDelegateSpawnError(w http.ResponseWriter, err error) {
 	writeDelegateSpawnInternal(w, err)
 }
 
-// writeNoActiveClaimTeam answers a claim or delegation refused because it has
-// no active team to land the task on (db.ErrNoActiveClaimTeam): the task's team
-// is archived and the caller is on no active team that can see it. Nothing was
-// written. 403 TEAM_ARCHIVED, the archive write-block's answer, because the
+// claimTeamField checks the shape of a claim's or a delegate's team_id: when
+// present it must be a team id. Which team it may be is resolveClaimTeam's
+// to answer, once the task is read.
+func claimTeamField(v *httpx.Validation, teamID *string) {
+	if teamID == nil {
+		return
+	}
+	if _, err := uuid.Parse(*teamID); err != nil {
+		v.Invalid("team_id", "team_id must be a team id")
+	}
+}
+
+// resolveClaimTeam resolves the team a person's claim of a task, or their
+// delegate of it, lands the task on, for both routes and before either
+// writes. picked is the body's team_id, already checked by claimTeamField.
+//
+// The caller's candidates decide it (db.TaskStore.ClaimTeamCandidates): a
+// picked team must be one of them, and an absent one resolves only when there
+// is exactly one. Nothing else is consulted: not the caller's last-used team,
+// which is a default for creating things, and the answer is not recorded as
+// one. ok=false once it has written the refusal.
+func (s *Server) resolveClaimTeam(w http.ResponseWriter, r *http.Request, orgID, userID, taskID string, picked *string) (string, bool) {
+	var candidates []string
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		candidates, e = tx.Tasks.ClaimTeamCandidates(r.Context(), orgID, taskID, userID)
+		if e != nil || len(candidates) > 0 {
+			return e
+		}
+		return tx.Tasks.NoClaimTeamReason(r.Context(), orgID, taskID, userID)
+	}); writeClaimTeamRefusal(w, err) {
+		return "", false
+	} else if err != nil {
+		internalError(w, "tasks", err)
+		return "", false
+	}
+	switch {
+	case picked != nil:
+		// The candidates are spelled as stored; uuid.Parse accepts other
+		// spellings of the same id.
+		team := *picked
+		if parsed, err := uuid.Parse(team); err == nil {
+			team = parsed.String()
+		}
+		if !slices.Contains(candidates, team) {
+			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
+				Reason:  httpx.ReasonCrossTeamRef,
+				Message: "this task can't land on that team",
+				Field:   "team_id",
+			})
+			return "", false
+		}
+		return team, true
+	case len(candidates) > 1:
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason:  httpx.ReasonInvalidField,
+			Message: "a team is required: more than one of your teams can take this task, so select one",
+			Field:   "team_id",
+		})
+		return "", false
+	}
+	return candidates[0], true
+}
+
+// writeClaimTeamRefusal answers a claim or delegation refused over the team
+// the task lands on, and reports whether err was one of those refusals.
+// Nothing was written for any of them:
+//
+//   - db.ErrNoActiveClaimTeam: the caller has no team to land the task on
+//     because one is archived. 403 TEAM_ARCHIVED (writeNoActiveClaimTeam).
+//   - db.ErrNoClaimTeam: the caller has no team to land the task on, and none
+//     is archived. 403 FORBIDDEN (writeNoClaimTeam).
+//   - db.ErrClaimTeamNotCandidate: the write refused the team
+//     resolveClaimTeam had resolved, so the task's teams, or the caller's
+//     membership of them, changed in between. 409 CONFLICT.
+func writeClaimTeamRefusal(w http.ResponseWriter, err error) bool {
+	switch {
+	case errors.Is(err, db.ErrNoActiveClaimTeam):
+		writeNoActiveClaimTeam(w)
+	case errors.Is(err, db.ErrNoClaimTeam):
+		writeNoClaimTeam(w)
+	case errors.Is(err, db.ErrClaimTeamNotCandidate):
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+			Reason:  httpx.ReasonConflict,
+			Message: "the task's teams changed; read it again",
+		})
+	default:
+		return false
+	}
+	return true
+}
+
+// writeClaimedByAnotherUser answers a delegate of a task another person
+// holds: 409 CONFLICT, since the delegate would take the task from them.
+func writeClaimedByAnotherUser(w http.ResponseWriter) {
+	httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+		Reason: httpx.ReasonConflict, Message: "task is claimed by another user; refusing to steal",
+	})
+}
+
+// writeNoClaimTeam answers a claim or delegation refused because the caller
+// writes none of the teams the task can land on (db.ErrNoClaimTeam): they are
+// on neither its own team nor a team that can see it, or only view the ones
+// they are on. It is not the archived answer, because restoring a team would
+// not change it. 403 FORBIDDEN, the answer a missing write role gets
+// elsewhere, and no field: no team_id would be accepted.
+func writeNoClaimTeam(w http.ResponseWriter) {
+	httpx.WriteErrors(w, http.StatusForbidden, httpx.ErrorItem{
+		Reason:  httpx.ReasonForbidden,
+		Message: "you aren't a member with write access on a team that can take this task",
+	})
+}
+
+// writeNoActiveClaimTeam answers a claim or delegation refused because the
+// caller has no team to land the task on and an archived team is why
+// (db.ErrNoActiveClaimTeam): the task's team is archived, and the caller
+// writes no active team that can see it. Nothing was written. 403 TEAM_ARCHIVED, the archive write-block's answer, because the
 // fault is the same one: nothing lands on an archived team, and a retry gets
 // the same refusal until the team is restored.
 func writeNoActiveClaimTeam(w http.ResponseWriter) {

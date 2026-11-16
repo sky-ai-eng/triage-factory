@@ -45,6 +45,13 @@ describe('task writes', () => {
     ],
     ['claim', () => claimTask(TASK), '/api/tasks/task-1/claim', 'POST', { version: 7 }],
     [
+      'claim for a team',
+      () => claimTask(TASK, 't2'),
+      '/api/tasks/task-1/claim',
+      'POST',
+      { team_id: 't2', version: 7 },
+    ],
+    [
       'reassign',
       () => reassignTask(TASK, 'u2'),
       '/api/tasks/task-1/claim',
@@ -57,6 +64,13 @@ describe('task writes', () => {
       '/api/tasks/task-1/delegate',
       'POST',
       { blueprint_id: 'bp-1', version: 7 },
+    ],
+    [
+      'delegate for a team',
+      () => delegateTask(TASK, 'bp-1', 't2'),
+      '/api/tasks/task-1/delegate',
+      'POST',
+      { blueprint_id: 'bp-1', team_id: 't2', version: 7 },
     ],
     [
       'delegate to the default blueprint',

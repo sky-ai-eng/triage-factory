@@ -36,11 +36,13 @@ import TeamScopeSelect from '../components/TeamScopeSelect'
 import ZeroTeamState from '../components/ZeroTeamState'
 import PromptPicker from '../components/PromptPicker'
 import AssigneePicker from '../components/board/AssigneePicker'
+import ClaimTeamConfirm from '../components/board/ClaimTeamConfirm'
 import RequeueConfirm from '../components/board/RequeueConfirm'
 import { TaskCard } from '../components/board/TaskCard'
 import { deriveCard } from '../components/board/cardModel'
 import { toast } from '../components/Toast/toastStore'
 import { apiErrors, apiJSON, httpErrorMessage } from '../lib/apiClient'
+import { NO_CLAIM_TEAM, resolveClaimTeam } from '../lib/claimTeam'
 import {
   claimTask,
   delegateTask,
@@ -323,7 +325,7 @@ export default function Board() {
   // into every lane fetch as team_id); `teams` backs the row
   // color-coding. Both render their UI only at ≥2 teams. teamFilterRef
   // keeps the fetchers' identity stable while always reading the latest.
-  const { teams, loaded: teamsLoaded } = useTeams()
+  const { teams, loaded: teamsLoaded, multi: multiTeam, lastActingTeamId } = useTeams()
   const { isAdmin: orgIsAdmin } = useOrgRole()
   const [teamFilter, setTeamFilter] = useTeamFilter('board')
   const teamFilterRef = useRef(teamFilter)
@@ -416,6 +418,21 @@ export default function Board() {
   // Delegate flow
   const [showPromptPicker, setShowPromptPicker] = useState(false)
   const pendingDelegateTask = useRef<Task | null>(null)
+  // The team the pending delegate lands the task on, and the teams its picker
+  // offers when more than one of the caller's can take it. An empty value
+  // sends no team: a person on one team, and local mode.
+  const [delegateTeam, setDelegateTeam] = useState<{ value: string; options?: string[] }>({
+    value: '',
+  })
+  // The claim waiting on ClaimTeamConfirm: more than one of the caller's
+  // teams can take the task. Null the rest of the time, when a claim goes out
+  // without asking.
+  const [pendingClaim, setPendingClaim] = useState<{
+    taskId: string
+    handed: number
+    candidates: string[]
+    preselected: string
+  } | null>(null)
   // Tracks bot-claimed tasks where the delegate conversation failed
   // to fire. Cleared when a conversation for the task lands.
   const [delegateFailures, setDelegateFailures] = useState<Record<string, string>>({})
@@ -1110,6 +1127,59 @@ export default function Board() {
     [conversations, fireRequeue],
   )
 
+  // resolveTeam is how every claim and delegate gesture on the board learns
+  // the team the task lands on, before it writes.
+  const resolveTeam = useCallback(
+    (taskId: string) =>
+      resolveClaimTeam(taskId, {
+        multi: multiTeam,
+        teams,
+        lastActingTeamId,
+        teamFilter: teamFilterRef.current,
+      }),
+    [multiTeam, teams, lastActingTeamId],
+  )
+
+  // requestClaim is the one door every claim gesture takes: the drag into In
+  // Progress, and the picker's own-name row. It asks which team only when
+  // more than one of the caller's can take the task; otherwise the claim goes
+  // out at once. A failed claim throws to the gesture, which words the toast.
+  const requestClaim = useCallback(
+    async (taskId: string, handed = 0) => {
+      const team = await resolveTeam(taskId)
+      if (team.kind === 'none') {
+        toast.error(NO_CLAIM_TEAM)
+        return
+      }
+      if (team.kind === 'ask') {
+        setPendingClaim({
+          taskId,
+          handed,
+          candidates: team.candidates,
+          preselected: team.preselected,
+        })
+        return
+      }
+      noteWritten(await claimTask(taskRefFor(taskId, handed), team.teamId))
+    },
+    [noteWritten, resolveTeam, taskRefFor],
+  )
+
+  const confirmClaim = useCallback(
+    async (teamId: string) => {
+      const pending = pendingClaim
+      setPendingClaim(null)
+      if (!pending) return
+      try {
+        noteWritten(await claimTask(taskRefFor(pending.taskId, pending.handed), teamId))
+      } catch (err) {
+        toast.failed(err, 'Could not claim the task.')
+      }
+      fetchTasks()
+    },
+    [fetchTasks, noteWritten, pendingClaim, taskRefFor],
+  )
+
   // The lane viewport (the scroller) and the strip inside it, which is
   // `max-content` wide so its own box grows with the lanes — as a plain flex
   // child its box would match the scroller and its children merely overflow,
@@ -1282,7 +1352,7 @@ export default function Board() {
         // Queued → In Progress: the drag is a claim, and the claim is what
         // moves the card — the server lands the row in progress in the same
         // write. Idempotent when the caller already holds it.
-        noteWritten(await claimTask(taskRefFor(taskId)))
+        await requestClaim(taskId)
         return
       }
 
@@ -1318,13 +1388,13 @@ export default function Board() {
   const handlePickerClaim = useCallback(
     async (task: Task) => {
       try {
-        noteWritten(await claimTask(taskRefFor(task.id, task.version)))
+        await requestClaim(task.id, task.version)
       } catch (err) {
         toast.failed(err, 'Could not claim the task.')
       }
       fetchTasks()
     },
-    [fetchTasks, noteWritten, taskRefFor],
+    [fetchTasks, requestClaim],
   )
 
   const handlePickerUnclaim = useCallback(
@@ -1337,10 +1407,36 @@ export default function Board() {
     [requestRequeue],
   )
 
-  const handlePickerDelegate = useCallback((task: Task) => {
-    pendingDelegateTask.current = task
-    setShowPromptPicker(true)
-  }, [])
+  // The blueprint picker opens on the team the task lands on, so it lists
+  // that team's blueprints: the one candidate, or the caller's choice among
+  // several, which the picker's own team selector changes.
+  const delegateResolveInFlight = useRef(false)
+  const handlePickerDelegate = useCallback(
+    async (task: Task) => {
+      // One at a time: a second delegate started while the first reads its
+      // teams would open the picker for whichever read answers last.
+      if (delegateResolveInFlight.current) return
+      delegateResolveInFlight.current = true
+      let team
+      try {
+        team = await resolveTeam(task.id)
+      } finally {
+        delegateResolveInFlight.current = false
+      }
+      if (team.kind === 'none') {
+        toast.error(NO_CLAIM_TEAM)
+        return
+      }
+      pendingDelegateTask.current = task
+      setDelegateTeam(
+        team.kind === 'ask'
+          ? { value: team.preselected, options: team.candidates }
+          : { value: team.teamId ?? '' },
+      )
+      setShowPromptPicker(true)
+    },
+    [resolveTeam],
+  )
 
   const handlePickerReassign = useCallback(
     async (task: Task, targetUserID: string) => {
@@ -1361,7 +1457,11 @@ export default function Board() {
       if (!task) return
       pendingDelegateTask.current = null
       try {
-        const body = await delegateTask(taskRefFor(task.id, task.version), promptId)
+        const body = await delegateTask(
+          taskRefFor(task.id, task.version),
+          promptId,
+          delegateTeam.value || undefined,
+        )
         noteWritten({ id: task.id, version: body.version })
         const conversationID = body.conversation_id
         if (conversationID) {
@@ -1406,7 +1506,7 @@ export default function Board() {
       }
       fetchTasks()
     },
-    [fetchTasks, noteWritten, taskRefFor],
+    [delegateTeam, fetchTasks, noteWritten, taskRefFor],
   )
 
   const activeTask = activeId ? allTasks.get(activeId) : null
@@ -1575,6 +1675,13 @@ export default function Board() {
         subtitle="Select a blueprint to run for this task"
         selectLabel="Run"
         onSelect={handlePromptSelected}
+        teamValue={delegateTeam.value || undefined}
+        teamOptions={delegateTeam.options}
+        onTeamChange={
+          delegateTeam.options
+            ? (teamId) => setDelegateTeam((prev) => ({ ...prev, value: teamId }))
+            : undefined
+        }
         onClose={() => {
           setShowPromptPicker(false)
           pendingDelegateTask.current = null
@@ -1584,6 +1691,14 @@ export default function Board() {
           pendingDelegateTask.current = null
           window.location.href = '/prompts'
         }}
+      />
+
+      <ClaimTeamConfirm
+        open={pendingClaim !== null}
+        candidates={pendingClaim?.candidates ?? []}
+        preselected={pendingClaim?.preselected ?? ''}
+        onConfirm={(teamId) => void confirmClaim(teamId)}
+        onCancel={() => setPendingClaim(null)}
       />
 
       <RequeueConfirm

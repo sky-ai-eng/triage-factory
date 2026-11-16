@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, waitFor, fireEvent, act, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import Board from './Board'
-import type { Conversation, Task, TeamMember } from '../types'
+import type { Conversation, Task, TeamBot, TeamMember } from '../types'
 
 // The board's lanes, checked against what it actually reads; the two gestures
 // that move a card into In Progress; and its one confirmation, checked against
@@ -63,11 +63,39 @@ const QUEUES = {
   resolve: vi.fn(async () => {}),
 }
 vi.mock('../hooks/usePermissionQueues', () => ({ usePermissionQueues: () => QUEUES }))
-const TEAMS = { teams: [{ id: 't1', name: 'platform' }], loaded: true }
+/** The viewer's teams. One team by default, which is also local mode. */
+const ONE_TEAM = {
+  teams: [{ id: 't1', name: 'platform', slug: 'platform' }],
+  lastActingTeamId: '',
+  multi: false,
+  loaded: true,
+}
+const teamsStore = vi.hoisted(() => ({ current: null as unknown }))
 const TEAM_FILTER: [string[], () => void] = [[], () => {}]
-vi.mock('../hooks/useTeams', () => ({
-  useTeams: () => TEAMS,
-  useTeamFilter: () => TEAM_FILTER,
+vi.mock('../hooks/useTeams', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../hooks/useTeams')>()
+  return {
+    useTeams: () => teamsStore.current,
+    useTeamFilter: () => TEAM_FILTER,
+    pickerDefault: actual.pickerDefault,
+  }
+})
+/** The blueprint picker, reduced to what the board hands it and one row to
+ *  press: what it lists is its own test's subject. */
+const promptPicker = vi.hoisted(() => ({
+  props: null as null | { teamValue?: string; teamOptions?: string[] },
+}))
+vi.mock('../components/PromptPicker', () => ({
+  default: (props: {
+    open: boolean
+    teamValue?: string
+    teamOptions?: string[]
+    onSelect: (id: string) => void
+  }) => {
+    if (!props.open) return null
+    promptPicker.props = { teamValue: props.teamValue, teamOptions: props.teamOptions }
+    return <button onClick={() => props.onSelect('bp-1')}>Run the blueprint</button>
+  },
 }))
 vi.mock('../hooks/useDeploymentConfig', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../hooks/useDeploymentConfig')>()
@@ -82,7 +110,10 @@ const ME = {
   role: 'member',
   is_current_user: true,
 } as TeamMember
-const ROSTER = { members: [ME], bot: null }
+const ROSTER: { members: TeamMember[]; bot: TeamBot | null } = {
+  members: [ME],
+  bot: null,
+}
 vi.mock('../hooks/useOrgRole', () => ({ useOrgRole: () => ({ isAdmin: false }) }))
 
 /** The task the board paints into In Progress, held by the viewer. */
@@ -146,6 +177,8 @@ let closed: Task[]
 let closedRuns: Record<string, Conversation[]>
 /** The can_write every listed task carries; undefined leaves the key off. */
 let taskCanWrite: boolean | undefined
+/** The teams a task's detail read lists for a claim or a delegate. */
+let claimTeams: string[]
 
 beforeEach(() => {
   listBodies = []
@@ -155,6 +188,10 @@ beforeEach(() => {
   closed = []
   closedRuns = {}
   taskCanWrite = undefined
+  claimTeams = ['t1']
+  teamsStore.current = ONE_TEAM
+  ROSTER.bot = null
+  promptPicker.props = null
   QUEUES.resolve.mockClear()
   api.apiList.mockReset()
   api.apiJSON.mockReset()
@@ -174,24 +211,28 @@ beforeEach(() => {
     )
     return { items, next_page_token: '', total_count: items.length }
   })
-  api.apiJSON.mockImplementation(async (path: string, init?: { body?: string }) => {
-    if (path === '/api/me') return { id: 'u1' }
-    if (path === '/api/tasks/facets') {
-      facetBodies.push(JSON.parse(init?.body ?? '{}') as Record<string, unknown>)
-      return { event_types: [{ value: 'github:pr:opened', count: 2 }] }
-    }
-    if (path === '/api/agent/conversations/list') {
-      return { runs: { [HELD.id]: [held], ...closedRuns }, messages: {} }
-    }
-    // A task write answers the task with the version it left, one past the
-    // version the board read, whatever the write named.
-    const task = [HELD, FREE].find((t) => path.startsWith(`/api/tasks/${t.id}`))
-    if (task) {
-      writes.push({ path, body: JSON.parse(init?.body ?? '{}') as Record<string, unknown> })
-      return { ...task, version: task.version + 1 }
-    }
-    throw new Error('unexpected apiJSON ' + path)
-  })
+  api.apiJSON.mockImplementation(
+    async (path: string, init?: { method?: string; body?: string }) => {
+      if (path === '/api/me') return { id: 'u1' }
+      if (path === '/api/tasks/facets') {
+        facetBodies.push(JSON.parse(init?.body ?? '{}') as Record<string, unknown>)
+        return { event_types: [{ value: 'github:pr:opened', count: 2 }] }
+      }
+      if (path === '/api/agent/conversations/list') {
+        return { runs: { [HELD.id]: [held], ...closedRuns }, messages: {} }
+      }
+      // A task write answers the task with the version it left, one past the
+      // version the board read, whatever the write named.
+      const task = [HELD, FREE].find((t) => path.startsWith(`/api/tasks/${t.id}`))
+      // The detail read a claim or a delegate makes first, for its teams.
+      if (task && !init?.method) return { ...task, claim_team_ids: claimTeams }
+      if (task) {
+        writes.push({ path, body: JSON.parse(init?.body ?? '{}') as Record<string, unknown> })
+        return { ...task, version: task.version + 1 }
+      }
+      throw new Error('unexpected apiJSON ' + path)
+    },
+  )
   api.apiFetch.mockResolvedValue(undefined)
   dnd.drop = null
 })
@@ -549,6 +590,83 @@ describe('starting a queued task', () => {
     fireEvent.click(picker.getByRole('option', { name: ME.display_name }))
     await waitFor(() => expect(writes.length).toBe(2))
     expect(writes.map((w) => w.body.version)).toEqual([FREE.version, FREE.version + 1])
+  })
+})
+
+describe('the team a claim or a delegate lands on', () => {
+  function onTwoTeams() {
+    teamsStore.current = {
+      teams: [
+        { id: 't1', name: 'platform', slug: 'platform' },
+        { id: 't2', name: 'data', slug: 'data' },
+      ],
+      lastActingTeamId: '',
+      multi: true,
+      loaded: true,
+    }
+  }
+
+  it('sends the one team that can take the task, without asking', async () => {
+    onTwoTeams()
+    claimTeams = ['t2']
+    renderBoard()
+    await screen.findByText(FREE.title)
+
+    await act(async () => {
+      await dnd.drop!(FREE.id, 'in_progress')
+    })
+
+    expect(writes).toEqual([
+      { path: `/api/tasks/${FREE.id}/claim`, body: { team_id: 't2', version: FREE.version } },
+    ])
+    expect(screen.queryByText('Which team takes this task?')).not.toBeInTheDocument()
+  })
+
+  it('asks which team when two can take the task, and claims for the one chosen', async () => {
+    onTwoTeams()
+    claimTeams = ['t1', 't2']
+    renderBoard()
+    await screen.findByText(FREE.title)
+
+    await act(async () => {
+      await dnd.drop!(FREE.id, 'in_progress')
+    })
+    // The drop wrote nothing: the claim waits on the answer.
+    await screen.findByText('Which team takes this task?')
+    expect(writes).toEqual([])
+
+    fireEvent.click(screen.getByRole('radio', { name: 'data' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Claim' }))
+
+    await waitFor(() =>
+      expect(writes).toEqual([
+        { path: `/api/tasks/${FREE.id}/claim`, body: { team_id: 't2', version: FREE.version } },
+      ]),
+    )
+  })
+
+  it('opens the blueprint picker on the team the task lands on, and delegates for it', async () => {
+    onTwoTeams()
+    claimTeams = ['t2']
+    ROSTER.bot = { agent_id: 'a1', display_name: 'Tess', enabled: true, model: '', autonomy: null }
+    renderBoard()
+    await waitFor(() => expect(listBodies.length).toBe(3))
+
+    const picker = await openPicker('Unassigned')
+    fireEvent.click(picker.getByRole('option', { name: /Tess/ }))
+
+    // One candidate: the picker lists that team's blueprints and offers no
+    // team to choose.
+    fireEvent.click(await screen.findByRole('button', { name: 'Run the blueprint' }))
+    expect(promptPicker.props).toEqual({ teamValue: 't2', teamOptions: undefined })
+    await waitFor(() =>
+      expect(writes).toEqual([
+        {
+          path: `/api/tasks/${FREE.id}/delegate`,
+          body: { blueprint_id: 'bp-1', team_id: 't2', version: FREE.version },
+        },
+      ]),
+    )
   })
 })
 

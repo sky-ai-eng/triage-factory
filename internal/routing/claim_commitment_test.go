@@ -144,7 +144,7 @@ func TestFire_UserClaimMidFireWinsAndTheRunStillLands(t *testing.T) {
 	// A human takes the task over before the fire commits. tryAutoDelegate's
 	// cross-team guard only reads the BOT claim, so the trigger proceeds and
 	// the stamp is what has to refuse.
-	if ok, err := testTaskStore(s.db).ClaimQueuedForUser(t.Context(), runmode.LocalDefaultOrgID, s.task.ID, runmode.LocalDefaultUserID, dbtest.TaskVersion(t, testTaskStore(s.db), runmode.LocalDefaultOrgID, s.task.ID)); err != nil || !ok {
+	if ok, err := testTaskStore(s.db).ClaimQueuedForUser(t.Context(), runmode.LocalDefaultOrgID, s.task.ID, runmode.LocalDefaultUserID, dbtest.ClaimTeam(t, testTaskStore(s.db), runmode.LocalDefaultOrgID, s.task.ID, runmode.LocalDefaultUserID), dbtest.TaskVersion(t, testTaskStore(s.db), runmode.LocalDefaultOrgID, s.task.ID)); err != nil || !ok {
 		t.Fatalf("ClaimQueuedForUser: ok=%v err=%v", ok, err)
 	}
 

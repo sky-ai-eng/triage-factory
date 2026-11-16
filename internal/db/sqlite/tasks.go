@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -1576,19 +1577,17 @@ func (s *taskStore) VisibilityTeams(ctx context.Context, orgID, taskID string) (
 	return out, rows.Err()
 }
 
-// sqliteClaimTeamExpr is the team a user-initiated claim lands the task on,
-// for every claim write and ResolveClaimTeam, mirroring pgClaimTeamExpr. task
-// and user are the numbered placeholders (?N) the calling statement binds the
-// task id and the claimant's user id to — numbered so one statement can carry
-// the expression in both its SET and its WHERE — and the statement's row must
-// be reachable as `tasks`.
+// sqliteClaimTeamExpr is the team a handoff to another person lands the task
+// on, mirroring pgClaimTeamExpr. task and user are the numbered placeholders
+// (?N) the calling statement binds the task id and the new claimant's user id
+// to, and the statement's row must be reachable as `tasks`.
 //
-// The claimant's active team in the task's visibility set comes first,
+// The new claimant's active team in the task's visibility set comes first,
 // preferring the current owner and otherwise the lowest id so the result is
 // deterministic; with none, the current owner while it is active. The
 // visibility set offers only a team the claimant can write, never one they
 // can only view. An archived team is neither chosen nor kept. NULL when
-// neither applies; every write's WHERE clause refuses that case.
+// neither applies.
 func sqliteClaimTeamExpr(task, user string) string {
 	return `COALESCE(
 		(SELECT tt.team_id
@@ -1601,6 +1600,43 @@ func sqliteClaimTeamExpr(task, user string) string {
 		  ORDER BY (tt.team_id = tasks.team_id) DESC, tt.team_id ASC
 		  LIMIT 1),
 		(SELECT tm.id FROM teams tm WHERE tm.id = tasks.team_id AND tm.deleted_at IS NULL))`
+}
+
+// sqliteClaimCandidateSQL is the predicate that makes a membership row a
+// team the claimant may land the statement's task on, mirroring
+// pgClaimCandidateSQL: the candidates read and every claim write that takes a
+// team carry it, so the read and the writes cannot disagree. It reads the
+// membership as `m`, its team as `tm`, and the task as `tasks`; user is the
+// numbered placeholder (?N) bound to the claimant's user id.
+//
+// A team qualifies only while it is active and the claimant writes it, as an
+// admin or member. When the task's own team qualifies it is the only
+// candidate; otherwise the candidates are the qualifying teams in the task's
+// visibility set.
+func sqliteClaimCandidateSQL(user string) string {
+	return `m.user_id = ` + user + `
+		   AND m.role IN ('admin', 'member')
+		   AND tm.deleted_at IS NULL
+		   AND CASE WHEN EXISTS (
+		              SELECT 1 FROM memberships om
+		                JOIN teams ot ON ot.id = om.team_id
+		               WHERE om.team_id = tasks.team_id AND om.user_id = ` + user + `
+		                 AND om.role IN ('admin', 'member')
+		                 AND ot.deleted_at IS NULL)
+		            THEN m.team_id = tasks.team_id
+		            ELSE m.team_id IN (SELECT tt.team_id FROM task_teams tt WHERE tt.task_id = tasks.id)
+		       END`
+}
+
+// sqliteIsClaimTeamCandidate is a claim write's guard that team, the numbered
+// placeholder bound to the team the claim names, is one of the claimant's
+// candidates for the row being written.
+func sqliteIsClaimTeamCandidate(user, team string) string {
+	return `EXISTS (
+		         SELECT 1 FROM memberships m
+		           JOIN teams tm ON tm.id = m.team_id
+		          WHERE m.team_id = ` + team + `
+		            AND ` + sqliteClaimCandidateSQL(user) + `)`
 }
 
 // sqliteClaimStageExpr is the stage a claim lands on. Assigning a task — to a
@@ -1694,7 +1730,7 @@ func stampAgentClaimIfUnclaimed(ctx context.Context, q queryer, taskID, agentID,
 	return n > 0, nil
 }
 
-func (s *taskStore) HandoffAgentClaim(ctx context.Context, orgID, taskID, agentID, userID string, version int64) (db.HandoffResult, domain.Task, error) {
+func (s *taskStore) HandoffAgentClaim(ctx context.Context, orgID, taskID, agentID, userID, teamID string, version int64) (db.HandoffResult, domain.Task, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return db.HandoffRefused, domain.Task{}, err
 	}
@@ -1704,14 +1740,16 @@ func (s *taskStore) HandoffAgentClaim(ctx context.Context, orgID, taskID, agentI
 	if userID == "" {
 		return db.HandoffRefused, domain.Task{}, fmt.Errorf("HandoffAgentClaim: empty userID")
 	}
-	claimTeam := sqliteClaimTeamExpr("?2", "?3")
+	if teamID == "" {
+		return db.HandoffRefused, domain.Task{}, fmt.Errorf("HandoffAgentClaim: empty teamID")
+	}
 	var t domain.Task
 	row, err := scanTaskBareRow(s.q.QueryRowContext(ctx, `
 		UPDATE tasks
 		   SET `+db.TaskSetSQL(
 		db.TaskAssign{Col: "claimed_by_agent_id", Expr: "?1"},
 		db.TaskAssign{Col: "claimed_by_user_id", Expr: "NULL"},
-		db.TaskAssign{Col: "team_id", Expr: claimTeam},
+		db.TaskAssign{Col: "team_id", Expr: "?5"},
 		db.TaskAssign{Col: "snooze_until", Expr: "NULL"},
 		db.TaskAssign{Col: "status", Expr: sqliteClaimStageExpr},
 	)+`
@@ -1720,9 +1758,9 @@ func (s *taskStore) HandoffAgentClaim(ctx context.Context, orgID, taskID, agentI
 		   AND (claimed_by_user_id  IS NULL OR claimed_by_user_id  = ?3)
 		   AND (claimed_by_agent_id IS NULL OR claimed_by_agent_id != ?1)
 		   AND status NOT IN ('done', 'dismissed')
-		   AND `+claimTeam+` IS NOT NULL
+		   AND `+sqliteIsClaimTeamCandidate("?3", "?5")+`
 		RETURNING `+sqliteTaskBareColumns,
-		agentID, taskID, userID, version), &t)
+		agentID, taskID, userID, version, teamID), &t)
 	if err == nil {
 		return db.HandoffChanged, row, nil
 	}
@@ -1734,17 +1772,17 @@ func (s *taskStore) HandoffAgentClaim(ctx context.Context, orgID, taskID, agentI
 	// row the caller never saw. Terminal status takes precedence over the
 	// no-op check so a sticky-bot-claim on a closed task doesn't fall through
 	// to HandoffNoOp and let the caller proceed past a row that mustn't be
-	// reopened; a missing team comes next, so a caller never proceeds to a
-	// run on a task it could not have handed off. The re-read projects the
-	// bare columns too, so a no-op answers with the row it left as it stands.
+	// reopened; the team comes next, so a caller never proceeds to a run on a
+	// task it could not have handed off to that team. The re-read projects
+	// the bare columns too, so a no-op answers with the row it left as it
+	// stands.
 	var cur domain.Task
 	var st taskScanState
-	var team sql.NullString
 	err = s.q.QueryRowContext(ctx, `
-		SELECT `+sqliteTaskBareColumns+`, `+sqliteClaimTeamExpr("?1", "?2")+`
+		SELECT `+sqliteTaskBareColumns+`
 		  FROM tasks WHERE id = ?1`,
-		taskID, userID,
-	).Scan(append(st.bareTargets(&cur), &team)...)
+		taskID,
+	).Scan(st.bareTargets(&cur)...)
 	if err == sql.ErrNoRows {
 		return db.HandoffRefused, domain.Task{}, nil
 	}
@@ -1758,8 +1796,8 @@ func (s *taskStore) HandoffAgentClaim(ctx context.Context, orgID, taskID, agentI
 	if cur.Status == "done" || cur.Status == "dismissed" {
 		return db.HandoffRefused, domain.Task{}, nil
 	}
-	if !team.Valid {
-		return db.HandoffRefused, domain.Task{}, db.ErrNoActiveClaimTeam
+	if err := claimTeamRefusal(ctx, s.q, taskID, userID, teamID); err != nil {
+		return db.HandoffRefused, domain.Task{}, err
 	}
 	if cur.ClaimedByAgentID == agentID {
 		return db.HandoffNoOp, cur, nil
@@ -1767,60 +1805,111 @@ func (s *taskStore) HandoffAgentClaim(ctx context.Context, orgID, taskID, agentI
 	return db.HandoffRefused, domain.Task{}, nil
 }
 
-func (s *taskStore) ResolveClaimTeam(ctx context.Context, orgID, taskID, userID string) (string, error) {
+func (s *taskStore) ClaimTeamCandidates(ctx context.Context, orgID, taskID, userID string) ([]string, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return "", err
+		return nil, err
 	}
-	return resolveClaimTeam(ctx, s.q, taskID, userID)
+	return claimTeamCandidates(ctx, s.q, taskID, userID)
 }
 
-// resolveClaimTeam reads the team a claim by userID would land the task on,
-// through the same expression the claim writes use. "" when the task is
-// missing, db.ErrNoActiveClaimTeam when the expression finds no team. The
-// local user is usually enrolled in no team, so in practice this is the
-// task's own team while it is active.
-func resolveClaimTeam(ctx context.Context, q queryer, taskID, userID string) (string, error) {
-	var team sql.NullString
-	err := q.QueryRowContext(ctx, `
-		SELECT `+sqliteClaimTeamExpr("?1", "?2")+`
+// claimTeamCandidates reads the teams a claim or a delegate by userID may
+// land the task on, in team id order, through the predicate the claim writes
+// carry. Empty when the task is missing or no team qualifies.
+func claimTeamCandidates(ctx context.Context, q queryer, taskID, userID string) ([]string, error) {
+	rows, err := q.QueryContext(ctx, `
+		SELECT m.team_id
 		  FROM tasks
-		 WHERE id = ?1
-	`, taskID, userID).Scan(&team)
-	if err == sql.ErrNoRows {
-		return "", nil
-	}
+		  JOIN memberships m
+		  JOIN teams tm ON tm.id = m.team_id
+		 WHERE tasks.id = ?1
+		   AND `+sqliteClaimCandidateSQL("?2")+`
+		 ORDER BY m.team_id
+	`, taskID, userID)
 	if err != nil {
-		return "", fmt.Errorf("resolve claim team: %w", err)
+		return nil, fmt.Errorf("read claim team candidates: %w", err)
 	}
-	if !team.Valid {
-		return "", db.ErrNoActiveClaimTeam
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
 	}
-	return team.String, nil
+	return out, rows.Err()
 }
 
-// claimTeamRefusal is the follow-up a person-claim write runs when it matched
-// no row: db.ErrNoActiveClaimTeam when the reason is that the claim has no
-// team to land on, nil when it was one of the write's other guards (or the
-// task is gone), for which the caller answers ok=false.
-func claimTeamRefusal(ctx context.Context, q queryer, taskID, userID string) error {
-	_, err := resolveClaimTeam(ctx, q, taskID, userID)
-	return err
+func (s *taskStore) NoClaimTeamReason(ctx context.Context, orgID, taskID, userID string) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	return noClaimTeamReason(ctx, s.q, taskID, userID)
 }
 
-func (s *taskStore) TakeoverClaimFromAgent(ctx context.Context, orgID, taskID, userID string, version int64) (bool, error) {
+// noClaimTeamReason names why a claimant with no candidate has none:
+// db.ErrNoActiveClaimTeam when the task's own team is archived or an
+// archived team the claimant writes is in its visibility set, and
+// db.ErrNoClaimTeam otherwise.
+func noClaimTeamReason(ctx context.Context, q queryer, taskID, userID string) error {
+	var archived bool
+	if err := q.QueryRowContext(ctx, `
+		SELECT EXISTS (
+		  SELECT 1 FROM tasks
+		   WHERE tasks.id = ?1
+		     AND (EXISTS (SELECT 1 FROM teams ot
+		                   WHERE ot.id = tasks.team_id AND ot.deleted_at IS NOT NULL)
+		       OR EXISTS (SELECT 1 FROM task_teams tt
+		                    JOIN teams tm ON tm.id = tt.team_id
+		                    JOIN memberships m ON m.team_id = tt.team_id
+		                   WHERE tt.task_id = tasks.id
+		                     AND tm.deleted_at IS NOT NULL
+		                     AND m.user_id = ?2
+		                     AND m.role IN ('admin', 'member'))))
+	`, taskID, userID).Scan(&archived); err != nil {
+		return fmt.Errorf("read why the claim has no team: %w", err)
+	}
+	if archived {
+		return db.ErrNoActiveClaimTeam
+	}
+	return db.ErrNoClaimTeam
+}
+
+// claimTeamRefusal is the follow-up a claim write runs when it matched no row
+// at the caller's version: what noClaimTeamReason answers when the claimant
+// has no team to land the task on, db.ErrClaimTeamNotCandidate when they
+// have one and teamID is not among them, and nil when teamID is a candidate,
+// so one of the write's other guards refused it.
+func claimTeamRefusal(ctx context.Context, q queryer, taskID, userID, teamID string) error {
+	candidates, err := claimTeamCandidates(ctx, q, taskID, userID)
+	if err != nil {
+		return err
+	}
+	if len(candidates) == 0 {
+		return noClaimTeamReason(ctx, q, taskID, userID)
+	}
+	if !slices.Contains(candidates, teamID) {
+		return db.ErrClaimTeamNotCandidate
+	}
+	return nil
+}
+
+func (s *taskStore) TakeoverClaimFromAgent(ctx context.Context, orgID, taskID, userID, teamID string, version int64) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
 	if userID == "" {
 		return false, fmt.Errorf("TakeoverClaimFromAgent: empty userID")
 	}
-	claimTeam := sqliteClaimTeamExpr("?2", "?1")
+	if teamID == "" {
+		return false, fmt.Errorf("TakeoverClaimFromAgent: empty teamID")
+	}
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE tasks
 		   SET `+db.TaskSetSQL(
 		db.TaskAssign{Col: "claimed_by_user_id", Expr: "?1"},
 		db.TaskAssign{Col: "claimed_by_agent_id", Expr: "NULL"},
-		db.TaskAssign{Col: "team_id", Expr: claimTeam},
+		db.TaskAssign{Col: "team_id", Expr: "?4"},
 		db.TaskAssign{Col: "snooze_until", Expr: "NULL"},
 		db.TaskAssign{Col: "status", Expr: sqliteClaimStageExpr},
 		db.TaskAssign{Col: "source_status", Expr: sqliteSourceStatusExpr},
@@ -1830,35 +1919,46 @@ func (s *taskStore) TakeoverClaimFromAgent(ctx context.Context, orgID, taskID, u
 		   AND claimed_by_agent_id IS NOT NULL
 		   AND claimed_by_user_id  IS NULL
 		   AND status NOT IN ('done', 'dismissed')
-		   AND `+claimTeam+` IS NOT NULL
-	`, userID, taskID, version)
-	return userClaimLanded(ctx, s.q, res, err, taskID, userID, version)
+		   AND `+sqliteIsClaimTeamCandidate("?1", "?4")+`
+	`, userID, taskID, version, teamID)
+	return userClaimLanded(ctx, s.q, res, err, taskID, userID, teamID, version)
 }
 
 // userClaimLanded is versionedWriteLanded for the person-claim writes, whose
-// refusal has one more reason to name: with the version still the caller's,
-// db.ErrNoActiveClaimTeam when the claim has no team to land on.
-func userClaimLanded(ctx context.Context, q queryer, res sql.Result, err error, taskID, userID string, version int64) (bool, error) {
+// refusal has one more thing to name: with the version still the caller's,
+// what claimTeamRefusal says of the team the claim named.
+func userClaimLanded(ctx context.Context, q queryer, res sql.Result, err error, taskID, userID, teamID string, version int64) (bool, error) {
 	ok, err := versionedWriteLanded(ctx, q, res, err, taskID, version)
 	if ok || err != nil {
 		return ok, err
 	}
-	return false, claimTeamRefusal(ctx, q, taskID, userID)
+	var exists bool
+	if err := q.QueryRowContext(ctx,
+		`SELECT EXISTS (SELECT 1 FROM tasks WHERE id = ?1)`, taskID,
+	).Scan(&exists); err != nil {
+		return false, fmt.Errorf("read task: %w", err)
+	}
+	if !exists {
+		return false, nil
+	}
+	return false, claimTeamRefusal(ctx, q, taskID, userID, teamID)
 }
 
-func (s *taskStore) ClaimQueuedForUser(ctx context.Context, orgID, taskID, userID string, version int64) (bool, error) {
+func (s *taskStore) ClaimQueuedForUser(ctx context.Context, orgID, taskID, userID, teamID string, version int64) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
 	if userID == "" {
 		return false, fmt.Errorf("ClaimQueuedForUser: empty userID is not a valid claimant")
 	}
-	claimTeam := sqliteClaimTeamExpr("?2", "?1")
+	if teamID == "" {
+		return false, fmt.Errorf("ClaimQueuedForUser: empty teamID")
+	}
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE tasks
 		   SET `+db.TaskSetSQL(
 		db.TaskAssign{Col: "claimed_by_user_id", Expr: "?1"},
-		db.TaskAssign{Col: "team_id", Expr: claimTeam},
+		db.TaskAssign{Col: "team_id", Expr: "?4"},
 		db.TaskAssign{Col: "snooze_until", Expr: "NULL"},
 		db.TaskAssign{Col: "status", Expr: sqliteClaimStageExpr},
 		db.TaskAssign{Col: "source_status", Expr: sqliteSourceStatusExpr},
@@ -1868,9 +1968,9 @@ func (s *taskStore) ClaimQueuedForUser(ctx context.Context, orgID, taskID, userI
 		   AND status IN ('queued', 'snoozed')
 		   AND claimed_by_user_id  IS NULL
 		   AND claimed_by_agent_id IS NULL
-		   AND `+claimTeam+` IS NOT NULL
-	`, userID, taskID, version)
-	return userClaimLanded(ctx, s.q, res, err, taskID, userID, version)
+		   AND `+sqliteIsClaimTeamCandidate("?1", "?4")+`
+	`, userID, taskID, version, teamID)
+	return userClaimLanded(ctx, s.q, res, err, taskID, userID, teamID, version)
 }
 
 func (s *taskStore) ReassignClaimToUser(ctx context.Context, orgID, taskID, fromUserID, toUserID string, version int64) (bool, error) {

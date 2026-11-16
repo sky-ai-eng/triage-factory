@@ -37,7 +37,7 @@ func RunTaskStatusCheckConformance(t *testing.T, mk func(t *testing.T) TaskStatu
 		s := f.Store
 		_, _, byUser := f.Seed(t, "queue-held-user")
 		_, _, byAgent := f.Seed(t, "queue-held-agent")
-		if ok, err := s.ClaimQueuedForUser(ctx, f.OrgID, byUser, f.UserID, TaskVersion(t, s, f.OrgID, byUser)); err != nil || !ok {
+		if ok, err := s.ClaimQueuedForUser(ctx, f.OrgID, byUser, f.UserID, ClaimTeam(t, s, f.OrgID, byUser, f.UserID), TaskVersion(t, s, f.OrgID, byUser)); err != nil || !ok {
 			t.Fatalf("claim: ok=%v err=%v", ok, err)
 		}
 		if ok, err := s.StampAgentClaimIfUnclaimed(ctx, f.OrgID, byAgent, f.AgentID, ""); err != nil || !ok {

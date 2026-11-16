@@ -47,7 +47,7 @@ func TestPersonClaim_OwnEventStartsNoRun(t *testing.T) {
 	}
 	enableTeamAutoDelegate(t, database, runmode.LocalDefaultTeamID)
 	tasks := testTaskStore(database)
-	if ok, err := tasks.ClaimQueuedForUser(t.Context(), runmode.LocalDefaultOrgID, taskID, runmode.LocalDefaultUserID, dbtest.TaskVersion(t, tasks, runmode.LocalDefaultOrgID, taskID)); err != nil || !ok {
+	if ok, err := tasks.ClaimQueuedForUser(t.Context(), runmode.LocalDefaultOrgID, taskID, runmode.LocalDefaultUserID, dbtest.ClaimTeam(t, tasks, runmode.LocalDefaultOrgID, taskID, runmode.LocalDefaultUserID), dbtest.TaskVersion(t, tasks, runmode.LocalDefaultOrgID, taskID)); err != nil || !ok {
 		t.Fatalf("setup: claim the task for a person: ok=%v err=%v", ok, err)
 	}
 
