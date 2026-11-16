@@ -239,12 +239,9 @@ const pgTaskUnclaimedExpr = `CASE WHEN t.claimed_by_agent_id IS NULL AND t.claim
 // The conformance suite asserts the two dialects agree on the resulting order,
 // not just the set, and walks a keyset page through every sort in both.
 //
-// Two terms are wrapped where SQLite wraps them and for the same reason:
-// closed_at is COALESCEd to a sentinel because a NULL breaks the keyset chain
-// below the partition that separates open rows from closed ones, and
-// priority_score is widened to float8 because the column is float4 while a
-// cursor value is a Go float64 — COALESCE against a numeric literal would pick
-// the comparison type instead.
+// closed_at is COALESCEd to a sentinel where SQLite COALESCEs it and for the
+// same reason: a NULL breaks the keyset chain below the partition that
+// separates open rows from closed ones.
 func pgTaskListTerms(f db.TaskListFilter) (joins string, terms []taskSortTerm) {
 	desc := f.SortDir != db.TaskSortDirAsc
 	terms = []taskSortTerm{
@@ -284,7 +281,7 @@ func pgTaskListTerms(f db.TaskListFilter) (joins string, terms []taskSortTerm) {
 			taskSortTerm{
 				expr: "COALESCE(tr.sort_order, 999)", bind: pgTaskKeyInt, check: pgTaskCheckInt,
 				target: func(t *domain.Task) any { return &t.ListSortOrder }},
-			taskSortTerm{expr: "COALESCE(t.priority_score::float8, 0.5)", bind: pgTaskKeyReal, check: pgTaskCheckReal, desc: true})
+			taskSortTerm{expr: "COALESCE(t.priority_score, 0.5)", bind: pgTaskKeyReal, check: pgTaskCheckReal, desc: true})
 	}
 	return joins, append(terms, taskSortTerm{expr: "t.id", bind: pgTaskKeyUUID, check: pgTaskCheckUUID})
 }

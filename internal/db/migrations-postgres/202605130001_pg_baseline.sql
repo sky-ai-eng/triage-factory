@@ -494,7 +494,7 @@ CREATE TABLE public.agents (
     org_id uuid NOT NULL,
     display_name text DEFAULT 'Triage Factory Bot'::text NOT NULL,
     default_model text,
-    default_autonomy_suitability real,
+    default_autonomy_suitability double precision,
     github_pat_user_id uuid,
     github_org_login text,
     -- GitHub's numeric id for the github_org_login account, written with it.
@@ -746,11 +746,11 @@ CREATE TABLE public.event_handlers (
     applies_to_unowned boolean DEFAULT false NOT NULL,
     system_slug text,
     name text,
-    default_priority real,
+    default_priority double precision,
     sort_order integer,
     blueprint_id text,
     breaker_threshold integer,
-    min_autonomy_suitability real,
+    min_autonomy_suitability double precision,
     -- Notify-only: who a notify rule tells, its creator ('creator') or its
     -- team's members ('team'). NULL for rules and triggers.
     notify_audience text,
@@ -1622,9 +1622,9 @@ CREATE TABLE public.tasks (
     dedup_key text DEFAULT ''::text NOT NULL,
     primary_event_id uuid NOT NULL,
     status text DEFAULT 'queued'::text NOT NULL,
-    priority_score real,
+    priority_score double precision,
     ai_summary text,
-    autonomy_suitability real,
+    autonomy_suitability double precision,
     priority_reasoning text,
     scoring_status text DEFAULT 'pending'::text NOT NULL,
     -- Counts score writes. UpdateTaskScores raises it with the scores and, in
@@ -1681,7 +1681,7 @@ CREATE TABLE public.team_agents (
     agent_id uuid NOT NULL,
     enabled boolean DEFAULT true NOT NULL,
     per_team_model text,
-    per_team_autonomy_suitability real,
+    per_team_autonomy_suitability double precision,
     added_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
