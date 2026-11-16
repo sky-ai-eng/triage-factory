@@ -195,6 +195,46 @@ func TestStart_ServesGHOnThePrivateSocket(t *testing.T) {
 	}
 }
 
+// A process that dies mid-run leaves its channel directory behind, socket file
+// and gh config included. The next channel for the conversation still serves
+// gh on its socket rather than failing the bind and leaving gh pointed at a
+// socket nothing listens on.
+func TestStart_ReplacesADeadChannelsDirectory(t *testing.T) {
+	paths.SetForTest(t, shortStateRoot(t))
+	dir := paths.GHChannelDir("conv-1")
+	if err := os.MkdirAll(filepath.Join(dir, "config"), 0o700); err != nil {
+		t.Fatalf("make leftover dir: %v", err)
+	}
+	socket := filepath.Join(dir, "gh.sock")
+	dead, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatalf("bind leftover socket: %v", err)
+	}
+	// A killed process never unlinks its socket file.
+	dead.(*net.UnixListener).SetUnlinkOnClose(false)
+	_ = dead.Close()
+	if err := os.WriteFile(filepath.Join(dir, "config", "config.yml"),
+		[]byte("http_unix_socket: "+strconv.Quote(socket)+"\n"), 0o600); err != nil {
+		t.Fatalf("write leftover gh config: %v", err)
+	}
+
+	upstream := newRecordingUpstream(t)
+	cfg := okConfig(t)
+	cfg.Upstream = upstream.srv.URL
+	ch, err := Start(cfg)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = ch.Close() })
+
+	if ch.Host != "127.0.0.1" {
+		t.Errorf("Host = %q, want the portless 127.0.0.1", ch.Host)
+	}
+	if status := get(t, socketClient(t, ch), "https://127.0.0.1/api/v3/repos/octo/repo/pulls/7/files", ch.Token); status != http.StatusOK {
+		t.Errorf("status down the configured socket = %d, want 200", status)
+	}
+}
+
 // The socket is the same front door as the TLS listener: a request without
 // the run's placeholder is refused on both, and neither forwards it.
 func TestStart_SocketRefusesARequestWithoutThePlaceholder(t *testing.T) {

@@ -82,12 +82,12 @@
 //
 // # What this channel cannot see at all
 //
-// GH_HOST redirects the base URL, so it reaches only the requests gh BUILDS
-// from that base. A command that takes an absolute URL out of a response body
-// and follows it — the release asset commands do this, using the upload_url and
-// the release object's own url — leaves this channel entirely, and neither its
-// act nor its outcome can be recorded here. Naming those shapes in the write
-// classifier would therefore be a promise it cannot keep.
+// Over TCP, GH_HOST redirects the base URL, so it reaches only the requests gh
+// BUILDS from that base. A command that takes an absolute URL out of a response
+// body and follows it — the release asset commands do this, using the
+// upload_url and the release object's own url — leaves this channel entirely,
+// and neither its act nor its outcome can be recorded here. Naming those shapes
+// in the write classifier would therefore be a promise it cannot keep.
 //
 // In the sandbox they do not merely go unlogged, they fail: the jail has no
 // route to those hosts and no keychain to authenticate them with, so the escape
@@ -95,6 +95,11 @@
 // observes the agent's GitHub writes" is true only of the traffic the injector
 // is in front of, and a probe run outside the jail — on a host with a real
 // keyring — will see such a command succeed with nothing recorded.
+//
+// A gh on the unix socket (ServeUnix) sends those requests here too, since
+// http_unix_socket carries every request whatever host its URL names. gh
+// attaches the placeholder only to requests for GH_HOST, so the caller-auth
+// check refuses the rest, and nothing is recorded for them.
 //
 // # TLS, but no interception
 //

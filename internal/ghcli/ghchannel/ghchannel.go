@@ -74,7 +74,7 @@ const socketHost = "127.0.0.1"
 // on Linux, 104 on macOS. A path that fills it leaves no room for the NUL a
 // client written in C expects after it, so the channel's socket path must be
 // shorter.
-var socketPathLimit = len(syscall.RawSockaddrUnix{}.Path)
+const socketPathLimit = len(syscall.RawSockaddrUnix{}.Path)
 
 var channelLog = logging.Component("ghchannel")
 
@@ -186,6 +186,13 @@ func Start(cfg Config) (*Channel, error) {
 	}
 	channelDir := paths.GHChannelDir(cfg.ConversationID)
 	configDir := filepath.Join(channelDir, "config")
+	// A directory already here was left by a process that died before its
+	// Close: its socket file would refuse the bind, and its gh config would
+	// still send gh to that dead socket. One channel holds a conversation's
+	// directory at a time, so what is here belongs to none.
+	if err := os.RemoveAll(channelDir); err != nil {
+		return nil, fmt.Errorf("ghchannel: clear channel dir: %w", err)
+	}
 	// 0700 throughout: the agent runs as this same user in local mode, so the
 	// permissions are not a boundary against it — they keep the run's surface
 	// off other accounts on a shared machine.
