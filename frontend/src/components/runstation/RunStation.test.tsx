@@ -12,12 +12,12 @@ import { resetModelCatalogForTest } from '../../hooks/useModelCatalog'
 // affordance routes over the unresolved deliverable set.
 function station(over: Partial<Conversation>, actions: Partial<StationActions> = {}) {
   const conversation = {
-    ID: 'r1',
-    TaskID: '',
-    Status: 'open',
-    Model: 'claude-opus-5',
-    StartedAt: '2026-07-30T00:00:00Z',
-    ResultSummary: '',
+    id: 'r1',
+    task_id: '',
+    status: 'open',
+    model: 'claude-opus-5',
+    started_at: '2026-07-30T00:00:00Z',
+    result_summary: '',
     ...over,
   } as Conversation
   return render(
@@ -46,29 +46,29 @@ describe('RunStation composer gate', () => {
   })
 
   it('offers the input on a parked conversation the server says is resumable', () => {
-    station({ Status: 'open', resumable: true })
+    station({ status: 'open', resumable: true })
     expect(composer()).toBeInTheDocument()
   })
 
   it('offers it on a response that predates the field, falling back to status', () => {
-    station({ Status: 'open' })
+    station({ status: 'open' })
     expect(composer()).toBeInTheDocument()
   })
 
   it('replaces it with the workspace copy when the workspace is gone', () => {
-    // The bug the field exists for: from Status alone this row is
+    // The bug the field exists for: from status alone this row is
     // indistinguishable from the one above, and every message it accepted
     // would come back 410.
-    station({ Status: 'open', resumable: false, resume_blocked_reason: 'workspace_expired' })
+    station({ status: 'open', resumable: false, resume_blocked_reason: 'workspace_expired' })
     expect(composer()).not.toBeInTheDocument()
     expect(screen.getByText(/workspace expired/i)).toBeInTheDocument()
   })
 
   it('names the blueprint when that is what refused', () => {
     station({
-      Status: 'open',
-      CompletedAt: '2026-07-16T11:00:00Z',
-      Outcome: 'finish',
+      status: 'open',
+      completed_at: '2026-07-16T11:00:00Z',
+      outcome: 'finish',
       resumable: false,
       resume_blocked_reason: 'blueprint_concluded',
     })
@@ -79,7 +79,7 @@ describe('RunStation composer gate', () => {
   it('says nothing about resuming a failed conversation', () => {
     // Not a resumable status to begin with, so there is no offer to withdraw
     // and no explanation to give.
-    station({ Status: 'failed' })
+    station({ status: 'failed' })
     expect(composer()).not.toBeInTheDocument()
     expect(screen.queryByText(/can’t be resumed|can’t take a follow-up/i)).not.toBeInTheDocument()
   })
@@ -106,7 +106,7 @@ describe('RunStation dock approval affordance', () => {
     const onOpenDeliverable = vi.fn()
     station(
       {
-        Status: 'running',
+        status: 'running',
         has_unresolved_deliverables: true,
         unresolved_pr_count: 1,
         unresolved_review_count: 0,
@@ -152,7 +152,7 @@ describe('RunStation dock approval affordance', () => {
     const onOpenDeliverable = vi.fn()
     station(
       {
-        Status: 'running',
+        status: 'running',
         has_unresolved_deliverables: true,
         unresolved_pr_count: 1,
         unresolved_review_count: 1,
@@ -181,7 +181,7 @@ describe('RunStation retry readout', () => {
 
   it('says when a queued run waiting out an unavailable provider tries again', () => {
     // `now` is 00:01; the hand-back set the next attempt four minutes later.
-    station({ Status: 'queued', next_attempt_at: '2026-07-30T00:05:00Z' })
+    station({ status: 'queued', next_attempt_at: '2026-07-30T00:05:00Z' })
     const at = new Date('2026-07-30T00:05:00Z').toLocaleTimeString([], {
       hour: '2-digit',
       minute: '2-digit',
@@ -191,12 +191,12 @@ describe('RunStation retry readout', () => {
   })
 
   it('reads as an ordinary queued run once the time has passed', () => {
-    station({ Status: 'queued', next_attempt_at: '2026-07-30T00:00:30Z' })
+    station({ status: 'queued', next_attempt_at: '2026-07-30T00:00:30Z' })
     expect(screen.queryByText(/Retrying at/)).not.toBeInTheDocument()
   })
 
   it('ignores the stamp on a run that is no longer queued', () => {
-    station({ Status: 'running', next_attempt_at: '2026-07-30T00:05:00Z' })
+    station({ status: 'running', next_attempt_at: '2026-07-30T00:05:00Z' })
     expect(screen.queryByText(/Retrying at/)).not.toBeInTheDocument()
   })
 })
@@ -213,12 +213,12 @@ describe('RunStation for a reader who may not act', () => {
   // wired, so the only thing deciding what renders is can_write.
   function liveStation(canWrite: boolean | undefined) {
     const conversation = {
-      ID: 'r1',
-      TaskID: '',
-      Status: 'running',
-      Model: 'claude-opus-5',
-      StartedAt: '2026-07-30T00:00:00Z',
-      ResultSummary: '',
+      id: 'r1',
+      task_id: '',
+      status: 'running',
+      model: 'claude-opus-5',
+      started_at: '2026-07-30T00:00:00Z',
+      result_summary: '',
       ...(canWrite === undefined ? {} : { can_write: canWrite }),
     } as Conversation
     return render(
@@ -320,16 +320,16 @@ describe('RunStation chat', () => {
     } = {},
   ) {
     const conversation = {
-      ID: 'c1',
-      TaskID: 't1',
+      id: 'c1',
+      task_id: 't1',
       type: 'interactive',
       runtime: 'native',
-      Status: 'open',
+      status: 'open',
       has_run: true,
-      Model: 'sonnet',
+      model: 'sonnet',
       next_message_model: 'sonnet',
-      StartedAt: '2026-07-30T00:00:00Z',
-      ResultSummary: '',
+      started_at: '2026-07-30T00:00:00Z',
+      result_summary: '',
       ...over,
     } as Conversation
     const ui = (c: Conversation, prompts: PendingPermission[] = pending) => (
@@ -415,7 +415,7 @@ describe('RunStation chat', () => {
   })
 
   it('closes the settings while a permission prompt hides the composer', async () => {
-    const view = chat({ Status: 'running' })
+    const view = chat({ status: 'running' })
     fireEvent.click(settingsButton())
     expect(await screen.findByRole('dialog')).toBeInTheDocument()
 

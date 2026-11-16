@@ -123,7 +123,7 @@ export function stationState(conversation: Conversation): StationState {
         belt: 0,
       }
   }
-  switch (conversation.Status) {
+  switch (conversation.status) {
     case 'open':
       // Parked before anything ran: the conversation a person's claim opens,
       // waiting for its first message. Idle's light and motion, under its
@@ -174,7 +174,7 @@ export function stationState(conversation: Conversation): StationState {
       return {
         key: 'open',
         light: HMI_CYAN,
-        label: conversation.Status.toUpperCase(),
+        label: conversation.status.toUpperCase(),
         live: false,
         scanner: false,
         heat: 0.2,

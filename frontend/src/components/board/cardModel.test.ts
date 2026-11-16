@@ -25,13 +25,13 @@ function task(over: Partial<Task> = {}): Task {
 
 function conversation(over: Partial<Conversation> = {}): Conversation {
   return {
-    ID: 'c1',
-    TaskID: 't1',
-    Status: 'running',
-    Model: 'claude-opus-5',
-    StartedAt: '2026-09-13T11:00:00Z',
-    ClaimedAt: '2026-09-13T11:30:00Z',
-    ResultSummary: '',
+    id: 'c1',
+    task_id: 't1',
+    status: 'running',
+    model: 'claude-opus-5',
+    started_at: '2026-09-13T11:00:00Z',
+    claimed_at: '2026-09-13T11:30:00Z',
+    result_summary: '',
     ...over,
   } as Conversation
 }
@@ -49,10 +49,10 @@ describe('deriveCard lifecycle', () => {
     const m = deriveCard(
       task({ status: 'queued' }),
       conversation({
-        Status: 'open',
-        CompletedAt: '2026-07-16T11:00:00Z',
-        ResultSummary: 'opened a draft pull request',
-        DurationMs: 252_000,
+        status: 'open',
+        completed_at: '2026-07-16T11:00:00Z',
+        result_summary: 'opened a draft pull request',
+        duration_ms: 252_000,
         artifact_counts: { branch: 1, pull_request: 1 },
         unresolved_pr_count: 1,
         unresolved_review_count: 0,
@@ -73,7 +73,7 @@ describe('deriveCard lifecycle', () => {
   it('reads a running conversation as working, ticking from the claim stamp', () => {
     const m = deriveCard(
       task(),
-      conversation({ Status: 'running', current_action: 'Reading internal/delegate/teardown.go' }),
+      conversation({ status: 'running', current_action: 'Reading internal/delegate/teardown.go' }),
       undefined,
       NOW,
     )
@@ -88,7 +88,7 @@ describe('deriveCard lifecycle', () => {
   it('names the queue wait on a queued run and holds the mark idle', () => {
     const m = deriveCard(
       task(),
-      conversation({ Status: 'queued', QueuedAt: '2026-09-13T11:58:00Z', queue_position: 3 }),
+      conversation({ status: 'queued', queued_at: '2026-09-13T11:58:00Z', queue_position: 3 }),
       undefined,
       NOW,
     )
@@ -99,7 +99,7 @@ describe('deriveCard lifecycle', () => {
   })
 
   it('names the setup phase as activity, in the words the Overview uses', () => {
-    const phase = (s: string) => deriveCard(task(), conversation({ Status: s }), undefined, NOW)
+    const phase = (s: string) => deriveCard(task(), conversation({ status: s }), undefined, NOW)
     expect(phase('fetching').command).toBe('Fetching the workspace')
     expect(phase('cloning').command).toBe('Cloning the repository')
     expect(phase('agent_starting').command).toBe('Starting the agent')
@@ -109,7 +109,7 @@ describe('deriveCard lifecycle', () => {
     expect(
       deriveCard(
         task(),
-        conversation({ Status: 'cloning', current_action: 'Editing internal/server/agent.go' }),
+        conversation({ status: 'cloning', current_action: 'Editing internal/server/agent.go' }),
         undefined,
         NOW,
       ).command,
@@ -120,7 +120,7 @@ describe('deriveCard lifecycle', () => {
     // Between the agent coming live and its first tool call the server has
     // no action to derive, and the row says the state rather than going back
     // to the destination label.
-    const m = deriveCard(task(), conversation({ Status: 'running' }), undefined, NOW)
+    const m = deriveCard(task(), conversation({ status: 'running' }), undefined, NOW)
     expect(m.lifecycle).toBe('working')
     expect(m.command).toBe('Working')
   })
@@ -129,14 +129,14 @@ describe('deriveCard lifecycle', () => {
     expect(
       deriveCard(
         task(),
-        conversation({ Status: 'open', CompletedAt: '2026-07-16T11:00:00Z', DurationMs: 60_000 }),
+        conversation({ status: 'open', completed_at: '2026-07-16T11:00:00Z', duration_ms: 60_000 }),
         undefined,
         NOW,
       ).lifecycle,
     ).toBe('done')
     const failed = deriveCard(
       task(),
-      conversation({ Status: 'failed', DurationMs: 60_000, ResultSummary: 'it broke' }),
+      conversation({ status: 'failed', duration_ms: 60_000, result_summary: 'it broke' }),
       undefined,
       NOW,
     )
@@ -149,9 +149,9 @@ describe('deriveCard lifecycle', () => {
       deriveCard(
         task(),
         conversation({
-          Status: 'open',
-          CompletedAt: '2026-07-16T11:00:00Z',
-          Outcome: 'abort',
+          status: 'open',
+          completed_at: '2026-07-16T11:00:00Z',
+          outcome: 'abort',
           blueprint_step_index: 0,
           blueprint_step_count: 2,
         }),
@@ -164,7 +164,7 @@ describe('deriveCard lifecycle', () => {
   it('reads a parked conversation as idle', () => {
     const m = deriveCard(
       task(),
-      conversation({ Status: 'open', DurationMs: 380_000 }),
+      conversation({ status: 'open', duration_ms: 380_000 }),
       undefined,
       NOW,
     )
@@ -178,7 +178,7 @@ describe('deriveCard lifecycle', () => {
     // is parked, and nothing ran in it, so the card is the task's.
     const m = deriveCard(
       task({ claimed_by_user_id: 'u1' }),
-      conversation({ type: 'interactive', Status: 'open', has_run: false, DurationMs: 0 }),
+      conversation({ type: 'interactive', status: 'open', has_run: false, duration_ms: 0 }),
       undefined,
       NOW,
     )
@@ -191,7 +191,7 @@ describe('deriveCard lifecycle', () => {
   it('keeps a conversation that has not run yet as a run while it is queued or starting', () => {
     // A delegation waiting for its slot has no assistant row either.
     for (const Status of ['queued', 'cloning', 'failed']) {
-      const m = deriveCard(task(), conversation({ Status, has_run: false }), undefined, NOW)
+      const m = deriveCard(task(), conversation({ status: Status, has_run: false }), undefined, NOW)
       expect(m.lifecycle, Status).not.toBe('queued')
       expect(m.age, Status).toBeUndefined()
     }
@@ -201,9 +201,9 @@ describe('deriveCard lifecycle', () => {
     const m = deriveCard(
       task(),
       conversation({
-        Status: 'open',
-        CompletedAt: '2026-07-16T11:00:00Z',
-        ResultSummary: 'Serialized the read behind a mutex.',
+        status: 'open',
+        completed_at: '2026-07-16T11:00:00Z',
+        result_summary: 'Serialized the read behind a mutex.',
       }),
       undefined,
       NOW,
@@ -235,7 +235,7 @@ describe('deriveCard lifecycle', () => {
   it('shows no summary placeholder on a closed task, which is never scored', () => {
     const m = deriveCard(
       task({ status: 'done', ai_summary: undefined, scoring_status: 'pending' }),
-      conversation({ Status: 'open', CompletedAt: '2026-09-13T11:50:00Z' }),
+      conversation({ status: 'open', completed_at: '2026-09-13T11:50:00Z' }),
       undefined,
       NOW,
     )
@@ -272,7 +272,7 @@ describe('deriveCard lifecycle', () => {
     expect(
       deriveCard(
         task({ status: 'queued', event_type: 'github:pr:ci_check_failed' }),
-        conversation({ Status: 'open' }),
+        conversation({ status: 'open' }),
         undefined,
         NOW,
       ).event?.label,
@@ -280,7 +280,7 @@ describe('deriveCard lifecycle', () => {
     expect(
       deriveCard(
         task({ status: 'done', event_type: 'github:pr:ci_check_failed' }),
-        conversation({ Status: 'open', CompletedAt: '2026-07-16T11:00:00Z', DurationMs: 60_000 }),
+        conversation({ status: 'open', completed_at: '2026-07-16T11:00:00Z', duration_ms: 60_000 }),
         undefined,
         NOW,
       ).event?.label,
@@ -299,7 +299,7 @@ describe('deriveCard lifecycle', () => {
   it("keeps a dismissed task's run lifecycle beside the dismissal", () => {
     const model = deriveCard(
       task({ status: 'dismissed' }),
-      conversation({ Status: 'failed', DurationMs: 60_000 }),
+      conversation({ status: 'failed', duration_ms: 60_000 }),
       undefined,
       NOW,
     )
@@ -310,7 +310,7 @@ describe('deriveCard lifecycle', () => {
   it("reads a dismissed task's working run as working", () => {
     const model = deriveCard(
       task({ status: 'dismissed' }),
-      conversation({ Status: 'running', current_action: 'Running the tests' }),
+      conversation({ status: 'running', current_action: 'Running the tests' }),
       undefined,
       NOW,
     )
@@ -321,9 +321,9 @@ describe('deriveCard lifecycle', () => {
 
   it('reports the chain as shape, only past one step', () => {
     const steps = [
-      conversation({ ID: 's0', Status: 'open', CompletedAt: '2026-07-16T11:00:00Z' }),
-      conversation({ ID: 's1', Status: 'running' }),
-      conversation({ ID: 's2', Status: '' }),
+      conversation({ id: 's0', status: 'open', completed_at: '2026-07-16T11:00:00Z' }),
+      conversation({ id: 's1', status: 'running' }),
+      conversation({ id: 's2', status: '' }),
     ]
     expect(deriveCard(task(), steps[1], steps, NOW).chain).toEqual({ done: 1, total: 3 })
     expect(deriveCard(task(), steps[1], [steps[1]], NOW).chain).toBeUndefined()
@@ -349,7 +349,7 @@ describe('deriveCard artifacts', () => {
     const m = deriveCard(
       task(),
       conversation({
-        Status: 'open',
+        status: 'open',
         artifact_counts: { review: 2, branch: 1, issue: 3 },
         unresolved_pr_count: 0,
         unresolved_review_count: 1,

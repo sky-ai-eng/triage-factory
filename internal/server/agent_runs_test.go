@@ -64,7 +64,7 @@ func TestHandleConversations_Batched(t *testing.T) {
 	if len(resp.Runs[taskA]) != 2 {
 		t.Fatalf("task A conversations = %d, want 2", len(resp.Runs[taskA]))
 	}
-	if got, _ := resp.Runs[taskA][0]["ID"].(string); got != primaryA {
+	if got, _ := resp.Runs[taskA][0]["id"].(string); got != primaryA {
 		t.Errorf("task A primary (runs[0]) = %q, want %q (newest first)", got, primaryA)
 	}
 	if len(resp.Runs[taskB]) != 1 {
@@ -197,7 +197,7 @@ func TestHandleConversations_TeamFilter(t *testing.T) {
 		out := map[string]bool{}
 		for _, rows := range resp.Runs {
 			for _, r := range rows {
-				id, _ := r["ID"].(string)
+				id, _ := r["id"].(string)
 				out[id] = true
 			}
 		}
@@ -563,7 +563,7 @@ func TestConversationResponse_QueuePositionOnlyWhenQueued(t *testing.T) {
 	byID := map[string]map[string]any{}
 	for _, convs := range list.Runs {
 		for _, c := range convs {
-			id, _ := c["ID"].(string)
+			id, _ := c["id"].(string)
 			byID[id] = c
 		}
 	}
@@ -608,11 +608,11 @@ func TestConversationResponse_CarriesOutcomeAndChainPosition(t *testing.T) {
 	}
 
 	got := readConversation(t, s, conversationID)
-	if got["Outcome"] != "continue" {
-		t.Errorf("Outcome = %v, want continue", got["Outcome"])
+	if got["outcome"] != "continue" {
+		t.Errorf("outcome = %v, want continue", got["outcome"])
 	}
-	if _, ok := got["OutcomeReason"]; !ok {
-		t.Error("conversation response omits OutcomeReason")
+	if _, ok := got["outcome_reason"]; !ok {
+		t.Error("conversation response omits outcome_reason")
 	}
 	if n, isNum := got["blueprint_step_count"].(float64); !isNum || n != 3 {
 		t.Errorf("blueprint_step_count = %v, want 3", got["blueprint_step_count"])
@@ -630,8 +630,8 @@ func TestConversationResponse_CarriesOutcomeAndChainPosition(t *testing.T) {
 	if n, isNum := convs[0]["blueprint_step_count"].(float64); !isNum || n != 3 {
 		t.Errorf("listed blueprint_step_count = %v, want 3", convs[0]["blueprint_step_count"])
 	}
-	if convs[0]["Outcome"] != "continue" {
-		t.Errorf("listed Outcome = %v, want continue", convs[0]["Outcome"])
+	if convs[0]["outcome"] != "continue" {
+		t.Errorf("listed outcome = %v, want continue", convs[0]["outcome"])
 	}
 
 	// The single-prompt shape — every delegated run is a blueprint step, and a

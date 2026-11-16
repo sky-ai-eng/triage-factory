@@ -284,10 +284,10 @@ export default function Board() {
   // the offer it held.
   const noteChat = useCallback((c: Conversation) => {
     setUnrunChats((prev) => {
-      if (isChatToStart(c)) return prev[c.TaskID] === c.ID ? prev : { ...prev, [c.TaskID]: c.ID }
-      if (prev[c.TaskID] !== c.ID) return prev
+      if (isChatToStart(c)) return prev[c.task_id] === c.id ? prev : { ...prev, [c.task_id]: c.id }
+      if (prev[c.task_id] !== c.id) return prev
       const next = { ...prev }
-      delete next[c.TaskID]
+      delete next[c.task_id]
       return next
     })
   }, [])
@@ -465,11 +465,11 @@ export default function Board() {
           // conversation vocabulary that no conversation can carry. The
           // `__pending-` id is what marks the row synthetic.
           return {
-            ID: `__pending-${blueprintRunID}-${i}`,
-            Status: '',
+            id: `__pending-${blueprintRunID}-${i}`,
+            status: '',
             blueprint_run_id: blueprintRunID,
             blueprint_step_index: i,
-          } as unknown as Conversation
+          } as Conversation
         })
       } catch {
         // Network error — leave chain indicator empty for now; the
@@ -541,7 +541,7 @@ export default function Board() {
         const taskConversations = conversationsByTask[taskID]
         // A task the window did not reach keeps its offer, as it keeps its
         // card's conversation, until a read that reaches it says otherwise.
-        if (taskConversations) nextChats[taskID] = taskConversations.find(isChatToStart)?.ID
+        if (taskConversations) nextChats[taskID] = taskConversations.find(isChatToStart)?.id
         if (!taskConversations || taskConversations.length === 0) continue
         const latestConversation =
           taskConversations.find((c) => !isUnusedClaimConversation(c)) ?? taskConversations[0]
@@ -551,7 +551,7 @@ export default function Board() {
             .filter((r) => r.blueprint_run_id === blueprintRunID)
             .sort((a, b) => (a.blueprint_step_index ?? 0) - (b.blueprint_step_index ?? 0))
           const activeStep =
-            stepConversations.find((r) => isActiveStatus(r.Status)) ??
+            stepConversations.find((r) => isActiveStatus(r.status)) ??
             stepConversations[stepConversations.length - 1]
           nextConversations[taskID] = activeStep
           chainSeeds.push(
@@ -781,7 +781,7 @@ export default function Board() {
       // taken over from the agent, and its first row is what retires the
       // card's "Start chat", so it refreshes the card too.
       const taskID =
-        Object.entries(conversationsRef.current).find(([, c]) => c.ID === conversationID)?.[0] ??
+        Object.entries(conversationsRef.current).find(([, c]) => c.id === conversationID)?.[0] ??
         Object.entries(unrunChatsRef.current).find(([, id]) => id === conversationID)?.[0]
       if (!taskID) return
       const timers = actionRefreshTimers.current
@@ -829,15 +829,15 @@ export default function Board() {
           setConversations((prev) => {
             const updated = { ...prev }
             for (const [taskId, conversation] of Object.entries(updated)) {
-              if (conversation.ID === conversationID) {
+              if (conversation.id === conversationID) {
                 matched = true
                 // failure_kind rides the failed-status event so the card's
                 // kind-specific copy lands with the flip, not only after the
                 // full-conversation refetch below settles.
                 updated[taskId] = {
                   ...conversation,
-                  Status: status,
-                  ...(event.data.failure_kind ? { FailureKind: event.data.failure_kind } : {}),
+                  status,
+                  ...(event.data.failure_kind ? { failure_kind: event.data.failure_kind } : {}),
                 }
                 break
               }
@@ -848,20 +848,20 @@ export default function Board() {
             .then((fullConversation) => {
               noteChat(fullConversation)
               setConversations((p) => {
-                const existing = p[fullConversation.TaskID]
+                const existing = p[fullConversation.task_id]
                 if (
                   existing &&
-                  existing.ID !== fullConversation.ID &&
-                  (existing.StartedAt >= fullConversation.StartedAt ||
+                  existing.id !== fullConversation.id &&
+                  (existing.started_at >= fullConversation.started_at ||
                     isUnusedClaimConversation(fullConversation))
                 ) {
                   return p
                 }
-                return { ...p, [fullConversation.TaskID]: fullConversation }
+                return { ...p, [fullConversation.task_id]: fullConversation }
               })
               if (fullConversation.blueprint_run_id) {
                 seedChainStepConversations(
-                  fullConversation.TaskID,
+                  fullConversation.task_id,
                   fullConversation.blueprint_run_id,
                 )
               }
@@ -892,7 +892,7 @@ export default function Board() {
             // haven't tracked yet render immediately.
             let isChainStep = false
             for (const steps of Object.values(chainStepConversationsRef.current)) {
-              if (steps.some((r) => r.blueprint_run_id && r.ID === conversationID)) {
+              if (steps.some((r) => r.blueprint_run_id && r.id === conversationID)) {
                 isChainStep = true
                 break
               }
@@ -906,19 +906,19 @@ export default function Board() {
                 .then((fullConversation) => {
                   noteChat(fullConversation)
                   setConversations((p) => {
-                    const existing = p[fullConversation.TaskID]
+                    const existing = p[fullConversation.task_id]
                     if (
                       existing &&
-                      existing.ID !== fullConversation.ID &&
+                      existing.id !== fullConversation.id &&
                       isUnusedClaimConversation(fullConversation)
                     ) {
                       return p
                     }
-                    return { ...p, [fullConversation.TaskID]: fullConversation }
+                    return { ...p, [fullConversation.task_id]: fullConversation }
                   })
                   if (fullConversation.blueprint_run_id) {
                     seedChainStepConversations(
-                      fullConversation.TaskID,
+                      fullConversation.task_id,
                       fullConversation.blueprint_run_id,
                     )
                   }
@@ -930,20 +930,20 @@ export default function Board() {
           // Reconciler: a deliverable this conversation produced changed state
           // on GitHub. The conversation's own status is unchanged — only its
           // deliverable-derived surface (the strip, the frame) — so refetch
-          // the conversation, with NO optimistic Status write (unlike conversation_update).
+          // the conversation, with NO optimistic status write (unlike conversation_update).
           apiJSON<Conversation>(`/api/agent/conversations/${event.conversation_id}`)
             .then((fullConversation) => {
               setConversations((p) => {
-                const existing = p[fullConversation.TaskID]
+                const existing = p[fullConversation.task_id]
                 if (
                   existing &&
-                  existing.ID !== fullConversation.ID &&
-                  (existing.StartedAt >= fullConversation.StartedAt ||
+                  existing.id !== fullConversation.id &&
+                  (existing.started_at >= fullConversation.started_at ||
                     isUnusedClaimConversation(fullConversation))
                 ) {
                   return p
                 }
-                return { ...p, [fullConversation.TaskID]: fullConversation }
+                return { ...p, [fullConversation.task_id]: fullConversation }
               })
             })
             .catch(() => {})
@@ -999,10 +999,10 @@ export default function Board() {
   const permissionsAskedRef = useRef<Set<string>>(new Set())
   useEffect(() => {
     for (const conversation of Object.values(conversations)) {
-      if (!conversation?.ID || isPermissionTerminalStatus(conversation.Status)) continue
-      if (permissionsAskedRef.current.has(conversation.ID)) continue
-      permissionsAskedRef.current.add(conversation.ID)
-      refreshPermissions(conversation.ID)
+      if (!conversation?.id || isPermissionTerminalStatus(conversation.status)) continue
+      if (permissionsAskedRef.current.has(conversation.id)) continue
+      permissionsAskedRef.current.add(conversation.id)
+      refreshPermissions(conversation.id)
     }
   }, [conversations, refreshPermissions])
 
@@ -1012,7 +1012,7 @@ export default function Board() {
   // isn't dropped in the window before its conversation's conversation_update seeds
   // conversations. queuesRef gives the latest queue keys without that dependency.
   useEffect(() => {
-    const live = new Set(Object.values(conversations).map((r) => r.ID))
+    const live = new Set(Object.values(conversations).map((r) => r.id))
     for (const conversationID of Object.keys(queuesRef.current)) {
       if (!live.has(conversationID)) dropPermissionConversation(conversationID)
     }
@@ -1473,12 +1473,12 @@ export default function Board() {
             // mint — nobody has claimed it yet — so the card shows its
             // queue wait instead of pretending an agent is already working.
             [task.id]: {
-              ID: conversationID,
-              TaskID: task.id,
-              Status: 'queued',
-              Model: '',
-              StartedAt: new Date().toISOString(),
-              ResultSummary: '',
+              id: conversationID,
+              task_id: task.id,
+              status: 'queued',
+              model: '',
+              started_at: new Date().toISOString(),
+              result_summary: '',
             },
           }))
           setDelegateFailures((prev) => {
@@ -1816,7 +1816,7 @@ function ColumnContents({
             conversation={conversation}
             chainSteps={chainStepConversations[task.id]}
             unrunChatID={unrunChats[task.id]}
-            pendingPermissions={conversation ? permQueues[conversation.ID] : undefined}
+            pendingPermissions={conversation ? permQueues[conversation.id] : undefined}
             onResolvePermission={onResolvePermission}
             delegateFailure={delegateFailures[task.id]}
             onRetry={onRetry}
@@ -1898,7 +1898,7 @@ const SortableCard = memo(function SortableCard({
     return () => clearInterval(t)
   }, [model.ticking])
 
-  const href = conversation ? orgHref(`/runs/${conversation.ID}`) : undefined
+  const href = conversation ? orgHref(`/runs/${conversation.id}`) : undefined
   // The holder's way into their own conversation, until it has run. Only the
   // person who holds the task is offered it: a teammate reads the card as it
   // is, since a conversation has one person in it.
@@ -1920,7 +1920,7 @@ const SortableCard = memo(function SortableCard({
     if (resolving.current || !conversation || !head) return
     resolving.current = true
     try {
-      await onResolvePermission(conversation.ID, head.tool_call_id, { behavior })
+      await onResolvePermission(conversation.id, head.tool_call_id, { behavior })
     } finally {
       resolving.current = false
     }
@@ -1930,7 +1930,7 @@ const SortableCard = memo(function SortableCard({
       ? {
           command: stripWorktree(
             summarizePermissionInput(head.tool_name, head.input),
-            conversation.WorktreePath,
+            conversation.worktree_path,
           ),
           count: pendingPermissions?.length ?? 1,
           onAllow: () => void resolve('allow'),

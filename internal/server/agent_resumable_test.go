@@ -118,8 +118,8 @@ func TestHandleAgentStatus_ResumabilityOmittedForActiveAndFailed(t *testing.T) {
 			}
 
 			got := readConversation(t, s, conversationID)
-			if got["Status"] != status {
-				t.Fatalf("display status = %v, want %s — the fixture didn't produce the shape under test", got["Status"], status)
+			if got["status"] != status {
+				t.Fatalf("display status = %v, want %s — the fixture didn't produce the shape under test", got["status"], status)
 			}
 			if _, ok := got["resumable"]; ok {
 				t.Errorf("resumable = %v, want the key absent for a %s conversation", got["resumable"], status)

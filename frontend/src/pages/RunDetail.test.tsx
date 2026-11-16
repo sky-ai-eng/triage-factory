@@ -7,12 +7,12 @@ import { jsonBody } from '../test/apiResponse'
 import { resetModelCatalogForTest } from '../hooks/useModelCatalog'
 
 const stopping = {
-  ID: 'c1',
-  TaskID: '',
-  Status: 'running',
-  Model: 'claude-opus-5',
-  StartedAt: '2026-09-22T00:00:00Z',
-  ResultSummary: '',
+  id: 'c1',
+  task_id: '',
+  status: 'running',
+  model: 'claude-opus-5',
+  started_at: '2026-09-22T00:00:00Z',
+  result_summary: '',
   stop_requested_at: '2026-09-22T00:00:05Z',
 } as Conversation
 
@@ -80,8 +80,8 @@ describe('RunDetail return to queue', () => {
   function parkedOn(task: Partial<Task>) {
     detail.conversation = {
       ...stopping,
-      TaskID: 't1',
-      Status: 'open',
+      task_id: 't1',
+      status: 'open',
       stop_requested_at: undefined,
     }
     detail.task = { id: 't1', memory_pending: false, ...task } as Task
@@ -136,8 +136,8 @@ describe('RunDetail send', () => {
   it('posts the text with the model and effort the composer names', async () => {
     detail.conversation = {
       ...stopping,
-      TaskID: 't1',
-      Status: 'open',
+      task_id: 't1',
+      status: 'open',
       has_run: true,
       stop_requested_at: undefined,
       next_message_model: 'opus',
@@ -202,8 +202,8 @@ describe('RunDetail Escape', () => {
   function parked(conversation: Partial<Conversation> = {}) {
     detail.conversation = {
       ...stopping,
-      TaskID: 't1',
-      Status: 'open',
+      task_id: 't1',
+      status: 'open',
       has_run: true,
       stop_requested_at: undefined,
       ...conversation,

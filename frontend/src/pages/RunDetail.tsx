@@ -103,15 +103,15 @@ export default function RunDetail() {
           // empty because it has no conversation, not a name outside the
           // vocabulary.
           return {
-            ID: `__pending-${conversation.blueprint_run_id}-${i}`,
-            TaskID: conversation.TaskID,
-            Status: '',
-            Model: '',
-            StartedAt: '',
-            ResultSummary: '',
+            id: `__pending-${conversation.blueprint_run_id}-${i}`,
+            task_id: conversation.task_id,
+            status: '',
+            model: '',
+            started_at: '',
+            result_summary: '',
             blueprint_run_id: conversation.blueprint_run_id,
             blueprint_step_index: i,
-          } as unknown as Conversation
+          } as Conversation
         })
         setChainSteps(padded)
       })
@@ -119,7 +119,7 @@ export default function RunDetail() {
     return () => {
       cancelled = true
     }
-  }, [conversation?.blueprint_run_id, conversation?.TaskID])
+  }, [conversation?.blueprint_run_id, conversation?.task_id])
 
   // Stop the conversation: the agent stops, it parks `open`, and its
   // blueprint and task stay exactly where they were — so the composer's offer
@@ -131,7 +131,7 @@ export default function RunDetail() {
     if (!conversation || stopPending) return
     setStopPending(true)
     try {
-      await apiFetch(`/api/agent/conversations/${conversation.ID}/stop`, { method: 'POST' })
+      await apiFetch(`/api/agent/conversations/${conversation.id}/stop`, { method: 'POST' })
       softRefresh()
     } catch (err) {
       toast.failed(err, 'Could not stop the run.')
@@ -154,7 +154,7 @@ export default function RunDetail() {
     async ({ text, model, effort }: OutgoingMessage): Promise<SendOutcome> => {
       if (!conversation) return { sent: false, settingsErrors: [] }
       try {
-        await apiFetch(`/api/agent/conversations/${conversation.ID}/message`, {
+        await apiFetch(`/api/agent/conversations/${conversation.id}/message`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(effort ? { text, model, effort } : { text, model }),
@@ -253,7 +253,7 @@ export default function RunDetail() {
     // A stop asked for and not yet settled disables the controls the same way
     // the in-flight POST does; a terminal row has no stop controls to disable.
     stopPending:
-      stopPending || (!!conversation.stop_requested_at && !isTerminalStatus(conversation.Status)),
+      stopPending || (!!conversation.stop_requested_at && !isTerminalStatus(conversation.status)),
     onResolvePermission: resolvePermission,
   }
 

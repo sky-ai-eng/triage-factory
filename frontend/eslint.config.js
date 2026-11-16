@@ -24,6 +24,13 @@ export default defineConfig([
     languageOptions: {
       ecmaVersion: 2020,
       globals: globals.browser,
+      // Type information, for no-ghost-conversation-status: a conversation's
+      // `status` and a blueprint run's are told apart by the interface the
+      // checker resolves the property to.
+      parserOptions: {
+        projectService: true,
+        tsconfigRootDir: import.meta.dirname,
+      },
     },
     // The conversation-status vocabulary's second enforcer. The Go mirror test
     // pins the arrays in src/types.ts; this pins the component code that

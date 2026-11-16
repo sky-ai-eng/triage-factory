@@ -375,7 +375,9 @@ const UpstreamContinuationNote = "<system-note kind=\"continuation\">\n" +
 // regardless of surface (a delegated task conversation, a future interactive
 // session or subagent). Per-engagement execution state lives on Claim. The
 // status/summary projection is served through a handler-side map; the
-// transcript rows cross the wire as the snake_case MessageDTO.
+// transcript rows cross the wire as the snake_case MessageDTO. The JSON tags
+// spell the map's keys, so a read that marshals the struct itself writes the
+// same names.
 type Conversation struct {
 	// Type names the owning surface: "delegation" | "interactive" (minted by
 	// a person's claim) | namespaced "subagent:<kind>" (reserved). Empty on
@@ -397,17 +399,17 @@ type Conversation struct {
 	// changes assembly, and assembly must be a pure function of rows).
 	ArchivedAt *time.Time `json:"archived_at,omitempty"`
 
-	ID       string
-	TaskID   string
-	PromptID string // FK to prompts.id — which prompt was used for this conversation
+	ID       string `json:"id"`
+	TaskID   string `json:"task_id"`
+	PromptID string `json:"prompt_id"` // FK to prompts.id — which prompt was used for this conversation
 	// Status is the DISPLAYED lifecycle: the stored column with the live
 	// claim's phase coalesced over it, so a hydrated DTO may carry a phase
 	// name here. The vocabulary and its classifiers live in conversation_status.go;
 	// don't restate the names anywhere else. Approval is a derived view over
 	// the unresolved-deliverable set, never a stored status.
-	Status    string
-	Model     string
-	StartedAt time.Time
+	Status    string    `json:"status"`
+	Model     string    `json:"model"`
+	StartedAt time.Time `json:"started_at"`
 	// QueuedAt is when the conversation entered the queue this episode — the
 	// enqueue for a fresh conversation, re-stamped by the wake on a resume;
 	// ClaimedAt is when the dispatcher last claimed it (work actually began).
@@ -416,9 +418,9 @@ type Conversation struct {
 	// StartedAt stays the mint stamp and DurationMs stays pure working time
 	// (the SDK-reported per-turn duration, never wall clock across the
 	// queue). Both nil on legacy rows that predate the queue columns.
-	QueuedAt    *time.Time
-	ClaimedAt   *time.Time
-	CompletedAt *time.Time
+	QueuedAt    *time.Time `json:"queued_at"`
+	ClaimedAt   *time.Time `json:"claimed_at"`
+	CompletedAt *time.Time `json:"completed_at"`
 
 	// NextAttemptAt is the earliest time the dispatcher may claim this
 	// conversation again, set when an engagement handed it back to wait out
@@ -442,21 +444,20 @@ type Conversation struct {
 	// one — in a shared fleet it can therefore understate the wait, which is
 	// accepted. The deployment-truthful view is the fleet console's, behind
 	// the operator gate.
-	QueuePosition *int
+	QueuePosition *int `json:"queue_position,omitempty"`
 
 	// TotalCostUSD / DurationMs / NumTurns are derived at read time, not
 	// stored: cost is the SUM of the messages ledger's cost_usd stamps,
 	// duration/turns the SUM of the claims' per-engagement telemetry. nil
 	// when nothing has settled yet. Wire shape unchanged from the
 	// stored-column era.
-	TotalCostUSD *float64
-	DurationMs   *int
-	NumTurns     *int
+	TotalCostUSD *float64 `json:"total_cost_usd"`
+	DurationMs   *int     `json:"duration_ms"`
+	NumTurns     *int     `json:"num_turns"`
 
 	// Token breakdown, derived at read time as the SUM over this
 	// conversation's messages (plain ints — 0 for a conversation that never
-	// streamed a usage-bearing message). Mirrors system_llm_runs' columns;
-	// snake_case json tags keep the frozen wire shape.
+	// streamed a usage-bearing message). Mirrors system_llm_runs' columns.
 	InputTokens         int `json:"input_tokens"`
 	OutputTokens        int `json:"output_tokens"`
 	CacheReadTokens     int `json:"cache_read_tokens"`
@@ -466,7 +467,7 @@ type Conversation struct {
 	// ParkReason vocabulary, see the type. Empty === SQL NULL: never parked,
 	// or resumed since (a resume clears it, so a conversation that went on to
 	// conclude doesn't still name the stop it was picked back up from).
-	ParkReason ParkReason
+	ParkReason ParkReason `json:"park_reason"`
 
 	// EndedAt / EndedReason are the boundary stamp: WHEN this conversation
 	// stopped being its task's live one, and WHY (the closed EndedReason
@@ -478,8 +479,8 @@ type Conversation struct {
 	// `failed` or parked `open` — what ended it is the task moving on, not
 	// the transcript finishing — so a reader asking "is this still the task's
 	// conversation" reads EndedAt and nothing else.
-	EndedAt     *time.Time
-	EndedReason EndedReason
+	EndedAt     *time.Time  `json:"ended_at,omitempty"`
+	EndedReason EndedReason `json:"ended_reason,omitempty"`
 
 	// StopRequestedAt / StopRequestedBy are a pending stop: someone asked for
 	// this conversation to stop and neither its holder nor the dispatcher has
@@ -501,31 +502,31 @@ type Conversation struct {
 	ClaimLastActivityAt *time.Time `json:"claim_last_activity_at,omitempty"`
 	ClaimCurrentOp      string     `json:"claim_current_op,omitempty"`
 
-	WorktreePath  string
-	ResultSummary string
+	WorktreePath  string `json:"worktree_path"`
+	ResultSummary string `json:"result_summary"`
 
 	// Outcome is the step's verdict (ConversationOutcome vocabulary),
 	// persisted with the park that records it. Empty string === SQL NULL: no
 	// verdict yet, or an infra-error conversation (status='failed'). The
 	// orchestrator reads this to advance.
-	Outcome string
+	Outcome string `json:"outcome"`
 	// OutcomeReason is the natural-language "why I stopped / what a human
 	// needs to do": the reason a stop_blueprint call gave, for either ending.
 	// Distinct from ResultSummary (the always-present "what I did"). Empty ===
 	// NULL.
-	OutcomeReason string
+	OutcomeReason string `json:"outcome_reason"`
 	// FailureKind is the machine-readable failure discriminator
 	// (ConversationFailureKind vocabulary) for a status='failed' conversation —
 	// see the type's doc. Empty string === SQL NULL: non-failed conversations,
 	// legacy failed rows, and failures nothing classified.
-	FailureKind ConversationFailureKind
-	SessionID   string // Claude Code session_id captured from `claude -p --output-format json`, used for --resume
+	FailureKind ConversationFailureKind `json:"failure_kind"`
+	SessionID   string                  `json:"session_id"` // Claude Code session_id captured from `claude -p --output-format json`, used for --resume
 	// MemoryMissing — the agent did not write its own memory: the conversation
 	// has no conversation_memory row whose Source is MemorySourceAgent. A
 	// generated row (the provisioner standing in) and a `none` row (a run that
 	// concluded with nothing to say) both leave it true, because the question
 	// is about the agent and not about whether a row exists.
-	MemoryMissing bool
+	MemoryMissing bool `json:"memory_missing"`
 	// HasRun says the conversation holds an assistant message: an engagement
 	// has produced a turn on it. Derived on every read
 	// (db.ConversationHasRunSQL), never stored. A conversation a person's
@@ -533,8 +534,8 @@ type Conversation struct {
 	// notes it has collected, and a conversation that never ran owes no
 	// memory when a boundary ends it.
 	HasRun      bool   `json:"has_run"`
-	TriggerType string // "manual" | "event" (matches conversations.trigger_type / blueprint_runs.trigger_type vocabulary)
-	TriggerID   string // FK to event_handlers.id — the firing trigger, inherited from the parent blueprint_run onto every step's conversation so the llm_spend view can attribute autonomous spend by rule (TFAC-478); empty/NULL for manual conversations
+	TriggerType string `json:"trigger_type"` // "manual" | "event" (matches conversations.trigger_type / blueprint_runs.trigger_type vocabulary)
+	TriggerID   string `json:"trigger_id"`   // FK to event_handlers.id — the firing trigger, inherited from the parent blueprint_run onto every step's conversation so the llm_spend view can attribute autonomous spend by rule; empty/NULL for manual conversations
 
 	// TriggeringEventID is the event instance that auto-fired this
 	// conversation. Set only on the event path; empty (→ SQL NULL) for manual
@@ -545,14 +546,14 @@ type Conversation struct {
 	// already committed conflicts on the fence and is skipped. Forward-only
 	// provenance — written via BlueprintStore.CreateRunWithFirstStepSystem, not
 	// hydrated by Get.
-	TriggeringEventID string
+	TriggeringEventID string `json:"triggering_event_id"`
 
 	// ActorAgentID is the agents.id the spawner stamped when the conversation
 	// started. Immutable audit pointer — survives later
 	// config edits and agent-row deletion (SET NULL on delete). Empty
 	// string = NULL on the row (conversation was spawned before the agent
 	// bootstrap completed, or after the agent was deleted).
-	ActorAgentID string
+	ActorAgentID string `json:"actor_agent_id"`
 
 	// ActorAgentName is the display name of the actor agent, denormalized
 	// from agents.display_name via a LEFT JOIN on the read projections (Get /
@@ -560,7 +561,7 @@ type Conversation struct {
 	// without a second round-trip. Empty when actor_agent_id is NULL or the
 	// referenced agent row was deleted (LEFT JOIN → NULL name); not a stored
 	// column, so insert/scan paths that don't JOIN agents leave it "".
-	ActorAgentName string
+	ActorAgentName string `json:"actor_agent_name"`
 
 	// CreatorUserID is the users.id of the human who initiated this
 	// conversation. Set for manual conversations (the delegate route /
@@ -569,7 +570,7 @@ type Conversation struct {
 	// CHECK pairs this with trigger_type: 'manual' ↔ non-NULL,
 	// 'event' ↔ NULL. Same shape the system_rows_nullable
 	// migration introduced for prompts / task_rules / etc.
-	CreatorUserID string
+	CreatorUserID string `json:"creator_user_id"`
 
 	// TeamID is the conversation's owning team — conversations.team_id, NOT NULL (the
 	// LocalDefaultTeamID sentinel in local mode, the task-derived team in
@@ -579,7 +580,7 @@ type Conversation struct {
 	// deliverables.team_id (NOT NULL, per TFAC-455 F1) directly off the conversation.
 	// Populated by the Get and ClaimNextConversation scan paths; empty on rows
 	// hydrated by projections that don't select it.
-	TeamID string
+	TeamID string `json:"team_id"`
 
 	BlueprintRunID     string `json:"blueprint_run_id,omitempty"`     // FK to blueprint_runs.id — populated for conversations that are a step inside a multi-step blueprint
 	BlueprintStepIndex *int   `json:"blueprint_step_index,omitempty"` // 0-based step index within the blueprint; nil for non-blueprint-step conversations

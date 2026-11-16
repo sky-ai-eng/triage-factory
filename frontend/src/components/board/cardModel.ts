@@ -99,7 +99,7 @@ export function deriveCard(
   // idle would say work stopped that never started. One that has not run but
   // is queued, starting or failed stays a run, since something is happening
   // to it or went wrong.
-  const parkedUnrun = conversation?.has_run === false && conversation.Status === 'open'
+  const parkedUnrun = conversation?.has_run === false && conversation.status === 'open'
   const hasRun = !!conversation && !queuedTask && !parkedUnrun
   const lifecycle = lifecycleOf(task, hasRun ? conversation : undefined)
   const working = lifecycle === 'working'
@@ -123,7 +123,7 @@ export function deriveCard(
   if (working && conversation) {
     const retryAt = retryingAt(conversation, now)
     if (retryAt) command = retryingAtLabel(retryAt)
-    else if (conversation.Status === 'queued') {
+    else if (conversation.status === 'queued') {
       const ahead = (conversation.queue_position ?? 1) - 1
       command = ahead > 0 ? `Waiting for a run slot · ${ahead} ahead` : 'Waiting for a run slot'
     } else command = activeProse(conversation)
@@ -137,13 +137,13 @@ export function deriveCard(
       // entered the line, a started run's elapsed from the claim stamp, so
       // queue time never inflates working time.
       const from =
-        conversation.Status === 'queued'
-          ? (conversation.QueuedAt ?? conversation.StartedAt)
+        conversation.status === 'queued'
+          ? (conversation.queued_at ?? conversation.started_at)
           : workStartedAt(conversation)
       elapsed = formatElapsed(from, now)
       ticking = true
-    } else if (conversation.DurationMs != null) {
-      elapsed = formatDurationMs(conversation.DurationMs)
+    } else if (conversation.duration_ms != null) {
+      elapsed = formatDurationMs(conversation.duration_ms)
     }
   }
 
@@ -181,7 +181,7 @@ export function deriveCard(
     // steps that produced them are over, and a queued card carrying their
     // segments would read as a plan still in motion.
     chain: hasRun ? chainShape(chainSteps) : undefined,
-    liveState: conversation?.Status === 'queued' ? 'idle' : 'running',
+    liveState: conversation?.status === 'queued' ? 'idle' : 'running',
     ticking,
   }
 }
@@ -205,7 +205,7 @@ function lifecycleOf(task: Task, run: Conversation | undefined): Lifecycle {
   // No run: a task, waiting — or, for a task closed with nothing ever run on
   // it, simply done.
   if (!run) return isOpenTask(task) ? 'queued' : 'done'
-  const s = run.Status
+  const s = run.status
   if (s === 'queued' || isActiveStatus(s)) return 'working'
   if (isFailedStatus(s)) return 'failed'
   // A concluded conversation means three things (lib/conversationStatus

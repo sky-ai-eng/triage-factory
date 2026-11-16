@@ -61,16 +61,16 @@ export function TelemetryRail({
   // the elapsed readout (`now`), so memoize it on the message array.
   const contextUsed = useMemo(() => latestContextSize(messages), [messages])
   const { all: catalog } = useModelCatalog()
-  const catalogWindow = catalog.find((m) => m.key === conversation.Model)?.context_window
+  const catalogWindow = catalog.find((m) => m.key === conversation.model)?.context_window
   // Working time and queue dwell are separate gauges: elapsed/running tick
   // from the claim stamp (queue time never inflates them), the queued readout
   // carries the wait — live while the run is in line, settled once it ran.
-  const isQueued = conversation.Status === 'queued'
+  const isQueued = conversation.status === 'queued'
   const workStart = workStartedAt(conversation)
   const started = !isQueued && workStart ? new Date(workStart) : null
   const duration =
-    conversation.DurationMs != null && conversation.DurationMs > 0
-      ? formatDurationMs(conversation.DurationMs)
+    conversation.duration_ms != null && conversation.duration_ms > 0
+      ? formatDurationMs(conversation.duration_ms)
       : workStart
         ? formatElapsed(workStart, now)
         : null
@@ -110,7 +110,7 @@ export function TelemetryRail({
         <Section label="Context">
           <ContextGauge
             used={contextUsed}
-            limit={contextLimit(conversation.Model, catalogWindow)}
+            limit={contextLimit(conversation.model, catalogWindow)}
             light={state.light}
           />
         </Section>
@@ -118,20 +118,20 @@ export function TelemetryRail({
 
       {/* Run figures */}
       <Section label="Run">
-        {conversation.NumTurns != null && conversation.NumTurns > 0 && (
-          <Readout k="turns" v={String(conversation.NumTurns)} />
+        {conversation.num_turns != null && conversation.num_turns > 0 && (
+          <Readout k="turns" v={String(conversation.num_turns)} />
         )}
-        {conversation.TotalCostUSD != null && conversation.TotalCostUSD > 0 && (
+        {conversation.total_cost_usd != null && conversation.total_cost_usd > 0 && (
           <Readout
             k="cost"
-            v={`$${conversation.TotalCostUSD.toFixed(conversation.TotalCostUSD < 1 ? 4 : 2)}`}
+            v={`$${conversation.total_cost_usd.toFixed(conversation.total_cost_usd < 1 ? 4 : 2)}`}
           />
         )}
-        {conversation.Model && (
-          <Readout k="model" v={shortModel(conversation.Model)} title={conversation.Model} />
+        {conversation.model && (
+          <Readout k="model" v={shortModel(conversation.model)} title={conversation.model} />
         )}
-        {duration && (conversation.DurationMs != null || !isQueued) && (
-          <Readout k={conversation.DurationMs != null ? 'elapsed' : 'running'} v={duration} />
+        {duration && (conversation.duration_ms != null || !isQueued) && (
+          <Readout k={conversation.duration_ms != null ? 'elapsed' : 'running'} v={duration} />
         )}
         {idle && <Readout k="idle" v={idle} />}
         {dwellMs != null && (isQueued || dwellMs >= QUEUE_DWELL_VISIBLE_MS) && (
@@ -157,16 +157,16 @@ export function TelemetryRail({
         {started && (
           <Readout k="started" v={clockStamp(started)} title={started.toLocaleString()} />
         )}
-        {conversation.ParkReason && (
-          <Readout k="stop" v={parkReasonLabel(conversation.ParkReason)} />
+        {conversation.park_reason && (
+          <Readout k="stop" v={parkReasonLabel(conversation.park_reason)} />
         )}
         {/* The stored token, plus what it meant for the task. On its own
             `continue` is an orchestration term the viewer has no way to read —
             and the one that decides whether anything runs after this. */}
-        {conversation.Outcome && (
+        {conversation.outcome && (
           <Readout
             k="outcome"
-            v={conversation.Outcome}
+            v={conversation.outcome}
             accent={state.light}
             note={completionGloss(conversation)}
           />
@@ -182,17 +182,17 @@ export function TelemetryRail({
         onDeliverableResolved={onDeliverableResolved}
       />
 
-      {isConcluded(conversation) && conversation.ResultSummary && (
+      {isConcluded(conversation) && conversation.result_summary && (
         <Section label="Summary" last>
           <p className="whitespace-pre-line text-secondary leading-relaxed text-ink-2">
-            {conversation.ResultSummary}
+            {conversation.result_summary}
           </p>
         </Section>
       )}
 
-      {conversation.OutcomeReason && (
+      {conversation.outcome_reason && (
         <Section label="Reason" last>
-          <p className="text-secondary leading-relaxed text-ink-2">{conversation.OutcomeReason}</p>
+          <p className="text-secondary leading-relaxed text-ink-2">{conversation.outcome_reason}</p>
         </Section>
       )}
     </aside>

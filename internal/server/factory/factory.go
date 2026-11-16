@@ -68,30 +68,29 @@ type factoryRunJSON struct {
 	Mine bool                  `json:"mine"`
 }
 
-// factoryRunSummaryJSON mirrors the AgentCard-expected shape the frontend
-// already consumes (see frontend/src/types.ts Conversation). Field names are
-// capitalized to match the struct-tag-free JSON the existing /api/agent/
-// runs handler emits for Status/StartedAt/etc.
+// factoryRunSummaryJSON is the subset of the conversation body the factory's
+// agent cards read (frontend/src/types.ts Conversation), under the same keys
+// the conversation routes write.
 type factoryRunSummaryJSON struct {
-	ID             string     `json:"ID"`
-	TaskID         string     `json:"TaskID"`
-	PromptID       string     `json:"PromptID"`
-	Status         string     `json:"Status"`
-	Model          string     `json:"Model"`
-	StartedAt      time.Time  `json:"StartedAt"`
-	CompletedAt    *time.Time `json:"CompletedAt"`
-	TotalCostUSD   *float64   `json:"TotalCostUSD"`
-	DurationMs     *int       `json:"DurationMs"`
-	NumTurns       *int       `json:"NumTurns"`
-	ParkReason     string     `json:"ParkReason"`
-	ResultSummary  string     `json:"ResultSummary"`
-	SessionID      string     `json:"SessionID"`
-	MemoryMissing  bool       `json:"MemoryMissing"`
-	TriggerType    string     `json:"TriggerType"`
-	TriggerID      string     `json:"TriggerID"`
+	ID             string     `json:"id"`
+	TaskID         string     `json:"task_id"`
+	PromptID       string     `json:"prompt_id"`
+	Status         string     `json:"status"`
+	Model          string     `json:"model"`
+	StartedAt      time.Time  `json:"started_at"`
+	CompletedAt    *time.Time `json:"completed_at"`
+	TotalCostUSD   *float64   `json:"total_cost_usd"`
+	DurationMs     *int       `json:"duration_ms"`
+	NumTurns       *int       `json:"num_turns"`
+	ParkReason     string     `json:"park_reason"`
+	ResultSummary  string     `json:"result_summary"`
+	SessionID      string     `json:"session_id"`
+	MemoryMissing  bool       `json:"memory_missing"`
+	TriggerType    string     `json:"trigger_type"`
+	TriggerID      string     `json:"trigger_id"`
 	ActorAgentID   string     `json:"actor_agent_id"`
 	ActorAgentName string     `json:"actor_agent_name"`
-	FailureKind    string     `json:"FailureKind"`
+	FailureKind    string     `json:"failure_kind"`
 }
 
 func toFactoryRunSummary(r domain.Conversation) factoryRunSummaryJSON {
