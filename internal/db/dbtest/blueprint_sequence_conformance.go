@@ -548,54 +548,69 @@ func RunBlueprintSequenceConformance(t *testing.T, mk BlueprintSequenceFactory) 
 		}
 	})
 
-	t.Run("An_advance_refuses_a_run_whose_task_left_its_team", func(t *testing.T) {
-		// A run is its task's team's work. Once the task is on another team
-		// the next step would open there under the old team's run, so the
-		// guard refuses it, and the reactor cancels the run instead.
-		store, sc := mk(t)
-		taskID := sc.NewTask(t)
-		br, step0 := seedFiring(t, store, sc, taskID)
-		sc.MoveTaskToAnotherTeam(t, taskID)
+	// A run is the agent's work on its task for the task's team. Once a person
+	// holds the task, or it is on another team, the next step would be work
+	// on a task taken off the run, and a completion would close it under its
+	// new holder. Both writes refuse, and the cancel the reactor writes
+	// instead still lands.
+	for _, left := range []struct {
+		name  string
+		leave func(t *testing.T, sc BlueprintSequenceScaffold, taskID string)
+	}{
+		{"left_its_team", func(t *testing.T, sc BlueprintSequenceScaffold, taskID string) {
+			sc.MoveTaskToAnotherTeam(t, taskID)
+		}},
+		{"a_person_holds", func(t *testing.T, sc BlueprintSequenceScaffold, taskID string) {
+			team := sc.TaskOwnerTeam(t, taskID)
+			sc.ClaimTaskForUser(t, taskID)
+			if got := sc.TaskOwnerTeam(t, taskID); got != team {
+				t.Fatalf("the claim moved the task from team %q to %q; this case is a claim on the run's team", team, got)
+			}
+		}},
+	} {
+		t.Run("An_advance_refuses_a_run_whose_task_"+left.name, func(t *testing.T) {
+			store, sc := mk(t)
+			taskID := sc.NewTask(t)
+			br, step0 := seedFiring(t, store, sc, taskID)
+			left.leave(t, sc, taskID)
 
-		advanced, ended, next, err := store.AdvanceRunToStepSystem(ctx, sc.OrgID, 0, step0.ID, sc.Step(br, 1))
-		if err != nil {
-			t.Fatalf("advancing a run whose task moved is a refusal, not an error: %v", err)
-		}
-		if advanced || ended != nil || next != nil {
-			t.Fatalf("(advanced=%v, ended=%v, conv=%v), want (false, nil, nil)", advanced, ended != nil, next != nil)
-		}
-		if got := sc.RunCurrentStep(t, br.ID); got != 0 {
-			t.Errorf("current_step_index = %d, want 0", got)
-		}
-		if n := sc.ConversationCount(t, taskID); n != 1 {
-			t.Errorf("conversations on the task = %d, want 1 — a step was minted on a task the run's team no longer holds", n)
-		}
-		if sc.ConversationEnded(t, step0.ID) {
-			t.Error("the concluded step was ended under an advance that did not commit")
-		}
-	})
+			advanced, ended, next, err := store.AdvanceRunToStepSystem(ctx, sc.OrgID, 0, step0.ID, sc.Step(br, 1))
+			if err != nil {
+				t.Fatalf("advancing a run its task was taken off is a refusal, not an error: %v", err)
+			}
+			if advanced || ended != nil || next != nil {
+				t.Fatalf("(advanced=%v, ended=%v, conv=%v), want (false, nil, nil)", advanced, ended != nil, next != nil)
+			}
+			if got := sc.RunCurrentStep(t, br.ID); got != 0 {
+				t.Errorf("current_step_index = %d, want 0", got)
+			}
+			if n := sc.ConversationCount(t, taskID); n != 1 {
+				t.Errorf("conversations on the task = %d, want 1 — a step was minted on a task taken off the run", n)
+			}
+			if sc.ConversationEnded(t, step0.ID) {
+				t.Error("the concluded step was ended under an advance that did not commit")
+			}
+		})
 
-	t.Run("A_completion_refuses_a_run_whose_task_left_its_team", func(t *testing.T) {
-		// Completing a run closes its task, and a task on another team is the
-		// new team's to close. The cancel the reactor writes instead still
-		// lands.
-		store, sc := mk(t)
-		taskID := sc.NewTask(t)
-		br, _ := seedFiring(t, store, sc, taskID)
-		sc.MoveTaskToAnotherTeam(t, taskID)
+		t.Run("A_completion_refuses_a_run_whose_task_"+left.name, func(t *testing.T) {
+			store, sc := mk(t)
+			taskID := sc.NewTask(t)
+			br, _ := seedFiring(t, store, sc, taskID)
+			left.leave(t, sc, taskID)
 
-		changed, err := store.MarkRunStatusSystem(ctx, sc.OrgID, br.ID, domain.BlueprintRunStatusCompleted, "", nil)
-		if err != nil {
-			t.Fatalf("completing a run whose task moved is a refusal, not an error: %v", err)
-		}
-		if changed {
-			t.Fatal("completed a run whose task is on another team")
-		}
-		changed, err = store.MarkRunStatusSystem(ctx, sc.OrgID, br.ID, domain.BlueprintRunStatusCancelled, "task moved to another team", nil)
-		if err != nil || !changed {
-			t.Fatalf("cancel the run whose task moved: (changed=%v, %v), want (true, nil)", changed, err)
-		}
-	})
+			changed, err := store.MarkRunStatusSystem(ctx, sc.OrgID, br.ID, domain.BlueprintRunStatusCompleted, "", nil)
+			if err != nil {
+				t.Fatalf("completing a run its task was taken off is a refusal, not an error: %v", err)
+			}
+			if changed {
+				t.Fatal("completed a run its task was taken off")
+			}
+			changed, err = store.MarkRunStatusSystem(ctx, sc.OrgID, br.ID, domain.BlueprintRunStatusCancelled, "taken off the run", nil)
+			if err != nil || !changed {
+				t.Fatalf("cancel the run: (changed=%v, %v), want (true, nil)", changed, err)
+			}
+		})
+	}
 
 	t.Run("A_terminal_run_advances_nothing", func(t *testing.T) {
 		// The reactor refreshes the run before it decides, but a cancel can

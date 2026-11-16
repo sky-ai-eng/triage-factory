@@ -901,9 +901,10 @@ func (s *blueprintStore) AdvanceRunToStepSystem(ctx context.Context, orgID strin
 	advanced := false
 	var ended, conv *domain.Conversation
 	err := inTx(ctx, s.admin, func(q queryer) error {
-		// 0. The run's task, share-locked, so the team the guard below reads
-		// cannot move before this commits: a move either commits first, and
-		// the guard refuses the advance, or waits for this one.
+		// 0. The run's task, share-locked, so the team and claim the guard
+		// below reads cannot change before this commits: a move or a claim
+		// either commits first, and the guard refuses the advance, or waits
+		// for this one.
 		if err := shareLockRunTask(ctx, q, orgID, nextStep.BlueprintRunID); err != nil {
 			return err
 		}
@@ -940,10 +941,18 @@ func (s *blueprintStore) AdvanceRunToStepSystem(ctx context.Context, orgID strin
 	return advanced, ended, conv, nil
 }
 
+// pgRunIsItsTasksWorkSQL holds a run's advance and its completion to the
+// task the run is working: still on the run's team, and held by no person. A
+// person's claim takes a task off the agent, and a move to another team takes
+// it off the run's team, so in either case the run is cancelled instead. It
+// reads blueprint_runs as br.
+const pgRunIsItsTasksWorkSQL = `br.team_id = (SELECT t.team_id FROM tasks t
+	WHERE t.org_id = br.org_id AND t.id = br.task_id AND t.claimed_by_user_id IS NULL)`
+
 // shareLockRunTask share-locks the task a run is on, for a write whose guard
-// reads the task's team: the team cannot move between the guard and the
-// commit. Every transaction that writes a task and its run takes the task
-// first, so this precedes the run's write.
+// reads the task's team and claim (pgRunIsItsTasksWorkSQL): neither can
+// change between the guard and the commit. Every transaction that writes a
+// task and its run takes the task first, so this precedes the run's write.
 func shareLockRunTask(ctx context.Context, q queryer, orgID, runID string) error {
 	if _, err := q.ExecContext(ctx, `
 		SELECT 1 FROM tasks t
@@ -958,13 +967,14 @@ func shareLockRunTask(ctx context.Context, q queryer, orgID, runID string) error
 // advanceRunCurrentStep moves a running blueprint_run's sequencing pointer one
 // step on, and reports whether it moved. The predicate is the compare-and-swap
 // the advance transaction fences on: a run that terminated since its reactor
-// read it, whose pointer another engagement already moved, or whose task is
-// no longer on the run's team matches no row and writes nothing.
+// read it, whose pointer another engagement already moved, or whose task it
+// is no longer working (pgRunIsItsTasksWorkSQL) matches no row and writes
+// nothing.
 func advanceRunCurrentStep(ctx context.Context, q queryer, orgID, id string, from, to int) (bool, error) {
 	res, err := q.ExecContext(ctx, `
 		UPDATE blueprint_runs br SET current_step_index = $1
 		WHERE br.org_id = $2 AND br.id = $3 AND br.status = 'running' AND br.current_step_index = $4
-		  AND br.team_id = (SELECT t.team_id FROM tasks t WHERE t.org_id = br.org_id AND t.id = br.task_id)
+		  AND `+pgRunIsItsTasksWorkSQL+`
 	`, to, orgID, id, from)
 	if err != nil {
 		return false, err
@@ -1311,7 +1321,7 @@ func (s *blueprintStore) MarkRunStatusSystem(ctx context.Context, orgID, id stri
 	completing := status == domain.BlueprintRunStatusCompleted
 	var changed bool
 	err := inTx(ctx, s.admin, func(tx queryer) error {
-		// A completion is held to the task's team, read below.
+		// A completion is held to the task it works, read below.
 		if completing {
 			if err := shareLockRunTask(ctx, tx, orgID, id); err != nil {
 				return err
@@ -1322,7 +1332,7 @@ func (s *blueprintStore) MarkRunStatusSystem(ctx context.Context, orgID, id stri
 			SET status = $1, abort_reason = $2, aborted_at_step = $3, completed_at = now()
 			WHERE br.org_id = $4 AND br.id = $5
 			  AND br.status = 'running'
-			  AND (NOT $6 OR br.team_id = (SELECT t.team_id FROM tasks t WHERE t.org_id = br.org_id AND t.id = br.task_id))
+			  AND (NOT $6 OR `+pgRunIsItsTasksWorkSQL+`)
 		`, string(status), reasonArg, stepArg, orgID, id, completing)
 		if err != nil {
 			return err

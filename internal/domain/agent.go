@@ -170,8 +170,10 @@ const (
 	// before the new conversation is minted, so a task never has two live
 	// conversations at once.
 	EndedDelegated EndedReason = "delegated"
-	// EndedTakenOver — a person claimed a task an agent held. Stamped in the
-	// claim's transaction, before the person's own conversation is minted.
+	// EndedTakenOver — a person claimed a task the agent was working. Stamped
+	// in the claim's transaction, before the person's own conversation is
+	// minted, or by the reactor on a run's last step when it cancels a run
+	// whose task a person holds and the claim stamped nothing.
 	EndedTakenOver EndedReason = "taken_over"
 	// EndedReassigned — the task moved to another team: a person's claim was
 	// handed to someone there, or a blueprint run's task left the run's team

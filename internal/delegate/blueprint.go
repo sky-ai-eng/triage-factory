@@ -85,7 +85,7 @@ func blueprintDecisionForStepConversation(runOutcome string, isFinal bool) (deci
 
 // errRunNotEnded rolls back terminateBlueprint's transaction when its mark
 // ended nothing: another writer already ended the run, or the store refused a
-// completion because the run's task left the run's team.
+// completion because the task was taken off the run.
 var errRunNotEnded = errors.New("blueprint run not ended by this write")
 
 // terminateBlueprint finalizes the blueprint run row and runs the shared
@@ -142,9 +142,10 @@ func (s *Spawner) terminateBlueprint(
 	// write is the one that ended the run is only known from the mark, so a
 	// run another writer already ended rolls the close back with it
 	// (errRunNotEnded): that writer decided what happens to the task.
-	// So does a completion the mark refuses because the task has moved to
-	// another team since the reactor checked: the run stays running, and the
-	// stranded-run replay's reactor cancels it.
+	// So does a completion the mark refuses because the task was taken off
+	// the run (a person's claim, a move to another team) since the reactor
+	// checked: the run stays running, and the stranded-run replay's reactor
+	// cancels it.
 	//
 	// A task already closed (ErrNoSuchTask: the close's WHERE is
 	// state-guarded) is not a failure. Any other close error fails the whole
@@ -171,7 +172,7 @@ func (s *Spawner) terminateBlueprint(
 	// worktree a follow-up has since been given. A refused completion ended
 	// nothing, and the cancel that follows it runs them.
 	if errors.Is(markErr, errRunNotEnded) {
-		blueprintLog.Info("blueprint_run not ended by this write: it is already terminal, or its task left the run's team before it could complete",
+		blueprintLog.Info("blueprint_run not ended by this write: it is already terminal, or its task was taken off it before it could complete",
 			"blueprint_run", blueprintRunID, "status", status)
 		return
 	}

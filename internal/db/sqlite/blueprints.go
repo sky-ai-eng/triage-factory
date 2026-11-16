@@ -884,17 +884,25 @@ func (s *blueprintStore) AdvanceRunToStepSystem(ctx context.Context, orgID strin
 	return advanced, ended, conv, nil
 }
 
+// runIsItsTasksWorkSQL holds a run's advance and its completion to the task
+// the run is working: still on the run's team, and held by no person. A
+// person's claim takes a task off the agent, and a move to another team takes
+// it off the run's team, so in either case the run is cancelled instead. A run
+// with no team predates the column and is held to the claim alone.
+const runIsItsTasksWorkSQL = `(blueprint_runs.team_id IS NULL
+	    OR blueprint_runs.team_id = (SELECT team_id FROM tasks WHERE id = blueprint_runs.task_id))
+	AND (SELECT claimed_by_user_id FROM tasks WHERE id = blueprint_runs.task_id) IS NULL`
+
 // advanceRunCurrentStep moves a running blueprint_run's sequencing pointer one
 // step on, and reports whether it moved. The predicate is the compare-and-swap
 // the advance transaction fences on: a run that terminated since its reactor
-// read it, whose pointer another engagement already moved, or whose task is
-// no longer on the run's team matches no row and writes nothing. A run with
-// no team predates the column and is not held to it.
+// read it, whose pointer another engagement already moved, or whose task it is
+// no longer working (runIsItsTasksWorkSQL) matches no row and writes nothing.
 func advanceRunCurrentStep(ctx context.Context, q queryer, id string, from, to int) (bool, error) {
 	res, err := q.ExecContext(ctx, `
 		UPDATE blueprint_runs SET current_step_index = ?
 		WHERE id = ? AND status = 'running' AND current_step_index = ?
-		  AND (team_id IS NULL OR team_id = (SELECT team_id FROM tasks WHERE id = blueprint_runs.task_id))
+		  AND `+runIsItsTasksWorkSQL+`
 	`, to, id, from)
 	if err != nil {
 		return false, err
@@ -1211,7 +1219,7 @@ func (s *blueprintStore) MarkRunStatusSystem(ctx context.Context, orgID, id stri
 			UPDATE blueprint_runs
 			SET status = ?, abort_reason = ?, aborted_at_step = ?, completed_at = ?
 			WHERE id = ? AND status = 'running'
-			  AND (NOT ? OR team_id IS NULL OR team_id = (SELECT team_id FROM tasks WHERE id = blueprint_runs.task_id))
+			  AND (NOT ? OR (`+runIsItsTasksWorkSQL+`))
 		`, string(status), reasonArg, stepArg, now, id, status == domain.BlueprintRunStatusCompleted)
 		if err != nil {
 			return err
