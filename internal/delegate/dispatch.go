@@ -2180,27 +2180,6 @@ func (s *Spawner) freshStepWorkspace(ctx context.Context, orgID string, task dom
 // br is nil for a conversation a person works in. Its workspace is the task's
 // all the same, so it is built or restored as a step's is, from the
 // conversation and the task alone, and nothing is stamped on a run.
-// bindConversation sets on cfg what the claimed conversation conv decides
-// about its launch: who it runs for, under which framework prompt, and, for
-// a conversation that belongs to a blueprint run, the run br and the step
-// stepIdx it executes. A conversation a person works in belongs to none, and
-// br is nil for it, so it is bound none, which is what offers it no TF tool
-// on either runtime (hasBlueprint).
-func (cfg *runConfig) bindConversation(orgID string, conv domain.Conversation, br *domain.BlueprintRun, stepIdx int) {
-	cfg.orgID = orgID
-	cfg.teamID = conv.TeamID
-	cfg.claimID = conv.ClaimID
-	cfg.upstreamHandBacks = conv.UpstreamHandBacks
-	cfg.jailLosses = conv.JailLosses
-	cfg.lastHandBackOutcome = conv.LastHandBackOutcome
-	cfg.surface = surfaceFor(conv.Type)
-	cfg.interactive = conv.Type == domain.ConversationTypeInteractive
-	if !cfg.interactive {
-		cfg.blueprintRunID = br.ID
-		cfg.blueprintStep = stepIdx
-	}
-}
-
 func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.BlueprintRun, task domain.Task, conv domain.Conversation, gh *ghclient.Client, sidecar *runSidecar, localChannels ...*localGitChannel) (runConfig, error) {
 	var localGit *localGitChannel
 	if len(localChannels) > 0 {

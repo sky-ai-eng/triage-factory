@@ -88,16 +88,17 @@ func TaskCloseKey(closedAt time.Time) string {
 // TaskNoteAudience is who reads a note about a task's close: a conversation
 // that belongs to a blueprint run, or a chat a person works the task in. A
 // conversation is offered stop_blueprint exactly when it belongs to a
-// blueprint run, so only that audience's note names the tool.
+// blueprint run, so only that audience's note names the tool. The zero value
+// is the chat, whose wording names no tool and so is true for either reader.
 type TaskNoteAudience int
 
 const (
+	// TaskNoteForChat is a conversation that belongs to no blueprint run: a
+	// chat a person works the task in. It has no workflow to end and no tool
+	// to end one with.
+	TaskNoteForChat TaskNoteAudience = iota
 	// TaskNoteForBlueprint is a conversation that belongs to a blueprint run.
-	TaskNoteForBlueprint TaskNoteAudience = iota
-	// TaskNoteForChat is a conversation that belongs to none: a chat a person
-	// works the task in. It has no workflow to end and no tool to end one
-	// with.
-	TaskNoteForChat
+	TaskNoteForBlueprint
 )
 
 // taskNotePersonMessage ends every blueprint conversation's note about a

@@ -159,18 +159,30 @@ func TestCloseHold_DeliverableAwaitingAPersonHoldsTheClose(t *testing.T) {
 
 // TestCloseHold_TheHoldBeginningStagesNoNote: the task stays open while its
 // close holds, so the conversation working on it has nothing new to act on,
-// and the spawner that tells a close stages no note on it.
+// and the spawner that tells a close stages no note on it. The close applying
+// once the person resolves the draft stages the one close note, which shows
+// the spawner could stage on this conversation all along.
 func TestCloseHold_TheHoldBeginningStagesNoNote(t *testing.T) {
 	f := holdCIClose(t, "owner/repo#held-untold", func(database *sql.DB) Delegator {
 		return delegate.NewSpawner(database, sqlitestore.New(database), nil, nil, "m")
 	})
-
-	notes, err := sqlitestore.New(f.database).StagedInjections.FlushPendingSystem(t.Context(), runmode.LocalDefaultOrgID, f.convID)
-	if err != nil {
-		t.Fatalf("flush the working conversation's notes: %v", err)
+	flush := func() []domain.StagedInjection {
+		t.Helper()
+		notes, err := sqlitestore.New(f.database).StagedInjections.FlushPendingSystem(t.Context(), runmode.LocalDefaultOrgID, f.convID)
+		if err != nil {
+			t.Fatalf("flush the working conversation's notes: %v", err)
+		}
+		return notes
 	}
-	if len(notes) != 0 {
+
+	if notes := flush(); len(notes) != 0 {
 		t.Errorf("notes staged on the working conversation when the hold began = %+v, want none", notes)
+	}
+
+	resolveDrafts(t, f.database, f.draftConvID)
+	f.r.sweepCloseDeferrals(t.Context())
+	if notes := flush(); len(notes) != 1 || notes[0].Producer != domain.StagedInjectionProducerTaskClosing {
+		t.Errorf("notes staged once the close applied = %+v, want the one close note", notes)
 	}
 }
 
