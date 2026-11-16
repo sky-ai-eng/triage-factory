@@ -391,7 +391,7 @@ export default function Factory() {
         // The create's answer carries the version the delegate names: the
         // task as this gesture found or made it.
         created = true
-        await delegateTask(task, promptId)
+        await delegateTask(task, promptId, delegateTeam || undefined)
       } catch (err) {
         if (created) {
           if (delegateTeam) noteWrittenTeam(delegateTeam)

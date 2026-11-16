@@ -43,6 +43,12 @@ var (
 	// ErrBlueprintNoSteps — the blueprint the caller named has no steps, so
 	// a firing of it would mint a run with nothing to drive.
 	ErrBlueprintNoSteps = errors.New("delegate: blueprint has no steps")
+
+	// ErrBlueprintOtherTeam — the blueprint belongs to another team than the
+	// one the run is planned for. A run spends its team's budget under its
+	// team's model settings and is staged with its team's knowledge, so it
+	// executes only that team's blueprints.
+	ErrBlueprintOtherTeam = errors.New("delegate: blueprint belongs to another team")
 )
 
 // resolveBlueprint finds the blueprint to fire from an explicit blueprint ID.

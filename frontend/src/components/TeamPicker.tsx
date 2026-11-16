@@ -8,6 +8,11 @@ interface Props {
   onChange: (teamId: string) => void
   label?: string
   className?: string
+  /** When given, the only teams offered, and the picker renders when there
+   *  are at least two of them: a write that may land on some of the viewer's
+   *  teams and not others (a claim or a delegate of a task, which offers the
+   *  task's `claim_team_ids`). */
+  teamIds?: string[]
 }
 
 // TeamPicker is the write-time team picker: a *required* team
@@ -16,14 +21,23 @@ interface Props {
 // read filter it renders nothing below 2 teams (the modal silently
 // targets the sole team, exactly as the resolver's sole-team fallback
 // does), so callers can mount it unconditionally and let the count gate
-// hide it.
+// hide it. A caller that passes `teamIds` narrows both the options and the
+// gate to those teams.
 //
 // Controlled: the parent seeds the initial value via pickerDefault()
 // (sticky default → most-recent → first team) and threads `value` into
 // the submit body. When this renders null (≤1 team) the parent should
 // submit team_id='' and let the server resolve the sole team.
-export default function TeamPicker({ value, onChange, label = 'Team', className = '' }: Props) {
-  const { teams, multi } = useTeams()
+export default function TeamPicker({
+  value,
+  onChange,
+  label = 'Team',
+  className = '',
+  teamIds,
+}: Props) {
+  const all = useTeams()
+  const teams = teamIds ? all.teams.filter((t) => teamIds.includes(t.id)) : all.teams
+  const multi = teamIds ? teams.length >= 2 : all.multi
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
 

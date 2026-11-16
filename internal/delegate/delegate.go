@@ -406,7 +406,9 @@ type DelegationPlan struct {
 // ErrBlueprintUnspecified, ErrBlueprintNoSteps, ErrPromptNotFound,
 // ErrPromptUnspecified, modelaccess.ErrNoCredentials,
 // modelaccess.ErrProviderUnconfigured, and domain.ErrModelNotEnabled.
-// RefusalCause classifies them. Anything else is a read that failed.
+// RefusalCause classifies them. ErrBlueprintOtherTeam is typed too and is
+// not one RefusalCause classifies: only a manual delegation can meet it.
+// Anything else is a read that failed.
 //
 // No GitHub client is resolved here: the dispatcher resolves one per claim.
 func (s *Spawner) PlanDelegation(task domain.Task, teamID string, opts DelegateOpts) (DelegationPlan, error) {
@@ -487,6 +489,14 @@ func (s *Spawner) PlanDelegation(task domain.Task, teamID string, opts DelegateO
 	blueprint, err := s.resolveBlueprint(orgID, opts.ExplicitBlueprintID, triggerType, creatorUserID)
 	if err != nil {
 		return DelegationPlan{}, err
+	}
+	// The read above admits any blueprint the caller can see, which for a
+	// person on several teams is every one of those teams'. A trigger's
+	// blueprint is its own team's by foreign key, so this refuses only a
+	// manual delegation. A plan for an unowned task names no team to compare
+	// with, as for the per-team cap above.
+	if teamID != "" && blueprint.TeamID != teamID {
+		return DelegationPlan{}, fmt.Errorf("%w: %q", ErrBlueprintOtherTeam, blueprint.Name)
 	}
 	steps, err := s.resolveBlueprintSteps(orgID, blueprint.ID, triggerType, creatorUserID)
 	if err != nil {

@@ -912,7 +912,21 @@ func (s *Server) stockClaimTicket(r *http.Request, b *stockBatch, entity *domain
 		// failed row rather than stealing. The version is the one the find
 		// just read, so a write landing on the task in between refuses the
 		// claim the same way.
-		claimOK, e = tx.Tasks.ClaimQueuedForUser(r.Context(), b.orgID, task.ID, b.userID, task.Version)
+		//
+		// The claim lands on the batch's team, which is the team of a task
+		// the find just created. A task that already existed on another team
+		// the caller writes has that team as its one candidate, and stays on
+		// it. With several candidates that leave the batch's team out, the
+		// claim write refuses.
+		claimTeam := b.teamID
+		candidates, e := tx.Tasks.ClaimTeamCandidates(r.Context(), b.orgID, task.ID, b.userID)
+		if e != nil {
+			return e
+		}
+		if len(candidates) == 1 {
+			claimTeam = candidates[0]
+		}
+		claimOK, e = tx.Tasks.ClaimQueuedForUser(r.Context(), b.orgID, task.ID, b.userID, claimTeam, task.Version)
 		if errors.Is(e, db.ErrTaskVersion) {
 			claimOK, e = false, nil
 		}
@@ -937,6 +951,8 @@ func (s *Server) stockClaimTicket(r *http.Request, b *stockBatch, entity *domain
 	} else if errors.Is(err, db.ErrNoActiveClaimTeam) {
 		return stockFailed(snap.Key, httpx.ReasonTeamArchived,
 			"the ticket's task is on an archived team, and you're on no active team it can move to")
+	} else if errors.Is(err, db.ErrClaimTeamNotCandidate) {
+		return stockFailed(snap.Key, httpx.ReasonCrossTeamRef, "the ticket's task can't land on the selected team")
 	} else if err != nil {
 		stockLog.Error("stock: claim failed", "issue", snap.Key, "error", err)
 		return stockFailed(snap.Key, httpx.ReasonInternal, "could not claim the ticket"+httpx.LocalDetail(err))

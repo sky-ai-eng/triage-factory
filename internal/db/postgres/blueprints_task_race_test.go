@@ -311,7 +311,7 @@ func TestBlueprintStore_Postgres_FiringCarriesTaskClaim(t *testing.T) {
 		taskID := fx.newTask(t)
 		// The user claims the task in the window before the insert: they win
 		// the claim, and the run must still commit.
-		if ok, err := stores.Tasks.ClaimQueuedForUser(ctx, fx.orgID, taskID, fx.userID, dbtest.TaskVersion(t, stores.Tasks, fx.orgID, taskID)); err != nil || !ok {
+		if ok, err := stores.Tasks.ClaimQueuedForUser(ctx, fx.orgID, taskID, fx.userID, dbtest.ClaimTeam(t, stores.Tasks, fx.orgID, taskID, fx.userID), dbtest.TaskVersion(t, stores.Tasks, fx.orgID, taskID)); err != nil || !ok {
 			t.Fatalf("ClaimQueuedForUser: ok=%v err=%v", ok, err)
 		}
 		br := fx.firing(t, taskID)

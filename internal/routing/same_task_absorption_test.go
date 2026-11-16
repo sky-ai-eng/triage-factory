@@ -388,7 +388,7 @@ func TestTryAutoDelegate_SameTask_HoldsTheFiringBehindAHandedNote(t *testing.T) 
 			bumpTaskViaRealUpsert(t, router, task, trigger, entityID, secondEventID)
 			if tc.personsClaim {
 				tasks := testTaskStore(database)
-				if ok, err := tasks.ClaimQueuedForUser(t.Context(), runmode.LocalDefaultOrgID, task.ID, runmode.LocalDefaultUserID, dbtest.TaskVersion(t, tasks, runmode.LocalDefaultOrgID, task.ID)); err != nil || !ok {
+				if ok, err := tasks.ClaimQueuedForUser(t.Context(), runmode.LocalDefaultOrgID, task.ID, runmode.LocalDefaultUserID, dbtest.ClaimTeam(t, tasks, runmode.LocalDefaultOrgID, task.ID, runmode.LocalDefaultUserID), dbtest.TaskVersion(t, tasks, runmode.LocalDefaultOrgID, task.ID)); err != nil || !ok {
 					t.Fatalf("claim the task for a person: ok=%v err=%v", ok, err)
 				}
 				if task, err = tasks.Get(t.Context(), runmode.LocalDefaultOrgID, task.ID); err != nil || task == nil || task.ClaimedByUserID == "" {

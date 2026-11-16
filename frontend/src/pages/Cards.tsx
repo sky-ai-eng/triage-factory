@@ -6,7 +6,7 @@ import { useNavigate, useSearchParams } from 'react-router'
 import type { Task, WSEvent } from '../types'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useOrgHref } from '../hooks/useOrgHref'
-import { useTeamFilter } from '../hooks/useTeams'
+import { useTeamFilter, useTeams } from '../hooks/useTeams'
 import { usePagedList } from '../hooks/usePagedList'
 import { TASK_LIST_PATH, queueListBody } from '../lib/taskList'
 import { Bell, SlidersHorizontal } from 'lucide-react'
@@ -16,10 +16,12 @@ import RequestedReviewerBadge from '../components/RequestedReviewerBadge'
 import VulnerableAlertList from '../components/VulnerableAlertList'
 import PackageFacts from '../components/PackageFacts'
 import PromptPicker from '../components/PromptPicker'
+import ClaimTeamConfirm from '../components/board/ClaimTeamConfirm'
 import TaskRulesPanel from '../components/TaskRulesPanel'
 import NotifyRulesPanel from '../components/NotifyRulesPanel'
 import TeamScopeSelect from '../components/TeamScopeSelect'
 import { snoozeUntilFromPreset } from '../lib/snooze'
+import { NO_CLAIM_TEAM, resolveClaimTeam } from '../lib/claimTeam'
 import {
   claimTask,
   delegateTask,
@@ -56,6 +58,19 @@ export default function Cards() {
   // write returned, which is what the undo's requeue names.
   const [undoTask, setUndoTask] = useState<(TaskRef & { action: SwipeAction }) | null>(null)
   const [showPromptPicker, setShowPromptPicker] = useState(false)
+  // The card a claim or delegate gesture is waiting on a choice for: the
+  // claim's team (ClaimTeamConfirm), or the delegate's blueprint and team
+  // (the picker). It stays the top card until the choice is made.
+  const [pendingClaim, setPendingClaim] = useState<{
+    task: Task
+    candidates: string[]
+    preselected: string
+  } | null>(null)
+  const [pendingDelegate, setPendingDelegate] = useState<{
+    task: Task
+    team: string
+    teamOptions?: string[]
+  } | null>(null)
   const [rulesOpen, setRulesOpen] = useState(false)
   // A notification links to a task rule as ?rule=…: the rules panel opens on
   // that rule's editor, and the link is dropped when the panel closes.
@@ -118,6 +133,7 @@ export default function Cards() {
   useEffect(() => {
     teamFilterRef.current = teamFilter
   }, [teamFilter])
+  const { teams, multi: multiTeam, lastActingTeamId } = useTeams()
   // The deck as of the last render, for the handlers that need to read it
   // without being re-created on every card (fetchQueue's pin-the-top-card
   // merge, the swipe's top-up check).
@@ -179,14 +195,54 @@ export default function Cards() {
     ),
   )
 
-  const swipe = async (action: SwipeAction, promptId?: string) => {
-    const task = tasks[0]
+  const teamResolveInFlight = useRef(false)
+  // A claim or a delegate first learns the team the task lands on. `choice`
+  // is what a dialog or the picker answered for the card it was opened on;
+  // without one the gesture is fresh and acts on the top card.
+  const swipe = async (
+    action: SwipeAction,
+    choice?: { task: Task; teamId?: string; promptId?: string },
+  ) => {
+    const task = choice?.task ?? tasks[0]
     if (!task) return
 
-    // Delegate always requires an explicit prompt pick
-    if (action === 'delegate' && !promptId) {
-      setShowPromptPicker(true)
-      return
+    let teamId = choice?.teamId
+    if ((action === 'claim' || action === 'delegate') && !choice) {
+      // One at a time: a held or repeated key would otherwise start a second
+      // gesture on the same card while the first is still reading its teams.
+      if (teamResolveInFlight.current) return
+      teamResolveInFlight.current = true
+      let team
+      try {
+        team = await resolveClaimTeam(task.id, {
+          multi: multiTeam,
+          teams,
+          lastActingTeamId,
+          teamFilter: teamFilterRef.current,
+        })
+      } finally {
+        teamResolveInFlight.current = false
+      }
+      if (team.kind === 'none') {
+        toast.error(NO_CLAIM_TEAM)
+        return
+      }
+      if (action === 'delegate') {
+        // Delegate always requires an explicit blueprint pick, from the team
+        // the task lands on.
+        setPendingDelegate(
+          team.kind === 'ask'
+            ? { task, team: team.preselected, teamOptions: team.candidates }
+            : { task, team: team.teamId ?? '' },
+        )
+        setShowPromptPicker(true)
+        return
+      }
+      if (team.kind === 'ask') {
+        setPendingClaim({ task, candidates: team.candidates, preselected: team.preselected })
+        return
+      }
+      teamId = team.teamId
     }
 
     // Each gesture addresses its own route: the two lifecycle ones are field
@@ -201,8 +257,8 @@ export default function Cards() {
           : action === 'dismiss'
             ? (await patchTaskStatus(task, 'dismissed')).version
             : action === 'claim'
-              ? (await claimTask(task)).version
-              : (await delegateTask(task, promptId)).version
+              ? (await claimTask(task, teamId)).version
+              : (await delegateTask(task, choice?.promptId, teamId)).version
     } catch (err) {
       // A card the server says changed since the deck read it is reloaded
       // whole, so the next gesture on it decides against what changed. The
@@ -213,7 +269,9 @@ export default function Cards() {
     }
 
     setUndoTask({ id: task.id, version, action })
-    setDeckItems((prev) => prev.slice(1))
+    // By id: the gesture awaited a read or a choice before its write, and the
+    // card it acted on is the one that leaves.
+    setDeckItems((prev) => prev.filter((t) => t.id !== task.id))
     setTimeout(() => setUndoTask(null), 5000)
     // Top the deck up before it runs dry. A page holds the first 200 pickable
     // tasks; without this, a triage run long enough to swipe through them
@@ -222,8 +280,16 @@ export default function Cards() {
   }
 
   const delegateWithPrompt = (promptId: string) => {
+    const pending = pendingDelegate
     setShowPromptPicker(false)
-    swipe('delegate', promptId)
+    setPendingDelegate(null)
+    if (!pending) return
+    swipe('delegate', { task: pending.task, teamId: pending.team || undefined, promptId })
+  }
+
+  const closePromptPicker = () => {
+    setShowPromptPicker(false)
+    setPendingDelegate(null)
   }
 
   // Undo puts the task back in the queue, which is where every card in the
@@ -251,6 +317,8 @@ export default function Cards() {
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      // The arrow keys belong to the dialog or the picker while one is open.
+      if (pendingClaim || showPromptPicker) return
       if (e.key === 'ArrowLeft') swipe('dismiss')
       else if (e.key === 'ArrowRight') swipe('claim')
       else if (e.key === 'ArrowUp') swipe('delegate')
@@ -418,11 +486,30 @@ export default function Cards() {
         subtitle="Select a blueprint to run for this task"
         selectLabel="Run"
         onSelect={delegateWithPrompt}
-        onClose={() => setShowPromptPicker(false)}
+        teamValue={pendingDelegate?.team || undefined}
+        teamOptions={pendingDelegate?.teamOptions}
+        onTeamChange={
+          pendingDelegate?.teamOptions
+            ? (teamId) => setPendingDelegate((prev) => (prev ? { ...prev, team: teamId } : prev))
+            : undefined
+        }
+        onClose={closePromptPicker}
         onEditPrompts={() => {
-          setShowPromptPicker(false)
+          closePromptPicker()
           navigate(orgHref('/prompts'))
         }}
+      />
+
+      <ClaimTeamConfirm
+        open={pendingClaim !== null}
+        candidates={pendingClaim?.candidates ?? []}
+        preselected={pendingClaim?.preselected ?? ''}
+        onConfirm={(teamId) => {
+          const pending = pendingClaim
+          setPendingClaim(null)
+          if (pending) swipe('claim', { task: pending.task, teamId })
+        }}
+        onCancel={() => setPendingClaim(null)}
       />
 
       <TaskRulesPanel open={rulesPanelOpen} onClose={closeRules} openRuleId={linkedRule} />

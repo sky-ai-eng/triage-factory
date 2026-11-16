@@ -204,7 +204,7 @@ func RunTaskVersionConformance(t *testing.T, mk TaskVersionFactory) {
 			return landed("ClearSnooze")(s.ClearSnooze(ctx, h.OrgID, taskID, v))
 		})
 		step("ClaimQueuedForUser", 1, func(v int64) (*domain.Task, error) {
-			return landed("ClaimQueuedForUser")(s.ClaimQueuedForUser(ctx, h.OrgID, taskID, h.UserID, v))
+			return landed("ClaimQueuedForUser")(s.ClaimQueuedForUser(ctx, h.OrgID, taskID, h.UserID, ClaimTeam(t, s, h.OrgID, taskID, h.UserID), v))
 		})
 		step("AdvanceStatusForUser, which changes nothing", 0, func(v int64) (*domain.Task, error) {
 			return landed("AdvanceStatusForUser")(s.AdvanceStatusForUser(ctx, h.OrgID, taskID, h.UserID, "in_progress", v))
@@ -219,17 +219,17 @@ func RunTaskVersionConformance(t *testing.T, mk TaskVersionFactory) {
 			return refused("StampAgentClaimIfUnclaimed")(s.StampAgentClaimIfUnclaimed(ctx, h.OrgID, taskID, h.AgentID, ""))
 		})
 		step("TakeoverClaimFromAgent", 1, func(v int64) (*domain.Task, error) {
-			return landed("TakeoverClaimFromAgent")(s.TakeoverClaimFromAgent(ctx, h.OrgID, taskID, h.UserID, v))
+			return landed("TakeoverClaimFromAgent")(s.TakeoverClaimFromAgent(ctx, h.OrgID, taskID, h.UserID, ClaimTeam(t, s, h.OrgID, taskID, h.UserID), v))
 		})
 		step("HandoffAgentClaim", 1, func(v int64) (*domain.Task, error) {
-			result, task, err := s.HandoffAgentClaim(ctx, h.OrgID, taskID, h.AgentID, h.UserID, v)
+			result, task, err := s.HandoffAgentClaim(ctx, h.OrgID, taskID, h.AgentID, h.UserID, ClaimTeam(t, s, h.OrgID, taskID, h.UserID), v)
 			if err == nil && result != db.HandoffChanged {
 				err = fmt.Errorf("HandoffAgentClaim = %v, want HandoffChanged", result)
 			}
 			return &task, err
 		})
 		step("HandoffAgentClaim to the agent that holds it", 0, func(v int64) (*domain.Task, error) {
-			result, task, err := s.HandoffAgentClaim(ctx, h.OrgID, taskID, h.AgentID, h.UserID, v)
+			result, task, err := s.HandoffAgentClaim(ctx, h.OrgID, taskID, h.AgentID, h.UserID, ClaimTeam(t, s, h.OrgID, taskID, h.UserID), v)
 			if err == nil && result != db.HandoffNoOp {
 				err = fmt.Errorf("HandoffAgentClaim = %v, want HandoffNoOp", result)
 			}
@@ -253,7 +253,7 @@ func RunTaskVersionConformance(t *testing.T, mk TaskVersionFactory) {
 		s := h.Tasks
 		claim := func(t *testing.T, taskID string) {
 			t.Helper()
-			if ok, err := s.ClaimQueuedForUser(ctx, h.OrgID, taskID, h.UserID, version(t, h, taskID)); err != nil || !ok {
+			if ok, err := s.ClaimQueuedForUser(ctx, h.OrgID, taskID, h.UserID, ClaimTeam(t, s, h.OrgID, taskID, h.UserID), version(t, h, taskID)); err != nil || !ok {
 				t.Fatalf("ClaimQueuedForUser: ok=%v err=%v", ok, err)
 			}
 		}
@@ -287,7 +287,7 @@ func RunTaskVersionConformance(t *testing.T, mk TaskVersionFactory) {
 				return okOrRefused(s.RequeueTask(ctx, h.OrgID, id, v))
 			}},
 			{name: "ClaimQueuedForUser", lands: true, write: func(id string, v int64) error {
-				return okOrRefused(s.ClaimQueuedForUser(ctx, h.OrgID, id, h.UserID, v))
+				return okOrRefused(s.ClaimQueuedForUser(ctx, h.OrgID, id, h.UserID, ClaimTeam(t, s, h.OrgID, id, h.UserID), v))
 			}},
 			{name: "TakeoverClaimFromAgent", lands: true, prep: func(t *testing.T, id string) {
 				t.Helper()
@@ -295,7 +295,7 @@ func RunTaskVersionConformance(t *testing.T, mk TaskVersionFactory) {
 					t.Fatalf("StampAgentClaimIfUnclaimed: ok=%v err=%v", ok, err)
 				}
 			}, write: func(id string, v int64) error {
-				return okOrRefused(s.TakeoverClaimFromAgent(ctx, h.OrgID, id, h.UserID, v))
+				return okOrRefused(s.TakeoverClaimFromAgent(ctx, h.OrgID, id, h.UserID, ClaimTeam(t, s, h.OrgID, id, h.UserID), v))
 			}},
 			{name: "ReassignClaimToUser", prep: claim, write: func(id string, v int64) error {
 				return okOrRefused(s.ReassignClaimToUser(ctx, h.OrgID, id, h.UserID, h.UserID, v))
@@ -304,7 +304,7 @@ func RunTaskVersionConformance(t *testing.T, mk TaskVersionFactory) {
 				return okOrRefused(s.ReassignClaimToUserSystem(ctx, h.OrgID, id, h.UserID, h.UserID, v))
 			}},
 			{name: "HandoffAgentClaim", lands: true, write: func(id string, v int64) error {
-				result, _, err := s.HandoffAgentClaim(ctx, h.OrgID, id, h.AgentID, h.UserID, v)
+				result, _, err := s.HandoffAgentClaim(ctx, h.OrgID, id, h.AgentID, h.UserID, ClaimTeam(t, s, h.OrgID, id, h.UserID), v)
 				if err == nil && result != db.HandoffChanged {
 					return errRefused
 				}
@@ -314,11 +314,11 @@ func RunTaskVersionConformance(t *testing.T, mk TaskVersionFactory) {
 			// re-delegation replaces the task's runs.
 			{name: "HandoffAgentClaim to the agent that holds it", lands: true, prep: func(t *testing.T, id string) {
 				t.Helper()
-				if r, _, err := s.HandoffAgentClaim(ctx, h.OrgID, id, h.AgentID, h.UserID, version(t, h, id)); err != nil || r != db.HandoffChanged {
+				if r, _, err := s.HandoffAgentClaim(ctx, h.OrgID, id, h.AgentID, h.UserID, ClaimTeam(t, s, h.OrgID, id, h.UserID), version(t, h, id)); err != nil || r != db.HandoffChanged {
 					t.Fatalf("HandoffAgentClaim: %v %v", r, err)
 				}
 			}, write: func(id string, v int64) error {
-				result, _, err := s.HandoffAgentClaim(ctx, h.OrgID, id, h.AgentID, h.UserID, v)
+				result, _, err := s.HandoffAgentClaim(ctx, h.OrgID, id, h.AgentID, h.UserID, ClaimTeam(t, s, h.OrgID, id, h.UserID), v)
 				if err == nil && result != db.HandoffNoOp {
 					return errRefused
 				}

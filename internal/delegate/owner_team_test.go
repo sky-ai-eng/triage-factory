@@ -37,6 +37,27 @@ func TestDelegate_OwnerTeamID_IsTheRunsTeam(t *testing.T) {
 	if got := taskOwnerTeam(t, database, task.ID); got == actingTeamID {
 		t.Fatalf("fixture task already owned by the acting team; the test would prove nothing")
 	}
+	// A run executes its own team's blueprint, so the blueprint is the acting
+	// team's, as a trigger's is. The blueprint, its steps and their prompts
+	// reference each other by team, so they move in one transaction with the
+	// foreign keys checked at its commit.
+	tx, err := database.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	for _, q := range []string{
+		`PRAGMA defer_foreign_keys = ON`,
+		`UPDATE prompts SET team_id = ?1 WHERE id IN (SELECT step_prompt_id FROM blueprint_steps WHERE blueprint_id = ?2)`,
+		`UPDATE blueprints SET team_id = ?1 WHERE id = ?2`,
+		`UPDATE blueprint_steps SET team_id = ?1 WHERE blueprint_id = ?2`,
+	} {
+		if _, err := tx.Exec(q, actingTeamID, bpID); err != nil {
+			t.Fatalf("move the blueprint to the acting team: %v\n%s", err, q)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("move the blueprint to the acting team: %v", err)
+	}
 
 	var resolvedFor []string
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
