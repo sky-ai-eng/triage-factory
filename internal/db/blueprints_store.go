@@ -658,13 +658,25 @@ type BlueprintStore interface {
 	// names. It holds the one-active-run index against its task, and nothing
 	// re-mints the missing step.
 	//
+	// A run is its task's team's work: a step is only ever minted while the
+	// task is on the run's team. A task that moved to another team takes the
+	// work with it, and its run is cancelled rather than advanced.
+	//
 	// Statement order inside the transaction is fixed:
 	//
+	//  0. The run's task, share-locked (Postgres; SQLite's single writer needs
+	//     no lock), so its team cannot move between the guard and the commit.
+	//     It comes first because every transaction that writes a task and its
+	//     run takes the task first. A claim that moves the task to another
+	//     team either commits before this lock, and the guard below reads the
+	//     new team, or waits for this commit, and then ends and stops the step
+	//     this minted.
 	//  1. The guarded bump: current_step_index moves to nextStep's own index,
-	//     and only on a row still 'running' at fromStepIndex. That is the
-	//     pointer write and the fence at once, which is why it leads — a second
-	//     reactor holding a terminal from the same step queues on this row and
-	//     then finds the guard closed, having written nothing.
+	//     and only on a row still 'running' at fromStepIndex whose task is on
+	//     the run's team. That is the pointer write and the fence at once,
+	//     which is why it leads the writes — a second reactor holding a
+	//     terminal from the same step queues on this row and then finds the
+	//     guard closed, having written nothing.
 	//
 	//     Both the run being advanced and the index being advanced to are
 	//     read off nextStep rather than passed beside it: the pointer and the
@@ -678,9 +690,10 @@ type BlueprintStore interface {
 	//  3. The next step's conversations row.
 	//
 	// Returns advanced=false with nothing written when the guard missed — the
-	// run is terminal, or another engagement already moved the pointer. The
-	// sequence is somebody else's to drive by then, so a caller stands down
-	// rather than failing the blueprint.
+	// run is terminal, another engagement already moved the pointer, or the
+	// task has left the run's team. In the first two the sequence is somebody
+	// else's to drive, so a caller stands down rather than failing the
+	// blueprint; in the third the caller cancels the run.
 	AdvanceRunToStepSystem(ctx context.Context, orgID string, fromStepIndex int, concludedConversationID string, nextStep domain.Conversation) (advanced bool, ended, conv *domain.Conversation, err error)
 
 	// SetRunWorktreePathSystem fills in a blueprint_run's worktree_path after
@@ -802,9 +815,14 @@ type BlueprintStore interface {
 	// MarkRunStatusSystem transitions a running blueprint run to a terminal
 	// status, records optional abort metadata, and parks its children still
 	// mid-flight. Returns (true, nil) when the row was updated, (false, nil)
-	// when the guard rejected the write. It has no app-pool twin: ending a run
-	// is the orchestrator's decision, and the run's write policy follows its
-	// team, which its delegator may no longer be able to write.
+	// when the guard rejected the write: the run is no longer running, or the
+	// status is completed and the run's task has left the run's team. A
+	// completion closes its task, and a task on another team is the new
+	// team's to close, so that run is cancelled instead, by the reactor that
+	// reads it next. A run with no team predates the column and is not held
+	// to it. It has no app-pool twin: ending a run is the orchestrator's
+	// decision, and the run's write policy follows its team, which its
+	// delegator may no longer be able to write.
 	MarkRunStatusSystem(ctx context.Context, orgID string, id string, status domain.BlueprintRunStatus, abortReason string, abortedAtStep *int) (changed bool, err error)
 	ConversationsForBlueprintSystem(ctx context.Context, orgID string, blueprintRunID string) ([]domain.Conversation, error)
 	IsNewestRunForTaskSystem(ctx context.Context, orgID, taskID, blueprintRunID string) (bool, error)

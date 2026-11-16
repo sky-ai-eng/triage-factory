@@ -901,6 +901,14 @@ func (s *blueprintStore) AdvanceRunToStepSystem(ctx context.Context, orgID strin
 	advanced := false
 	var ended, conv *domain.Conversation
 	err := inTx(ctx, s.admin, func(q queryer) error {
+		// 0. The run's task, share-locked, so the team the guard below reads
+		// cannot move before this commits. A claim that moves the task waits
+		// here and then ends and stops the step this mints; one that moved
+		// it first is read by the guard, which refuses the advance.
+		if err := shareLockRunTask(ctx, q, orgID, nextStep.BlueprintRunID); err != nil {
+			return err
+		}
+
 		// 1. The pointer, guarded — the fence for everything below it.
 		ok, err := advanceRunCurrentStep(ctx, q, orgID, nextStep.BlueprintRunID, fromStepIndex, *nextStep.BlueprintStepIndex)
 		if err != nil || !ok {
@@ -933,15 +941,31 @@ func (s *blueprintStore) AdvanceRunToStepSystem(ctx context.Context, orgID strin
 	return advanced, ended, conv, nil
 }
 
+// shareLockRunTask share-locks the task a run is on, for a write whose guard
+// reads the task's team: the team cannot move between the guard and the
+// commit. Every transaction that writes a task and its run takes the task
+// first, so this precedes the run's write.
+func shareLockRunTask(ctx context.Context, q queryer, orgID, runID string) error {
+	if _, err := q.ExecContext(ctx, `
+		SELECT 1 FROM tasks t
+		JOIN blueprint_runs br ON br.org_id = t.org_id AND br.task_id = t.id
+		WHERE br.org_id = $1 AND br.id = $2
+		FOR SHARE OF t`, orgID, runID); err != nil {
+		return fmt.Errorf("lock the run's task: %w", err)
+	}
+	return nil
+}
+
 // advanceRunCurrentStep moves a running blueprint_run's sequencing pointer one
 // step on, and reports whether it moved. The predicate is the compare-and-swap
 // the advance transaction fences on: a run that terminated since its reactor
-// read it, or whose pointer another engagement already moved, matches no row
-// and writes nothing.
+// read it, whose pointer another engagement already moved, or whose task is
+// no longer on the run's team matches no row and writes nothing.
 func advanceRunCurrentStep(ctx context.Context, q queryer, orgID, id string, from, to int) (bool, error) {
 	res, err := q.ExecContext(ctx, `
-		UPDATE blueprint_runs SET current_step_index = $1
-		WHERE org_id = $2 AND id = $3 AND status = 'running' AND current_step_index = $4
+		UPDATE blueprint_runs br SET current_step_index = $1
+		WHERE br.org_id = $2 AND br.id = $3 AND br.status = 'running' AND br.current_step_index = $4
+		  AND br.team_id = (SELECT t.team_id FROM tasks t WHERE t.org_id = br.org_id AND t.id = br.task_id)
 	`, to, orgID, id, from)
 	if err != nil {
 		return false, err
@@ -1285,14 +1309,22 @@ func (s *blueprintStore) MarkRunStatusSystem(ctx context.Context, orgID, id stri
 	if abortedAtStep != nil {
 		stepArg = *abortedAtStep
 	}
+	completing := status == domain.BlueprintRunStatusCompleted
 	var changed bool
 	err := inTx(ctx, s.admin, func(tx queryer) error {
+		// A completion is held to the task's team, read below.
+		if completing {
+			if err := shareLockRunTask(ctx, tx, orgID, id); err != nil {
+				return err
+			}
+		}
 		res, err := tx.ExecContext(ctx, `
-			UPDATE blueprint_runs
+			UPDATE blueprint_runs br
 			SET status = $1, abort_reason = $2, aborted_at_step = $3, completed_at = now()
-			WHERE org_id = $4 AND id = $5
-			  AND status = 'running'
-		`, string(status), reasonArg, stepArg, orgID, id)
+			WHERE br.org_id = $4 AND br.id = $5
+			  AND br.status = 'running'
+			  AND (NOT $6 OR br.team_id = (SELECT t.team_id FROM tasks t WHERE t.org_id = br.org_id AND t.id = br.task_id))
+		`, string(status), reasonArg, stepArg, orgID, id, completing)
 		if err != nil {
 			return err
 		}

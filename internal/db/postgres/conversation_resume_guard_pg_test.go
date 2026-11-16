@@ -17,7 +17,9 @@ import (
 // TestConversationStore_Postgres_CalledOffRunRefusesAnOpenWakeForAnotherTeam
 // runs the wake's called-off guard on the pool it runs on in production, as a
 // member of the step conversation's team who is not on its blueprint run's
-// team and so cannot see the run. The shared conformance suite wires both
+// team and so cannot see the run: the test moves the run, standing in for
+// every caller the conversation's write policy admits and the run's read
+// policy does not. The shared conformance suite wires both
 // pools to the admin connection, where every run is visible, so it cannot tell
 // a guard that reads the run past its policy from one that reads an empty
 // result as "not called off".

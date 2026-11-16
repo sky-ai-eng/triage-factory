@@ -1060,9 +1060,11 @@ func seedPgBlueprintRun(t *testing.T, h *pgtest.Harness, orgID, userID, taskID s
 }
 
 // moveBlueprintRunToAnotherTeam puts brID on a new team that only userID is
-// on, the shape a run is left in when its task moved to another team mid-run
-// and the next step was minted there: a member of the step's team can write
-// the step and cannot see the run.
+// on, so a member of the step's team can write the step and cannot see the
+// run. No door puts a step on another team from its run. The shape stands in
+// for every caller the conversation's write policy admits and the run's read
+// policy does not, which is who the guards under test read past that policy
+// for.
 func moveBlueprintRunToAnotherTeam(t *testing.T, h *pgtest.Harness, orgID, userID, brID string) {
 	t.Helper()
 	runTeam := seedPgDefaultTeam(t, h, orgID, userID)
@@ -1140,13 +1142,14 @@ func seedPgConversationPromptIn(t *testing.T, h *pgtest.Harness, id, orgID, user
 // hand-off guard under the pool it actually runs on, as the principal it is
 // most likely to be wrong for.
 //
-// blueprint_runs_select is team-scoped, and a step conversation can sit on a
-// different team from its run: the task moved mid-run and the next step was
-// minted on the new team. A member of that team may legitimately update the
-// step and sees NO row for its blueprint. Written as a correlated subquery,
-// the guard reads that emptiness as "no blueprint is running" and lets the
-// flip through — reopening the window for everyone off the run's team, which
-// is the shape a conformance suite wired to the admin pool cannot see.
+// blueprint_runs_select admits the run's team alone, and conversations_update
+// admits more (a private row's creator, an org-visible row's org admin), so a
+// caller may legitimately update a step and see NO row for its blueprint. The
+// test stages that caller as a member of the step's team with the run moved
+// to a team of its own. Written as a correlated subquery, the guard reads that
+// emptiness as "no blueprint is running" and lets the flip through, reopening
+// the window for everyone off the run's team, which is the shape a
+// conformance suite wired to the admin pool cannot see.
 //
 // Both directions are asserted, because a guard that refuses everyone would
 // pass the first half and silently break teammate follow-up.

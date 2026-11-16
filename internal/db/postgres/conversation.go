@@ -385,10 +385,11 @@ func parkOpen(ctx context.Context, q queryer, orgID, conversationID string, park
 // and why the blueprint check is in this statement rather than in the caller.
 //
 // It goes through tf.blueprint_run_is_running rather than a correlated
-// subquery because this statement runs on the app pool: blueprint_runs is
-// team-scoped, and a step conversation can sit on another team from its run
-// (the task moved mid-run), so a subquery by a member of the step's team
-// would find nothing and the guard would fail OPEN on exactly the rows it
+// subquery because this statement runs on the app pool, under two different
+// rules: the conversation's write policy admits a private row's creator and an
+// org-visible row's org admin, and the run's read policy admits its team's
+// members alone. A subquery by a caller the first admits and the second does
+// not would find nothing, and the guard would fail OPEN on exactly the rows it
 // protects.
 //
 // The other guard, that the conversation's run was not called off, cannot

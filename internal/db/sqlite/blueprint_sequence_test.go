@@ -164,6 +164,14 @@ func sqliteSequenceScaffold(t *testing.T) (db.BlueprintStore, dbtest.BlueprintSe
 				t.Fatalf("end the conversation: %v", err)
 			}
 		},
+		// tasks.team_id carries no foreign key here, so any other id is
+		// another team.
+		MoveTaskToAnotherTeam: func(t *testing.T, taskID string) {
+			t.Helper()
+			if _, err := conn.Exec(`UPDATE tasks SET team_id = '00000000-0000-0000-0000-0000000000b2' WHERE id = ?`, taskID); err != nil {
+				t.Fatalf("move the task to another team: %v", err)
+			}
+		},
 		RunCount: func(t *testing.T, taskID string) int {
 			return countOn(t, `SELECT count(*) FROM blueprint_runs WHERE task_id = ?`, taskID)
 		},

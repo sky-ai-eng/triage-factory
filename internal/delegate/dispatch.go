@@ -1802,6 +1802,16 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 			domain.BlueprintRunStatusCancelled, "cancelled", &stepIdx, false)
 		return
 	}
+	// A run is its task's team's work. The doors that move a task to another
+	// team stop its live steps, but a step that had already concluded has
+	// nothing to stop, and only this reactor reads it: advancing would put the
+	// old team's run on the new team's task, and finishing would close the
+	// task under its new holder. Checked before every arm, so no arm acts on a
+	// run its task has left.
+	if s.taskLeftRunTeam(ctx, orgID, br) {
+		s.cancelRunForTeamMove(ctx, orgID, br, stepConversation.ID, stepIdx, cfg, startTime)
+		return
+	}
 
 	// Parked mid-step with no verdict and no cancel behind it: leave the
 	// blueprint running, the worktree on disk, the snapshot in the blob store
@@ -1886,11 +1896,16 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 			return
 		}
 		if !advanced {
-			// The advance guard closed between the refresh at the top and the
-			// write: the run terminated, or another engagement already moved
-			// the pointer. Same answer as the stale-step check above, for the
-			// same reason — the sequence is somebody else's to drive, and
-			// every transition here would be decided on their state.
+			// The task moved to another team after the check above: the guard
+			// refuses an advance onto a task the run's team no longer holds.
+			if s.taskLeftRunTeam(ctx, orgID, br) {
+				s.cancelRunForTeamMove(ctx, orgID, br, stepConversation.ID, stepIdx, cfg, startTime)
+				return
+			}
+			// Otherwise the run terminated, or another engagement already
+			// moved the pointer. Same answer as the stale-step check above,
+			// for the same reason — the sequence is somebody else's to drive,
+			// and every transition here would be decided on their state.
 			dispatchLog.Error("reactor: the advance guard found the sequence already moved; writing no blueprint transition",
 				"blueprint_run", br.ID, "conversation", stepConversation.ID, "step", stepIdx)
 			return
@@ -1919,6 +1934,45 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 		s.terminateBlueprint(orgID, br.ID, br.TaskID, startTime, cfg,
 			domain.BlueprintRunStatusAborted, reason, &stepIdx, false)
 	}
+}
+
+// taskLeftRunTeam reports whether the run's task is now on a team other than
+// the run's. A run with no team predates the column and is not held to it. A
+// failed read answers false: the store refuses to advance or complete a run
+// whose task left its team, so a run this misses stays running for the
+// stranded-run replay, which reads it again.
+func (s *Spawner) taskLeftRunTeam(ctx context.Context, orgID string, br *domain.BlueprintRun) bool {
+	if br.TeamID == "" {
+		return false
+	}
+	task, err := s.tasks.GetSystem(ctx, orgID, br.TaskID)
+	if err != nil || task == nil {
+		dispatchLog.Warn("reactor: read the run's task for its team failed; the store's guards hold the run to it",
+			"blueprint_run", br.ID, "task", br.TaskID, "error", err)
+		return false
+	}
+	return task.TeamID == nil || *task.TeamID != br.TeamID
+}
+
+// cancelRunForTeamMove ends a run whose task moved to another team. Its last
+// step stops being the task's conversation, with its memory owed, and the run
+// is cancelled, which leaves the task, and the new holder's work on it, alone.
+// The step is ended first so that whatever the cancel lets start on the task
+// finds the boundary already written. The door that moved the task has
+// usually ended the step already and rung for it, which the stamp answers
+// with no row.
+func (s *Spawner) cancelRunForTeamMove(ctx context.Context, orgID string, br *domain.BlueprintRun, stepConversationID string, stepIdx int, cfg runConfig, startTime time.Time) {
+	dispatchLog.Info("reactor: the run's task moved to another team; cancelling the run",
+		"blueprint_run", br.ID, "task", br.TaskID, "step", stepIdx)
+	ended, err := s.conversations.EndConversationSystem(ctx, orgID, stepConversationID, domain.EndedReassigned)
+	if err != nil {
+		dispatchLog.Warn("stamp the reassigned boundary on the run's last step failed; cancelling the run regardless",
+			"blueprint_run", br.ID, "conversation", stepConversationID, "error", err)
+	} else if ended != nil {
+		s.kickMemoryOwed(orgID, ended.ID)
+	}
+	s.terminateBlueprint(orgID, br.ID, br.TaskID, startTime, cfg,
+		domain.BlueprintRunStatusCancelled, "task moved to another team", &stepIdx, false)
 }
 
 // modelForClaim resolves the model one claim runs on.

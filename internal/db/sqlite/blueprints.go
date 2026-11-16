@@ -887,12 +887,14 @@ func (s *blueprintStore) AdvanceRunToStepSystem(ctx context.Context, orgID strin
 // advanceRunCurrentStep moves a running blueprint_run's sequencing pointer one
 // step on, and reports whether it moved. The predicate is the compare-and-swap
 // the advance transaction fences on: a run that terminated since its reactor
-// read it, or whose pointer another engagement already moved, matches no row
-// and writes nothing.
+// read it, whose pointer another engagement already moved, or whose task is
+// no longer on the run's team matches no row and writes nothing. A run with
+// no team predates the column and is not held to it.
 func advanceRunCurrentStep(ctx context.Context, q queryer, id string, from, to int) (bool, error) {
 	res, err := q.ExecContext(ctx, `
 		UPDATE blueprint_runs SET current_step_index = ?
 		WHERE id = ? AND status = 'running' AND current_step_index = ?
+		  AND (team_id IS NULL OR team_id = (SELECT team_id FROM tasks WHERE id = blueprint_runs.task_id))
 	`, to, id, from)
 	if err != nil {
 		return false, err
@@ -1209,7 +1211,8 @@ func (s *blueprintStore) MarkRunStatusSystem(ctx context.Context, orgID, id stri
 			UPDATE blueprint_runs
 			SET status = ?, abort_reason = ?, aborted_at_step = ?, completed_at = ?
 			WHERE id = ? AND status = 'running'
-		`, string(status), reasonArg, stepArg, now, id)
+			  AND (NOT ? OR team_id IS NULL OR team_id = (SELECT team_id FROM tasks WHERE id = blueprint_runs.task_id))
+		`, string(status), reasonArg, stepArg, now, id, status == domain.BlueprintRunStatusCompleted)
 		if err != nil {
 			return err
 		}
