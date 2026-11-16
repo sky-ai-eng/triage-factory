@@ -215,11 +215,11 @@ func (r *Router) tryAutoDelegateTrackingInjection(ctx context.Context, orgID str
 				"entity", entityID, "task_id", task.ID, "trigger", trigger.ID, "event_id", triggeringEventID)
 			return r.enqueueBusyFiring(ctx, orgID, entityID, task, trigger, triggeringEventID, actingTeamID, agentID)
 		}
-		// The plan refused the run for a setting a person has to change: a
-		// spend cap, the team's models, a provider, a missing blueprint. A
-		// replay would be refused the same way, so the event is not replayed
-		// for it, and the next trigger gets its turn. The refusal wrote
-		// nothing: the claim rides the run's transaction.
+		// The plan refused the run for a standing condition: a spend cap, the
+		// team's models, a provider, a missing blueprint. A replay would be
+		// refused the same way, so the event is not replayed for it, and the
+		// next trigger gets its turn. The refusal wrote nothing: the claim
+		// rides the run's transaction.
 		if cause, ok := delegate.RefusalCause(err); ok {
 			routerLog.Info("auto-delegate skipped: the run was refused",
 				"task_id", task.ID, "trigger", trigger.ID, "event_id", triggeringEventID, "cause", cause, "error", err)

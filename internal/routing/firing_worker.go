@@ -435,9 +435,9 @@ func (r *Router) processFiring(ctx context.Context, cf dbpkg.ClaimedFiring) {
 	switch {
 	case err == nil:
 	case refused:
-		// The plan refused the run for a setting a person has to change, so
-		// every retry would be refused the same way. Completing the row
-		// releases its key, and the task's next event is decided afresh
+		// The plan refused the run for a standing condition, so every retry
+		// in the row's budget would be refused the same way. Completing the
+		// row releases its key, and the task's next event is decided afresh
 		// rather than queued behind a row that can never fire.
 		//
 		// The bot's claim stays, as every skip leaves it. A refused row
@@ -446,6 +446,8 @@ func (r *Router) processFiring(ctx context.Context, cf dbpkg.ClaimedFiring) {
 		// stamped the claim leaves the task claimed with no run; the row does
 		// not record which case it is, and the notice tells the trigger's
 		// team admins either way.
+		routerLog.InfoContext(unitCtx, "firing-queue: the run was refused",
+			"firing_id", f.ID, "task_id", f.TaskID, "trigger", f.TriggerID, "cause", refusal, "error", err)
 		if skip(domain.PendingFiringSkipRefused) {
 			terminal(func(termCtx context.Context) {
 				r.postTriggerRefused(termCtx, f.OrgID, task, *trigger, refusal, err)

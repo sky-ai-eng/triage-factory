@@ -9,8 +9,8 @@ import (
 
 // RefusalCause reports whether err is one of PlanDelegation's refusals, and
 // which: one of the domain.DelegationRefused* causes. A refusal is a standing
-// condition, so planning the same delegation again is refused the same way
-// until a person changes the setting it names.
+// condition: planning the same delegation again is refused the same way until
+// the setting it names changes, or, for a spend cap, the UTC day rolls over.
 //
 // Anything else answers ok=false and is a fault: a store read that failed, a
 // deadline, or a firing transaction that failed. A fault can come out

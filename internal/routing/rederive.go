@@ -163,11 +163,7 @@ func (r *Router) evaluateReDerive(ctx context.Context, orgID, taskID string) (re
 		// to. Its result is not kept: the fire plans again against the
 		// settings it finds then. A refusal plans no firing, and the walk
 		// moves on as it does for a tripped breaker.
-		runTeam := acting
-		if runTeam == "" {
-			runTeam = teamIDValue(task)
-		}
-		if _, err := r.spawner.PlanDelegation(*task, runTeam, triggerDelegateOpts(orgID, trigger, task.PrimaryEventID, agentID, dbpkg.AgentClaimStamp{}, "")); err != nil {
+		if _, err := r.spawner.PlanDelegation(*task, acting, triggerDelegateOpts(orgID, trigger, task.PrimaryEventID, agentID, dbpkg.AgentClaimStamp{}, "")); err != nil {
 			cause, refused := delegate.RefusalCause(err)
 			if !refused {
 				return false, fmt.Errorf("plan delegation: %w", err)

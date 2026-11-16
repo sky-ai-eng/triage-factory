@@ -116,8 +116,9 @@ const (
 	// PendingFiringSkipRefused: the spawner's plan refused the run for one of
 	// the domain.DelegationRefused* causes — a daily spend cap, the team's
 	// models, a provider the org has not connected, or a missing blueprint or
-	// prompt. A retry is refused the same way until a person changes the
-	// setting, so the firing is dropped rather than held: the task stays on
-	// the board, and a person can delegate it once the cause is fixed.
+	// prompt. A retry is refused the same way until a setting changes or, for
+	// a spend cap, the UTC day rolls over, and the firing is dropped rather
+	// than held for either: the task stays on the board, and a person can
+	// delegate it once the cause clears.
 	PendingFiringSkipRefused = "refused"
 )

@@ -51,25 +51,25 @@ type stubDelegator struct {
 	// firing transaction, which is where a concurrent write such as a team
 	// archive lands between the two.
 	beforeRun func()
-	// refusal, when set, is the refusal PlanDelegation answers and Delegate,
-	// which plans first, returns, for a test of a run the plan refuses.
-	refusal error
+	// planErr, when set, is what PlanDelegation answers and Delegate, which
+	// plans first, returns: a refusal, or a fault in one of the plan's reads.
+	planErr error
 }
 
 var errStubDelegate = errors.New("stub: delegation refused")
 
-// PlanDelegation passes every plan but the refusal a test set.
+// PlanDelegation passes every plan unless a test set planErr.
 func (s *stubDelegator) PlanDelegation(domain.Task, string, delegate.DelegateOpts) (delegate.DelegationPlan, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return delegate.DelegationPlan{}, s.refusal
+	return delegate.DelegationPlan{}, s.planErr
 }
 
 func (s *stubDelegator) Delegate(task domain.Task, opts delegate.DelegateOpts) (string, error) {
 	atomic.AddInt64(&s.calls, 1)
 	s.mu.Lock()
-	if s.refusal != nil {
-		err := s.refusal
+	if s.planErr != nil {
+		err := s.planErr
 		s.mu.Unlock()
 		return "", err
 	}
@@ -920,7 +920,7 @@ func TestFiringWorker_ARefusedRowCompletesOnItsFirstAttempt(t *testing.T) {
 	}
 
 	stub.mu.Lock()
-	stub.refusal = &delegate.CostCapError{Scope: delegate.CostCapScopeTeam, TeamName: "Default", SpentUSD: 12.34, CapUSD: 10}
+	stub.planErr = &delegate.CostCapError{Scope: delegate.CostCapScopeTeam, TeamName: "Default", SpentUSD: 12.34, CapUSD: 10}
 	stub.mu.Unlock()
 	endTaskConversations(t, database, taskID)
 	drainOnce(t, router)

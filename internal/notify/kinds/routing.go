@@ -93,8 +93,8 @@ var AutomationConflict = notify.Notice(notify.NoticeSpec[Conflict]{
 })
 
 // TriggerRefusal is one firing of a trigger that the spawner's plan refused,
-// so no run started. Its cause is a setting a person changes, and the firing
-// was dropped rather than retried.
+// so no run started. Its cause is a standing condition, and the firing was
+// dropped rather than retried.
 type TriggerRefusal struct {
 	TriggerID string `json:"trigger_id"`
 	// TeamID is the trigger's team.
