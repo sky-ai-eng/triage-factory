@@ -52,6 +52,8 @@ type ScoreFixture struct {
 	ScoreRevision func(t *testing.T, taskID string) int64
 	// QueueRows reads the task's task_rederive_queue rows, oldest first.
 	QueueRows func(t *testing.T, taskID string) []ReDeriveQueueRow
+	// Tasks is the task store the suite reads a scored task back through.
+	Tasks db.TaskStore
 }
 
 // ReDeriveQueueRow is one task_rederive_queue row as the suite reads it.
@@ -298,6 +300,31 @@ func RunScoreStoreConformance(t *testing.T, mk ScoreStoreFactory) {
 					t.Errorf("task %s still listed as unscored after UpdateTaskScores", id)
 				}
 			}
+		}
+	})
+
+	// 0.6 and 0.65 have no exact single-precision form, so a column narrower
+	// than a float64 reads each back as a different number.
+	t.Run("UpdateTaskScores_scores_read_back_as_written", func(t *testing.T) {
+		f := mk(t)
+		id := f.Seed(t, 1)[0]
+		if err := f.Store.UpdateTaskScores(ctx, f.OrgID, []domain.TaskScoreUpdate{{
+			ID: id, PriorityScore: 0.6, AutonomySuitability: 0.65, Summary: "s", PriorityReasoning: "r",
+		}}); err != nil {
+			t.Fatalf("UpdateTaskScores: %v", err)
+		}
+		task, err := f.Tasks.GetSystem(ctx, f.OrgID, id)
+		if err != nil || task == nil {
+			t.Fatalf("GetSystem: task=%v err=%v", task, err)
+		}
+		if task.PriorityScore == nil || task.AutonomySuitability == nil {
+			t.Fatalf("scores after UpdateTaskScores: PriorityScore=%v AutonomySuitability=%v, want both set", task.PriorityScore, task.AutonomySuitability)
+		}
+		if *task.PriorityScore != 0.6 {
+			t.Errorf("PriorityScore = %v, want exactly 0.6", *task.PriorityScore)
+		}
+		if *task.AutonomySuitability != 0.65 {
+			t.Errorf("AutonomySuitability = %v, want exactly 0.65", *task.AutonomySuitability)
 		}
 	})
 

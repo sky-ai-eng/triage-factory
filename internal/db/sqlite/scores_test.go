@@ -50,6 +50,7 @@ func TestScoreStore_SQLite(t *testing.T) {
 				}
 			},
 			ReDerive: stores.TaskReDerive,
+			Tasks:    stores.Tasks,
 			ScoreRevision: func(t *testing.T, taskID string) int64 {
 				t.Helper()
 				return readSQLiteScoreRevision(t, conn, taskID)

@@ -48,6 +48,7 @@ func TestScoreStore_Postgres(t *testing.T) {
 				}
 			},
 			ReDerive: stores.TaskReDerive,
+			Tasks:    stores.Tasks,
 			ScoreRevision: func(t *testing.T, taskID string) int64 {
 				t.Helper()
 				return readPgScoreRevision(t, h.AdminDB, taskID)
