@@ -610,9 +610,8 @@ func TestBlueprintStore_Postgres_RunProgress(t *testing.T) {
 //  3. blueprint_runs_select admits a NULL-creator row through plain org
 //     membership rather than the creator-equals-caller predicate. This is the
 //     one that has to hold under real claims: without it the request-facing
-//     GetRun / GetRunForConversation / CancelBlueprintRun paths would 404 on
-//     every auto-fired blueprint, because an app-pool SELECT cannot match a
-//     NULL creator.
+//     GetRun / GetRunForConversation paths would 404 on every auto-fired
+//     blueprint, because an app-pool SELECT cannot match a NULL creator.
 func TestBlueprintStore_Postgres_FiredRunCreatorUnderRLS(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)

@@ -1,6 +1,6 @@
 // Package blueprints serves the blueprints API: blueprint CRUD, the step list
 // and its restructuring verbs (merge, split, reconnect, duplicate), and the
-// blueprint-run reads and cancel.
+// blueprint-run reads.
 package blueprints
 
 import (
@@ -14,7 +14,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
-	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
@@ -24,19 +23,15 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
 )
 
-// Handler serves the blueprint + blueprint-run endpoints. spawner is read
-// through a getter so the handler always sees the current delegation spawner,
-// which is wired onto the server after construction.
+// Handler serves the blueprint + blueprint-run endpoints.
 type Handler struct {
-	tx      db.TxRunner
-	az      *authz.Checker
-	spawner func() *delegate.Spawner
+	tx db.TxRunner
+	az *authz.Checker
 }
 
-// New builds the blueprints handler. spawner is read on every run cancel, not
-// once here; see Handler.
-func New(tx db.TxRunner, az *authz.Checker, spawner func() *delegate.Spawner) *Handler {
-	return &Handler{tx: tx, az: az, spawner: spawner}
+// New builds the blueprints handler.
+func New(tx db.TxRunner, az *authz.Checker) *Handler {
+	return &Handler{tx: tx, az: az}
 }
 
 const maxBlueprintSteps = 50
@@ -1405,52 +1400,6 @@ func (h *Handler) handleBlueprintRunGet(w http.ResponseWriter, r *http.Request) 
 	httpx.WriteJSON(w, http.StatusOK, blueprintRunResponse{BlueprintRun: br, Steps: views})
 }
 
-func (h *Handler) handleBlueprintRunCancel(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := httpx.RequireOrg(w, r)
-	if !ok {
-		return
-	}
-	userID := httpx.ClaimsFrom(r.Context()).Subject
-	id, ok := httpx.UUIDPathOr404(w, r, "id", "blueprint run")
-	if !ok {
-		return
-	}
-
-	var br *domain.BlueprintRun
-	if err := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		var e error
-		br, e = tx.Blueprints.GetRun(r.Context(), orgID, id)
-		return e
-	}); err != nil {
-		httpx.InternalError(w, "blueprints", err)
-		return
-	}
-	if br == nil {
-		httpx.NotFound(w, "blueprint run")
-		return
-	}
-
-	switch br.Status {
-	case domain.BlueprintRunStatusCompleted, domain.BlueprintRunStatusFailed,
-		domain.BlueprintRunStatusAborted, domain.BlueprintRunStatusCancelled:
-		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonAlreadyTerminal, Message: "blueprint run already terminal"})
-		return
-	}
-
-	// Availability check after the existence + terminal checks so a missing or
-	// already-terminal run gets a 404/409 rather than a 503.
-	spawner := h.spawner()
-	if spawner == nil {
-		httpx.WriteDelegationUnavailable(w)
-		return
-	}
-	if err := spawner.CancelBlueprintRun(orgID, id, userID); err != nil {
-		httpx.InternalError(w, "blueprints", err)
-		return
-	}
-	httpx.WriteJSON(w, http.StatusAccepted, map[string]string{"status": "cancelling"})
-}
-
 // Register mounts the blueprint and blueprint-run routes.
 func (h *Handler) Register(m httpx.Mounts) {
 	m.APIMutating("POST /api/blueprints/list", h.handleBlueprintsList)
@@ -1468,5 +1417,4 @@ func (h *Handler) Register(m httpx.Mounts) {
 	m.APIMutating("POST /api/blueprints/duplicate", h.handleBlueprintDuplicate)
 	m.APIMutating("POST /api/blueprint-runs/list", h.handleBlueprintRunsList)
 	m.API("GET /api/blueprint-runs/{id}", h.handleBlueprintRunGet)
-	m.APIMutating("POST /api/blueprint-runs/{id}/cancel", h.handleBlueprintRunCancel)
 }

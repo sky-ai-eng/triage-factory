@@ -773,13 +773,6 @@ type BlueprintStore interface {
 	// blueprint instance, ordered by blueprint_step_index ASC, started_at ASC.
 	ConversationsForBlueprint(ctx context.Context, orgID string, blueprintRunID string) ([]domain.Conversation, error)
 
-	// ActiveStepConversationIDs returns the IDs of step conversations on a
-	// blueprint that have not reached a terminal state, parked `open` steps
-	// included: a cancel records its stop intent on each of them, and a
-	// paused blueprint whose parked step carried none would have nothing to
-	// settle it.
-	ActiveStepConversationIDs(ctx context.Context, orgID string, blueprintRunID string) ([]string, error)
-
 	// RunProgress returns, for each named blueprint run, how many steps its
 	// frozen plan holds and the run's status, keyed by blueprint_run id. A run
 	// whose row is absent — not found, or hidden from the caller (manual runs
@@ -811,6 +804,5 @@ type BlueprintStore interface {
 	GetRunForConversationSystem(ctx context.Context, orgID string, stepConversationID string) (*domain.BlueprintRun, *int, error)
 	MarkRunStatusSystem(ctx context.Context, orgID string, id string, status domain.BlueprintRunStatus, abortReason string, abortedAtStep *int) (changed bool, err error)
 	ConversationsForBlueprintSystem(ctx context.Context, orgID string, blueprintRunID string) ([]domain.Conversation, error)
-	ActiveStepConversationIDsSystem(ctx context.Context, orgID string, blueprintRunID string) ([]string, error)
 	IsNewestRunForTaskSystem(ctx context.Context, orgID, taskID, blueprintRunID string) (bool, error)
 }

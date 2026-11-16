@@ -461,7 +461,10 @@ transaction. It does not park the conversation itself.
 The live holder, or the dispatcher handling expired/unclaimed work, parks the conversation
 `open` and releases any claim in one transaction. Execution cannot be claimed while stop is
 requested. User follow-up clears the request to re-arm the conversation. A plain stop leaves the
-blueprint unchanged. Cancellation uses the same request/disposition separation (§1.7).
+blueprint unchanged. A blueprint run is cancelled only as part of a lifecycle action one layer up
+(a requeue, a new delegation, a person's claim, a reassignment, or a team archive), which stops the
+step conversation and requests the run's cancellation together. The cancellation uses the same
+request/disposition separation (§1.7).
 
 The request records who asked and why (`stop_requested_by`, `stop_requested_reason`), and the park
 derives `park_reason` from them, so a user stop, a system stop and a stall each park with their
@@ -525,7 +528,8 @@ and is refused like any other paused holder.
 #### Run health
 
 Healthy runs have no automatic total-duration limit. Claim age alone must not stop a run; this
-contract adds no `deadline_at` or `TF_RUN_DEADLINE`. Explicit stop and cancel controls remain.
+contract adds no `deadline_at` or `TF_RUN_DEADLINE`. The explicit stop, and the lifecycle actions
+that cancel a run, remain.
 
 Lease renewal proves ownership and database connectivity, not agent progress, so a stalled
 engagement whose executor still renews is detected separately (O4), by one watchdog in both

@@ -81,8 +81,11 @@ const (
 	// or it came to rest on one).
 	ResumeBlockedBlueprintConcluded = "blueprint_concluded"
 	// ResumeBlockedBlueprintCancelled — the workspace survives but the
-	// blueprint was called off at its own layer (the run cancelled outright,
-	// its team archived), so nothing under it runs again. As permanent as the
+	// blueprint was called off by a lifecycle action one layer up (a requeue,
+	// a new delegation, a person's claim, a reassignment, or its team
+	// archived), so nothing under it runs again. Each of those also stamps the
+	// conversation's end boundary, and the boundary rungs are asked first, so
+	// this rung answers only until that boundary lands. As permanent as the
 	// rung above, and split from it because the two put different sentences in
 	// front of a person: nothing here moved past anything — the work itself
 	// was ended, and the stop note on the transcript names the lifecycle event
