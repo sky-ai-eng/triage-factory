@@ -667,10 +667,10 @@ type BlueprintStore interface {
 	//  0. The run's task, share-locked (Postgres; SQLite's single writer needs
 	//     no lock), so its team cannot move between the guard and the commit.
 	//     It comes first because every transaction that writes a task and its
-	//     run takes the task first. A claim that moves the task to another
-	//     team either commits before this lock, and the guard below reads the
-	//     new team, or waits for this commit, and then ends and stops the step
-	//     this minted.
+	//     run takes the task first. A move to another team either commits
+	//     first, and the guard refuses the advance, or waits for this commit,
+	//     and then moves a task whose next step is already minted, as a move
+	//     during any live step does.
 	//  1. The guarded bump: current_step_index moves to nextStep's own index,
 	//     and only on a row still 'running' at fromStepIndex whose task is on
 	//     the run's team. That is the pointer write and the fence at once,

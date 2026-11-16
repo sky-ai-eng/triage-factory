@@ -1937,18 +1937,21 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 }
 
 // taskLeftRunTeam reports whether the run's task is now on a team other than
-// the run's. A run with no team predates the column and is not held to it. A
-// failed read answers false: the store refuses to advance or complete a run
-// whose task left its team, so a run this misses stays running for the
-// stranded-run replay, which reads it again.
+// the run's. A run with no team predates the column and is not held to it.
+//
+// A failed read answers false, and the reactor goes on as if the task had not
+// moved. The arms that would act for the task's new team, an advance and a
+// completion, are refused by the store, which reads the same team in the
+// write, and the run stays running for the stranded-run replay to read again.
+// The others fail, abort, or park the run, none of which touches the task.
 func (s *Spawner) taskLeftRunTeam(ctx context.Context, orgID string, br *domain.BlueprintRun) bool {
 	if br.TeamID == "" {
 		return false
 	}
 	task, err := s.tasks.GetSystem(ctx, orgID, br.TaskID)
 	if err != nil || task == nil {
-		dispatchLog.Warn("reactor: read the run's task for its team failed; the store's guards hold the run to it",
-			"blueprint_run", br.ID, "task", br.TaskID, "error", err)
+		dispatchLog.Warn("reactor: the run's task could not be read for its team; reacting as if it had not moved",
+			"blueprint_run", br.ID, "task", br.TaskID, "found", task != nil, "error", err)
 		return false
 	}
 	return task.TeamID == nil || *task.TeamID != br.TeamID
@@ -1957,13 +1960,18 @@ func (s *Spawner) taskLeftRunTeam(ctx context.Context, orgID string, br *domain.
 // cancelRunForTeamMove ends a run whose task moved to another team. Its last
 // step stops being the task's conversation, with its memory owed, and the run
 // is cancelled, which leaves the task, and the new holder's work on it, alone.
-// The step is ended first so that whatever the cancel lets start on the task
-// finds the boundary already written. The door that moved the task has
-// usually ended the step already and rung for it, which the stamp answers
-// with no row.
+//
+// The cancel is requested first, so a terminal write that fails below leaves a
+// called-off run that recovery still ends: the stranded-run replay for a
+// concluded step, and the unclaimed-stop settlement for a parked one, which
+// the replay never selects. The step is ended before the terminal, so whatever
+// the terminal lets start on the task finds the boundary already written. A
+// stamp that answers no row found the step already ended, and its memory
+// already rung for.
 func (s *Spawner) cancelRunForTeamMove(ctx context.Context, orgID string, br *domain.BlueprintRun, stepConversationID string, stepIdx int, cfg runConfig, startTime time.Time) {
 	dispatchLog.Info("reactor: the run's task moved to another team; cancelling the run",
 		"blueprint_run", br.ID, "task", br.TaskID, "step", stepIdx)
+	s.requestBlueprintCancel(ctx, orgID, br.ID)
 	ended, err := s.conversations.EndConversationSystem(ctx, orgID, stepConversationID, domain.EndedReassigned)
 	if err != nil {
 		dispatchLog.Warn("stamp the reassigned boundary on the run's last step failed; cancelling the run regardless",

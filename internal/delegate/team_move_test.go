@@ -44,6 +44,9 @@ func TestReactor_CancelsARunWhoseTaskLeftItsTeam(t *testing.T) {
 			if run.Status != domain.BlueprintRunStatusCancelled {
 				t.Errorf("run status = %q, want cancelled", run.Status)
 			}
+			if !run.CancelRequested {
+				t.Error("cancel_requested = false, want true — recovery ends a called-off run if its terminal write fails")
+			}
 			if run.CurrentStepIndex != 0 {
 				t.Errorf("current_step_index = %d, want 0", run.CurrentStepIndex)
 			}

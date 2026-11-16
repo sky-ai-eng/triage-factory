@@ -902,9 +902,8 @@ func (s *blueprintStore) AdvanceRunToStepSystem(ctx context.Context, orgID strin
 	var ended, conv *domain.Conversation
 	err := inTx(ctx, s.admin, func(q queryer) error {
 		// 0. The run's task, share-locked, so the team the guard below reads
-		// cannot move before this commits. A claim that moves the task waits
-		// here and then ends and stops the step this mints; one that moved
-		// it first is read by the guard, which refuses the advance.
+		// cannot move before this commits: a move either commits first, and
+		// the guard refuses the advance, or waits for this one.
 		if err := shareLockRunTask(ctx, q, orgID, nextStep.BlueprintRunID); err != nil {
 			return err
 		}
