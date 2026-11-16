@@ -722,7 +722,7 @@ func (s *blueprintStore) DuplicatePrompts(ctx context.Context, orgID, teamID str
 // in the order scanBlueprintRun reads them. Both reads SELECT it and both
 // single-row run writes RETURN it, so the write shape cannot drift from the
 // read shape.
-const pgBlueprintRunColumns = `id, blueprint_id, task_id, trigger_type, trigger_id, actor_agent_id::text, status,
+const pgBlueprintRunColumns = `id, team_id::text, blueprint_id, task_id, trigger_type, trigger_id, actor_agent_id::text, status,
 		       current_step_index, cancel_requested, step_plan,
 		       abort_reason, aborted_at_step, worktree_path, started_at, completed_at`
 
@@ -818,7 +818,7 @@ func (s *blueprintStore) CreateRunWithFirstStepSystem(ctx context.Context, orgID
 		}
 
 		// 2. The run.
-		if err := insertFiringRun(ctx, q, orgID, br, stepPlan, event, firstStep.CreatorUserID, &inserted); err != nil {
+		if err := insertFiringRun(ctx, q, orgID, br, runTeamID, stepPlan, event, firstStep.CreatorUserID, &inserted); err != nil {
 			return err
 		}
 		if !inserted {
@@ -1008,21 +1008,21 @@ func lockFiringTeam(ctx context.Context, q queryer, orgID, teamID string) (archi
 // reports through inserted whether a row landed. Split out so the two arms'
 // only difference — the fence and the creator column the schema CHECK pairs
 // with trigger_type — reads as the two statements it is.
-func insertFiringRun(ctx context.Context, q queryer, orgID string, br domain.BlueprintRun, stepPlan string, event bool, creatorUserID string, inserted *bool) error {
+func insertFiringRun(ctx context.Context, q queryer, orgID string, br domain.BlueprintRun, teamID, stepPlan string, event bool, creatorUserID string, inserted *bool) error {
 	var res sql.Result
 	var err error
 	if event {
 		res, err = q.ExecContext(ctx, `
 			INSERT INTO blueprint_runs
-				(id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id,
+				(id, org_id, team_id, creator_user_id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id,
 				 actor_agent_id, status, worktree_path, started_at, step_plan)
 			VALUES (
-				$1, $2, NULL,
-				$3, $4, 'event', $5, $6,
-				$7, $8, $9, now(), $10
+				$1, $2, $3::uuid, NULL,
+				$4, $5, 'event', $6, $7,
+				$8, $9, $10, now(), $11
 			)
 			ON CONFLICT (triggering_event_id, trigger_id) WHERE triggering_event_id IS NOT NULL DO NOTHING
-		`, br.ID, orgID, br.BlueprintID, br.TaskID, br.TriggerID, br.TriggeringEventID,
+		`, br.ID, orgID, nullIfEmpty(teamID), br.BlueprintID, br.TaskID, br.TriggerID, br.TriggeringEventID,
 			nullIfEmpty(br.ActorAgentID), br.Status, br.WorktreePath, stepPlan)
 	} else {
 		// A manual run is attributed to the person who asked for it, and the
@@ -1034,14 +1034,14 @@ func insertFiringRun(ctx context.Context, q queryer, orgID string, br domain.Blu
 		}
 		res, err = q.ExecContext(ctx, `
 			INSERT INTO blueprint_runs
-				(id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id,
+				(id, org_id, team_id, creator_user_id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id,
 				 actor_agent_id, status, worktree_path, started_at, step_plan)
 			VALUES (
-				$1, $2, $3::uuid,
-				$4, $5, $6, $7, NULL,
-				$8, $9, $10, now(), $11
+				$1, $2, $3::uuid, $4::uuid,
+				$5, $6, $7, $8, NULL,
+				$9, $10, $11, now(), $12
 			)
-		`, br.ID, orgID, creatorUserID, br.BlueprintID, br.TaskID, br.TriggerType,
+		`, br.ID, orgID, nullIfEmpty(teamID), creatorUserID, br.BlueprintID, br.TaskID, br.TriggerType,
 			nullIfEmpty(br.TriggerID), nullIfEmpty(br.ActorAgentID), br.Status, br.WorktreePath, stepPlan)
 	}
 	if err != nil {
@@ -1085,7 +1085,7 @@ func (s *blueprintStore) IsNewestRunForTaskSystem(ctx context.Context, orgID, ta
 
 // isNewestRunForTask goes through tf.blueprint_run_is_newest_for_task on both
 // pools rather than querying blueprint_runs directly. On the app pool that is
-// the whole point — the SELECT policy hides another user's manual run, so a
+// the whole point — the SELECT policy hides a run on another team, so a
 // direct query would report a superseded run as the newest. On the admin pool
 // it changes nothing but keeps one definition of the ordering.
 func isNewestRunForTask(ctx context.Context, q queryer, orgID, taskID, blueprintRunID string) (bool, error) {
@@ -1140,7 +1140,7 @@ func scanBlueprintRun(scan func(...any) error) (domain.BlueprintRun, error) {
 		cancelRequested bool
 		stepPlanRaw     string
 	)
-	if err := scan(&br.ID, &br.BlueprintID, &br.TaskID, &br.TriggerType, &triggerID, &actorAgentID, &br.Status,
+	if err := scan(&br.ID, &br.TeamID, &br.BlueprintID, &br.TaskID, &br.TriggerType, &triggerID, &actorAgentID, &br.Status,
 		&br.CurrentStepIndex, &cancelRequested, &stepPlanRaw,
 		&abortReason, &abortedAtStep, &br.WorktreePath, &br.StartedAt, &completedAt); err != nil {
 		return br, err
@@ -1191,9 +1191,7 @@ func (s *blueprintStore) ListRuns(ctx context.Context, orgID string, f db.Bluepr
 	}
 
 	q := `
-		SELECT id, blueprint_id, task_id, trigger_type, trigger_id, actor_agent_id::text, status,
-		       current_step_index, cancel_requested, step_plan,
-		       abort_reason, aborted_at_step, worktree_path, started_at, completed_at
+		SELECT ` + pgBlueprintRunColumns + `
 		FROM blueprint_runs` + where + ` ORDER BY started_at DESC, id`
 	pageArgs := args
 	if opts.Limit > 0 {
@@ -1497,9 +1495,9 @@ func (s *blueprintStore) RunProgress(ctx context.Context, orgID string, blueprin
 	if len(blueprintRunIDs) == 0 {
 		return out, nil
 	}
-	// App pool (RLS-active), matching the handler that asks: manual blueprint
-	// runs are creator-scoped, so another user's manual run is absent from the
-	// result rather than counted. The caller degrades to the unqualified
+	// App pool (RLS-active), matching the handler that asks: blueprint runs
+	// are team-scoped, so a run on a team the caller is not on is absent from
+	// the result rather than counted. The caller degrades to the unqualified
 	// projection there, exactly as the chain rail already does for a run whose
 	// blueprint row it cannot read.
 	rows, err := s.app.QueryContext(ctx, `

@@ -224,11 +224,11 @@ func DedupPreserveOrder(ids []string) []string {
 //
 // blueprints is team-scoped (mirrors prompts: composite uniques (id, org_id)
 // and (id, team_id), RLS on creator + team membership). blueprint_steps
-// inherits the blueprint's access; blueprint_runs is creator-scoped (RLS gates
-// rows on creator_user_id = tf.current_user_id() for manual runs, org-visible
-// for event runs). The Postgres impl threads org_id through every WHERE for
-// defense in depth and lets RLS enforce the rest; SQLite collapses orgID to
-// runmode.LocalDefaultOrgID via assertLocalOrg.
+// inherits the blueprint's access; blueprint_runs is team-scoped (RLS gates
+// rows on membership in the run's team_id, for manual and event runs alike,
+// as it gates the run's conversations). The Postgres impl threads org_id
+// through every WHERE for defense in depth and lets RLS enforce the rest;
+// SQLite collapses orgID to runmode.LocalDefaultOrgID via assertLocalOrg.
 //
 // The ...System methods route through the admin pool (claims-less system
 // callers); every other method runs on the app pool.
@@ -594,7 +594,8 @@ type BlueprintStore interface {
 	//     listing finds its conversation, and a firing that waits for it reads
 	//     the team archived and writes nothing. A team id with no row takes
 	//     no lock and is not refused here.
-	//  2. The blueprint_runs insert, which requires a trigger type: the arm
+	//  2. The blueprint_runs insert, whose team_id is the run's team read in
+	//     step 1. It requires a trigger type: the arm
 	//     is chosen by that value, so an empty one selects the manual arm by
 	//     omission rather than by intent and impls reject it with
 	//     ErrBlueprintRunTriggerTypeRequired. An event-triggered run
@@ -707,11 +708,12 @@ type BlueprintStore interface {
 	//
 	// A predicate rather than a getter for the newest run, because the honest
 	// answer is not always the caller's to see: blueprint_runs_select is
-	// creator-scoped for manual runs, so a task re-delegated by a DIFFERENT
-	// user has a superseding run the resolving caller cannot read. Postgres
-	// answers both pools through tf.blueprint_run_is_newest_for_task, which
-	// reads past that policy and hands back only the yes/no — enough to stop
-	// the close, nothing about whose work superseded it.
+	// team-scoped, so a task that moved to another team and was delegated
+	// there has a superseding run a resolving caller on the old team cannot
+	// read. Postgres answers both pools through
+	// tf.blueprint_run_is_newest_for_task, which reads past that policy and
+	// hands back only the yes/no — enough to stop the close, nothing about
+	// whose work superseded it.
 	IsNewestRunForTask(ctx context.Context, orgID, taskID, blueprintRunID string) (bool, error)
 
 	// GetRun returns a blueprint run by id, or (nil, nil) when not found.
@@ -775,8 +777,8 @@ type BlueprintStore interface {
 
 	// RunProgress returns, for each named blueprint run, how many steps its
 	// frozen plan holds and the run's status, keyed by blueprint_run id. A run
-	// whose row is absent — not found, or hidden from the caller (manual runs
-	// are creator-scoped under RLS) — is simply missing from the map rather
+	// whose row is absent — not found, or hidden from the caller (a run is
+	// team-scoped under RLS) — is simply missing from the map rather
 	// than reported with zero values, so a caller can tell "no such run
 	// visible" from a plan of no steps.
 	//

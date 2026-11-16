@@ -14,16 +14,17 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// TestConversationStore_Postgres_CalledOffRunRefusesAnOpenWakeForANonCreator
+// TestConversationStore_Postgres_CalledOffRunRefusesAnOpenWakeForAnotherTeam
 // runs the wake's called-off guard on the pool it runs on in production, as a
-// teammate who cannot see the creator's manual blueprint run. The shared
-// conformance suite wires both pools to the admin connection, where every run
-// is visible, so it cannot tell a guard that reads the run past its policy
-// from one that reads an empty result as "not called off".
+// member of the step conversation's team who is not on its blueprint run's
+// team and so cannot see the run. The shared conformance suite wires both
+// pools to the admin connection, where every run is visible, so it cannot tell
+// a guard that reads the run past its policy from one that reads an empty
+// result as "not called off".
 //
 // Both directions are asserted, because a guard that refused every invisible
 // run would pass the first half and break a teammate's follow-up.
-func TestConversationStore_Postgres_CalledOffRunRefusesAnOpenWakeForANonCreator(t *testing.T) {
+func TestConversationStore_Postgres_CalledOffRunRefusesAnOpenWakeForAnotherTeam(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
@@ -51,8 +52,10 @@ func TestConversationStore_Postgres_CalledOffRunRefusesAnOpenWakeForANonCreator(
 		VALUES ($1, $2, $3, $4, 'team', $5, 'github:pr:ci_check_failed', '', $6, 'queued', 'pending', 0.5)
 	`, taskID, orgID, creator, teamID, entityID, eventID)
 
-	// The creator's manual blueprint, cancel requested, with its step parked.
+	// The creator's manual blueprint on a team of its own, cancel requested,
+	// with its step parked on the task's team.
 	brID := seedPgBlueprintRun(t, h, orgID, creator, taskID)
+	moveBlueprintRunToAnotherTeam(t, h, orgID, creator, brID)
 	pgtest.MustExec(t, h.AdminDB, `UPDATE blueprint_runs SET cancel_requested = true WHERE id = $1`, brID)
 	stepIdx := 0
 	convID := seedPgConversation(t, h.AdminDB, orgID, domain.Conversation{
@@ -68,7 +71,7 @@ func TestConversationStore_Postgres_CalledOffRunRefusesAnOpenWakeForANonCreator(
 			return err
 		}
 		if n != 0 {
-			t.Errorf("the teammate can see %d blueprint_runs rows; this test needs the creator-scoped policy to hide it", n)
+			t.Errorf("the teammate can see %d blueprint_runs rows; this test needs the team-scoped policy to hide it", n)
 		}
 		return nil
 	}); err != nil {
@@ -83,13 +86,13 @@ func TestConversationStore_Postgres_CalledOffRunRefusesAnOpenWakeForANonCreator(
 			flipped = f
 			return mErr
 		}); err != nil {
-			t.Fatalf("MarkQueuedForResume as a non-creator: %v", err)
+			t.Fatalf("MarkQueuedForResume off the run's team: %v", err)
 		}
 		return flipped
 	}
 
 	if wake(t) {
-		t.Error("a non-creator's wake flipped an open step under a cancel-requested run; the guard read the hidden run as not called off")
+		t.Error("a wake from off the run's team flipped an open step under a cancel-requested run; the guard read the hidden run as not called off")
 	}
 	var status string
 	if err := h.AdminDB.QueryRow(`SELECT status FROM conversations WHERE id = $1`, convID).Scan(&status); err != nil {

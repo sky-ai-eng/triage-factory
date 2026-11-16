@@ -418,8 +418,8 @@ export interface Conversation {
   // blueprint_step_count is the length of the owning blueprint run's frozen
   // step plan — what turns blueprint_step_index into a position ("step 2 of
   // 4") and says whether a completed step is the chain's last. 0 when the
-  // server could not resolve the plan (a manual blueprint run is creator-scoped
-  // under RLS, so a teammate reads 0); lib/conversationStatus treats that as unknown and
+  // server could not resolve the plan (a blueprint run is team-scoped under
+  // RLS, so a reader off its team reads 0); lib/conversationStatus treats that as unknown and
   // falls back to the unqualified reading. Every delegated conversation belongs to
   // a blueprint, so 1 — not 0 — is the plain single-prompt case.
   blueprint_step_count?: number

@@ -328,14 +328,14 @@ type ConversationStore interface {
 	// turn end read as concluded. The re-open of an aborted blueprint
 	// (BlueprintStore.ReopenRunForResume, in the same transaction) withdraws
 	// the same columns. The check reads the run past blueprint_runs RLS, so a
-	// teammate who cannot see another user's manual run gets the creator's
-	// answer.
+	// caller who is not on the run's team, and so cannot see it, gets the
+	// answer a member of the team would.
 	//
 	// WHICH step of a finished blueprint may be woken is still not checked
 	// here — only the last one may, and that gate needs an admin-pool read
-	// (blueprint_runs RLS hides another user's manual blueprint, and a
-	// teammate resuming a conversation must not be refused for a row they merely
-	// cannot see), so it lives in the caller.
+	// (blueprint_runs RLS hides a run on another team, and a caller resuming a
+	// conversation must not be refused for a row they merely cannot see), so it
+	// lives in the caller.
 	MarkQueuedForResume(ctx context.Context, orgID, conversationID string) (bool, error)
 
 	// ClearNextAttempt drops the wait a hand-back set on the conversation

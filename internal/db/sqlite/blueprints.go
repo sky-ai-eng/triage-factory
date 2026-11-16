@@ -781,7 +781,7 @@ func (s *blueprintStore) CreateRunWithFirstStepSystem(ctx context.Context, orgID
 		}
 
 		// 2. The run.
-		if err := insertFiringRun(ctx, q, br, stepPlan, event, &inserted); err != nil {
+		if err := insertFiringRun(ctx, q, br, runTeamID, stepPlan, event, &inserted); err != nil {
 			return err
 		}
 		if !inserted {
@@ -945,21 +945,21 @@ func firingTeamArchived(ctx context.Context, q queryer, teamID string) (bool, er
 // only difference — the fence and the creator column the
 // blueprint_runs_creator_matches_trigger_type CHECK pairs with trigger_type —
 // reads as the two statements it is.
-func insertFiringRun(ctx context.Context, q queryer, br domain.BlueprintRun, stepPlan string, event bool, inserted *bool) error {
+func insertFiringRun(ctx context.Context, q queryer, br domain.BlueprintRun, teamID, stepPlan string, event bool, inserted *bool) error {
 	var res sql.Result
 	var err error
 	if event {
 		res, err = q.ExecContext(ctx, `
-			INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id, actor_agent_id, status, step_plan, worktree_path, creator_user_id, started_at)
-			VALUES (?, ?, ?, 'event', ?, ?, ?, ?, ?, ?, NULL, CURRENT_TIMESTAMP)
+			INSERT INTO blueprint_runs (id, team_id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id, actor_agent_id, status, step_plan, worktree_path, creator_user_id, started_at)
+			VALUES (?, ?, ?, ?, 'event', ?, ?, ?, ?, ?, ?, NULL, CURRENT_TIMESTAMP)
 			ON CONFLICT (triggering_event_id, trigger_id) WHERE triggering_event_id IS NOT NULL DO NOTHING
-		`, br.ID, br.BlueprintID, br.TaskID, br.TriggerID, br.TriggeringEventID,
+		`, br.ID, nullIfEmpty(teamID), br.BlueprintID, br.TaskID, br.TriggerID, br.TriggeringEventID,
 			nullIfEmpty(br.ActorAgentID), br.Status, stepPlan, br.WorktreePath)
 	} else {
 		res, err = q.ExecContext(ctx, `
-			INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id, actor_agent_id, status, step_plan, worktree_path, creator_user_id, started_at)
-			VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-		`, br.ID, br.BlueprintID, br.TaskID, br.TriggerType, nullIfEmpty(br.TriggerID),
+			INSERT INTO blueprint_runs (id, team_id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id, actor_agent_id, status, step_plan, worktree_path, creator_user_id, started_at)
+			VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		`, br.ID, nullIfEmpty(teamID), br.BlueprintID, br.TaskID, br.TriggerType, nullIfEmpty(br.TriggerID),
 			nullIfEmpty(br.ActorAgentID), br.Status, stepPlan, br.WorktreePath, runmode.LocalDefaultUserID)
 	}
 	if err != nil {
@@ -1033,7 +1033,7 @@ func (s *blueprintStore) GetRun(ctx context.Context, orgID, id string) (*domain.
 // the order scanBlueprintRunSQLite reads them. Both reads SELECT it and both
 // single-row run writes RETURN it, so the write shape cannot drift from the
 // read shape.
-const blueprintRunColumns = `id, blueprint_id, task_id, trigger_type, trigger_id, actor_agent_id, status,
+const blueprintRunColumns = `id, team_id, blueprint_id, task_id, trigger_type, trigger_id, actor_agent_id, status,
 		       current_step_index, cancel_requested, step_plan,
 		       abort_reason, aborted_at_step, worktree_path, started_at, completed_at`
 
@@ -1049,6 +1049,7 @@ const blueprintRunSelect = `
 func scanBlueprintRunSQLite(scan func(...any) error) (domain.BlueprintRun, error) {
 	var (
 		br              domain.BlueprintRun
+		teamID          sql.NullString
 		triggerID       sql.NullString
 		actorAgentID    sql.NullString
 		abortReason     sql.NullString
@@ -1057,7 +1058,7 @@ func scanBlueprintRunSQLite(scan func(...any) error) (domain.BlueprintRun, error
 		cancelRequested int
 		stepPlanRaw     string
 	)
-	if err := scan(&br.ID, &br.BlueprintID, &br.TaskID, &br.TriggerType, &triggerID, &actorAgentID, &br.Status,
+	if err := scan(&br.ID, &teamID, &br.BlueprintID, &br.TaskID, &br.TriggerType, &triggerID, &actorAgentID, &br.Status,
 		&br.CurrentStepIndex, &cancelRequested, &stepPlanRaw,
 		&abortReason, &abortedAtStep, &br.WorktreePath, &br.StartedAt, &completedAt); err != nil {
 		return br, err
@@ -1067,6 +1068,7 @@ func scanBlueprintRunSQLite(scan func(...any) error) (domain.BlueprintRun, error
 		return br, fmt.Errorf("unmarshal step plan for blueprint_run %s: %w", br.ID, err)
 	}
 	br.CancelRequested = cancelRequested != 0
+	br.TeamID = teamID.String
 	br.TriggerID = triggerID.String
 	br.ActorAgentID = actorAgentID.String
 	br.AbortReason = abortReason.String

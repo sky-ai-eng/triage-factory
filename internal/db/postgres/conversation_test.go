@@ -402,8 +402,8 @@ func newPgConversationSeeder(conn *sql.DB, orgID, userID, agentID, promptID stri
 			}
 			brID := uuid.New().String()
 			if _, err := conn.Exec(`
-				INSERT INTO blueprint_runs (id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, status, worktree_path, step_plan)
-				VALUES ($1, $2, $3, $4, $5, 'manual', 'running', '/tmp/wt', '[]')
+				INSERT INTO blueprint_runs (id, org_id, team_id, creator_user_id, blueprint_id, task_id, trigger_type, status, worktree_path, step_plan)
+				VALUES ($1, $2, (SELECT team_id FROM blueprints WHERE id = $4 AND org_id = $2), $3, $4, $5, 'manual', 'running', '/tmp/wt', '[]')
 			`, brID, orgID, userID, bpID, taskID); err != nil {
 				t.Fatalf("seed blueprint_run: %v", err)
 			}
@@ -1051,12 +1051,23 @@ func seedPgBlueprintRun(t *testing.T, h *pgtest.Harness, orgID, userID, taskID s
 	}
 	brID := uuid.New().String()
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO blueprint_runs (id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, status, worktree_path, step_plan)
-		VALUES ($1, $2, $3, $4, $5, 'manual', 'running', '/tmp/wt', '[]')
+		INSERT INTO blueprint_runs (id, org_id, team_id, creator_user_id, blueprint_id, task_id, trigger_type, status, worktree_path, step_plan)
+		VALUES ($1, $2, (SELECT team_id FROM blueprints WHERE id = $4 AND org_id = $2), $3, $4, $5, 'manual', 'running', '/tmp/wt', '[]')
 	`, brID, orgID, userID, bpID, taskID); err != nil {
 		t.Fatalf("seed blueprint_run: %v", err)
 	}
 	return brID
+}
+
+// moveBlueprintRunToAnotherTeam puts brID on a new team that only userID is
+// on, the shape a run is left in when its task moved to another team mid-run
+// and the next step was minted there: a member of the step's team can write
+// the step and cannot see the run.
+func moveBlueprintRunToAnotherTeam(t *testing.T, h *pgtest.Harness, orgID, userID, brID string) {
+	t.Helper()
+	runTeam := seedPgDefaultTeam(t, h, orgID, userID)
+	pgtest.MustExec(t, h.AdminDB,
+		`UPDATE blueprint_runs SET team_id = $1 WHERE org_id = $2 AND id = $3`, runTeam, orgID, brID)
 }
 
 // TestConversationStore_Postgres_RuntimeDefaultsToSDK pins the
@@ -1125,20 +1136,21 @@ func seedPgConversationPromptIn(t *testing.T, h *pgtest.Harness, id, orgID, user
 	}
 }
 
-// TestConversationStore_Postgres_HandOffGuardHoldsForANonCreator puts the
+// TestConversationStore_Postgres_HandOffGuardHoldsForAnotherTeam puts the
 // hand-off guard under the pool it actually runs on, as the principal it is
 // most likely to be wrong for.
 //
-// blueprint_runs_select is creator-scoped for manual runs, so a teammate who
-// may legitimately update a team-visible conversation sees NO row for its
-// blueprint. Written as a correlated subquery, the guard reads that emptiness
-// as "no blueprint is running" and lets the flip through — reopening the
-// window for everyone except the person who started the sequence, which is
-// the shape a conformance suite wired to the admin pool cannot see.
+// blueprint_runs_select is team-scoped, and a step conversation can sit on a
+// different team from its run: the task moved mid-run and the next step was
+// minted on the new team. A member of that team may legitimately update the
+// step and sees NO row for its blueprint. Written as a correlated subquery,
+// the guard reads that emptiness as "no blueprint is running" and lets the
+// flip through — reopening the window for everyone off the run's team, which
+// is the shape a conformance suite wired to the admin pool cannot see.
 //
 // Both directions are asserted, because a guard that refuses everyone would
 // pass the first half and silently break teammate follow-up.
-func TestConversationStore_Postgres_HandOffGuardHoldsForANonCreator(t *testing.T) {
+func TestConversationStore_Postgres_HandOffGuardHoldsForAnotherTeam(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
@@ -1166,9 +1178,11 @@ func TestConversationStore_Postgres_HandOffGuardHoldsForANonCreator(t *testing.T
 		VALUES ($1, $2, $3, $4, 'team', $5, 'github:pr:ci_check_failed', '', $6, 'queued', 'pending', 0.5)
 	`, taskID, orgID, creator, teamID, entityID, eventID)
 
-	// The creator's manual blueprint, still running, and its concluded step:
-	// the hand-off window, exactly as the reactor would find it.
+	// The creator's manual blueprint on a team of its own, still running, and
+	// its concluded step on the task's team: the hand-off window, exactly as
+	// the reactor would find it.
 	brID := seedPgBlueprintRun(t, h, orgID, creator, taskID)
+	moveBlueprintRunToAnotherTeam(t, h, orgID, creator, brID)
 	stepIdx := 0
 	convID := seedPgConversation(t, h.AdminDB, orgID, domain.Conversation{
 		TaskID: taskID, PromptID: "p_handoff_rls", Status: dbtest.SeedConcluded, Model: "m",
@@ -1185,7 +1199,7 @@ func TestConversationStore_Postgres_HandOffGuardHoldsForANonCreator(t *testing.T
 			return err
 		}
 		if n != 0 {
-			t.Errorf("the teammate can see %d blueprint_runs rows; this test needs the creator-scoped policy to hide it", n)
+			t.Errorf("the teammate can see %d blueprint_runs rows; this test needs the team-scoped policy to hide it", n)
 		}
 		return nil
 	}); err != nil {
@@ -1200,10 +1214,10 @@ func TestConversationStore_Postgres_HandOffGuardHoldsForANonCreator(t *testing.T
 		flipped = f
 		return mErr
 	}); err != nil {
-		t.Fatalf("MarkQueuedForResume as a non-creator: %v", err)
+		t.Fatalf("MarkQueuedForResume off the run's team: %v", err)
 	}
 	if flipped {
-		t.Error("a non-creator's wake flipped a concluded step of a running blueprint; the guard fell open on a row RLS hides")
+		t.Error("a wake from off the run's team flipped a concluded step of a running blueprint; the guard fell open on a row RLS hides")
 	}
 	var status string
 	if err := h.AdminDB.QueryRow(`SELECT status FROM conversations WHERE id = $1`, convID).Scan(&status); err != nil {
@@ -1230,15 +1244,16 @@ func TestConversationStore_Postgres_HandOffGuardHoldsForANonCreator(t *testing.T
 
 // TestConversationStore_Postgres_ResumeStampsTheWarmExecutorForANonCreator
 // pins the resume flip's affinity stamp against the trap its sibling guard
-// fell into: this statement runs on the app pool, so a subquery over a
-// creator-scoped table would read empty for a teammate and the flip would
-// silently stamp NULL — sending every teammate follow-up to a cold executor
-// while the warm tree sat idle, and doing it invisibly, since NULL is also
-// the legitimate answer for a conversation nothing ever drove.
+// fell into: this statement runs on the app pool, so a subquery over a table
+// whose policy does not follow the conversation could read empty for a
+// teammate and the flip would silently stamp NULL — sending every teammate
+// follow-up to a cold executor while the warm tree sat idle, and doing it
+// invisibly, since NULL is also the legitimate answer for a conversation
+// nothing ever drove.
 //
-// claims is not creator-scoped — its policy composes through the
-// conversation, so anyone who may update the row can read its claims — which
-// is what makes a plain correlated subquery the right shape here. The
+// claims composes its policy through the conversation, so anyone who may
+// update the row can read its claims, which is what makes a plain correlated
+// subquery the right shape here. The
 // precondition is asserted first, because that is the fact the subquery rests
 // on rather than something the assertion below would reveal on its own.
 func TestConversationStore_Postgres_ResumeStampsTheWarmExecutorForANonCreator(t *testing.T) {

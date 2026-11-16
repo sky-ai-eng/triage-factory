@@ -89,9 +89,7 @@ type BlueprintSequenceScaffold struct {
 	// ConversationEnded reports whether a conversation carries an ended_at
 	// stamp: the boundary an advance writes on the step it concludes.
 	ConversationEnded func(t *testing.T, convID string) bool
-	// ConversationTeam reads a conversation's team_id. Nil on a backend whose
-	// conversations do not derive their team from the task (local mode's
-	// single-team sentinel), where the assertion would test nothing.
+	// ConversationTeam reads a conversation's team_id.
 	ConversationTeam func(t *testing.T, convID string) string
 	// GetConversation point-reads a conversation through ConversationStore's
 	// own projection, so the suite can hold each door's returned conversation
@@ -141,13 +139,48 @@ func RunBlueprintSequenceConformance(t *testing.T, mk BlueprintSequenceFactory) 
 		if got := sc.TaskAgentClaim(t, taskID); got != sc.AgentID {
 			t.Errorf("claimed_by_agent_id = %q, want %q", got, sc.AgentID)
 		}
-		if sc.ConversationTeam != nil {
-			if got := sc.ConversationTeam(t, conv.ID); got != sc.ConsolidateTeamID {
-				t.Errorf("conversation team_id = %q, want the consolidated owner %q — the step insert must read the consolidation, not the owner it replaced", got, sc.ConsolidateTeamID)
-			}
+		if got := sc.ConversationTeam(t, conv.ID); got != sc.ConsolidateTeamID {
+			t.Errorf("conversation team_id = %q, want the consolidated owner %q — the step insert must read the consolidation, not the owner it replaced", got, sc.ConsolidateTeamID)
 		}
 		AssertWriteReturnedStoredRow(t, "CreateRunWithFirstStepSystem", *conv,
 			func() (*domain.Conversation, error) { return sc.GetConversation(t, conv.ID) })
+	})
+
+	t.Run("The_run_carries_the_team_its_first_step_is_created_on", func(t *testing.T) {
+		// Both team sources the mint resolves, one per insert arm: the owner
+		// the firing consolidates onto, and the task's own team when it names
+		// none. The run's team is what its row policies read, so it has to be
+		// the team whose members read its conversations.
+		store, sc := mk(t)
+		for _, tc := range []struct {
+			name        string
+			firing      func(*testing.T, string) domain.BlueprintRun
+			ownerTeamID string
+		}{
+			{"event_arm_with_an_owner", sc.Firing, sc.ConsolidateTeamID},
+			{"manual_arm_on_the_task's_team", sc.ManualFiring, ""},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				taskID := sc.NewTask(t)
+				br := tc.firing(t, taskID)
+				inserted, _, conv, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br,
+					db.AgentClaimStamp{}, tc.ownerTeamID, sc.Step(br, 0))
+				if err != nil || !inserted || conv == nil {
+					t.Fatalf("CreateRunWithFirstStepSystem: (inserted=%v, conv=%v, err=%v)", inserted, conv != nil, err)
+				}
+				want := sc.ConversationTeam(t, conv.ID)
+				if want == "" {
+					t.Fatal("the first step has no team, so the run's team has nothing to match")
+				}
+				run, err := store.GetRunSystem(ctx, sc.OrgID, br.ID)
+				if err != nil || run == nil {
+					t.Fatalf("GetRunSystem: (%v, %v)", run, err)
+				}
+				if run.TeamID != want {
+					t.Errorf("run team_id = %q, want the first step's team %q", run.TeamID, want)
+				}
+			})
+		}
 	})
 
 	t.Run("A_failing_step_insert_rolls_the_whole_firing_back", func(t *testing.T) {
@@ -290,10 +323,8 @@ func RunBlueprintSequenceConformance(t *testing.T, mk BlueprintSequenceFactory) 
 		if got := sc.TaskOwnerTeam(t, taskID); got != sc.ConsolidateTeamID {
 			t.Errorf("task owner team = %q, want %q — consolidation rides the firing, not the stamp", got, sc.ConsolidateTeamID)
 		}
-		if sc.ConversationTeam != nil {
-			if got := sc.ConversationTeam(t, conv.ID); got != sc.ConsolidateTeamID {
-				t.Errorf("conversation team_id = %q, want %q", got, sc.ConsolidateTeamID)
-			}
+		if got := sc.ConversationTeam(t, conv.ID); got != sc.ConsolidateTeamID {
+			t.Errorf("conversation team_id = %q, want %q", got, sc.ConsolidateTeamID)
 		}
 	})
 

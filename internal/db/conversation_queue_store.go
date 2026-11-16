@@ -309,8 +309,8 @@ func SQLiteCompletedRunSQL(alias string) string {
 
 // PostgresCompletedRunSQL is a completed run over the alias the caller names.
 // It reads the run's status through tf.blueprint_run_is_completed, because
-// blueprint_runs is readable only by a manual run's creator and a count read
-// by a teammate would otherwise leave the run out.
+// blueprint_runs is readable only by the run's team and a count read by a
+// caller on another team would otherwise leave the run out.
 func PostgresCompletedRunSQL(alias string) string {
 	return `(` + ConcludedConversationSQL(alias) + ` OR (` + alias + `.status = 'open' AND tf.blueprint_run_is_completed(` + alias + `.blueprint_run_id, ` + alias + `.org_id)))`
 }

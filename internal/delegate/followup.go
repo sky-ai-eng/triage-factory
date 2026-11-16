@@ -222,9 +222,9 @@ func injectionWillFlush(status string, concluded bool, outcome string) bool {
 // moved past this step (the drivability arm above, permanently) or it came to
 // rest on it (nothing refuses). Allow now, discover later is the failure.
 //
-// Admin-pool read on purpose: blueprint_runs RLS hides another user's manual
-// blueprint, and a teammate resuming a run must not be refused for a row they
-// merely cannot see. A run with no blueprint, or a lookup that fails, is
+// Admin-pool read on purpose: blueprint_runs RLS hides a run on another team,
+// and a caller resuming a run must not be refused for a row they merely
+// cannot see. A run with no blueprint, or a lookup that fails, is
 // treated as drivable — an inability to check must not strand a resumable run,
 // and both the CAS and the claim gate re-check for real.
 func (s *Spawner) blueprintFollowUpBlock(ctx context.Context, orgID string, conv *domain.Conversation) (string, *domain.BlueprintRun) {

@@ -89,8 +89,8 @@ func TestBlueprintStore_Postgres_FiringDelegationBoundary(t *testing.T) {
 }
 
 // TestBlueprintStore_Postgres_IsNewestRunForTask runs the shared newest-run
-// suite against the Postgres impl, on the admin pool. Its creator-scoped
-// sibling below covers what only a claims-carrying connection can show.
+// suite against the Postgres impl, on the admin pool. Its team-scoped sibling
+// below covers what only a claims-carrying connection can show.
 func TestBlueprintStore_Postgres_IsNewestRunForTask(t *testing.T) {
 	h := pgtest.Shared(t)
 	dbtest.RunIsNewestRunForTaskConformance(t, func(t *testing.T) (db.BlueprintStore, dbtest.BlueprintSequenceScaffold) {
@@ -98,47 +98,50 @@ func TestBlueprintStore_Postgres_IsNewestRunForTask(t *testing.T) {
 	})
 }
 
-// TestBlueprintStore_Postgres_IsNewestRunForTask_ReadsPastTheCreatorScope is
+// TestBlueprintStore_Postgres_IsNewestRunForTask_ReadsPastTheTeamScope is
 // the reason IsNewestRunForTask is a predicate over a SECURITY DEFINER
 // function rather than a plain query for the newest run.
 //
-// blueprint_runs_select is creator-scoped for manual runs. So when Alice's
-// delegation leaves a draft PR, the task is requeued, and BOB re-delegates it,
-// Bob's run is invisible to Alice — and the terminal-on-last close, which runs
-// on the app pool under the claims of whoever resolved the deliverable, would ask
-// "is Alice's run still the task's newest?", be told yes by a query that cannot
-// see Bob's, and take the task to done under Bob's live engagement.
+// blueprint_runs_select is team-scoped. So when Alice's team delegates a task,
+// the run leaves a draft PR, and the task moves to Bob's team, which delegates
+// it again, Bob's run is invisible to Alice — and the terminal-on-last close,
+// which runs on the app pool under the claims of whoever resolved the
+// deliverable, would ask "is Alice's run still the task's newest?", be told yes
+// by a query that cannot see Bob's, and take the task to done under Bob's live
+// engagement.
 //
 // Only a claims-carrying connection can show this: the conformance suite wires
 // both pools to the admin (BYPASSRLS) connection, where every run is visible
 // and the bug cannot reproduce.
-func TestBlueprintStore_Postgres_IsNewestRunForTask_ReadsPastTheCreatorScope(t *testing.T) {
+func TestBlueprintStore_Postgres_IsNewestRunForTask_ReadsPastTheTeamScope(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	ctx := context.Background()
 	orgID, alice := seedPgOrgForBlueprints(t, h)
-	teamID := seedPgDefaultTeam(t, h, orgID, alice)
-	blueprintID := "bp-creator-scope-" + orgID[:8]
-	seedPgBlueprintInTeam(t, h, orgID, alice, teamID, blueprintID)
-	taskID := seedPgTask(t, h, orgID, alice)
+	aliceTeam := seedPgDefaultTeam(t, h, orgID, alice)
+	aliceBlueprint := "bp-team-scope-a-" + orgID[:8]
+	seedPgBlueprintInTeam(t, h, orgID, alice, aliceTeam, aliceBlueprint)
 	bob := seedPgMember(t, h, orgID, "bob", "member")
+	bobTeam := seedPgDefaultTeam(t, h, orgID, bob)
+	bobBlueprint := "bp-team-scope-b-" + orgID[:8]
+	seedPgBlueprintInTeam(t, h, orgID, bob, bobTeam, bobBlueprint)
+	taskID := seedPgTask(t, h, orgID, alice)
 
-	// Alice's engagement, finished; then Bob's, live and later. Both MANUAL,
-	// which is what puts them on opposite sides of the SELECT policy — and
-	// seeded at the admin pool so each run carries its real creator rather than
-	// whichever identity the insert ran as.
+	// Alice's team's engagement, finished; then Bob's team's, live and later.
+	// Each run is on its own team, which is what puts them on opposite sides
+	// of the SELECT policy, and both are seeded at the admin pool.
 	aliceRun, bobRun := uuid.New().String(), uuid.New().String()
 	for _, r := range []struct {
-		id, creator, status string
-		startedAt           string
+		id, teamID, creator, blueprintID, status string
+		startedAt                                string
 	}{
-		{aliceRun, alice, "completed", "now() - interval '1 hour'"},
-		{bobRun, bob, "running", "now()"},
+		{aliceRun, aliceTeam, alice, aliceBlueprint, "completed", "now() - interval '1 hour'"},
+		{bobRun, bobTeam, bob, bobBlueprint, "running", "now()"},
 	} {
 		if _, err := h.AdminDB.Exec(`
-			INSERT INTO blueprint_runs (id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, status, step_plan, worktree_path, started_at)
-			VALUES ($1, $2, $3, $4, $5, 'manual', $6, '[]'::jsonb, '', `+r.startedAt+`)
-		`, r.id, orgID, r.creator, blueprintID, taskID, r.status); err != nil {
+			INSERT INTO blueprint_runs (id, org_id, team_id, creator_user_id, blueprint_id, task_id, trigger_type, status, step_plan, worktree_path, started_at)
+			VALUES ($1, $2, $3, $4, $5, $6, 'manual', $7, '[]'::jsonb, '', `+r.startedAt+`)
+		`, r.id, orgID, r.teamID, r.creator, r.blueprintID, taskID, r.status); err != nil {
 			t.Fatalf("seed blueprint_run %s: %v", r.id, err)
 		}
 	}
@@ -154,7 +157,7 @@ func TestBlueprintStore_Postgres_IsNewestRunForTask_ReadsPastTheCreatorScope(t *
 			t.Fatalf("GetRun(bob's run) as Alice: %v", err)
 		}
 		if hidden != nil {
-			t.Fatalf("Alice can read Bob's manual run; blueprint_runs_select is no longer creator-scoped and this test needs rewriting")
+			t.Fatalf("Alice can read a run on a team she is not on; blueprint_runs_select is no longer team-scoped and this test needs rewriting")
 		}
 
 		// The fix. Whether a run has been superseded is a fact about the task,
@@ -860,14 +863,79 @@ func TestBlueprintStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 		// directly.
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
 			_, e := tx.ExecContext(ctx, `
-				INSERT INTO blueprint_runs (id, org_id, creator_user_id, blueprint_id, task_id,
+				INSERT INTO blueprint_runs (id, org_id, team_id, creator_user_id, blueprint_id, task_id,
 				                            trigger_type, status, step_plan, worktree_path, started_at)
-				VALUES ($1, $2, $3::uuid, $4, $5, 'manual', 'running', '[]', '/tmp/rls-x', now())
+				VALUES ($1, $2, (SELECT team_id FROM blueprints WHERE id = $4 AND org_id = $2), $3::uuid, $4, $5, 'manual', 'running', '[]', '/tmp/rls-x', now())
 			`, uuid.NewString(), orgA, bob, blueprintIDA, taskA)
 			return e
 		})
 		pgtest.AssertRLSViolation(t, err)
 	})
+}
+
+// TestBlueprintStore_Postgres_RunIsReadableByItsTeamAlone pins
+// blueprint_runs_select under request claims: a run, manual or triggered, is
+// read by a member of its team who did not delegate it, and by no member of
+// another team in the same org. The step chain the board and the run page
+// draw comes from this read, so a teammate who could read the run's
+// conversation but not the run would see a run with no steps.
+func TestBlueprintStore_Postgres_RunIsReadableByItsTeamAlone(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	ctx := context.Background()
+
+	orgID, delegator := seedPgOrgForBlueprints(t, h)
+	teamID := seedPgDefaultTeam(t, h, orgID, delegator)
+	teammate := seedPgMember(t, h, orgID, "teammate", "member")
+	pgtest.MustExec(t, h.AdminDB,
+		`INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'member')`, teammate, teamID)
+	outsider := seedPgMember(t, h, orgID, "outsider", "member")
+	seedPgDefaultTeam(t, h, orgID, outsider)
+
+	blueprintID := "bp-team-read-" + orgID[:8]
+	seedPgBlueprintInTeam(t, h, orgID, delegator, teamID, blueprintID)
+	manualRun := insertPgBlueprintRun(t, h, orgID, delegator, domain.BlueprintRun{
+		TeamID: teamID, BlueprintID: blueprintID, TaskID: seedPgTask(t, h, orgID, delegator),
+		WorktreePath: "/tmp/team-read-manual",
+	})
+	triggeredRun := insertPgBlueprintRun(t, h, orgID, "", domain.BlueprintRun{
+		TeamID: teamID, BlueprintID: blueprintID, TaskID: seedPgTask(t, h, orgID, delegator),
+		TriggerType: domain.BlueprintTriggerEvent, WorktreePath: "/tmp/team-read-triggered",
+	})
+
+	for _, run := range []struct{ name, id string }{
+		{"manual", manualRun},
+		{"triggered", triggeredRun},
+	} {
+		for _, reader := range []struct {
+			name, userID string
+			reads        bool
+		}{
+			{"teammate", teammate, true},
+			{"another team's member", outsider, false},
+		} {
+			t.Run(run.name+"/"+reader.name, func(t *testing.T) {
+				err := h.WithUser(t, reader.userID, orgID, func(tx *sql.Tx) error {
+					got, err := pgstore.NewForTx(tx, pgtest.SecretKey).Blueprints.GetRun(ctx, orgID, run.id)
+					if err != nil {
+						return fmt.Errorf("GetRun: %w", err)
+					}
+					switch {
+					case reader.reads && got == nil:
+						t.Errorf("GetRun returned nothing; a member of the run's team must read it")
+					case reader.reads && got.TeamID != teamID:
+						t.Errorf("TeamID = %q, want the run's team %q", got.TeamID, teamID)
+					case !reader.reads && got != nil:
+						t.Errorf("GetRun returned the run to a member of another team")
+					}
+					return nil
+				})
+				if err != nil {
+					t.Fatalf("WithUser: %v", err)
+				}
+			})
+		}
+	}
 }
 
 // seedPgOrgForBlueprints creates the (org, user, membership) triplet

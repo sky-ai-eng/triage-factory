@@ -209,10 +209,17 @@ func sqliteSequenceScaffold(t *testing.T) (db.BlueprintStore, dbtest.BlueprintSe
 			}
 			return endedAt.Valid
 		},
-		// Local mode stamps every conversation with the team sentinel
-		// rather than deriving one from the task, so the assertion would
-		// prove nothing here. The Postgres arm carries it.
-		ConversationTeam: nil,
+		// Local mode stamps every conversation with the team sentinel, so
+		// the owner assertions hold here by construction; the run's team
+		// assertion still reads a value the mint wrote.
+		ConversationTeam: func(t *testing.T, convID string) string {
+			t.Helper()
+			var team sql.NullString
+			if err := conn.QueryRow(`SELECT team_id FROM conversations WHERE id = ?`, convID).Scan(&team); err != nil {
+				t.Fatalf("read conversation team_id: %v", err)
+			}
+			return team.String
+		},
 		GetConversation: func(t *testing.T, convID string) (*domain.Conversation, error) {
 			t.Helper()
 			return stores.Conversations.GetSystem(context.Background(), runmode.LocalDefaultOrgID, convID)
