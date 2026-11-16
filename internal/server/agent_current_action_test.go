@@ -70,7 +70,7 @@ func TestHandleConversations_CurrentAction(t *testing.T) {
 	row := func(taskID, conversationID string) map[string]any {
 		t.Helper()
 		for _, r := range resp.Runs[taskID] {
-			if r["ID"] == conversationID {
+			if r["id"] == conversationID {
 				return r
 			}
 		}
@@ -78,8 +78,8 @@ func TestHandleConversations_CurrentAction(t *testing.T) {
 		return nil
 	}
 
-	if got := row(workingTask, working); got["Status"] != domain.StatusRunning {
-		t.Fatalf("working conversation status = %v, want %q", got["Status"], domain.StatusRunning)
+	if got := row(workingTask, working); got["status"] != domain.StatusRunning {
+		t.Fatalf("working conversation status = %v, want %q", got["status"], domain.StatusRunning)
 	} else if got["current_action"] != "Vetting the router" {
 		t.Errorf("current_action = %v, want the authored bash summary", got["current_action"])
 	}
@@ -100,8 +100,8 @@ func TestHandleConversations_CurrentAction(t *testing.T) {
 		{"a queued conversation", queuedTask, queued, domain.StatusQueued},
 	} {
 		got := row(tc.taskID, tc.conversationID)
-		if got["Status"] != tc.wantStatus {
-			t.Errorf("%s: status = %v, want %q (fixture is not in the state it claims)", tc.what, got["Status"], tc.wantStatus)
+		if got["status"] != tc.wantStatus {
+			t.Errorf("%s: status = %v, want %q (fixture is not in the state it claims)", tc.what, got["status"], tc.wantStatus)
 		}
 		if v, ok := got["current_action"]; ok {
 			t.Errorf("%s: current_action = %v, want the field omitted", tc.what, v)

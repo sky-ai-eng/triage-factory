@@ -86,7 +86,7 @@ function tokenDelta(msg: Message): TokenDelta | null {
 // useConversationDetail loads a single agent conversation, its messages, and the parent
 // task, then subscribes to live websocket updates so the page stays
 // fresh while the agent works. We fetch the task separately because
-// Conversation only carries TaskID, and the detail page wants the title +
+// Conversation only carries task_id, and the detail page wants the title +
 // source badge in its header.
 export function useConversationDetail(conversationID: string | undefined): ConversationDetailState {
   const [conversation, setConversation] = useState<Conversation | null>(null)
@@ -207,7 +207,7 @@ export function useConversationDetail(conversationID: string | undefined): Conve
     if (cost != null && costSeen !== null && !costSeen.has(msg.id)) {
       costSeen.add(msg.id)
       setConversation((prev) =>
-        prev ? { ...prev, TotalCostUSD: (prev.TotalCostUSD ?? 0) + cost } : prev,
+        prev ? { ...prev, total_cost_usd: (prev.total_cost_usd ?? 0) + cost } : prev,
       )
     }
     const usage = tokenDelta(msg)
@@ -253,7 +253,7 @@ export function useConversationDetail(conversationID: string | undefined): Conve
   // conversation's own row moving, so the station re-reads it on every push
   // that can mean it moved.
   const refreshTask = useCallback(() => {
-    const taskID = conversationRef.current?.TaskID
+    const taskID = conversationRef.current?.task_id
     if (!conversationID || !taskID) return
     const id = conversationID
     const mine = ++taskReadSeq.current
@@ -385,8 +385,8 @@ export function useConversationDetail(conversationID: string | undefined): Conve
         const taskRead = ++taskReadSeq.current
         const [transcript, taskRow] = await Promise.all([
           apiJSON<TranscriptPage>(`/api/agent/conversations/${conversationID}/messages`),
-          conversationData.TaskID
-            ? apiJSON<Task>(`/api/tasks/${conversationData.TaskID}`).catch((err: unknown) => ({
+          conversationData.task_id
+            ? apiJSON<Task>(`/api/tasks/${conversationData.task_id}`).catch((err: unknown) => ({
                 taskError: httpErrorMessage(err, 'Could not load the task.'),
               }))
             : null,

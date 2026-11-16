@@ -253,7 +253,7 @@ describe('useTasksIndex', () => {
 
 describe('useRetryClock', () => {
   const deferred = (id: string, at: string) =>
-    ({ ID: id, Status: 'queued', next_attempt_at: at }) as Conversation
+    ({ id, status: 'queued', next_attempt_at: at }) as Conversation
 
   it('advances at each retry time, so a row stops saying when it retries once that passes', () => {
     vi.setSystemTime(new Date('2026-10-03T12:00:00Z'))
@@ -262,7 +262,7 @@ describe('useRetryClock', () => {
       deferred('c-sooner', '2026-10-03T12:00:30Z'),
     ]
     const { result } = renderHook(() => useRetryClock(rows))
-    const retrying = () => rows.filter((c) => retryingAt(c, result.current)).map((c) => c.ID)
+    const retrying = () => rows.filter((c) => retryingAt(c, result.current)).map((c) => c.id)
     expect(retrying()).toEqual(['c-later', 'c-sooner'])
 
     act(() => {
@@ -283,7 +283,7 @@ describe('useRetryClock', () => {
   })
 
   it('arms nothing when no row is waiting to retry', () => {
-    renderHook(() => useRetryClock([{ ID: 'c-1', Status: 'running' } as Conversation]))
+    renderHook(() => useRetryClock([{ id: 'c-1', status: 'running' } as Conversation]))
     expect(vi.getTimerCount()).toBe(0)
   })
 })

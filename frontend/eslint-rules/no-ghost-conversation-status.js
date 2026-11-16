@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs'
+import ts from 'typescript'
 
 // no-ghost-conversation-status — fail the lint when component code branches on a
 // conversation status the backend cannot emit.
@@ -6,7 +7,7 @@ import { readFileSync } from 'node:fs'
 // Why this exists on top of the Go mirror test: that test pins the three
 // exported arrays in src/types.ts against internal/domain/conversation_status.go, and
 // component code never reads those arrays. It compares a status against a bare
-// literal — `run.Status === 'cancelled'`, `case 'task_unsolvable':` — and no
+// literal — `run.status === 'cancelled'`, `case 'task_unsolvable':` — and no
 // amount of array-pinning can see a literal in a switch arm. Three retired
 // statuses outlived their backend states that way; two of them came back within
 // days of the mirror test landing.
@@ -14,38 +15,40 @@ import { readFileSync } from 'node:fs'
 // SCOPE — what counts as "a conversation status" here, and why the two
 // look-alike vocabularies are safe:
 //
-//   1. `<expr>.Status` — the Conversation projection is PascalCase (it comes
-//      through a handler-side map of the Go struct), while every other DTO in
-//      types.ts spells its own status lowercase: a blueprint run's
-//      `blueprint_run.status` legitimately terminates `cancelled` too. The
-//      case alone separates them, with no type information and no false
-//      positives.
+//   1. `<expr>.status` where the checker resolves `status` to the member the
+//      Conversation interface declares, directly or through a `Pick` or
+//      `Partial` of it. Every other DTO in types.ts spells its own status the
+//      same way, and a blueprint run's `blueprint_run.status` legitimately
+//      terminates `cancelled` too, so the property name cannot separate them;
+//      the declaration it resolves to can. A union of a conversation with
+//      another status-bearing type is out of scope, because a name the other
+//      vocabulary holds is a real branch there.
 //   2. Anything annotated `ConversationStatusValue` — the alias exists so a
 //      status that travels one hop from that property into a helper
 //      (`isActiveStatus(status)`, a tone switch) stays visible. Without it the
 //      guard would stop at the function boundary, which is exactly where two of
 //      the retired arms hid.
 //
-// The alternative scoping — type information, via a `Conversation['Status']`
-// -typed expression — buys nothing extra here: that property is typed `string`
-// on purpose (an unrecognized wire value must reach the closed-world predicates
-// in lib/conversationStatus, not blow up at the boundary), so the checker would answer
-// "string" for the blueprint status too, and the rule would have
-// to fall back on names anyway. This way the check costs no type-aware lint
-// pass.
+// The property's TYPE cannot separate them either: it is typed `string` on
+// purpose (an unrecognized wire value must reach the closed-world predicates in
+// lib/conversationStatus, not blow up at the boundary), so the checker answers
+// "string" for the blueprint status too. What the rule asks the checker is
+// which declaration the property belongs to, which is why it needs a
+// type-aware lint pass (`parserOptions.projectService` in eslint.config.js).
 //
 // Positions checked: `===`/`!==` comparisons and `case` arms — i.e. every place
 // a status name decides something. The name may be a bare literal or a `const`
 // alias holding one, since naming a ghost is what a reader does when they think
 // the name is worth keeping, and a guard that only sees inline literals rewards
 // exactly that. ASSIGNMENT positions are deliberately not checked: the board and
-// run view mint placeholder rows for un-spawned chain steps whose `Status` is a
+// run view mint placeholder rows for un-spawned chain steps whose `status` is a
 // client-side sentinel the server never sends, and those are honest — nothing
 // branches on the name.
 
 const VOCABULARY_SOURCE = new URL('../src/types.ts', import.meta.url)
 const VOCABULARY_DECLARATIONS = ['CLAIM_PHASES', 'TERMINAL_CONVERSATION_STATUSES', 'CONVERSATION_STATUSES']
-const STATUS_PROPERTY = 'Status'
+const STATUS_INTERFACE = 'Conversation'
+const STATUS_PROPERTY = 'status'
 const STATUS_TYPE = 'ConversationStatusValue'
 
 // readVocabulary lifts the status names out of the types.ts mirror, so this
@@ -88,7 +91,7 @@ function readVocabulary() {
 // exports, under the same rule readVocabulary follows: a guard that silently
 // passes when it cannot find what it guards is worse than no guard. The
 // annotation arm is the half of this rule with no other symptom when it goes
-// stale — the `.Status` arm keeps firing, the rule's own fixtures name the type
+// stale — the `.status` arm keeps firing, the rule's own fixtures name the type
 // as a bare string and so keep passing, and the only visible effect is that a
 // status reaching a comparison through a typed helper stops being checked.
 function assertStatusTypeExists() {
@@ -101,6 +104,23 @@ function assertStatusTypeExists() {
 }
 
 assertStatusTypeExists()
+
+// assertStatusPropertyExists pins the property arm the same way: the rule
+// recognizes a conversation status by the interface and member names below,
+// and a rename of either would leave the arm matching nothing while the rule's
+// own fixtures, which declare their own Conversation, kept passing.
+function assertStatusPropertyExists() {
+  const source = readFileSync(VOCABULARY_SOURCE, 'utf8')
+  const start = source.indexOf(`export interface ${STATUS_INTERFACE} {`)
+  const end = start < 0 ? -1 : source.indexOf('\n}', start)
+  if (end < 0 || !source.slice(start, end).includes(`\n  ${STATUS_PROPERTY}: ${STATUS_TYPE}\n`)) {
+    throw new Error(
+      `no-ghost-conversation-status: src/types.ts has no \`${STATUS_PROPERTY}: ${STATUS_TYPE}\` member on \`interface ${STATUS_INTERFACE}\` — the property half of the conversation-status vocabulary lint would match nothing`,
+    )
+  }
+}
+
+assertStatusPropertyExists()
 
 // Exported for the rule's own tests, which assert on the parsed set rather
 // than a second hand-written copy of it.
@@ -129,6 +149,13 @@ export default {
 
   create(context) {
     const sourceCode = context.sourceCode
+    const services = sourceCode.parserServices
+    if (!services?.program) {
+      throw new Error(
+        'no-ghost-conversation-status: the file was parsed without type information, so a conversation `status` cannot be told from any other — set parserOptions.projectService',
+      )
+    }
+    const checker = services.program.getTypeChecker()
     // Checks are gathered during the traversal and evaluated at Program:exit,
     // because resolving a `ConversationStatusValue` annotation walks up from the
     // declaration through `parent` links that ESLint only fills in as it
@@ -154,7 +181,7 @@ export default {
     // Only same-file `const` initializers are followed. An imported constant,
     // a property of a frozen map, a value computed at runtime: all invisible
     // here, and all of them would need cross-file or type information to see.
-    // The `.Status` and ConversationStatusValue scoping is what makes those rare — a
+    // The `.status` and ConversationStatusValue scoping is what makes those rare — a
     // status that reaches a comparison still has to reach it through one of
     // the two shapes above.
     function statusValue(node) {
@@ -219,6 +246,25 @@ export default {
       return member ? typeReferenceName(member.typeAnnotation) : null
     }
 
+    // Whether the property names the member the Conversation interface
+    // declares and nothing else. A homomorphic mapped type's property (`Pick`,
+    // `Partial`) carries the declaration it was mapped from, so those are seen
+    // through; a union's carries every constituent's, so one that mixes in
+    // another vocabulary is not.
+    function declaredByStatusInterface(property) {
+      const declarations =
+        checker.getSymbolAtLocation(services.esTreeNodeToTSNodeMap.get(property))?.declarations ?? []
+      return (
+        declarations.length > 0 &&
+        declarations.every(
+          (declaration) =>
+            ts.isPropertySignature(declaration) &&
+            ts.isInterfaceDeclaration(declaration.parent) &&
+            declaration.parent.name.text === STATUS_INTERFACE,
+        )
+      )
+    }
+
     function isConversationStatusExpression(node) {
       if (!node) return false
       // An explicit `as ConversationStatusValue` names the value the same way an
@@ -232,7 +278,8 @@ export default {
         return (
           !inner.computed &&
           inner.property.type === 'Identifier' &&
-          inner.property.name === STATUS_PROPERTY
+          inner.property.name === STATUS_PROPERTY &&
+          declaredByStatusInterface(inner.property)
         )
       }
       if (inner.type === 'Identifier') return declaredTypeName(inner) === STATUS_TYPE
@@ -269,7 +316,7 @@ export default {
 
       'Program:exit'() {
         for (const { left, right } of checks) {
-          // A comparison of two statuses (`run.Status === other.Status`) names
+          // A comparison of two statuses (`run.status === other.status`) names
           // nothing, so neither ordering fires.
           if (isConversationStatusExpression(left)) report(left, right)
           else report(right, left)

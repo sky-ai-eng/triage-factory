@@ -27,7 +27,7 @@ export const FAILED_STATUSES = TERMINAL_CONVERSATION_STATUSES
 // concluded conversation is still resumable; whether the work it belongs to is
 // done is its blueprint run's status, which completionKind reads.
 export function isConcluded(conversation: Conversation): boolean {
-  return conversation.Status === 'open' && conversation.CompletedAt != null
+  return conversation.status === 'open' && conversation.completed_at != null
 }
 
 export function isTerminalStatus(
@@ -51,7 +51,7 @@ export function isClaimPhase(status: ConversationStatusValue): status is ClaimPh
 }
 
 export function isActiveConversation(conversation: Conversation): boolean {
-  return isActiveStatus(conversation.Status)
+  return isActiveStatus(conversation.status)
 }
 
 export function isActiveStatus(status: ConversationStatusValue): boolean {
@@ -80,7 +80,7 @@ export const PHASE_PROSE: Record<ClaimPhase, string> = {
 // active (queued, parked, ended) is undefined: each surface has its own
 // words for those.
 export function activeProse(conversation: Conversation): string | undefined {
-  const s = conversation.Status
+  const s = conversation.status
   if (isClaimPhase(s)) return PHASE_PROSE[s]
   if (s === 'running') return conversation.current_action || 'Working'
   return undefined
@@ -92,7 +92,7 @@ export function activeProse(conversation: Conversation): string | undefined {
 // terminals. The board confirms a requeue on this, not on whether a run
 // exists: with nothing in flight the move is reversible by re-claiming.
 export function isLiveRun(conversation: Conversation): boolean {
-  return conversation.Status === 'queued' || isActiveStatus(conversation.Status)
+  return conversation.status === 'queued' || isActiveStatus(conversation.status)
 }
 
 export function isFailedStatus(status: ConversationStatusValue): boolean {
@@ -176,7 +176,7 @@ export function completionKind(conversation: Conversation): CompletionKind | nul
   if (!isConcluded(conversation)) return null
   const pos = chainPosition(conversation)
   const isFinal = pos ? pos.isFinal : true
-  if (conversation.Outcome === 'continue' && !isFinal) return 'handoff'
+  if (conversation.outcome === 'continue' && !isFinal) return 'handoff'
   switch (conversation.blueprint_run_status) {
     case 'completed':
       return 'done'
@@ -185,7 +185,7 @@ export function completionKind(conversation: Conversation): CompletionKind | nul
     case 'cancelled':
       return 'stopped'
   }
-  switch (conversation.Outcome) {
+  switch (conversation.outcome) {
     case 'continue':
       return isFinal ? 'done' : 'handoff'
     case 'finish':
@@ -219,7 +219,7 @@ export function completionGloss(conversation: Conversation): string {
     // situation resolves, whatever its run did.
     if (conversation.blueprint_run_status === 'cancelled') return 'workflow cancelled'
     if (conversation.blueprint_run_status === 'failed') return 'the workflow failed'
-    return conversation.Outcome === 'abort'
+    return conversation.outcome === 'abort'
       ? 'stopped without finishing'
       : 'ended without a usable outcome — the workflow stopped here for a human'
   }
@@ -232,7 +232,7 @@ export function completionGloss(conversation: Conversation): string {
   if (pos && !pos.isFinal) return 'ended the workflow early — the later steps were skipped'
   // A finished run stays finished: a follow-up on its last step that ended on
   // an abort is recorded on the step and reopens nothing.
-  if (conversation.Outcome === 'abort')
+  if (conversation.outcome === 'abort')
     return 'work complete — a later follow-up’s abort reopened nothing'
   if (pos) return `work complete — the last of ${pos.total} steps`
   return 'work complete'
@@ -280,12 +280,12 @@ export function parkReasonLabel(reason: string): string {
 // exclusion — the infrastructure under it died, so there is no tree to
 // rehydrate.
 //
-// Status is one of three inputs, and the only one the client can see: whether
+// status is one of three inputs, and the only one the client can see: whether
 // the workspace survived and whether anything would drive it are server-side
 // facts. So this is never the whole answer — use canResumeConversation, which folds in
 // the server's own verdict.
 export function isResumableConversation(conversation: Conversation): boolean {
-  return conversation.Status === 'open'
+  return conversation.status === 'open'
 }
 
 // canResumeConversation is the composer's gate for a conversation with no live
@@ -351,7 +351,7 @@ export function resumeBlockedCopy(conversation: Conversation): string {
 // queue columns. Live elapsed readouts tick from here so queue dwell never
 // inflates working time.
 export function workStartedAt(conversation: Conversation): string {
-  return conversation.ClaimedAt ?? conversation.StartedAt
+  return conversation.claimed_at ?? conversation.started_at
 }
 
 // Settled queue dwell below this stays off the display surfaces (card footer,
@@ -360,21 +360,21 @@ export function workStartedAt(conversation: Conversation): string {
 // can't drift; a live QUEUED conversation always shows its wait regardless.
 export const QUEUE_DWELL_VISIBLE_MS = 5000
 
-// queueDwellMs — how long the conversation waited in the queue: live (now − QueuedAt)
+// queueDwellMs — how long the conversation waited in the queue: live (now − queued_at)
 // while it is still queued, else the latest episode's settled dwell
-// (ClaimedAt − QueuedAt). QueuedAt is stamped when the conversation entered the
+// (claimed_at − queued_at). queued_at is stamped when the conversation entered the
 // queue this episode — a resume re-stamps it at the wake — so the readout is
 // the current wait, never the whole life since mint. A row that predates the
-// queue columns has no QueuedAt: while it is live in the queue its wait is
-// measured from StartedAt (the only stamp it has, and for such a row also its
+// queue columns has no queued_at: while it is live in the queue its wait is
+// measured from started_at (the only stamp it has, and for such a row also its
 // enqueue), and once settled its dwell is unknowable, so null.
 export function queueDwellMs(conversation: Conversation, now: number = Date.now()): number | null {
   const queuedAt =
-    conversation.QueuedAt ?? (conversation.Status === 'queued' ? conversation.StartedAt : null)
+    conversation.queued_at ?? (conversation.status === 'queued' ? conversation.started_at : null)
   if (!queuedAt) return null
-  if (conversation.Status === 'queued') return Math.max(0, now - new Date(queuedAt).getTime())
-  if (!conversation.ClaimedAt) return null
-  return Math.max(0, new Date(conversation.ClaimedAt).getTime() - new Date(queuedAt).getTime())
+  if (conversation.status === 'queued') return Math.max(0, now - new Date(queuedAt).getTime())
+  if (!conversation.claimed_at) return null
+  return Math.max(0, new Date(conversation.claimed_at).getTime() - new Date(queuedAt).getTime())
 }
 
 // retryingAt is when a deferred conversation is tried again: a queued
@@ -384,10 +384,10 @@ export function queueDwellMs(conversation: Conversation, now: number = Date.now(
 // conversation, and once the time has passed — from then on it is an ordinary
 // queued run waiting for a slot.
 export function retryingAt(
-  conversation: Pick<Conversation, 'Status' | 'next_attempt_at'>,
+  conversation: Pick<Conversation, 'status' | 'next_attempt_at'>,
   now: number = Date.now(),
 ): Date | null {
-  if (conversation.Status !== 'queued' || !conversation.next_attempt_at) return null
+  if (conversation.status !== 'queued' || !conversation.next_attempt_at) return null
   const at = new Date(conversation.next_attempt_at)
   if (Number.isNaN(at.getTime()) || at.getTime() <= now) return null
   return at

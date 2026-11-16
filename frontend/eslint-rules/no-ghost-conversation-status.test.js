@@ -3,6 +3,7 @@
 // Node, not the suite's default jsdom: the rule resolves the types.ts mirror
 // through import.meta.url, which only carries a file: URL outside the browser
 // environment.
+import { fileURLToPath } from 'node:url'
 import { RuleTester } from 'eslint'
 import tseslint from 'typescript-eslint'
 import { describe, expect, it } from 'vitest'
@@ -17,13 +18,43 @@ import rule, { CONVERSATION_STATUS_VOCABULARY } from './no-ghost-conversation-st
 //
 // RuleTester runs its assertions inline when no global describe/it exists
 // (vitest runs with globals off), so each run() call throws inside its own it().
+//
+// The rule reads types, so each fixture is parsed as a file in TypeScript's
+// default project, after a prelude that types the receivers the cases name: a
+// conversation (`run`, `step`, `picked`) and the look-alikes beside it.
+const fixtureDir = fileURLToPath(new URL('.', import.meta.url))
 const ruleTester = new RuleTester({
   languageOptions: {
     parser: tseslint.parser,
     ecmaVersion: 2022,
     sourceType: 'module',
+    parserOptions: {
+      projectService: { allowDefaultProject: ['fixture.ts'] },
+      tsconfigRootDir: fixtureDir,
+    },
   },
 })
+
+const prelude = [
+  'interface Conversation { status: string; next_attempt_at?: string }',
+  'interface Task { status: string }',
+  'interface BlueprintRun { status: string }',
+  'interface Claim { status?: string; outcome: string }',
+  'declare const run: Conversation',
+  'declare const step: Conversation',
+  "declare const picked: Pick<Conversation, 'status'>",
+  'declare const task: Task',
+  'declare const blueprintRun: BlueprintRun',
+  'declare const either: Conversation | BlueprintRun',
+  'declare const claim: Claim',
+  'declare const request: { status: string }',
+  'declare const thing: { status?: string }',
+  '',
+].join('\n')
+const fixture = (test) => {
+  const { code, ...rest } = typeof test === 'string' ? { code: test } : test
+  return { ...rest, code: prelude + code, filename: `${fixtureDir}fixture.ts` }
+}
 
 // The message interpolates the whole vocabulary; taking it from the rule's own
 // parse keeps a status added in Go from rewriting this file.
@@ -57,9 +88,9 @@ describe('no-ghost-conversation-status', () => {
     ruleTester.run('no-ghost-conversation-status', rule, {
       valid: [
         // Every branch a conversation status may legitimately take.
-        "if (run.Status === 'open') park()",
-        "if (run.Status !== 'failed') wait()",
-        "switch (run.Status) { case 'queued': case 'awaiting_credentials': case 'failed': break }",
+        "if (run.status === 'open') park()",
+        "if (run.status !== 'failed') wait()",
+        "switch (run.status) { case 'queued': case 'awaiting_credentials': case 'failed': break }",
         // A status one hop from the property, named through the alias.
         "function tone(status: ConversationStatusValue) { return status === 'running' ? 'hot' : 'cold' }",
         "function tone({ status }: { status: ConversationStatusValue }) { switch (status) { case 'open': return 1 } }",
@@ -67,6 +98,9 @@ describe('no-ghost-conversation-status', () => {
         "if (task.status === 'cancelled') archive()",
         // A blueprint RUN status — likewise, and the layer cancellation belongs to.
         "switch (blueprintRun.status) { case 'cancelled': return 'grey' }",
+        // A union with another vocabulary: 'cancelled' is a real branch for
+        // the blueprint run it may hold.
+        "if (either.status === 'cancelled') archive()",
         // An unannotated local holding something status-shaped: out of scope by
         // construction, not by accident — nothing says it is a conversation.
         "const status = thing.status ?? 'idle'; if (status === 'cancelled') show()",
@@ -74,13 +108,13 @@ describe('no-ghost-conversation-status', () => {
         "if (claim.outcome === 'cancelled') release()",
         // A real status behind a const alias — the alias is fine, the name is
         // what is checked.
-        "const OPEN = 'open' as const; if (run.Status === OPEN) park()",
+        "const OPEN = 'open' as const; if (run.status === OPEN) park()",
         // A const alias compared against the OTHER vocabularies: following the
         // alias must not widen what the rule considers a conversation.
         "const CANCELLED = 'cancelled'; if (request.status === CANCELLED) show()",
         // Two statuses compared to each other name nothing at all.
-        'if (run.Status === step.Status) same()',
-      ],
+        'if (run.status === step.status) same()',
+      ].map(fixture),
       invalid: [],
     })
   })
@@ -90,29 +124,34 @@ describe('no-ghost-conversation-status', () => {
       valid: [],
       invalid: [
         {
-          code: "if (run.Status === 'cancelled') showCancelled()",
+          code: "if (run.status === 'cancelled') showCancelled()",
           errors: [ghost('cancelled')],
         },
         {
-          code: "if (run.Status === 'task_unsolvable' || run.Status === 'pending_approval') nudge()",
+          code: "if (run.status === 'task_unsolvable' || run.status === 'pending_approval') nudge()",
           errors: [ghost('task_unsolvable'), ghost('pending_approval')],
         },
         {
-          code: "switch (run.Status) { case 'completed': return 1; case 'cancelled': return 2 }",
+          code: "switch (run.status) { case 'completed': return 1; case 'cancelled': return 2 }",
           errors: [ghost('completed'), ghost('cancelled')],
         },
         {
           // A conversation never concludes: a verdict parks it `open`.
-          code: "if (run.Status === 'completed') showDone()",
+          code: "if (run.status === 'completed') showDone()",
           errors: [ghost('completed')],
         },
         {
-          code: "if ('worktree_created' === run.Status) spin()",
+          code: "if ('worktree_created' === run.status) spin()",
           errors: [ghost('worktree_created')],
         },
         {
-          code: "if (run?.Status === 'initializing') spin()",
+          code: "if (run?.status === 'initializing') spin()",
           errors: [ghost('initializing')],
+        },
+        // A Pick of the conversation is still its status.
+        {
+          code: "if (picked.status === 'cancelled') showCancelled()",
+          errors: [ghost('cancelled')],
         },
         // Through the alias — the hop that hid two of the retired arms.
         {
@@ -130,11 +169,11 @@ describe('no-ghost-conversation-status', () => {
         },
         // Behind a const alias — naming the ghost must not launder it.
         {
-          code: "const CANCELLED = 'cancelled'; if (run.Status === CANCELLED) showCancelled()",
+          code: "const CANCELLED = 'cancelled'; if (run.status === CANCELLED) showCancelled()",
           errors: [ghostAlias('cancelled', 'CANCELLED')],
         },
         {
-          code: "const UNSOLVABLE = 'task_unsolvable' as const; switch (run.Status) { case UNSOLVABLE: return 1 }",
+          code: "const UNSOLVABLE = 'task_unsolvable' as const; switch (run.status) { case UNSOLVABLE: return 1 }",
           errors: [ghostAlias('task_unsolvable', 'UNSOLVABLE')],
         },
         {
@@ -153,7 +192,7 @@ describe('no-ghost-conversation-status', () => {
           code: "if (((claim.status ?? '') as ConversationStatusValue) === 'cancelled') show()",
           errors: [ghost('cancelled')],
         },
-      ],
+      ].map(fixture),
     })
   })
 })

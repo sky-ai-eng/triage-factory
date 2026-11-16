@@ -2515,7 +2515,7 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
   const lastFiredHash = new Map<string, string>()
   const hashStationData = (data: ClickedStationInfo): string => {
     const queuedIds = data.queued.map((e) => e.id).join(',')
-    const conversationIds = data.runs.map((r) => `${r.run.ID}:${r.run.Status}`).join(',')
+    const conversationIds = data.runs.map((r) => `${r.run.id}:${r.run.status}`).join(',')
     return `${data.queuedCount}|${data.conversationCount}|${queuedIds}|${conversationIds}`
   }
 

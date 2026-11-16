@@ -679,30 +679,29 @@ func (ag *agentHandler) handleAgentArtifacts(w http.ResponseWriter, r *http.Requ
 // add a query to a polled route for a field it does not render.
 func conversationResponse(conv *domain.Conversation, deliverableCount int, arts []domain.Deliverable, artifactCounts map[string]int, actionCount int, progress db.RunProgress, currentAction string) map[string]any {
 	out := map[string]any{
-		"ID":            conv.ID,
-		"TaskID":        conv.TaskID,
-		"PromptID":      conv.PromptID,
-		"Status":        conv.Status,
-		"Model":         conv.Model,
-		"StartedAt":     conv.StartedAt,
-		"QueuedAt":      conv.QueuedAt,
-		"ClaimedAt":     conv.ClaimedAt,
-		"CompletedAt":   conv.CompletedAt,
-		"TotalCostUSD":  conv.TotalCostUSD,
-		"DurationMs":    conv.DurationMs,
-		"NumTurns":      conv.NumTurns,
-		"ParkReason":    string(conv.ParkReason),
-		"WorktreePath":  conv.WorktreePath,
-		"ResultSummary": conv.ResultSummary,
-		// The terminal envelope's parsed outcome and its abort note. PascalCase
-		// with the legacy set they belong to; empty string when the conversation holds
-		// none (still executing, an infra failure, or an outcome gate that
-		// exhausted its retries).
-		"Outcome":       conv.Outcome,
-		"OutcomeReason": conv.OutcomeReason,
-		"FailureKind":   string(conv.FailureKind),
-		"SessionID":     conv.SessionID,
-		"MemoryMissing": conv.MemoryMissing,
+		"id":             conv.ID,
+		"task_id":        conv.TaskID,
+		"prompt_id":      conv.PromptID,
+		"status":         conv.Status,
+		"model":          conv.Model,
+		"started_at":     conv.StartedAt,
+		"queued_at":      conv.QueuedAt,
+		"claimed_at":     conv.ClaimedAt,
+		"completed_at":   conv.CompletedAt,
+		"total_cost_usd": conv.TotalCostUSD,
+		"duration_ms":    conv.DurationMs,
+		"num_turns":      conv.NumTurns,
+		"park_reason":    string(conv.ParkReason),
+		"worktree_path":  conv.WorktreePath,
+		"result_summary": conv.ResultSummary,
+		// The terminal envelope's parsed outcome and its abort note; empty
+		// string when the conversation holds none (still executing, an infra
+		// failure, or an outcome gate that exhausted its retries).
+		"outcome":        conv.Outcome,
+		"outcome_reason": conv.OutcomeReason,
+		"failure_kind":   string(conv.FailureKind),
+		"session_id":     conv.SessionID,
+		"memory_missing": conv.MemoryMissing,
 		// Whether the conversation holds an assistant message. A conversation a
 		// person's claim minted reads false until its first turn.
 		"has_run": conv.HasRun,
@@ -710,8 +709,8 @@ func conversationResponse(conv *domain.Conversation, deliverableCount int, arts 
 		// The engine driving the transcript: a composer says when a settings
 		// change takes effect, which differs between the two.
 		"runtime":              conv.Runtime,
-		"TriggerType":          conv.TriggerType,
-		"TriggerID":            conv.TriggerID,
+		"trigger_type":         conv.TriggerType,
+		"trigger_id":           conv.TriggerID,
 		"actor_agent_id":       conv.ActorAgentID,
 		"actor_agent_name":     conv.ActorAgentName,
 		"blueprint_run_id":     conv.BlueprintRunID,
@@ -729,11 +728,10 @@ func conversationResponse(conv *domain.Conversation, deliverableCount int, arts 
 		// not the artifact counts, so it is what a view of the
 		// conversation's actions refetches on.
 		"action_count": actionCount,
-		// The token rollups the conversation read already SUMs, alongside the cost /
-		// duration / turns ones above. snake_case like every key added since
-		// the legacy PascalCase set froze. Plain ints — 0 for a conversation that never
-		// streamed a usage-bearing message — so a consumer never has to
-		// distinguish absent from none.
+		// The token rollups the conversation read already SUMs, alongside the
+		// cost / duration / turns ones above. Plain ints — 0 for a
+		// conversation that never streamed a usage-bearing message — so a
+		// consumer never has to distinguish absent from none.
 		"input_tokens":          conv.InputTokens,
 		"output_tokens":         conv.OutputTokens,
 		"cache_read_tokens":     conv.CacheReadTokens,
@@ -1611,8 +1609,8 @@ type conversationListFilterKey struct {
 // a task's conversations stay contiguous and total_count counts conversations, not
 // tasks.
 //
-// Runs carry the frozen run projection byte-for-byte, PascalCase legacy keys
-// and all. Renaming them is its own change, not a side effect of this one.
+// Each row in Runs is the body conversationResponse builds, the same one the
+// single-conversation read serves.
 type conversationListResponse struct {
 	Runs          map[string][]map[string]any    `json:"runs"`
 	Messages      map[string][]domain.MessageDTO `json:"messages,omitempty"`
