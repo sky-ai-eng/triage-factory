@@ -752,7 +752,13 @@ func newDirectCommand(runCtx context.Context, opts RunOptions, nodeArgs []string
 	// githooks.LFSSkipSmudgeEnvVar is stripped and re-set for the same reason:
 	// an inherited value would decide whether the agent's checkouts download
 	// LFS content, which is TF's call to make the same way in every run.
-	parentEnv := filterEnv(os.Environ(), []string{jscJITEnvKey, runmode.SandboxMarkerEnvVar, backgroundTasksEnvKey, githooks.LFSSkipSmudgeEnvVar})
+	// GitHub's CLI variables are stripped because an operator's GITHUB_TOKEN
+	// or GH_TOKEN would let the agent act on GitHub as the operator, and an
+	// operator's GH_REPO or GH_HOST would retarget its gh (isGitHubCLIEnvKey).
+	parentEnv := filterEnvFunc(
+		filterEnv(os.Environ(), []string{jscJITEnvKey, runmode.SandboxMarkerEnvVar, backgroundTasksEnvKey, githooks.LFSSkipSmudgeEnvVar}),
+		isGitHubCLIEnvKey,
+	)
 	hookEnv = append(append([]string(nil), hookEnv...), agentRuntimeEnv()...)
 	hookEnv = append(hookEnv, backgroundTasksEnvKey+"=1", githooks.LFSSkipSmudgeEnvVar+"=1")
 	if opts.LocalSandbox != nil {
