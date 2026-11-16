@@ -1617,7 +1617,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 
 	// Past every hand-back: this claim now owns the conversation's outcome, so
 	// the queued rows become this turn's message, and the turn starts.
-	s.startTurn(conv.ID, conv.ClaimID)
+	s.startTurn(stepCtx, conv.ID, conv.ClaimID)
 	flushPendingInput()
 
 	// A tree restored or rebuilt under the session is one the model remembers

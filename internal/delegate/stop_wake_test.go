@@ -174,7 +174,7 @@ func stopNativeEngagement(t *testing.T, suffix string, turn func(s *Spawner, con
 // for the next engagement, which is how a person redirects a working agent.
 func TestStop_ANativeTurnStoppedWithAMessageWaitingRunsItNext(t *testing.T) {
 	s, conversationID := stopNativeEngagement(t, "native-redirect", func(s *Spawner, conversationID, claimID string) {
-		s.startTurn(conversationID, claimID)
+		s.startTurn(context.Background(), conversationID, claimID)
 	})
 	if got := claimNext(t, s); got == nil || got.ID != conversationID {
 		t.Fatalf("ClaimNextConversation = %+v, want conversation %s: the message waiting behind the stopped turn runs next", got, conversationID)
@@ -186,7 +186,7 @@ func TestStop_ANativeTurnStoppedWithAMessageWaitingRunsItNext(t *testing.T) {
 // waiting that no turn has read, ends that message as a stop in bring-up does.
 func TestStop_BetweenTurnsKeepsTheWaitingMessageFromWaking(t *testing.T) {
 	s, conversationID := stopNativeEngagement(t, "native-between-turns", func(s *Spawner, conversationID, claimID string) {
-		s.startTurn(conversationID, claimID)
+		s.startTurn(context.Background(), conversationID, claimID)
 		s.endTurn(conversationID, claimID)
 	})
 	if got := claimNext(t, s); got != nil {
@@ -248,5 +248,39 @@ func TestStop_TheNextNativeEngagementReadsTheStopWhereItFell(t *testing.T) {
 	}
 	if pending := pendingRows(t, s, "r-stop-wake"); len(pending) != 2 {
 		t.Errorf("pending rows = %+v, want the stopped message and the follow-up, both for the next engagement to drain", pending)
+	}
+}
+
+// TestStartTurn_ACancelledContextStartsNoTurn: a stop that cancelled the
+// engagement before its turn took any input leaves no turn running, so the
+// park it leads to ends the waiting messages.
+func TestStartTurn_ACancelledContextStartsNoTurn(t *testing.T) {
+	s, _ := stopNativeEngagement(t, "native-stopped-at-start", func(s *Spawner, conversationID, claimID string) {
+		stopped, cancel := context.WithCancel(context.Background())
+		cancel()
+		s.startTurn(stopped, conversationID, claimID)
+	})
+	if got := claimNext(t, s); got != nil {
+		t.Fatalf("ClaimNextConversation = %s, want nothing: the turn never took the message", got.ID)
+	}
+}
+
+// TestWaitWarm_EndsTheTurn: a warm wait is the claim held between two turns,
+// so a stop that reaches the engagement there finds no turn running.
+func TestWaitWarm_EndsTheTurn(t *testing.T) {
+	s, database, conversationID, _ := setupAdvanceFixture(t, "warm-ends-turn")
+	markNative(t, database, conversationID)
+	claimID := markEngaged(t, database, conversationID)
+	defer s.startActivityTracker(&domain.Conversation{ID: conversationID, ClaimID: claimID}, func(error) {})()
+	s.startTurn(context.Background(), conversationID, claimID)
+
+	stopped, cancel := context.WithCancel(context.Background())
+	cancel()
+	n := nativeTail{orgID: runmode.LocalDefaultOrgID, conversationID: conversationID, cfg: runConfig{orgID: runmode.LocalDefaultOrgID, claimID: claimID}}
+	if end := s.waitWarm(stopped, n, time.Now().Add(time.Hour)); end != warmStopped {
+		t.Fatalf("waitWarm on a stopped engagement = %v, want warmStopped", end)
+	}
+	if s.turnRunning(conversationID, claimID) {
+		t.Error("the turn is still running after the warm wait began")
 	}
 }

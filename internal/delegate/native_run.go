@@ -356,7 +356,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	// turn of a conversation a person works in records the answer the person
 	// got as its summary, not the agent's reply to the memory note.
 	run := func(ctx context.Context, params agentloop.Params) agentloop.Result {
-		s.startTurn(conversationID, cfg.claimID)
+		s.startTurn(ctx, conversationID, cfg.claimID)
 		result := engine.Run(ctx, params)
 		if cfg.interactive && result.Kind == agentloop.ResultConcluded {
 			result.ResultSummary = s.turnAnswer(context.WithoutCancel(ctx), orgID, conversationID, result.ResultSummary)

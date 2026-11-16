@@ -447,22 +447,47 @@ func (s *Spawner) activityFor(conversationID string) *activityTracker {
 	return s.activity[conversationID]
 }
 
+// trackerFor is the tracker of the engagement holding claimID on
+// conversationID, or nil. Matching the claim keeps a successor in this
+// process out of reach: its tracker is registered under the same
+// conversation, and only its own engagement may act on it.
+func (s *Spawner) trackerFor(conversationID, claimID string) *activityTracker {
+	a := s.activityFor(conversationID)
+	if a == nil || a.claimID != claimID {
+		return nil
+	}
+	return a
+}
+
 // startTurn and endTurn record the engagement holding claimID on
 // conversationID starting a turn, at the point the turn takes its input, and
-// that turn ending with the claim kept. A person's message sent while a turn runs waits behind it,
-// so a stop of that turn leaves the message to run next; one sent while no
-// turn runs is the work a stop ends.
-func (s *Spawner) startTurn(conversationID, claimID string) {
-	s.setTurnRunning(conversationID, claimID, true)
+// that turn ending with the claim kept. A person's message sent while a turn
+// runs waits behind it, so a stop of that turn leaves the message to run next;
+// one sent while no turn runs is the work a stop ends.
+//
+// A turn whose context a stop has already cancelled does not start: the read
+// that would take its input fails on that context, so the input stays waiting
+// and the stop ended it.
+func (s *Spawner) startTurn(ctx context.Context, conversationID, claimID string) {
+	if ctx.Err() != nil {
+		return
+	}
+	s.trackerFor(conversationID, claimID).setTurnRunning(true)
 }
 
 func (s *Spawner) endTurn(conversationID, claimID string) {
-	s.setTurnRunning(conversationID, claimID, false)
+	s.trackerFor(conversationID, claimID).setTurnRunning(false)
 }
 
-func (s *Spawner) setTurnRunning(conversationID, claimID string, running bool) {
-	a := s.activityFor(conversationID)
-	if a == nil || a.claimID != claimID {
+// turnRunning reports whether the engagement holding claimID on
+// conversationID has a turn in progress. An engagement with no tracker in
+// this process has started none.
+func (s *Spawner) turnRunning(conversationID, claimID string) bool {
+	return s.trackerFor(conversationID, claimID).inTurn()
+}
+
+func (a *activityTracker) setTurnRunning(running bool) {
+	if a == nil {
 		return
 	}
 	a.mu.Lock()
@@ -470,12 +495,8 @@ func (s *Spawner) setTurnRunning(conversationID, claimID string, running bool) {
 	a.mu.Unlock()
 }
 
-// turnRunning reports whether the engagement holding claimID on
-// conversationID has a turn in progress. An engagement with no tracker in
-// this process has started none.
-func (s *Spawner) turnRunning(conversationID, claimID string) bool {
-	a := s.activityFor(conversationID)
-	if a == nil || a.claimID != claimID {
+func (a *activityTracker) inTurn() bool {
+	if a == nil {
 		return false
 	}
 	a.mu.Lock()
@@ -492,16 +513,8 @@ func (s *Spawner) turnRunning(conversationID, claimID string) bool {
 // the queue, or stop whatever engagement holds the conversation next. The
 // work an engagement still does after letting go — the snapshot that follows
 // a park or a hand-back — carries a bound of its own instead.
-//
-// Matching the claim keeps a successor in this process out of reach: its
-// tracker is registered under the same conversation, and only its own
-// release may end it.
 func (s *Spawner) releaseActivity(conversationID, claimID string) {
-	a := s.activityFor(conversationID)
-	if a == nil || a.claimID != claimID {
-		return
-	}
-	a.stop()
+	s.trackerFor(conversationID, claimID).stop()
 }
 
 // beginWorkspaceOp bounds one workspace operation and reports it to the

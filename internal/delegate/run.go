@@ -660,7 +660,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// the rows a crashed bring-up leaves behind are the rows of a conversation
 	// that really was about to speak. The turn starts here, where it takes the
 	// person's waiting messages.
-	s.startTurn(conversationID, cfg.claimID)
+	s.startTurn(ctx, conversationID, cfg.claimID)
 	if err := s.composeLaunchTurn(ctx, &baseOpts, sink, orgID, conversationID, creatorUserID, cfg.lastHandBackOutcome, workspaceNote(cfg.runRoot, cfg.workspace), cfg.interactive, taskMemories, taskContext); err != nil {
 		if errors.Is(err, db.ErrClaimReleased) {
 			// Fenced out before the first turn: a successor owns the
