@@ -384,9 +384,17 @@ type RunOptions struct {
 // and is injected on the upstream hop; the placeholder is all the agent's
 // environment ever holds, in either mode.
 type GHChannelParams struct {
-	// Host is the injector's bound "host:port" (no scheme) — GH_HOST. gh forces
-	// https to it and verifies against the injector's per-run cert.
+	// Host is GH_HOST, no scheme. Multi mode's is the injector's bound
+	// "host:port", which gh forces https to and verifies against the injector's
+	// per-run cert. A local run's is "127.0.0.1" with no port when its gh
+	// reaches the injector over the unix socket its ConfigDir names, since gh
+	// drops a git remote's port before it compares the remote with GH_HOST;
+	// otherwise it is GitHost.
 	Host string
+	// GitHost is the injector's TLS listener, "127.0.0.1:<port>", which a local
+	// run's git remotes are rewritten onto. Direct path only: a sandboxed run's
+	// git config is built by its sidecar.
+	GitHost string
 	// Token is the per-run placeholder the agent's gh presents
 	// (GH_ENTERPRISE_TOKEN). The injector strips it and injects the real token.
 	Token string

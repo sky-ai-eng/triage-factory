@@ -31,15 +31,15 @@ let serverConversation: Conversation
 
 function conversation(over: Partial<Conversation>): Conversation {
   return {
-    ID: CONVERSATION_ID,
+    id: CONVERSATION_ID,
     // Empty so the hook skips the parent-task fetch: this suite is about the
     // conversation row's readouts.
-    TaskID: '',
-    Status: 'running',
-    Model: 'claude-opus-5',
-    StartedAt: new Date(T0).toISOString(),
-    ClaimedAt: new Date(T0).toISOString(),
-    ResultSummary: '',
+    task_id: '',
+    status: 'running',
+    model: 'claude-opus-5',
+    started_at: new Date(T0).toISOString(),
+    claimed_at: new Date(T0).toISOString(),
+    result_summary: '',
     ...over,
   } as Conversation
 }
@@ -163,7 +163,7 @@ function send(event: WSEvent) {
 describe('useConversationDetail live cost accumulation', () => {
   beforeEach(() => {
     dispatch = null
-    serverConversation = conversation({ TotalCostUSD: 0.2 })
+    serverConversation = conversation({ total_cost_usd: 0.2 })
     serverMessages = []
     pendingSince = null
     failSinceReads = false
@@ -214,7 +214,7 @@ describe('useConversationDetail live cost accumulation', () => {
 
     // The server's SUM is the authority: it lands whether or not it agrees with
     // what the client accumulated, so drift can't compound across a conversation.
-    serverConversation = conversation({ TotalCostUSD: 2.64, Status: 'completed' })
+    serverConversation = conversation({ total_cost_usd: 2.64, status: 'completed' })
     send({
       type: 'conversation_update',
       conversation_id: CONVERSATION_ID,
@@ -389,7 +389,7 @@ describe('useConversationDetail live token accumulation', () => {
     expect(screen.getByText('1.5k')).toBeInTheDocument()
 
     serverConversation = conversation({
-      Status: 'completed',
+      status: 'completed',
       input_tokens: 9000,
       output_tokens: 800,
       cache_read_tokens: 5000,
@@ -426,8 +426,8 @@ function TranscriptHarness() {
   return (
     <>
       <div data-testid="transcript">{messages.map((m) => m.content).join('|')}</div>
-      <div data-testid="cost">{conversation ? String(conversation.TotalCostUSD ?? '') : ''}</div>
-      <div data-testid="status">{conversation?.Status ?? ''}</div>
+      <div data-testid="cost">{conversation ? String(conversation.total_cost_usd ?? '') : ''}</div>
+      <div data-testid="status">{conversation?.status ?? ''}</div>
       <div data-testid="op">{conversation?.claim_current_op ?? ''}</div>
     </>
   )
@@ -440,7 +440,7 @@ function transcript(): string {
 // Settle the conversation and wait for the refetch it triggers to actually
 // land, so a following tick sees the settled row rather than racing it.
 async function settleConversation() {
-  serverConversation = conversation({ Status: 'completed', TotalCostUSD: 0.2 })
+  serverConversation = conversation({ status: 'completed', total_cost_usd: 0.2 })
   send({
     type: 'conversation_update',
     conversation_id: CONVERSATION_ID,
@@ -462,7 +462,7 @@ describe('useConversationDetail transcript reconciliation', () => {
     // due on demand; setTimeout stays real so waitFor still polls normally.
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
     dispatch = null
-    serverConversation = conversation({ TotalCostUSD: 0.2 })
+    serverConversation = conversation({ total_cost_usd: 0.2 })
     serverMessages = [message({ id: 11, content: 'first' })]
     pendingSince = null
     failSinceReads = false
@@ -570,7 +570,7 @@ describe('useConversationDetail transcript reconciliation', () => {
     // would: the same tick re-reads the live conversation's row, and the fold
     // and that read have to agree.
     serverMessages.push(message({ id: 12, content: 'second', cost_usd: 0.05 }))
-    serverConversation = conversation({ TotalCostUSD: 0.25 })
+    serverConversation = conversation({ total_cost_usd: 0.25 })
     await tick()
     expect(screen.getByTestId('cost').textContent).toBe('0.25')
 
@@ -584,17 +584,17 @@ describe('useConversationDetail transcript reconciliation', () => {
   })
 
   it('re-reads a live conversation every tick, so its claim activity moves', async () => {
-    serverConversation = conversation({ TotalCostUSD: 0.2, claim_current_op: 'provider' })
+    serverConversation = conversation({ total_cost_usd: 0.2, claim_current_op: 'provider' })
     render(<TranscriptHarness />)
     await waitFor(() => expect(screen.getByTestId('op').textContent).toBe('provider'))
 
-    serverConversation = conversation({ TotalCostUSD: 0.2, claim_current_op: 'tool:bash' })
+    serverConversation = conversation({ total_cost_usd: 0.2, claim_current_op: 'tool:bash' })
     await tick()
     expect(screen.getByTestId('op').textContent).toBe('tool:bash')
   })
 
   it('does not re-read a settled conversation on the tick', async () => {
-    serverConversation = conversation({ Status: 'completed', TotalCostUSD: 0.2 })
+    serverConversation = conversation({ status: 'completed', total_cost_usd: 0.2 })
     const fetchMock = mockFetch()
     render(<TranscriptHarness />)
     await waitFor(() => expect(transcript()).toBe('first'))
@@ -609,7 +609,7 @@ describe('useConversationDetail transcript reconciliation', () => {
   })
 
   it('issues no repair reads for a conversation already settled when the station opened', async () => {
-    serverConversation = conversation({ Status: 'completed', TotalCostUSD: 0.2 })
+    serverConversation = conversation({ status: 'completed', total_cost_usd: 0.2 })
     const fetchMock = mockFetch()
     render(<TranscriptHarness />)
     await waitFor(() => expect(transcript()).toBe('first'))
@@ -702,7 +702,7 @@ function PagingProbe() {
 describe('useConversationDetail transcript back-paging', () => {
   beforeEach(() => {
     dispatch = null
-    serverConversation = conversation({ TotalCostUSD: 0.2 })
+    serverConversation = conversation({ total_cost_usd: 0.2 })
     serverMessages = []
     pendingSince = null
     failSinceReads = false
@@ -747,7 +747,7 @@ describe('useConversationDetail transcript back-paging', () => {
     // Older rows are already inside the conversation row's SUM, so folding
     // them would add dollars that are already counted. Under-reporting self-corrects on
     // the next read; over-reporting compounds.
-    serverConversation = conversation({ TotalCostUSD: 0.2 })
+    serverConversation = conversation({ total_cost_usd: 0.2 })
     serverMessages = [message({ id: 30 })]
     firstPageOlderToken = 'tok-old'
     olderPages = { 'tok-old': { rows: [message({ id: 10, cost_usd: 5 })], next: '' } }
@@ -768,7 +768,7 @@ describe('useConversationDetail transcript back-paging', () => {
 
 function RefreshProbe({ id }: { id: string }) {
   const { conversation } = useConversationDetail(id)
-  return <div data-testid="status">{conversation?.Status ?? ''}</div>
+  return <div data-testid="status">{conversation?.status ?? ''}</div>
 }
 
 function urlsEndingWith(fetchMock: ReturnType<typeof mockFetch>, suffix: string): string[] {
@@ -779,7 +779,7 @@ describe('useConversationDetail deliverable refresh', () => {
   beforeEach(() => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
     dispatch = null
-    serverConversation = conversation({ TotalCostUSD: 0.2 })
+    serverConversation = conversation({ total_cost_usd: 0.2 })
     serverMessages = [message({ id: 11 })]
     pendingSince = null
     failSinceReads = false
@@ -821,7 +821,7 @@ describe('useConversationDetail deliverable refresh', () => {
     // The transition is also broadcast, but a dropped frame must not leave
     // the approval surface on the pre-transition row. A settled conversation
     // reads its row only at load, so a second read is the refresh's.
-    serverConversation = conversation({ Status: 'completed', TotalCostUSD: 0.2 })
+    serverConversation = conversation({ status: 'completed', total_cost_usd: 0.2 })
     refreshUpdated = 1
     const fetchMock = mockFetch()
     render(<RefreshProbe id={CONVERSATION_ID} />)
@@ -834,7 +834,7 @@ describe('useConversationDetail deliverable refresh', () => {
     // A person resolving a deliverable in another tab sends only
     // conversations_updated, and a settled conversation's row is read on no
     // tick, so without this read its pending ids would stay stale.
-    serverConversation = conversation({ Status: 'completed', TotalCostUSD: 0.2 })
+    serverConversation = conversation({ status: 'completed', total_cost_usd: 0.2 })
     const fetchMock = mockFetch()
     render(<RefreshProbe id={CONVERSATION_ID} />)
     await waitFor(() => expect(screen.getByTestId('status').textContent).toBe('completed'))
@@ -864,7 +864,7 @@ describe('useConversationDetail deliverable refresh', () => {
         return Promise.resolve({
           ok: true,
           status: 200,
-          ...jsonBody(conversation({ Status: 'failed' })),
+          ...jsonBody(conversation({ status: 'failed' })),
         })
       }
       return base(url)
@@ -916,7 +916,7 @@ describe('useConversationDetail task refresh', () => {
               ? { items: [], next_page_token: '' }
               : path.endsWith('/deliverables/refresh')
                 ? { updated: 0 }
-                : conversation({ TaskID: 't1', Status: 'open' })
+                : conversation({ task_id: 't1', status: 'open' })
         return Promise.resolve({ ok: true, status: 200, ...jsonBody(body) })
       }),
     )

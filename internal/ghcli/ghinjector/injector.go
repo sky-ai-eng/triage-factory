@@ -82,12 +82,12 @@
 //
 // # What this channel cannot see at all
 //
-// GH_HOST redirects the base URL, so it reaches only the requests gh BUILDS
-// from that base. A command that takes an absolute URL out of a response body
-// and follows it — the release asset commands do this, using the upload_url and
-// the release object's own url — leaves this channel entirely, and neither its
-// act nor its outcome can be recorded here. Naming those shapes in the write
-// classifier would therefore be a promise it cannot keep.
+// Over TCP, GH_HOST redirects the base URL, so it reaches only the requests gh
+// BUILDS from that base. A command that takes an absolute URL out of a response
+// body and follows it — the release asset commands do this, using the
+// upload_url and the release object's own url — leaves this channel entirely,
+// and neither its act nor its outcome can be recorded here. Naming those shapes
+// in the write classifier would therefore be a promise it cannot keep.
 //
 // In the sandbox they do not merely go unlogged, they fail: the jail has no
 // route to those hosts and no keychain to authenticate them with, so the escape
@@ -95,6 +95,11 @@
 // observes the agent's GitHub writes" is true only of the traffic the injector
 // is in front of, and a probe run outside the jail — on a host with a real
 // keyring — will see such a command succeed with nothing recorded.
+//
+// A gh on the unix socket (ServeUnix) sends those requests here too, since
+// http_unix_socket carries every request whatever host its URL names. gh
+// attaches the placeholder only to requests for GH_HOST, so the caller-auth
+// check refuses the rest, and nothing is recorded for them.
 //
 // # TLS, but no interception
 //
@@ -106,6 +111,12 @@
 // There is no TLS interception of GitHub anywhere — the
 // injector terminates gh's connection with its own per-run cert and opens its
 // own TLS connection to the real upstream.
+//
+// A gh configured with http_unix_socket is the exception: it sends every
+// request down that socket in plain HTTP, whatever its URL's scheme and host,
+// and ServeUnix serves the same handler there. That hop has no TLS, so it is
+// only as private as the socket file, and whoever binds the socket has to
+// place it where no other account can reach it.
 //
 // # Path surface
 //
@@ -130,7 +141,9 @@
 // and every repo-contextual command needed an explicit -R. Pointing both at one
 // origin is the fix, and it is why the run's listener lives on port 443: gh
 // strips the port from a remote's host before comparing, so a ported GH_HOST is
-// unmatchable no matter what the remote says.
+// unmatchable no matter what the remote says. A local run cannot bind 443, so
+// its git stays on the ported listener and its gh reaches the same handler
+// over a unix socket (ServeUnix), under a GH_HOST that drops the port.
 //
 // Nothing about the git half is reimplemented here. It is gitproxy's own
 // handler — its ref gate, its base-branch push policy, its per-repo authorize
@@ -380,7 +393,7 @@ type Config struct {
 	// caller-auth gate below, because the two halves authenticate differently —
 	// git presents the git proxy's per-run Basic password, gh presents
 	// GH_ENTERPRISE_TOKEN — and each half validates its own. nil keeps this
-	// listener API-only, which is what local mode and every existing test get.
+	// listener API-only.
 	GitHandler http.Handler
 }
 
@@ -416,6 +429,11 @@ type Server struct {
 	listener net.Listener
 	httpSrv  *http.Server
 	serveErr chan error
+
+	// unixSrv serves the same handler in plain HTTP on unixLn, a unix socket
+	// (ServeUnix).
+	unixSrv *http.Server
+	unixLn  net.Listener
 }
 
 // New validates the config and constructs a Server without listening.
@@ -498,8 +516,9 @@ const dotcomAPIHost = "api.github.com"
 // wrapper to the Rewrite hook (off the inbound header set, so it never logs).
 type authCtxKey struct{}
 
-// Handler exposes the proxy as an http.Handler (production Start wraps it in
-// TLS; tests can drive it via httptest.NewUnstartedServer + StartTLS).
+// Handler exposes the proxy as an http.Handler (Start and Serve wrap it in TLS,
+// ServeUnix serves it in plain HTTP; tests can drive it via
+// httptest.NewUnstartedServer + StartTLS).
 func (s *Server) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Git first, and before the API caller-auth gate: a git request carries
@@ -1254,15 +1273,65 @@ func (s *Server) Serve(ln net.Listener) (string, error) {
 	return ln.Addr().String(), nil
 }
 
+// ServeUnix takes ownership of an ALREADY-BOUND unix listener and serves the
+// same handler on it in plain HTTP until Shutdown, beside whatever Start or
+// Serve serves. It is for a gh configured with http_unix_socket, which sends
+// every request down the socket without TLS whatever its URL says, so that a
+// local run's GH_HOST can drop the port (see "The shared origin" above).
+//
+// The handler is the one TLS requests reach, so the caller-auth check, the
+// repository gate, the write refusals, and the observations apply to a socket
+// request exactly as they do to one over TLS. The binder sets the socket
+// file's mode.
+//
+// A listener that is not a unix listener is refused and stays the caller's.
+// Ownership otherwise transfers: Shutdown closes it.
+func (s *Server) ServeUnix(ln net.Listener) error {
+	if ln == nil {
+		return errors.New("ghinjector: ServeUnix requires a bound listener")
+	}
+	if network := ln.Addr().Network(); network != "unix" {
+		return fmt.Errorf("ghinjector: ServeUnix requires a unix listener, got %q", network)
+	}
+	if s.unixSrv != nil {
+		return errors.New("ghinjector: already serving a unix socket; create a new Server per run")
+	}
+	s.unixLn = ln
+	s.unixSrv = &http.Server{
+		Handler:           s.Handler(),
+		ReadHeaderTimeout: 30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+	go func() {
+		// Serve returns only on Shutdown or an accept failure. The latter
+		// leaves gh with connection errors on the socket, which it reports as
+		// it would any unreachable host, so it is logged rather than surfaced
+		// through Err, which reports the TLS listener the git half also uses.
+		if err := s.unixSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			injectorLog.Warn("unix socket listener stopped", "conversation", s.cfg.ConversationID, "error", err)
+		}
+	}()
+	return nil
+}
+
 // Err returns the first unexpected Serve error (channel closes on exit).
 func (s *Server) Err() <-chan error { return s.serveErr }
 
-// Shutdown stops serving and drains in-flight requests. Idempotent.
+// Shutdown stops serving on every listener and drains in-flight requests.
+// Idempotent.
 func (s *Server) Shutdown(ctx context.Context) error {
-	if s.httpSrv == nil {
-		return nil
+	var errs []error
+	if s.httpSrv != nil {
+		errs = append(errs, s.httpSrv.Shutdown(ctx))
 	}
-	return s.httpSrv.Shutdown(ctx)
+	if s.unixSrv != nil {
+		errs = append(errs, s.unixSrv.Shutdown(ctx))
+		// The server closes only a listener its Serve goroutine has taken up,
+		// and one that has not run yet would leave the socket accepting after
+		// Shutdown returned. Closing it twice is harmless.
+		_ = s.unixLn.Close()
+	}
+	return errors.Join(errs...)
 }
 
 // RequestCount returns how many upstream responses the proxy has observed.

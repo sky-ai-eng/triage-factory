@@ -155,10 +155,10 @@ export default function RunStation({
   const retryAt = retryingAt(conversation, now)
   const elapsed = retryAt
     ? retryingAtLabel(retryAt)
-    : conversation.Status === 'queued'
-      ? formatElapsed(conversation.QueuedAt ?? conversation.StartedAt, now)
-      : !active && conversation.DurationMs != null
-        ? formatDurationMs(conversation.DurationMs)
+    : conversation.status === 'queued'
+      ? formatElapsed(conversation.queued_at ?? conversation.started_at, now)
+      : !active && conversation.duration_ms != null
+        ? formatDurationMs(conversation.duration_ms)
         : formatElapsed(workStartedAt(conversation), now)
 
   const chain = useMemo<ChainStep[]>(() => {
@@ -167,15 +167,15 @@ export default function RunStation({
     return chainSteps.map((s, i) => {
       // A synthetic placeholder (step not spawned yet) or the run you're already
       // viewing isn't a navigable trace.
-      const navigable = !s.ID.startsWith('__pending-') && s.ID !== conversation.ID
+      const navigable = !s.id.startsWith('__pending-') && s.id !== conversation.id
       const label = chainStepLabels?.[i]
       return {
-        state: stepStateOf(s, i, conversation.ID, currentStep),
+        state: stepStateOf(s, i, conversation.id, currentStep),
         label: label?.name || label?.brief ? label! : null,
-        href: navigable ? orgHref(`/runs/${s.ID}`) : null,
+        href: navigable ? orgHref(`/runs/${s.id}`) : null,
       }
     })
-  }, [chainSteps, chainStepLabels, conversation.ID, conversation.blueprint_step_index, orgHref])
+  }, [chainSteps, chainStepLabels, conversation.id, conversation.blueprint_step_index, orgHref])
 
   return (
     <motion.div
@@ -548,14 +548,14 @@ function IntakeDock({
   // true, whether the conversation is live or terminal (TFAC-382/TFAC-492).
   const counts = approvalCounts(conversation)
   const hasUnresolved = hasUnresolvedDeliverables(conversation)
-  const isTerminal = isTerminalStatus(conversation.Status)
+  const isTerminal = isTerminalStatus(conversation.status)
   // Parked: a turn ended, with the step's verdict or without. Not terminal —
   // the composer below offers to resume it — but the conversation is over
   // unless the user picks it up, so it takes the same Return-to-queue exit a
   // terminal gets.
-  const isParked = conversation.Status === 'open'
+  const isParked = conversation.status === 'open'
   // A conversation takes steering when a turn is executing, or when a
-  // follow-up would actually be accepted. Status is the cheap first cut and
+  // follow-up would actually be accepted. status is the cheap first cut and
   // the server's `resumable` is the authority: whether the workspace
   // survived and whether anything would drive it are facts only it can see,
   // and a conversation that looks parked-and-warm from here may answer every
@@ -577,14 +577,14 @@ function IntakeDock({
   // the conversation that waits, with nothing running: a message sent now is
   // queued until the memory lands. An earlier conversation of the task,
   // the one owing the memory among them, has nothing waiting on it.
-  const memoryWait = !!task?.memory_pending && task.conversation_id === conversation.ID && !active
+  const memoryWait = !!task?.memory_pending && task.conversation_id === conversation.id && !active
   // A failed chat is replaced for the person who holds the task, so the line
   // that says so leads to the replacement.
   const replacementHref =
     conversation.resume_blocked_reason === 'ended_failed' &&
     conversation.type === 'interactive' &&
     !!task?.conversation_id &&
-    task.conversation_id !== conversation.ID
+    task.conversation_id !== conversation.id
       ? orgHref(`/runs/${task.conversation_id}`)
       : null
 
@@ -618,15 +618,15 @@ function IntakeDock({
           completionGloss(conversation)
         : state.key === 'ready'
           ? 'no messages yet — say what you want done'
-          : conversation.Status === 'open'
+          : conversation.status === 'open'
             ? 'open — idle, resumable'
-            : conversation.Status === 'failed'
-              ? conversation.FailureKind === 'memory_limit'
+            : conversation.status === 'failed'
+              ? conversation.failure_kind === 'memory_limit'
                 ? 'killed — exceeded its memory limit (raise TF_CLAIM_MEMORY_LIMIT_MB if needed)'
                 : 'run failed'
-              : conversation.Status === 'queued' && memoryWait
+              : conversation.status === 'queued' && memoryWait
                 ? 'waiting on memory'
-                : conversation.Status
+                : conversation.status
 
   return (
     <div className="relative z-10 shrink-0 border-t border-line-1 px-4 py-2.5">
@@ -638,7 +638,7 @@ function IntakeDock({
           key={pending[0].tool_call_id}
           prompt={pending[0]}
           remaining={pending.length - 1}
-          worktree={conversation.WorktreePath}
+          worktree={conversation.worktree_path}
           onResolve={canWrite ? actions.onResolvePermission : undefined}
         />
       )}
@@ -815,7 +815,7 @@ function ApprovalAffordance({
             Deliverables
           </div>
           <DeliverableList
-            conversationId={conversation.ID}
+            conversationId={conversation.id}
             pendingDeliverableIds={conversation.pending_deliverable_ids}
             refreshKey={artifactSetKey(conversation)}
             onOpenApproval={(kind, id) => {
@@ -1008,9 +1008,9 @@ function stepStateOf(
   currentConversationID: string,
   currentStepIndex?: number,
 ): StepState {
-  if (isActiveStatus(s.Status)) return 'active'
+  if (isActiveStatus(s.status)) return 'active'
   if (isConcluded(s)) return 'done'
-  if (isFailedStatus(s.Status)) return 'failed'
-  if (s.ID === currentConversationID || i === currentStepIndex) return 'current'
+  if (isFailedStatus(s.status)) return 'failed'
+  if (s.id === currentConversationID || i === currentStepIndex) return 'current'
   return 'pending'
 }

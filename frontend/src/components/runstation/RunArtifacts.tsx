@@ -81,7 +81,7 @@ async function loadArtifactSet(conversationId: string): Promise<ArtifactSet> {
 }
 
 export function RunArtifacts({ conversation, onOpenDeliverable, onDeliverableResolved }: Props) {
-  const conversationId = conversation.ID
+  const conversationId = conversation.id
   const refreshKey = artifactSetKey(conversation)
   const [tick, setTick] = useState(0)
   const [set, setSet] = useState<ArtifactSet | null>(null)

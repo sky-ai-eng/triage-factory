@@ -253,7 +253,7 @@ func TestHandleAgentStop_RecordsTheRequestAndLeavesBlueprintRunning(t *testing.T
 	if first["stop_requested_at"] == nil {
 		t.Errorf("response carries no stop_requested_at: %v", first)
 	}
-	if got := first["Status"]; got != "queued" {
+	if got := first["status"]; got != "queued" {
 		t.Errorf("response Status = %v, want queued — the request writes no status", got)
 	}
 	// A second POST while the first is pending is the same answer.

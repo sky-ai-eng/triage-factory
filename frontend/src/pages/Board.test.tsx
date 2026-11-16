@@ -157,12 +157,12 @@ const DISMISSED: Task = {
 /** Its conversation, in whichever state a test puts it. */
 function conversation(status: string): Conversation {
   return {
-    ID: 'c1',
-    TaskID: HELD.id,
-    Status: status,
-    Model: 'claude-opus-5',
-    StartedAt: '2026-09-01T12:00:00Z',
-    ResultSummary: status === 'completed' ? 'opened a pull request' : '',
+    id: 'c1',
+    task_id: HELD.id,
+    status,
+    model: 'claude-opus-5',
+    started_at: '2026-09-01T12:00:00Z',
+    result_summary: status === 'completed' ? 'opened a pull request' : '',
   } as Conversation
 }
 
@@ -416,8 +416,8 @@ describe('the conversation a card shows', () => {
     // than the run it took the task from.
     const claimed = {
       ...conversation('open'),
-      ID: 'c-claim',
-      StartedAt: '2026-09-01T13:00:00Z',
+      id: 'c-claim',
+      started_at: '2026-09-01T13:00:00Z',
       type: 'interactive',
       has_run: false,
     } as Conversation
@@ -432,14 +432,14 @@ describe('the conversation a card shows', () => {
     renderBoard()
     await screen.findByText(HELD.title)
 
-    expect(runLinks()).toEqual([held.ID])
+    expect(runLinks()).toEqual([held.id])
   })
 
   it("shows a claim's conversation once it has run", async () => {
     const claimed = {
       ...conversation('open'),
-      ID: 'c-claim',
-      StartedAt: '2026-09-01T13:00:00Z',
+      id: 'c-claim',
+      started_at: '2026-09-01T13:00:00Z',
       type: 'interactive',
       has_run: true,
     } as Conversation
@@ -464,8 +464,8 @@ describe('the conversation a card shows', () => {
       const task = { ...HELD, claimed_by_user_id: holder, conversation_id: 'c-claim' }
       const claimed = {
         ...conversation('open'),
-        ID: 'c-claim',
-        StartedAt: '2026-09-01T13:00:00Z',
+        id: 'c-claim',
+        started_at: '2026-09-01T13:00:00Z',
         type: 'interactive',
         has_run: hasRun,
       } as Conversation
@@ -503,15 +503,15 @@ describe('the conversation a card shows', () => {
     const task = { ...HELD, conversation_id: 'c-new' }
     const live = {
       ...conversation('open'),
-      ID: 'c-new',
-      StartedAt: '2026-09-01T13:00:00Z',
+      id: 'c-new',
+      started_at: '2026-09-01T13:00:00Z',
       type: 'interactive',
       has_run: false,
     } as Conversation
     const failed = {
       ...conversation('failed'),
-      ID: 'c-failed',
-      StartedAt: '2026-09-01T12:30:00Z',
+      id: 'c-failed',
+      started_at: '2026-09-01T12:30:00Z',
       type: 'interactive',
       has_run: false,
       ended_at: '2026-09-01T12:59:00Z',
@@ -757,7 +757,7 @@ describe('a permission prompt on a card', () => {
   function parkOnPrompt(canWrite: boolean) {
     held = { ...conversation('running'), can_write: canWrite }
     ;(QUEUES as { queues: Record<string, unknown[]> }).queues = {
-      [held.ID]: [{ tool_call_id: 'toolu_1', tool_name: 'Bash', input: { command: 'make test' } }],
+      [held.id]: [{ tool_call_id: 'toolu_1', tool_name: 'Bash', input: { command: 'make test' } }],
     }
   }
 
@@ -792,8 +792,8 @@ describe('a closed task in Done', () => {
   function running(): Conversation {
     return {
       ...conversation('running'),
-      ID: 'c-dismissed',
-      TaskID: DISMISSED.id,
+      id: 'c-dismissed',
+      task_id: DISMISSED.id,
       current_action: 'Reading the upload test',
       can_write: true,
     }
@@ -822,10 +822,10 @@ describe('a closed task in Done', () => {
       [DISMISSED.id]: [
         {
           ...conversation('open'),
-          ID: 'c-dismissed',
-          TaskID: DISMISSED.id,
-          CompletedAt: '2026-09-01T12:04:00Z',
-          DurationMs: 240_000,
+          id: 'c-dismissed',
+          task_id: DISMISSED.id,
+          completed_at: '2026-09-01T12:04:00Z',
+          duration_ms: 240_000,
         },
       ],
     }
@@ -856,7 +856,7 @@ describe('a closed task in Done', () => {
     closed = [DISMISSED]
     closedRuns = { [DISMISSED.id]: [run] }
     ;(QUEUES as { queues: Record<string, unknown[]> }).queues = {
-      [run.ID]: [{ tool_call_id: 'toolu_9', tool_name: 'Bash', input: { command: 'make lint' } }],
+      [run.id]: [{ tool_call_id: 'toolu_9', tool_name: 'Bash', input: { command: 'make lint' } }],
     }
     renderBoard()
     expect(await screen.findByText('make lint')).toBeInTheDocument()
@@ -868,8 +868,8 @@ describe('a closed task in Done', () => {
       fireEvent.click(within(card(DISMISSED.title)).getByRole('button', { name: 'Deny' }))
     })
     expect(QUEUES.resolve.mock.calls).toEqual([
-      [run.ID, 'toolu_9', { behavior: 'allow' }],
-      [run.ID, 'toolu_9', { behavior: 'deny' }],
+      [run.id, 'toolu_9', { behavior: 'allow' }],
+      [run.id, 'toolu_9', { behavior: 'deny' }],
     ])
   })
 })

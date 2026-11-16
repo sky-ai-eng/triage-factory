@@ -105,22 +105,22 @@ function ScreenTranscript({ messages, conversation, hasOlder, loadingOlder, onLo
     if (top < prev) setPinned(false)
   }, [])
 
-  // Key the rows off conversation.WorktreePath — the only conversation field
+  // Key the rows off conversation.worktree_path — the only conversation field
   // they read — rather than the conversation object itself, whose identity
   // churns on every status refetch and deliverable poll. Rebuilding here is
   // cheap element creation; the heavy work (markdown parsing, tool panes)
   // bails out per-row via the memoized leaf components when a row's inputs
   // are unchanged.
   const rows = useMemo(
-    () => buildRows(messages, conversation.WorktreePath),
-    [messages, conversation.WorktreePath],
+    () => buildRows(messages, conversation.worktree_path),
+    [messages, conversation.worktree_path],
   )
 
   // The settled verdict renders outside buildRows so the row list doesn't
   // depend on the full conversation object (see above). Same visibility rule
   // as before: present once the conversation is settled and carries a summary.
   const verdict =
-    conversation.ResultSummary && !isActiveConversation(conversation) ? (
+    conversation.result_summary && !isActiveConversation(conversation) ? (
       <Verdict conversation={conversation} />
     ) : null
 
@@ -630,7 +630,7 @@ function Verdict({ conversation }: { conversation: Conversation }) {
         className="max-w-none text-card-title leading-relaxed [&_code]:rounded-[3px] [&_code]:bg-[color:var(--hmi-code-bg)] [&_code]:px-1 [&_code]:font-mono [&_code]:text-reported [&_li]:my-0.5 [&_p]:my-1.5 [&_ul]:my-2 [&_ul]:list-disc [&_ul]:pl-5"
         style={{ color: 'var(--hmi-ink)' }}
       >
-        <MemoMarkdown>{conversation.ResultSummary}</MemoMarkdown>
+        <MemoMarkdown>{conversation.result_summary}</MemoMarkdown>
       </div>
     </div>
   )

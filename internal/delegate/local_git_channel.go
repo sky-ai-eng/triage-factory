@@ -56,7 +56,15 @@ func (c *localGitChannel) configPairs(gh *agentproc.GHChannelParams) [][2]string
 	if gh == nil {
 		pairs = c.proxy.GitConfigPairsWithSSH("", "")
 	} else {
-		pairs = c.proxy.GitConfigPairsWithSSH(gh.Host, gh.CertSourcePath)
+		pairs = c.proxy.GitConfigPairsWithSSH(gh.GitHost, gh.CertSourcePath)
+		if gh.GitHost != "" && gh.Host != gh.GitHost {
+			// A URL gh builds for git from GH_HOST (a `gh repo clone`, the
+			// remote `gh pr checkout` adds for a fork) names the portless host,
+			// where nothing listens. Rewritten onto the shared origin it reaches
+			// the run's proxy, whose own authorization decides it like any
+			// other git request.
+			pairs = append(pairs, [2]string{"url.https://" + gh.GitHost + "/.insteadOf", "https://" + gh.Host + "/"})
+		}
 	}
 	// The SSH bridge below carries a fetch by mapping each protocol-v2 command
 	// onto one stateless request; v0's negotiation is stateful and has no such

@@ -266,7 +266,7 @@ func TestConversationCanWrite_Postgres(t *testing.T) {
 		out := map[string]any{}
 		for _, rows := range body.Runs {
 			for _, row := range rows {
-				out[row["ID"].(string)] = row["can_write"]
+				out[row["id"].(string)] = row["can_write"]
 			}
 		}
 		return out

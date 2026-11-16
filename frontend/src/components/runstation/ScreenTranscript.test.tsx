@@ -5,12 +5,12 @@ import type { Conversation, Message } from '../../types'
 
 const conversation = (over: Partial<Conversation> = {}): Conversation =>
   ({
-    ID: 'r1',
-    TaskID: 't1',
-    Status: 'open',
-    Model: 'claude-opus-4-8',
-    StartedAt: '2026-06-25T00:00:00Z',
-    ResultSummary: '',
+    id: 'r1',
+    task_id: 't1',
+    status: 'open',
+    model: 'claude-opus-4-8',
+    started_at: '2026-06-25T00:00:00Z',
+    result_summary: '',
     ...over,
   }) as Conversation
 
@@ -86,7 +86,7 @@ describe('ScreenTranscript system-authored rows', () => {
 // contract.
 describe('ScreenTranscript verdict', () => {
   it('renders no verdict for a settled conversation with no summary', () => {
-    render(<ScreenTranscript conversation={conversation({ Status: 'open' })} messages={[]} />)
+    render(<ScreenTranscript conversation={conversation({ status: 'open' })} messages={[]} />)
     expect(screen.queryByText('IDLE')).not.toBeInTheDocument()
   })
 
@@ -94,9 +94,9 @@ describe('ScreenTranscript verdict', () => {
     render(
       <ScreenTranscript
         conversation={conversation({
-          Status: 'completed',
-          Outcome: 'finish',
-          ResultSummary: 'Opened a PR.',
+          status: 'completed',
+          outcome: 'finish',
+          result_summary: 'Opened a PR.',
         })}
         messages={[]}
       />,
