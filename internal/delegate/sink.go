@@ -136,8 +136,10 @@ func (k *conversationSink) OnSession(sessionID string) error {
 // One door for every engagement, fenced or not: the write is keyed on the
 // session and only ever raises the stored total (RecordSessionCostSystem), so
 // a process that lost its claim still records what its session cost and
-// cannot lower a total a newer process wrote. If the fence discarded this
-// process's session, the row names another one and the write changes nothing.
+// cannot lower a total a newer process wrote. Where the fence kept this
+// process's session id off the row, the row names another session and the
+// write changes nothing; a process that resumed the session the row already
+// names raises that session's total like any other.
 //
 // The reader goroutine has no caller context, so the write gets its own bound,
 // and a failure is logged rather than returned: losing the total costs the

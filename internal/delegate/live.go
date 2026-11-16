@@ -257,6 +257,7 @@ func (s *Spawner) runLiveAndDrive(ctx context.Context, spec liveRunSpec) liveOut
 func foldAccounting(classified, merged *agentproc.Result) *agentproc.Result {
 	r := *classified
 	r.CostUSD = merged.CostUSD
+	r.SessionCostUSD = merged.SessionCostUSD
 	r.DurationMs = merged.DurationMs
 	r.NumTurns = merged.NumTurns
 	return &r

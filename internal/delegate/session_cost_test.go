@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -77,5 +79,56 @@ func TestDispatch_ResumedSDKTurnRecordsOnlyItsOwnSpend(t *testing.T) {
 	}
 	if conv.SessionCostUSD != 0.75 {
 		t.Errorf("stored session total = %v, want 0.75", conv.SessionCostUSD)
+	}
+}
+
+// TestDispatch_ReclaimedSDKTurnRecordsOnlyItsOwnSpend: an engagement that
+// took a person's message and ended before its reply leaves the turn cut off,
+// and the next claim resumes the session on the step path rather than the
+// follow-up one. That launch is handed the total the session's last process
+// reported too.
+func TestDispatch_ReclaimedSDKTurnRecordsOnlyItsOwnSpend(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	f := newInteractiveFixture(t, "1477-reclaim")
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+	session := &fakeSDKSession{id: "sess-1477-reclaim"}
+
+	f.endTurnSpending(t, session, "the build is red because a test is flaky", 0.25)
+	f.s.dispatchClaimedConversation(ctx, f.claim(t, "why is the build red?"), time.Now())
+	f.stampModel(t)
+
+	// The engagement that took the next message ended before its reply, so
+	// the claim below finds no message waiting and a session to continue.
+	if err := f.s.SendMessage(ctx, org, f.conv.ID, runmode.LocalDefaultUserID, "can you rerun it?", domain.TurnSettings{}); err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	if _, _, ok, err := f.stores.ConversationPendingInput.Consume(ctx, org, f.conv.ID); err != nil || !ok {
+		t.Fatalf("take the message off the queue = (%v, %v)", ok, err)
+	}
+	claimed, err := f.stores.ConversationQueue.ClaimNextConversation(ctx, "interactive-exec", 1, db.ClaimPlacement{}, db.DefaultClaimLease)
+	if err != nil || claimed == nil || claimed.ID != f.conv.ID {
+		t.Fatalf("ClaimNextConversation = (%v, %v), want the conversation", claimed, err)
+	}
+	claimed.OrgID = org
+
+	reclaimed := f.endTurnSpending(t, session, "rerunning it", 0.5)
+	f.s.dispatchClaimedConversation(ctx, claimed, time.Now())
+	if reclaimed.opts.SessionID != session.id {
+		t.Fatalf("the re-claim launched session %q, want %q resumed", reclaimed.opts.SessionID, session.id)
+	}
+	if reclaimed.opts.SessionCostBaselineUSD != 0.25 {
+		t.Errorf("the re-claim's baseline = %v, want the 0.25 the first turn's process reported", reclaimed.opts.SessionCostBaselineUSD)
+	}
+
+	conv, err := f.stores.Conversations.GetSystem(ctx, org, f.conv.ID)
+	if err != nil || conv == nil {
+		t.Fatalf("GetSystem = (%v, %v)", conv, err)
+	}
+	if conv.TotalCostUSD == nil {
+		t.Fatal("recorded spend = none, want 0.75, the re-claimed process's total")
+	}
+	if *conv.TotalCostUSD != 0.75 {
+		t.Errorf("recorded spend = %v, want 0.75, the re-claimed process's total", *conv.TotalCostUSD)
 	}
 }
