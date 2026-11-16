@@ -56,7 +56,7 @@ type runConfig struct {
 	// resumes an SDK session picks its continuation note by it.
 	lastHandBackOutcome string
 
-	teamID   string     // the conversation's owning team (conversations.team_id, NOT NULL), stamped alongside orgID from the claimed conversation row; read at construction to populate agenthost.ConversationInfo.TeamID so the capture writers can stamp deliverables.team_id (TFAC-458). Also stamped on the conversation-bearing terminal paths (dispatchClaimedConversation / handlePreAgentFailure); empty on the resumed step's reactor path, which carries only the org.
+	teamID   string     // the conversation's owning team (conversations.team_id, NOT NULL), stamped alongside orgID from the claimed conversation row; read at construction to populate agenthost.ConversationInfo.TeamID so the capture writers can stamp deliverables.team_id. Also stamped on the conversation-bearing terminal paths (dispatchClaimedConversation / handlePreAgentFailure); empty on the resumed step's reactor path, which carries only the org.
 	scope    string     // what the agent is scoped to (repo, PR, issue)
 	sources  sourceDocs // the run's <tools> section and its <run_context> source notes
 	runRoot  string     // the run root: the agent's starting directory and conversations.worktree_path, for every source

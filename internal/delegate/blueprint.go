@@ -103,8 +103,8 @@ var errRunAlreadyTerminal = errors.New("blueprint run already terminal")
 // handlePreAgentFailure) stamp cfg.teamID off the claimed run, but the resumed
 // step's reactor passes the org alone and leaves it empty — so cfg.teamID is
 // NOT reliably set here. Any future run-attributed work on the terminal path
-// (e.g. recording a failed run's deliverables, TFAC-454) must thread the
-// team/identity explicitly rather than trust cfg.
+// (e.g. recording a failed run's deliverables) must thread the team/identity
+// explicitly rather than trust cfg.
 func (s *Spawner) terminateBlueprint(
 	orgID, blueprintRunID, taskID, triggerType, creatorUserID string,
 	startTime time.Time,
@@ -437,9 +437,9 @@ func buildBlueprintStepWrapperPrompt(task domain.Task, step domain.BlueprintStep
 // stop settlement for one nobody holds).
 //
 // Only the lifecycle stop reaches this, for a caller one layer up that has
-// decided the work is over (a task requeued, delegated again or claimed by a
-// person, an archived team). Stopping a conversation must not: the signal is
-// what turns a parked step into a permanently unresumable one.
+// decided the work is over (a task requeued, delegated again, claimed by a
+// person or reassigned, an archived team). Stopping a conversation must not:
+// the signal is what turns a parked step into a permanently unresumable one.
 //
 // Best-effort, because the lifecycle stop finishes its teardown either way: a
 // failure leaves the blueprint running with a parked step, which the orphan

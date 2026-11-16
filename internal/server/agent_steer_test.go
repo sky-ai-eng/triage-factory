@@ -302,19 +302,17 @@ func TestHandleAgentStop_RetiredPathsAreGone(t *testing.T) {
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
 	conversationID := seedSteerConversation(t, s.db, "retired", "running")
 	// A run path addresses its run by uuid, and a 404 for a malformed id would
-	// pass for a missing route, so the fixture's running run is re-seated under
-	// one: a copy, the original settled, the step moved across.
-	var oldID string
-	if err := s.db.QueryRow(`SELECT blueprint_run_id FROM conversations WHERE id = ?`, conversationID).Scan(&oldID); err != nil {
+	// pass for a missing route, so the task gets a running run under one.
+	var taskID, blueprintID string
+	if err := s.db.QueryRow(`
+		SELECT br.task_id, br.blueprint_id
+		  FROM conversations c JOIN blueprint_runs br ON br.id = c.blueprint_run_id
+		 WHERE c.id = ?`, conversationID).Scan(&taskID, &blueprintID); err != nil {
 		t.Fatalf("read blueprint run: %v", err)
 	}
-	brID := fixtureUUID("br_retired")
-	execSQL(t, s.db, `UPDATE blueprint_runs SET status = 'completed' WHERE id = ?`, oldID)
-	execSQL(t, s.db, `
-		INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, status, step_plan, worktree_path, creator_user_id, started_at)
-		SELECT ?, blueprint_id, task_id, trigger_type, 'running', step_plan, worktree_path, creator_user_id, started_at
-		  FROM blueprint_runs WHERE id = ?`, brID, oldID)
-	execSQL(t, s.db, `UPDATE conversations SET blueprint_run_id = ? WHERE id = ?`, brID, conversationID)
+	brID := dbtest.SeedBlueprintRun(t, s.db, domain.BlueprintRun{
+		ID: fixtureUUID("br_retired"), BlueprintID: blueprintID, TaskID: taskID,
+	})
 
 	for _, path := range []string{
 		"/api/agent/conversations/" + conversationID + "/cancel",
