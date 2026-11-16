@@ -399,3 +399,40 @@ func TestTaskGet_ListsTheClaimTeams(t *testing.T) {
 		}
 	})
 }
+
+// A caller who may write a task and writes none of the teams it can land on
+// is told so, on both routes: 403 FORBIDDEN, which is not the answer for an
+// archived team, since no team here is archived. The caller is the org's
+// owner, and the task is org-visible and owned by a team they are not on.
+func TestTaskClaimAndDelegate_NoTeamToLandOnIsForbidden(t *testing.T) {
+	r := newClaimTeamRig(t)
+	noTeam := refusal{http.StatusForbidden, httpx.ReasonForbidden, ""}
+
+	seed := func(t *testing.T) string {
+		t.Helper()
+		taskID := r.seedTask(t, r.outside)
+		pgtest.MustExec(t, r.h.AdminDB, `DELETE FROM task_teams WHERE task_id = $1`, taskID)
+		pgtest.MustExec(t, r.h.AdminDB, `UPDATE tasks SET visibility = 'org' WHERE id = $1`, taskID)
+		return taskID
+	}
+	// The task write gate answers 403 FORBIDDEN too, so the message is what
+	// says this refusal is the team's.
+	const message = "you aren't a member with write access on a team that can take this task"
+	for _, tc := range []struct {
+		name, verb string
+		body       map[string]any
+	}{
+		{"claim", "claim", map[string]any{}},
+		{"claim naming a team", "claim", map[string]any{"team_id": r.first}},
+		{"delegate", "delegate", map[string]any{"team_id": r.first, "blueprint_id": r.firstBlueprint}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			taskID := seed(t)
+			r.assertRefusedAndUnwritten(t, taskID, tc.verb, tc.body, noTeam)
+			rec := r.post(t, taskID, tc.verb, tc.body)
+			if got := decodeErrorItems(t, rec)[0].Message; got != message {
+				t.Errorf("%s refusal says %q, want %q", tc.verb, got, message)
+			}
+		})
+	}
+}

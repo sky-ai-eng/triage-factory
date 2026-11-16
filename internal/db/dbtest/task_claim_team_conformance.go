@@ -32,8 +32,9 @@ type ClaimTeamFixture struct {
 type ClaimTeamFactory func(t *testing.T) ClaimTeamFixture
 
 // RunClaimTeamConformance pins which teams a claim or a delegate may land a
-// task on (TaskStore.ClaimTeamCandidates), and that the claim writes land on
-// the team they are given and refuse one that read does not return.
+// task on (TaskStore.ClaimTeamCandidates), that the claim writes land on the
+// team they are given and refuse one that read does not return, and what they
+// answer a claimant who has no team at all.
 func RunClaimTeamConformance(t *testing.T, factory ClaimTeamFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -149,6 +150,49 @@ func RunClaimTeamConformance(t *testing.T, factory ClaimTeamFactory) {
 					ok, err := door.claim(fx, taskID, named.team, TaskVersion(t, fx.Store, fx.OrgID, taskID))
 					if ok || !errors.Is(err, db.ErrClaimTeamNotCandidate) {
 						t.Errorf("%s = (%v, %v), want (false, ErrClaimTeamNotCandidate)", door.name, ok, err)
+					}
+					if got := readClaimRow(ctx, t, fx.Store, fx.OrgID, taskID); got != before {
+						t.Errorf("task after a refused claim = %+v, want it unchanged at %+v", got, before)
+					}
+				})
+			}
+		}
+	})
+
+	// A claimant with no team to land the task on is refused by every door,
+	// with the reason: an archived team is not why here, so the answer is not
+	// the archived one (RunClaimArchivedTeamConformance covers that).
+	t.Run("AClaimWithNoTeamIsRefusedAsNoTeam", func(t *testing.T) {
+		fx := factory(t)
+		for _, shape := range []struct {
+			name    string
+			owner   string
+			visible []string
+		}{
+			{"the caller only views every team on the task", fx.ViewTeamID, []string{fx.ViewTeamID}},
+			{"an unowned task no team sees", "", nil},
+		} {
+			t.Run(shape.name+"/NoClaimTeamReason", func(t *testing.T) {
+				taskID := fx.SeedTask(t, shape.owner, shape.visible)
+				if err := fx.Store.NoClaimTeamReason(ctx, fx.OrgID, taskID, fx.UserID); !errors.Is(err, db.ErrNoClaimTeam) {
+					t.Errorf("NoClaimTeamReason = %v, want ErrNoClaimTeam", err)
+				}
+			})
+			for _, door := range doors {
+				// The bot's stamp needs an owner to keep, so the takeover
+				// runs on the owned shape alone.
+				if door.prep != nil && shape.owner == "" {
+					continue
+				}
+				t.Run(shape.name+"/"+door.name, func(t *testing.T) {
+					taskID := fx.SeedTask(t, shape.owner, shape.visible)
+					if door.prep != nil {
+						door.prep(t, fx, taskID)
+					}
+					before := readClaimRow(ctx, t, fx.Store, fx.OrgID, taskID)
+					ok, err := door.claim(fx, taskID, fx.WriteTeamIDs[0], TaskVersion(t, fx.Store, fx.OrgID, taskID))
+					if ok || !errors.Is(err, db.ErrNoClaimTeam) {
+						t.Errorf("%s = (%v, %v), want (false, ErrNoClaimTeam)", door.name, ok, err)
 					}
 					if got := readClaimRow(ctx, t, fx.Store, fx.OrgID, taskID); got != before {
 						t.Errorf("task after a refused claim = %+v, want it unchanged at %+v", got, before)

@@ -1027,12 +1027,12 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		if err != nil {
 			t.Fatalf("FindOrCreate(empty team): %v", err)
 		}
-		// A person's claim takes its team from the claimer's active team in
-		// the task's visibility set, else the active owner, and this task has
-		// neither: the door refuses before it writes.
+		// A person's claim lands on the task's own team or a team in its
+		// visibility set, and this task has neither: the door refuses before
+		// it writes, and no archived team is why.
 		ok, err := s.ClaimQueuedForUser(ctx, orgID, task.ID, userID, ClaimTeam(t, s, orgID, task.ID, userID), TaskVersion(t, s, orgID, task.ID))
-		if ok || !errors.Is(err, db.ErrNoActiveClaimTeam) {
-			t.Errorf("ClaimQueuedForUser on an unowned task = (%v, %v), want (false, ErrNoActiveClaimTeam)", ok, err)
+		if ok || !errors.Is(err, db.ErrNoClaimTeam) {
+			t.Errorf("ClaimQueuedForUser on an unowned task = (%v, %v), want (false, ErrNoClaimTeam)", ok, err)
 		}
 		// The bot's stamp with no acting team keeps the stored NULL owner, so
 		// there it is the claimed-⇒-owned CHECK, not the door, that refuses to

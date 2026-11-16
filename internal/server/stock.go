@@ -951,6 +951,9 @@ func (s *Server) stockClaimTicket(r *http.Request, b *stockBatch, entity *domain
 	} else if errors.Is(err, db.ErrNoActiveClaimTeam) {
 		return stockFailed(snap.Key, httpx.ReasonTeamArchived,
 			"the ticket's task is on an archived team, and you're on no active team it can move to")
+	} else if errors.Is(err, db.ErrNoClaimTeam) {
+		return stockFailed(snap.Key, httpx.ReasonForbidden,
+			"you aren't a member with write access on a team that can take the ticket's task")
 	} else if errors.Is(err, db.ErrClaimTeamNotCandidate) {
 		return stockFailed(snap.Key, httpx.ReasonCrossTeamRef, "the ticket's task can't land on the selected team")
 	} else if err != nil {

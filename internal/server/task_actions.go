@@ -392,11 +392,7 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 	} else if errors.Is(err, db.ErrTaskVersion) {
 		writeTaskVersionConflict(w)
 		return selfClaimed{}, false
-	} else if errors.Is(err, db.ErrNoActiveClaimTeam) {
-		writeNoActiveClaimTeam(w)
-		return selfClaimed{}, false
-	} else if errors.Is(err, db.ErrClaimTeamNotCandidate) {
-		writeClaimTeamsChanged(w)
+	} else if writeClaimTeamRefusal(w, err) {
 		return selfClaimed{}, false
 	} else if err != nil {
 		taskActionLog.Error("claim write failed", "task", id, "error", err)
@@ -882,13 +878,9 @@ func (s *Server) handOffAgentClaim(w http.ResponseWriter, r *http.Request, orgID
 		// stops and spawns nothing.
 		writeTaskVersionConflict(w)
 		return domain.Task{}, false
-	} else if errors.Is(err, db.ErrNoActiveClaimTeam) {
-		// The caller's last candidate went since readAgentClaimTarget read
-		// them: archived, or no longer theirs to write.
-		writeNoActiveClaimTeam(w)
-		return domain.Task{}, false
-	} else if errors.Is(err, db.ErrClaimTeamNotCandidate) {
-		writeClaimTeamsChanged(w)
+	} else if writeClaimTeamRefusal(w, err) {
+		// The caller's candidates changed since readAgentClaimTarget read
+		// them.
 		return domain.Task{}, false
 	} else if err != nil {
 		taskActionLog.Error("failed to stamp agent claim", "task", id, "error", err)
@@ -1336,15 +1328,17 @@ func (s *Server) resolveClaimTeam(w http.ResponseWriter, r *http.Request, orgID,
 	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		candidates, e = tx.Tasks.ClaimTeamCandidates(r.Context(), orgID, taskID, userID)
-		return e
-	}); err != nil {
+		if e != nil || len(candidates) > 0 {
+			return e
+		}
+		return tx.Tasks.NoClaimTeamReason(r.Context(), orgID, taskID, userID)
+	}); writeClaimTeamRefusal(w, err) {
+		return "", false
+	} else if err != nil {
 		internalError(w, "tasks", err)
 		return "", false
 	}
 	switch {
-	case len(candidates) == 0:
-		writeNoActiveClaimTeam(w)
-		return "", false
 	case picked != nil:
 		// The candidates are spelled as stored; uuid.Parse accepts other
 		// spellings of the same id.
@@ -1372,21 +1366,51 @@ func (s *Server) resolveClaimTeam(w http.ResponseWriter, r *http.Request, orgID,
 	return candidates[0], true
 }
 
-// writeClaimTeamsChanged answers a claim or delegation whose write refused
-// the team resolveClaimTeam had resolved (db.ErrClaimTeamNotCandidate): the
-// task's teams, or the caller's membership of them, changed in between.
-// Nothing was written.
-func writeClaimTeamsChanged(w http.ResponseWriter) {
-	httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
-		Reason:  httpx.ReasonConflict,
-		Message: "the task's teams changed; read it again",
+// writeClaimTeamRefusal answers a claim or delegation refused over the team
+// the task lands on, and reports whether err was one of those refusals.
+// Nothing was written for any of them:
+//
+//   - db.ErrNoActiveClaimTeam: the caller has no team to land the task on
+//     because one is archived. 403 TEAM_ARCHIVED (writeNoActiveClaimTeam).
+//   - db.ErrNoClaimTeam: the caller has no team to land the task on, and none
+//     is archived. 403 FORBIDDEN (writeNoClaimTeam).
+//   - db.ErrClaimTeamNotCandidate: the write refused the team
+//     resolveClaimTeam had resolved, so the task's teams, or the caller's
+//     membership of them, changed in between. 409 CONFLICT.
+func writeClaimTeamRefusal(w http.ResponseWriter, err error) bool {
+	switch {
+	case errors.Is(err, db.ErrNoActiveClaimTeam):
+		writeNoActiveClaimTeam(w)
+	case errors.Is(err, db.ErrNoClaimTeam):
+		writeNoClaimTeam(w)
+	case errors.Is(err, db.ErrClaimTeamNotCandidate):
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+			Reason:  httpx.ReasonConflict,
+			Message: "the task's teams changed; read it again",
+		})
+	default:
+		return false
+	}
+	return true
+}
+
+// writeNoClaimTeam answers a claim or delegation refused because the caller
+// writes none of the teams the task can land on (db.ErrNoClaimTeam): they are
+// on neither its own team nor a team that can see it, or only view the ones
+// they are on. It is not the archived answer, because restoring a team would
+// not change it. 403 FORBIDDEN, the answer a missing write role gets
+// elsewhere, and no field: no team_id would be accepted.
+func writeNoClaimTeam(w http.ResponseWriter) {
+	httpx.WriteErrors(w, http.StatusForbidden, httpx.ErrorItem{
+		Reason:  httpx.ReasonForbidden,
+		Message: "you aren't a member with write access on a team that can take this task",
 	})
 }
 
 // writeNoActiveClaimTeam answers a claim or delegation refused because the
-// caller has no team to land the task on (no candidate, or
-// db.ErrNoActiveClaimTeam from the write): they write neither the task's own
-// active team nor an active team that can see it. Nothing was written. 403 TEAM_ARCHIVED, the archive write-block's answer, because the
+// caller has no team to land the task on and an archived team is why
+// (db.ErrNoActiveClaimTeam): the task's team is archived, and the caller
+// writes no active team that can see it. Nothing was written. 403 TEAM_ARCHIVED, the archive write-block's answer, because the
 // fault is the same one: nothing lands on an archived team, and a retry gets
 // the same refusal until the team is restored.
 func writeNoActiveClaimTeam(w http.ResponseWriter) {

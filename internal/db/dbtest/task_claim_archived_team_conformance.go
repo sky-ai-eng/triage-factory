@@ -145,6 +145,9 @@ func RunClaimArchivedTeamConformance(t *testing.T, factory ClaimArchivedTeamFact
 			if err != nil || len(teams) != 0 {
 				t.Errorf("ClaimTeamCandidates = (%v, %v), want none", teams, err)
 			}
+			if err := fx.Store.NoClaimTeamReason(ctx, fx.OrgID, taskID, fx.UserID); !errors.Is(err, db.ErrNoActiveClaimTeam) {
+				t.Errorf("NoClaimTeamReason = %v, want ErrNoActiveClaimTeam", err)
+			}
 		})
 		t.Run("ClaimQueuedForUser", func(t *testing.T) {
 			taskID := seed(t)

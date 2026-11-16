@@ -21,12 +21,20 @@ import (
 var ErrNoSuchTask = errors.New("no task with that id")
 
 // ErrNoActiveClaimTeam is the claim mutations' refusal when the claimant has
-// no team to land the task on (TaskStore.ClaimTeamCandidates is empty): they
-// write neither the task's own active team nor any active team in its
-// visibility set. Nothing is written. Unlike a lost race, a retry gets the
-// same answer until the claimant can write an active team that can see the
-// task or the owner team is restored.
+// no team to land the task on (TaskStore.ClaimTeamCandidates is empty) and an
+// archived team is why: the task's own team is archived, or an archived team
+// the claimant writes is in its visibility set. Nothing is written. Unlike a
+// lost race, a retry gets the same answer until the team is restored or the
+// claimant can write an active team that can see the task.
 var ErrNoActiveClaimTeam = errors.New("db: the claim has no active team to land the task on")
+
+// ErrNoClaimTeam is the claim mutations' refusal when the claimant has no
+// team to land the task on and no archived team accounts for it: they write
+// neither the task's own team nor any team in its visibility set, because
+// they are on none of them or only view the ones they are on. Nothing is
+// written, and a retry gets the same answer until their memberships or the
+// task's teams change.
+var ErrNoClaimTeam = errors.New("db: the claimant writes no team the task can land on")
 
 // ErrClaimTeamNotCandidate is the claim mutations' refusal when the claimant
 // has teams to land the task on and the team the write names is not one of
@@ -720,8 +728,8 @@ type TaskStore interface {
 	// HandoffResult for the discriminator the caller maps. On a
 	// changed claim the owning team_id becomes teamID, which must be one
 	// of the delegating user's candidates (see ClaimTeamCandidates): with
-	// no candidate the handoff is refused with ErrNoActiveClaimTeam, and
-	// with candidates that do not include teamID with
+	// no candidate the handoff is refused with what NoClaimTeamReason
+	// answers, and with candidates that do not include teamID with
 	// ErrClaimTeamNotCandidate, both ahead of the same-agent no-op.
 	//
 	// The returned task is the row the handoff leaves: the one its UPDATE
@@ -750,6 +758,14 @@ type TaskStore interface {
 	// teams or the user's memberships changed in between.
 	ClaimTeamCandidates(ctx context.Context, orgID, taskID, userID string) ([]string, error)
 
+	// NoClaimTeamReason says why userID has no candidate for the task, for
+	// a caller whose ClaimTeamCandidates read came back empty: it returns
+	// ErrNoActiveClaimTeam when an archived team accounts for it (the
+	// task's own team is archived, or an archived team userID writes is in
+	// its visibility set), and ErrNoClaimTeam otherwise. The claim writes
+	// refuse a claimant with no candidate with the same answer.
+	NoClaimTeamReason(ctx context.Context, orgID, taskID, userID string) error
+
 	// TakeoverClaimFromAgent atomically flips a bot-claimed task
 	// to a user claim, landing the row in_progress. Race-safe: guards on
 	// the version the caller read, the bot still holding the claim AND no
@@ -773,9 +789,10 @@ type TaskStore interface {
 	// (ClaimTeamCandidates): the RLS update check requires write access to
 	// the team the row lands on, and an archived team stops its work, so a
 	// team the claimer only views, or an archived one, is never landed on.
-	// With no candidate the claim is refused with ErrNoActiveClaimTeam, and
-	// with candidates that do not include teamID with
-	// ErrClaimTeamNotCandidate; nothing is written either way.
+	// With no candidate the claim is refused with what NoClaimTeamReason
+	// answers (ErrNoActiveClaimTeam or ErrNoClaimTeam), and with candidates
+	// that do not include teamID with ErrClaimTeamNotCandidate; nothing is
+	// written either way.
 	//
 	// The same UPDATE records source_status (domain.SourceStatus): the
 	// status and assignee the task's Jira or Linear entity snapshot holds,

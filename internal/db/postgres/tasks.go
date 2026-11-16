@@ -1683,18 +1683,52 @@ func claimTeamCandidates(ctx context.Context, q queryer, orgID, taskID, userID s
 	return out, rows.Err()
 }
 
+func (s *taskStore) NoClaimTeamReason(ctx context.Context, orgID, taskID, userID string) error {
+	return noClaimTeamReason(ctx, s.q, orgID, taskID, userID)
+}
+
+// noClaimTeamReason names why a claimant with no candidate has none:
+// db.ErrNoActiveClaimTeam when the task's own team is archived or an
+// archived team the claimant writes is in its visibility set, and
+// db.ErrNoClaimTeam otherwise. Under the app pool task_teams RLS hides an
+// archived team's visibility row, so there only the task's own team answers
+// for an archive.
+func noClaimTeamReason(ctx context.Context, q queryer, orgID, taskID, userID string) error {
+	var archived bool
+	if err := q.QueryRowContext(ctx, `
+		SELECT EXISTS (
+		  SELECT 1 FROM tasks
+		   WHERE tasks.org_id = $1 AND tasks.id = $2
+		     AND (EXISTS (SELECT 1 FROM teams ot
+		                   WHERE ot.id = tasks.team_id AND ot.deleted_at IS NOT NULL)
+		       OR EXISTS (SELECT 1 FROM task_teams tt
+		                    JOIN teams tm ON tm.id = tt.team_id
+		                    JOIN memberships m ON m.team_id = tt.team_id
+		                   WHERE tt.task_id = tasks.id
+		                     AND tm.deleted_at IS NOT NULL
+		                     AND m.user_id = $3
+		                     AND m.role IN ('admin', 'member'))))
+	`, orgID, taskID, userID).Scan(&archived); err != nil {
+		return fmt.Errorf("read why the claim has no team: %w", err)
+	}
+	if archived {
+		return db.ErrNoActiveClaimTeam
+	}
+	return db.ErrNoClaimTeam
+}
+
 // claimTeamRefusal is the follow-up a claim write runs when it matched no row
-// at the caller's version: db.ErrNoActiveClaimTeam when the claimant has no
-// team to land the task on, db.ErrClaimTeamNotCandidate when they have one
-// and teamID is not among them, and nil when teamID is a candidate, so one
-// of the write's other guards refused it.
+// at the caller's version: what noClaimTeamReason answers when the claimant
+// has no team to land the task on, db.ErrClaimTeamNotCandidate when they
+// have one and teamID is not among them, and nil when teamID is a candidate,
+// so one of the write's other guards refused it.
 func claimTeamRefusal(ctx context.Context, q queryer, orgID, taskID, userID, teamID string) error {
 	candidates, err := claimTeamCandidates(ctx, q, orgID, taskID, userID)
 	if err != nil {
 		return err
 	}
 	if len(candidates) == 0 {
-		return db.ErrNoActiveClaimTeam
+		return noClaimTeamReason(ctx, q, orgID, taskID, userID)
 	}
 	if !slices.Contains(candidates, teamID) {
 		return db.ErrClaimTeamNotCandidate
