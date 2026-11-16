@@ -78,14 +78,24 @@ const liveClaimExistsSQL = `EXISTS (
 		  AND cl_a.phase IS NOT '` + domain.ClaimPhaseWarm + `')`
 
 // undeliveredInputExistsSQL matches drivable input: a plain user message
-// still awaiting delivery. Injections ride whatever engagement runs next and
-// never wake one on their own; a withdrawn row (undelivered + window_state
-// 'inactive') never happened. Nothing here reads `seq`, which compaction
-// re-writes to fractional values. Served by idx_messages_undelivered.
+// still awaiting delivery, sent after the conversation's wake position.
+// Injections ride whatever engagement runs next and never wake one on their
+// own; a withdrawn row (undelivered + window_state 'inactive') never
+// happened. Nothing here reads `seq`, which compaction re-writes to
+// fractional values. Served by idx_messages_undelivered. The Postgres twin
+// says what the wake position is.
 const undeliveredInputExistsSQL = `EXISTS (
 		SELECT 1 FROM messages m_i
 		WHERE m_i.conversation_id = r.id AND m_i.delivered = 0
-		  AND m_i.role = 'user' AND m_i.subtype = '' AND m_i.window_state = 'active')`
+		  AND m_i.role = 'user' AND m_i.subtype = '' AND m_i.window_state = 'active'
+		  AND m_i.id > COALESCE(r.wake_after_message_id, 0))`
+
+// wakeAfterStopSQL is the Postgres twin's wake position in this dialect,
+// against the bare columns of the row an UPDATE writes. SQLite's
+// multi-argument MAX is NULL when any argument is, where Postgres's GREATEST
+// skips a NULL, so the COALESCE supplies whichever side is set.
+const wakeAfterStopSQL = `COALESCE(MAX(wake_after_message_id, stop_through_message_id),
+		                                 wake_after_message_id, stop_through_message_id)`
 
 // undeliveredInputDuringClaimSQL is undeliveredInputExistsSQL narrowed to the
 // person messages that arrived while the claim claimExpr names held the
@@ -442,7 +452,7 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 		if _, err := q.ExecContext(ctx, `
 			UPDATE conversations SET status = NULL, parked_at = NULL, park_reason = NULL,
 			                         queued_at = CASE WHEN status IS NOT NULL THEN ? ELSE queued_at END,
-			                         stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL,
+			                         stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL, stop_through_message_id = NULL,
 			                         next_attempt_at = NULL
 			WHERE id = ? AND (status IS NOT NULL OR next_attempt_at IS NOT NULL)
 		`, claimedAt, claimed.ID); err != nil {
@@ -1291,7 +1301,7 @@ func (s *conversationQueueStore) settleUnclaimedStops(ctx context.Context, scope
 			}
 			if terminal {
 				if _, err := q.ExecContext(ctx, `
-					UPDATE conversations SET stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL,
+					UPDATE conversations SET stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL, stop_through_message_id = NULL,
 					                         next_attempt_at = NULL
 					WHERE id = ?
 				`, v.id); err != nil {
@@ -1302,9 +1312,11 @@ func (s *conversationQueueStore) settleUnclaimedStops(ctx context.Context, scope
 				SET status = 'open',
 				    parked_at = COALESCE(parked_at, ?),
 				    park_reason = ?,
+				    wake_after_message_id = `+wakeAfterStopSQL+`,
 				    stop_requested_at = NULL,
 				    stop_requested_by = NULL,
 				    stop_requested_reason = NULL,
+				    stop_through_message_id = NULL,
 				    next_attempt_at = NULL
 				WHERE id = ?
 			`, now, parkReason, v.id); err != nil {

@@ -158,17 +158,35 @@ const liveClaimExistsSQL = `EXISTS (
 		  AND cl_a.phase IS DISTINCT FROM '` + domain.ClaimPhaseWarm + `')`
 
 // undeliveredInputExistsSQL matches drivable input: a plain user message
-// still awaiting delivery. Injections (subtype 'injection:…', including a
-// compaction request — which is inserted delivered anyway) ride whatever
-// engagement runs next and never wake one on their own; a withdrawn row
-// (undelivered + window_state 'inactive') never happened. No assumption is
-// made about `seq` — a compaction commit re-seqs undelivered rows to
-// fractional values and nothing here reads the column. Served by
-// idx_messages_undelivered.
+// still awaiting delivery, sent after the conversation's wake position.
+// Injections (subtype 'injection:…', including a compaction request — which
+// is inserted delivered anyway) ride whatever engagement runs next and never
+// wake one on their own; a withdrawn row (undelivered + window_state
+// 'inactive') never happened. No assumption is made about `seq` — a
+// compaction commit re-seqs undelivered rows to fractional values and nothing
+// here reads the column. Served by idx_messages_undelivered.
+//
+// The wake position (wake_after_message_id) is where a stop that ended with
+// no turn run was sent: the messages in front of it were the work that stop
+// ended, so they no longer wake the conversation. They stay undelivered, and
+// the next engagement reads them with whatever woke it.
 const undeliveredInputExistsSQL = `EXISTS (
 		SELECT 1 FROM messages m_i
 		WHERE m_i.conversation_id = r.id AND m_i.delivered = false
-		  AND m_i.role = 'user' AND m_i.subtype = '' AND m_i.window_state = 'active')`
+		  AND m_i.role = 'user' AND m_i.subtype = '' AND m_i.window_state = 'active'
+		  AND m_i.id > COALESCE(r.wake_after_message_id, 0))`
+
+// wakeAfterStopSQL is the wake position a park that settles a stop with no
+// turn run writes, read off the row alias names as it stood before the write:
+// the position moved forward to where the stop was sent, and never back. A
+// row with no stop recorded keeps the position it had.
+//
+// It is not written by a park after a turn that was running when the stop
+// arrived. A person's message waiting behind that turn was not in front of the
+// stop, and it runs next.
+func wakeAfterStopSQL(alias string) string {
+	return `GREATEST(` + alias + `.wake_after_message_id, ` + alias + `.stop_through_message_id)`
+}
 
 // undeliveredInputDuringClaimSQL is undeliveredInputExistsSQL narrowed to the
 // person messages that arrived while the claim claimExpr names held the
@@ -747,7 +765,7 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 			UPDATE conversations SET status = NULL, parked_at = NULL, park_reason = NULL,
 			                         queued_at = CASE WHEN conversations.status IS NOT NULL THEN now()
 			                                          ELSE conversations.queued_at END,
-			                         stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL,
+			                         stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL, stop_through_message_id = NULL,
 			                         next_attempt_at = NULL
 			FROM candidate
 			WHERE conversations.id = candidate.id
@@ -1069,9 +1087,12 @@ func (s *conversationQueueStore) settleUnclaimedStops(ctx context.Context, scope
 				                       WHEN v.stop_requested_reason IS NOT NULL THEN v.stop_requested_reason
 				                       WHEN v.stop_requested_by IS NULL THEN 'system_cancelled'
 				                       ELSE 'user_cancelled' END,
+				    wake_after_message_id = CASE WHEN v.was_settled THEN c.wake_after_message_id
+				                                 ELSE `+wakeAfterStopSQL("c")+` END,
 				    stop_requested_at = NULL,
 				    stop_requested_by = NULL,
 				    stop_requested_reason = NULL,
+				    stop_through_message_id = NULL,
 				    next_attempt_at = NULL
 				FROM victims v WHERE c.id = v.id
 				RETURNING c.id, c.org_id, c.blueprint_run_id, c.blueprint_step_index, v.was_settled,

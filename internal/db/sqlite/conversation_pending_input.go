@@ -5,6 +5,7 @@ import (
 	"database/sql"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // conversationPendingInputStore is the SQLite impl of db.ConversationPendingInputStore — the
@@ -35,28 +36,15 @@ func (s *conversationPendingInputStore) Peek(ctx context.Context, orgID, convers
 	// every read of it: a withdrawn row (undelivered + inactive) never
 	// happened, and the flush skips it. Without this the routing decision
 	// would see input the delivery then cannot find.
-	rows, err := s.q.QueryContext(ctx, `
-		SELECT content, user_id FROM messages
+	queued, err := scanPendingRows(s.q.QueryContext(ctx, `
+		SELECT id, content, user_id FROM messages
 		WHERE `+pendingInputPredicate+` AND window_state = 'active'
 		ORDER BY id ASC
-	`, orgID, conversationID)
+	`, orgID, conversationID))
+	if err == nil {
+		queued, err = withStopNotesBetween(ctx, s.q, orgID, conversationID, queued)
+	}
 	if err != nil {
-		return "", "", false, err
-	}
-	defer rows.Close()
-	var queued []db.PendingRow
-	for rows.Next() {
-		var (
-			r      db.PendingRow
-			userID sql.NullString
-		)
-		if err := rows.Scan(&r.Content, &userID); err != nil {
-			return "", "", false, err
-		}
-		r.UserID = userID.String
-		queued = append(queued, r)
-	}
-	if err := rows.Err(); err != nil {
 		return "", "", false, err
 	}
 	message, userID, ok := db.JoinPendingRows(queued)
@@ -67,5 +55,61 @@ func (s *conversationPendingInputStore) Consume(ctx context.Context, orgID, conv
 	if err := assertLocalOrg(orgID); err != nil {
 		return "", "", false, err
 	}
-	return db.ConsumePendingInput(flushPendingInput(ctx, s.q, orgID, conversationID, []string{""}))
+	// One transaction, so a failed read of the stop notes rolls the flush back
+	// and the messages stay waiting, as a failed Consume always leaves them.
+	var flushed []db.PendingRow
+	err := inTx(ctx, s.q, func(q queryer) error {
+		rows, err := flushPendingInput(ctx, q, orgID, conversationID, []string{""})
+		if err != nil {
+			return err
+		}
+		flushed, err = withStopNotesBetween(ctx, q, orgID, conversationID, rows)
+		return err
+	})
+	return db.ConsumePendingInput(flushed, err)
+}
+
+// withStopNotesBetween adds to queued the conversation's stop-note rows that
+// lie between the oldest and the newest of its person messages, so the
+// resume message reads each stop where it fell (db.JoinPendingRows). The
+// notes were delivered when they were written, and are only read here.
+func withStopNotesBetween(ctx context.Context, q queryer, orgID, conversationID string, queued []db.PendingRow) ([]db.PendingRow, error) {
+	lo, hi, ok := db.PendingRowBounds(queued)
+	if !ok {
+		return queued, nil
+	}
+	notes, err := scanPendingRows(q.QueryContext(ctx, `
+		SELECT id, content, user_id FROM messages
+		WHERE org_id = ? AND conversation_id = ?
+		  AND role = 'user' AND subtype = ? AND id > ? AND id < ?
+		ORDER BY id ASC
+	`, orgID, conversationID, domain.MessageSubtypeStopNote, lo, hi))
+	if err != nil {
+		return nil, err
+	}
+	for i := range notes {
+		notes[i].Subtype = domain.MessageSubtypeStopNote
+	}
+	return append(queued, notes...), nil
+}
+
+func scanPendingRows(rows *sql.Rows, err error) ([]db.PendingRow, error) {
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []db.PendingRow
+	for rows.Next() {
+		var (
+			r       db.PendingRow
+			content sql.NullString
+			userID  sql.NullString
+		)
+		if err := rows.Scan(&r.ID, &content, &userID); err != nil {
+			return nil, err
+		}
+		r.Content, r.UserID = content.String, userID.String
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }

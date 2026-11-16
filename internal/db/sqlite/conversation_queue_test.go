@@ -878,6 +878,12 @@ func TestStopIntent_SQLite(t *testing.T) {
 	dbtest.RunStopIntentConformance(t, sqliteClaimLeaseFixture)
 }
 
+// TestStopWake_SQLite runs the shared wake-position conformance on the same
+// fixture the claim-lease suite uses.
+func TestStopWake_SQLite(t *testing.T) {
+	dbtest.RunStopWakeConformance(t, sqliteClaimLeaseFixture)
+}
+
 // TestHandBack_SQLite runs the shared hand-back conformance on the same
 // fixture the claim-lease suite uses.
 func TestHandBack_SQLite(t *testing.T) {

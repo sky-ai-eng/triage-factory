@@ -350,17 +350,18 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 		NewSandbox: true,
 	}
 
-	// A turn of a conversation a person works in records the answer the person
+	// Every turn, the first and each one a warm claim resumes, starts when the
+	// engine does: what the engine runs before it drains the waiting input
+	// (the transcript repair, a cold-resume compaction) is that turn's work. A
+	// turn of a conversation a person works in records the answer the person
 	// got as its summary, not the agent's reply to the memory note.
-	run := engine.Run
-	if cfg.interactive {
-		run = func(ctx context.Context, params agentloop.Params) agentloop.Result {
-			result := engine.Run(ctx, params)
-			if result.Kind == agentloop.ResultConcluded {
-				result.ResultSummary = s.turnAnswer(context.WithoutCancel(ctx), orgID, conversationID, result.ResultSummary)
-			}
-			return result
+	run := func(ctx context.Context, params agentloop.Params) agentloop.Result {
+		s.startTurn(ctx, conversationID, cfg.claimID)
+		result := engine.Run(ctx, params)
+		if cfg.interactive && result.Kind == agentloop.ResultConcluded {
+			result.ResultSummary = s.turnAnswer(context.WithoutCancel(ctx), orgID, conversationID, result.ResultSummary)
 		}
+		return result
 	}
 
 	return s.runNativeTail(ctx, nativeTail{

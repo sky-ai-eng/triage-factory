@@ -273,7 +273,8 @@ func completeConversationFlip(ctx context.Context, q queryer, orgID, conversatio
 		    failure_kind = NULLIF($6, ''),
 		    stop_requested_at = NULL,
 		    stop_requested_by = NULL,
-		    stop_requested_reason = NULL
+		    stop_requested_reason = NULL,
+		    stop_through_message_id = NULL
 		WHERE org_id = $7 AND id = $8
 		RETURNING *
 	`, status, time.Now().UTC(), resultSummary, outcome, outcomeReason, failureKind, orgID, conversationID)
@@ -346,7 +347,7 @@ func (s *conversationStore) SettleClaimCostSystem(ctx context.Context, orgID, co
 // that happens to land first — reaches this write. The derivation is one CASE so a
 // further kind of stop is one more arm. Every SET expression reads the row as
 // it stood before the write, so the stop columns cleared below are still the
-// pending intent where the reason reads them.
+// pending intent where the reason and the wake position read them.
 func parkOpen(ctx context.Context, q queryer, orgID, conversationID string, park db.Park) (bool, error) {
 	// A deliberate stop re-parks an already-parked row; a turn_incomplete park
 	// does not. Spelled as an extra clause rather than two queries.
@@ -364,12 +365,15 @@ func parkOpen(ctx context.Context, q queryer, orgID, conversationID string, park
 		        WHEN stop_requested_at IS NOT NULL THEN 'user_cancelled'
 		        ELSE COALESCE(NULLIF($2, ''), park_reason) END,
 		    result_summary = COALESCE(NULLIF($3, ''), result_summary),
+		    wake_after_message_id = CASE WHEN $6::boolean THEN `+wakeAfterStopSQL("conversations")+`
+		                                 ELSE wake_after_message_id END,
 		    stop_requested_at = NULL,
 		    stop_requested_by = NULL,
-		    stop_requested_reason = NULL
+		    stop_requested_reason = NULL,
+		    stop_through_message_id = NULL
 		WHERE org_id = $4 AND id = $5
 		  AND `+db.UnsettledConversationSQL("conversations")+reparkGuard+`
-	`, time.Now().UTC(), string(park.Reason), park.ResultSummary, orgID, conversationID)
+	`, time.Now().UTC(), string(park.Reason), park.ResultSummary, orgID, conversationID, park.NoTurnRan)
 	if err != nil {
 		return false, err
 	}
@@ -492,7 +496,7 @@ func resumeFlip(ctx context.Context, q queryer, orgID, conversationID string, ca
 		UPDATE conversations SET status = NULL,
 		                parked_at = NULL, park_reason = NULL,
 		                completed_at = NULL, outcome = NULL, outcome_reason = NULL,
-		                stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL,
+		                stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL, stop_through_message_id = NULL,
 		                next_attempt_at = NULL,
 		                queued_at = now(),
 		                preferred_executor_id = (
@@ -1418,7 +1422,7 @@ func markFailedIfActive(ctx context.Context, q queryer, orgID, conversationID, f
 		UPDATE conversations SET status = 'failed', completed_at = COALESCE(completed_at, $1),
 		    failure_kind = NULLIF($2, ''),
 		    result_summary = COALESCE(NULLIF($5, ''), result_summary),
-		    stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL
+		    stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL, stop_through_message_id = NULL
 		WHERE org_id = $3 AND id = $4
 		  AND `+db.UnsettledConversationSQL("conversations")+`
 	`, time.Now().UTC(), failureKind, orgID, conversationID, summary)
@@ -1946,6 +1950,14 @@ func (s *conversationStore) RequestStopForClaimSystem(ctx context.Context, orgID
 // writeStopIntent records a stop request on a non-terminal conversation and
 // reports whether it landed. See RequestStopSystem for why every column keys
 // on stop_requested_at.
+//
+// stop_through_message_id is where the stop was sent: the conversation's
+// newest message when the request was recorded. A park that settles the stop
+// with no turn run moves the wake position to it (wakeAfterStopSQL), so the
+// person messages in front of the stop stop waking the conversation and the
+// ones sent after it still do. A message's id is drawn from its sequence when
+// the row is inserted, so one whose insert has not committed when this reads
+// falls on the side of the stop its id was drawn on.
 func writeStopIntent(ctx context.Context, q queryer, orgID, conversationID, by string, reason domain.ParkReason) (bool, error) {
 	var id string
 	err := q.QueryRowContext(ctx, `
@@ -1954,7 +1966,11 @@ func writeStopIntent(ctx context.Context, q queryer, orgID, conversationID, by s
 		    stop_requested_by = CASE WHEN stop_requested_at IS NULL
 		                             THEN NULLIF($1, '') ELSE stop_requested_by END,
 		    stop_requested_reason = CASE WHEN stop_requested_at IS NULL
-		                                 THEN NULLIF($4, '') ELSE stop_requested_reason END
+		                                 THEN NULLIF($4, '') ELSE stop_requested_reason END,
+		    stop_through_message_id = CASE WHEN stop_requested_at IS NULL
+		                                   THEN (SELECT max(m.id) FROM messages m
+		                                         WHERE m.org_id = conversations.org_id AND m.conversation_id = conversations.id)
+		                                   ELSE stop_through_message_id END
 		WHERE org_id = $2 AND id = $3
 		  AND `+db.UnsettledConversationSQL("conversations")+`
 		RETURNING id

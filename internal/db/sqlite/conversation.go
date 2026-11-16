@@ -221,7 +221,8 @@ func completeConversationFlip(ctx context.Context, q queryer, conversationID, st
 		    failure_kind = @failure_kind,
 		    stop_requested_at = NULL,
 		    stop_requested_by = NULL,
-		    stop_requested_reason = NULL
+		    stop_requested_reason = NULL,
+		    stop_through_message_id = NULL
 		WHERE id = @id
 		RETURNING `+sqliteConversationReturningColumns,
 		sql.Named("status", status), sql.Named("now", time.Now().UTC()), sql.Named("summary", resultSummary),
@@ -296,7 +297,7 @@ func (s *conversationStore) parkAndRelease(ctx context.Context, orgID, conversat
 // pending stop decides the reason whatever the caller passed — see the
 // Postgres twin. Every SET expression reads the row as it stood before the
 // write, so the stop columns cleared below are still the pending intent where
-// the reason reads them.
+// the reason and the wake position read them.
 func parkOpen(ctx context.Context, q queryer, conversationID string, park db.Park) (bool, error) {
 	// A deliberate stop re-parks an already-parked row; a turn_incomplete park
 	// does not. Spelled as an extra clause rather than two queries.
@@ -314,12 +315,14 @@ func parkOpen(ctx context.Context, q queryer, conversationID string, park db.Par
 		        WHEN stop_requested_at IS NOT NULL THEN 'user_cancelled'
 		        ELSE COALESCE(NULLIF(?, ''), park_reason) END,
 		    result_summary = COALESCE(NULLIF(?, ''), result_summary),
+		    wake_after_message_id = CASE WHEN ? THEN `+wakeAfterStopSQL+` ELSE wake_after_message_id END,
 		    stop_requested_at = NULL,
 		    stop_requested_by = NULL,
-		    stop_requested_reason = NULL
+		    stop_requested_reason = NULL,
+		    stop_through_message_id = NULL
 		WHERE id = ?
 		  AND `+db.UnsettledConversationSQL("conversations")+reparkGuard+`
-	`, time.Now().UTC(), string(park.Reason), park.ResultSummary, conversationID)
+	`, time.Now().UTC(), string(park.Reason), park.ResultSummary, park.NoTurnRan, conversationID)
 	if err != nil {
 		return false, err
 	}
@@ -375,7 +378,7 @@ func sqliteResumeFlip(ctx context.Context, q queryer, conversationID string) (bo
 		UPDATE conversations SET status = NULL,
 		                parked_at = NULL, park_reason = NULL,
 		                completed_at = NULL, outcome = NULL, outcome_reason = NULL,
-		                stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL,
+		                stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL, stop_through_message_id = NULL,
 		                next_attempt_at = NULL,
 		                queued_at = ?,
 		                preferred_executor_id = (
@@ -665,7 +668,7 @@ func (s *conversationStore) markFailedIfActive(ctx context.Context, orgID, conve
 			UPDATE conversations SET status = 'failed', completed_at = COALESCE(completed_at, ?),
 			    failure_kind = ?,
 			    result_summary = COALESCE(NULLIF(?, ''), result_summary),
-			    stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL
+			    stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL, stop_through_message_id = NULL
 			WHERE id = ?
 			  AND `+db.UnsettledConversationSQL("conversations")+`
 		`, time.Now().UTC(), nullIfEmpty(failureKind), summary, conversationID)
@@ -1029,7 +1032,8 @@ const sqliteReturningDisplayStatusSQL = `COALESCE(
 		       OR (status = 'open' AND completed_at IS NULL AND EXISTS (
 		             SELECT 1 FROM messages m_i
 		             WHERE m_i.conversation_id = conversations.id AND m_i.delivered = 0
-		               AND m_i.role = 'user' AND m_i.subtype = '' AND m_i.window_state = 'active'))
+		               AND m_i.role = 'user' AND m_i.subtype = '' AND m_i.window_state = 'active'
+		               AND m_i.id > COALESCE(conversations.wake_after_message_id, 0)))
 		     THEN 'queued' END,
 		status,
 		'')`
@@ -1466,7 +1470,8 @@ func (s *conversationStore) RequestStopForClaimSystem(ctx context.Context, orgID
 }
 
 // writeStopIntent records a stop request on a non-terminal conversation and
-// reports whether it landed.
+// reports whether it landed. The Postgres twin says what
+// stop_through_message_id records.
 func writeStopIntent(ctx context.Context, q queryer, conversationID, by string, reason domain.ParkReason) (bool, error) {
 	var id string
 	err := q.QueryRowContext(ctx, `
@@ -1475,7 +1480,10 @@ func writeStopIntent(ctx context.Context, q queryer, conversationID, by string, 
 		    stop_requested_by = CASE WHEN stop_requested_at IS NULL
 		                             THEN NULLIF(?, '') ELSE stop_requested_by END,
 		    stop_requested_reason = CASE WHEN stop_requested_at IS NULL
-		                                 THEN NULLIF(?, '') ELSE stop_requested_reason END
+		                                 THEN NULLIF(?, '') ELSE stop_requested_reason END,
+		    stop_through_message_id = CASE WHEN stop_requested_at IS NULL
+		                                   THEN (SELECT MAX(m.id) FROM messages m WHERE m.conversation_id = conversations.id)
+		                                   ELSE stop_through_message_id END
 		WHERE id = ?
 		  AND `+db.UnsettledConversationSQL("conversations")+`
 		RETURNING id
