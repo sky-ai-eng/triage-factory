@@ -1,15 +1,17 @@
 -- +goose Up
--- Tasks carry an optimistic-concurrency token, and a pending firing can name
--- the note its event was handed to a conversation as. The poll records whether
--- it can read each repository's Dependabot alerts, and a refresh mark can name
--- them. A person's claim mints the conversation they work the task in, which
--- tasks already held get here. The brain marks the delegated failures and
--- parks it has told, interactive conversations count toward llm_spend, a
--- person's message records its reasoning effort, and conversation memory
--- records when its content last changed.
+-- Tasks carry an optimistic-concurrency token, a pending firing can name the
+-- note its event was handed to a conversation as, and a blueprint run records
+-- its team. The poll records whether it can read each repository's Dependabot
+-- alerts, and a refresh mark can name them. A person's claim mints the
+-- conversation they work the task in, which tasks already held get here. The
+-- brain marks the delegated failures and parks it has told, a conversation
+-- records its SDK session's running cost and where a stop's messages end,
+-- interactive conversations count toward llm_spend, a person's message records
+-- its reasoning effort, and conversation memory records when its content last
+-- changed.
 
 -- ===========================================================================
--- 1. Tasks and pending firings
+-- 1. Tasks, pending firings, and blueprint runs
 -- ===========================================================================
 
 -- The task's optimistic-concurrency token. A write that changes a column a
@@ -31,6 +33,26 @@ ALTER TABLE tasks ADD COLUMN version INTEGER NOT NULL DEFAULT 1;
 -- unsettled: the firing worker settles it once the run ends, by whether the
 -- note was read.
 ALTER TABLE pending_firings ADD COLUMN handed_note_id TEXT NULL;
+
+-- blueprint_runs.team_id: the team a run belongs to, set at mint to the team
+-- its first step conversation is created on, and never changed. A task that
+-- moves to another team gets a new run there, so the run stays with the team
+-- that made it, as its conversations do.
+--
+-- Nullable, unlike the Postgres twin: SQLite cannot add a NOT NULL column
+-- without a default, and a run with no conversation has no team to fill in.
+ALTER TABLE blueprint_runs ADD COLUMN team_id TEXT REFERENCES teams(id);
+
+-- Existing runs take the team of their lowest-index step conversation, which
+-- is the first step the mint created with the run.
+UPDATE blueprint_runs
+   SET team_id = (
+       SELECT c.team_id FROM conversations c
+        WHERE c.blueprint_run_id = blueprint_runs.id
+          AND c.blueprint_step_index IS NOT NULL
+        ORDER BY c.blueprint_step_index ASC, c.started_at ASC, c.id ASC
+        LIMIT 1
+   );
 
 -- ===========================================================================
 -- 2. Dependabot alerts
@@ -157,6 +179,45 @@ UPDATE conversations SET failure_noticed_at = COALESCE(completed_at, CURRENT_TIM
  WHERE status = 'failed';
 UPDATE conversations SET pause_noticed_parked_at = parked_at
  WHERE parked_at IS NOT NULL;
+
+-- sdk_session_cost_usd: the running total the SDK last reported for the
+-- session in sdk_session_id. Claude Code restores a session's total on
+-- --resume and reports it as every result's total_cost_usd, so a resumed
+-- process's own spend is what it reports less this.
+ALTER TABLE conversations ADD COLUMN sdk_session_cost_usd REAL NOT NULL DEFAULT 0;
+
+-- Stored spend records each SDK engagement on a session at the session's
+-- running total, so a conversation's newest cost row holds the total its
+-- session had reached. A session that can still be resumed starts from it;
+-- without it, the session's next engagement would record the whole total
+-- again. Ended conversations, and ones with no cost row, keep 0.
+UPDATE conversations
+   SET sdk_session_cost_usd = COALESCE((
+       SELECT m.cost_usd FROM messages m
+        WHERE m.conversation_id = conversations.id
+          AND m.cost_usd IS NOT NULL
+        ORDER BY m.id DESC
+        LIMIT 1
+   ), 0)
+ WHERE COALESCE(sdk_session_id, '') <> ''
+   AND ended_at IS NULL;
+
+-- A stop that ends with no turn run takes the person messages in front of it
+-- out of the wake predicate, and these two columns are where that position is
+-- kept. Both hold a messages id: a message's created_at is written by the
+-- process that inserted it, and the claim predicates never compare one
+-- process's clock with another's.
+--
+-- stop_through_message_id is the conversation's newest message id when the
+-- stop was requested. It belongs to the request: set with stop_requested_at,
+-- cleared wherever it is cleared.
+--
+-- wake_after_message_id: a person's undelivered message at or before this id
+-- does not wake the conversation. The park that settles a stop with no turn
+-- run moves it forward to the stop's stop_through_message_id; nothing moves it
+-- back or clears it. NULL lets every undelivered person message wake it.
+ALTER TABLE conversations ADD COLUMN stop_through_message_id INTEGER;
+ALTER TABLE conversations ADD COLUMN wake_after_message_id INTEGER;
 
 -- The reasoning effort a person's message runs at, beside the model it runs
 -- on (messages.model): one of 'low', 'medium', 'high', 'xhigh' and 'max', NULL
