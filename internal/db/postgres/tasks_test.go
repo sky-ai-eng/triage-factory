@@ -330,6 +330,90 @@ func TestTaskStore_Postgres_ReturnedRowUnderRLS(t *testing.T) {
 	}
 }
 
+// TestTaskStore_Postgres_ClaimSkipsViewOnlyTeam: a person who can only view
+// the lower-id team on a shared task and is a member of the other claims the
+// task, and the claim lands on the team they can write. Run under the person's
+// own claims, so tasks_update's check on the team the row lands on applies:
+// picking the view-only team fails the write with 42501. The task has no owner,
+// or is owned by the team the person only views, which the claim team would
+// otherwise prefer. The person's claim and the delegate's handoff to the agent
+// each run on a task of their own, and each lands on the team ResolveClaimTeam
+// answered before it.
+func TestTaskStore_Postgres_ClaimSkipsViewOnlyTeam(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, founder, agentID := seedPgOrgUserAgent(t, h)
+	viewTeam, writeTeam := firstTeamForOrg(t, h, orgID), pgtest.SeedTeam(t, h, orgID, "second")
+	if writeTeam < viewTeam {
+		viewTeam, writeTeam = writeTeam, viewTeam
+	}
+	person := pgtest.SeedUser(t, h, "split-roles")
+	pgtest.AddOrgMember(t, h, person, orgID, viewTeam, "member", "viewer")
+	pgtest.MustExec(t, h.AdminDB,
+		`INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'member')`, person, writeTeam)
+	ctx := context.Background()
+
+	writes := []struct {
+		name  string
+		claim func(tasks db.TaskStore, taskID string, version int64) error
+	}{
+		{"claim", func(tasks db.TaskStore, taskID string, version int64) error {
+			ok, err := tasks.ClaimQueuedForUser(ctx, orgID, taskID, person, version)
+			if err == nil && !ok {
+				err = errors.New("ok = false")
+			}
+			return err
+		}},
+		{"delegate", func(tasks db.TaskStore, taskID string, version int64) error {
+			result, _, err := tasks.HandoffAgentClaim(ctx, orgID, taskID, agentID, person, version)
+			if err == nil && result != db.HandoffChanged {
+				err = fmt.Errorf("result = %v, want %v", result, db.HandoffChanged)
+			}
+			return err
+		}},
+	}
+	for _, shape := range []struct {
+		name  string
+		owner any
+	}{
+		{"no owner", nil},
+		{"owned by the view-only team", viewTeam},
+	} {
+		for _, write := range writes {
+			name := shape.name + ", " + write.name
+			_, _, taskID := seedPgTaskChain(t, h.AdminDB, orgID, founder, "view-only-"+uuid.NewString()[:8])
+			pgtest.MustExec(t, h.AdminDB, `UPDATE tasks SET team_id = $2 WHERE id = $1`, taskID, shape.owner)
+			pgtest.MustExec(t, h.AdminDB,
+				`INSERT INTO task_teams (task_id, team_id) VALUES ($1, $2), ($1, $3)`, taskID, viewTeam, writeTeam)
+
+			if err := h.WithUser(t, person, orgID, func(tx *sql.Tx) error {
+				tasks := pgstore.NewForTx(tx, pgtest.SecretKey).Tasks
+				resolved, err := tasks.ResolveClaimTeam(ctx, orgID, taskID, person)
+				if err != nil {
+					return fmt.Errorf("ResolveClaimTeam: %w", err)
+				}
+				if resolved != writeTeam {
+					t.Errorf("%s: ResolveClaimTeam = %s, want the team the person can write (%s)", name, resolved, writeTeam)
+				}
+				if err := write.claim(tasks, taskID, dbtest.TaskVersion(t, tasks, orgID, taskID)); err != nil {
+					return fmt.Errorf("%s: %w", write.name, err)
+				}
+				return nil
+			}); err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+
+			var stored sql.NullString
+			if err := h.AdminDB.QueryRow(`SELECT team_id::text FROM tasks WHERE id = $1`, taskID).Scan(&stored); err != nil {
+				t.Fatalf("%s: read team_id: %v", name, err)
+			}
+			if stored.String != writeTeam {
+				t.Errorf("%s: stored team_id = %v, want %s", name, stored, writeTeam)
+			}
+		}
+	}
+}
+
 // TestTaskStore_Postgres_CrossOrgLeakage pins the defense-in-depth
 // guarantee: even with the org_id filter as the only line of defense
 // (AdminDB bypasses RLS), org A's queries can't see org B's tasks.
@@ -670,6 +754,54 @@ func TestTaskStore_Postgres_ReassignClaimToUser(t *testing.T) {
 			t.Errorf("ClaimedByUserID=%q, want %q", got.ClaimedByUserID, userB)
 		}
 	})
+}
+
+// TestTaskStore_Postgres_ReassignClaimRefusesViewOnlyTarget: a handoff to a
+// person whose only team on the task is one they can only view writes nothing.
+// The target is a member of another team, which isn't on the task, so the
+// guard has to find the write role on a team the task is on, not anywhere.
+func TestTaskStore_Postgres_ReassignClaimRefusesViewOnlyTarget(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, holder, _ := seedPgOrgUserAgent(t, h)
+	teamID := firstTeamForOrg(t, h, orgID)
+	viewer := pgtest.SeedUser(t, h, "reassign-viewer")
+	pgtest.AddOrgMember(t, h, viewer, orgID, teamID, "member", "viewer")
+	pgtest.MustExec(t, h.AdminDB,
+		`INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'member')`,
+		viewer, pgtest.SeedTeam(t, h, orgID, "elsewhere"))
+
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	ctx := context.Background()
+	_, _, taskID := seedPgTaskChain(t, h.AdminDB, orgID, holder, "reassign-viewer")
+	pgtest.MustExec(t, h.AdminDB, `INSERT INTO task_teams (task_id, team_id) VALUES ($1, $2)`, taskID, teamID)
+	if ok, err := stores.Tasks.ClaimQueuedForUser(ctx, orgID, taskID, holder, dbtest.TaskVersion(t, stores.Tasks, orgID, taskID)); err != nil || !ok {
+		t.Fatalf("seed claim: ok=%v err=%v", ok, err)
+	}
+	before, err := stores.Tasks.Get(ctx, orgID, taskID)
+	if err != nil || before == nil {
+		t.Fatalf("Get before: %v, %v", before, err)
+	}
+
+	ok, err := stores.Tasks.ReassignClaimToUserSystem(ctx, orgID, taskID, holder, viewer, before.Version)
+	if err != nil {
+		t.Fatalf("ReassignClaimToUserSystem: %v", err)
+	}
+	if ok {
+		t.Error("ok = true handing the claim to a viewer; the target guard must require write access")
+	}
+	after, err := stores.Tasks.Get(ctx, orgID, taskID)
+	if err != nil || after == nil {
+		t.Fatalf("Get after: %v, %v", after, err)
+	}
+	afterTeam := ""
+	if after.TeamID != nil {
+		afterTeam = *after.TeamID
+	}
+	if after.ClaimedByUserID != holder || afterTeam != teamID || after.Version != before.Version {
+		t.Errorf("refused handoff changed the claim: claimant %q team %q version %d, want %q %q %d",
+			after.ClaimedByUserID, afterTeam, after.Version, holder, teamID, before.Version)
+	}
 }
 
 // TestTaskStore_Postgres_MarkEventInjectedSystem pins TFAC-621 part 2:

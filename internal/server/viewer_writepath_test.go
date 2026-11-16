@@ -363,3 +363,41 @@ func TestViewer_TaskList_CanWrite(t *testing.T) {
 		}
 	}
 }
+
+// TestViewer_TaskHandoff_RefusesViewer: a team admin handing a member's task to
+// the team's viewer is refused as a reference to the wrong user, 422
+// CROSS_TEAM_REF on target_user_id, and the claim stays with the member. The
+// handoff writes on the admin pool, so the route's own guard is what keeps a
+// claim off someone who could see it and not act on it.
+func TestViewer_TaskHandoff_RefusesViewer(t *testing.T) {
+	r := newViewerRig(t)
+	taskID := r.seedTask(t)
+	pgtest.MustExec(t, r.h.AdminDB,
+		`UPDATE tasks SET claimed_by_user_id = $2, status = 'in_progress' WHERE id = $1`, taskID, r.member)
+
+	rec := httptest.NewRecorder()
+	req := r.req(http.MethodPost, "/api/tasks/"+taskID+"/claim", r.admin,
+		withTaskVersionIn(t, r.s, r.orgID, taskID, map[string]any{"target_user_id": r.viewer}))
+	req.SetPathValue("id", taskID)
+	r.s.handleTaskClaim(rec, req)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("handoff to viewer: status = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Errors []httpx.ErrorItem `json:"errors"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Errors) != 1 || body.Errors[0].Reason != httpx.ReasonCrossTeamRef || body.Errors[0].Field != "target_user_id" {
+		t.Errorf("handoff to viewer: errors = %+v, want one CROSS_TEAM_REF on target_user_id", body.Errors)
+	}
+
+	var claimant string
+	if err := r.h.AdminDB.QueryRow(`SELECT claimed_by_user_id::text FROM tasks WHERE id = $1`, taskID).Scan(&claimant); err != nil {
+		t.Fatalf("read claim: %v", err)
+	}
+	if claimant != r.member {
+		t.Errorf("claimed_by_user_id = %s after a refused handoff, want the member %s", claimant, r.member)
+	}
+}

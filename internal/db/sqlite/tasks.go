@@ -1585,9 +1585,10 @@ func (s *taskStore) VisibilityTeams(ctx context.Context, orgID, taskID string) (
 //
 // The claimant's active team in the task's visibility set comes first,
 // preferring the current owner and otherwise the lowest id so the result is
-// deterministic; with none, the current owner while it is active. An archived
-// team is neither chosen nor kept. NULL when neither applies; every write's
-// WHERE clause refuses that case.
+// deterministic; with none, the current owner while it is active. The
+// visibility set offers only a team the claimant can write, never one they
+// can only view. An archived team is neither chosen nor kept. NULL when
+// neither applies; every write's WHERE clause refuses that case.
 func sqliteClaimTeamExpr(task, user string) string {
 	return `COALESCE(
 		(SELECT tt.team_id
@@ -1595,6 +1596,7 @@ func sqliteClaimTeamExpr(task, user string) string {
 		   JOIN memberships m ON m.team_id = tt.team_id
 		   JOIN teams tm ON tm.id = tt.team_id
 		  WHERE tt.task_id = ` + task + ` AND m.user_id = ` + user + `
+		    AND m.role IN ('admin', 'member')
 		    AND tm.deleted_at IS NULL
 		  ORDER BY (tt.team_id = tasks.team_id) DESC, tt.team_id ASC
 		  LIMIT 1),
@@ -1886,11 +1888,11 @@ func (s *taskStore) ReassignClaimToUserSystem(ctx context.Context, orgID, taskID
 // its (trivial, single-connection) ReassignClaimToUserSystem wrapper. Besides
 // the claim CAS every other claim mutation does, it bakes the target-team-
 // membership guard directly into the WHERE clause — an EXISTS against
-// memberships requiring toUserID to belong to an active team associated
-// with the task (its task_teams visibility set or its current team_id) —
-// atomically with the CAS itself, mirroring the Postgres impl. Local mode is N=1 in
-// practice (no real cross-user memberships), but the guard keeps the SQLite
-// store conformant with the interface contract.
+// memberships requiring toUserID to be an admin or member of an active team
+// associated with the task (its task_teams visibility set or its current
+// team_id) — atomically with the CAS itself, mirroring the Postgres impl.
+// Local mode is N=1 in practice (no real cross-user memberships), but the
+// guard keeps the SQLite store conformant with the interface contract.
 func reassignClaimToUserSQLite(ctx context.Context, q queryer, taskID, fromUserID, toUserID string, version int64) (bool, error) {
 	if fromUserID == "" {
 		return false, fmt.Errorf("ReassignClaimToUser: empty fromUserID")
@@ -1913,6 +1915,7 @@ func reassignClaimToUserSQLite(ctx context.Context, q queryer, taskID, fromUserI
 		         SELECT 1 FROM memberships m2
 		           JOIN teams tm2 ON tm2.id = m2.team_id
 		          WHERE m2.user_id = ?1
+		            AND m2.role IN ('admin', 'member')
 		            AND tm2.deleted_at IS NULL
 		            AND (
 		              m2.team_id IN (SELECT team_id FROM task_teams WHERE task_id = ?2)

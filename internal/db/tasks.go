@@ -21,11 +21,12 @@ import (
 var ErrNoSuchTask = errors.New("no task with that id")
 
 // ErrNoActiveClaimTeam is the claim mutations' refusal, and ResolveClaimTeam's
-// answer, when a claim has no active team to land the task on: the claimant is
-// on no active team in the task's visibility set, and the task's own team is
+// answer, when a claim has no active team to land the task on: the claimant
+// can write no active team in the task's visibility set (they are on none of
+// them, or only view the ones they are on), and the task's own team is
 // archived (or it has none). Nothing is written. Unlike a lost race, a retry
-// gets the same answer until the claimant joins an active team that can see
-// the task or the owner team is restored.
+// gets the same answer until the claimant can write an active team that can
+// see the task or the owner team is restored.
 var ErrNoActiveClaimTeam = errors.New("db: the claim has no active team to land the task on")
 
 // ErrEntityClosed means a task mint found its entity closed — or found no
@@ -761,15 +762,16 @@ type TaskStore interface {
 	// ok=true when the claim landed; false means another claimant won or the
 	// task is closed, and ErrTaskVersion a task at another version.
 	//
-	// On success the owning team_id consolidates to the acting team:
-	// the claimer's active team in the task's visibility set
-	// (task_teams), preferring the current owner team when the claimer
-	// belongs to it and otherwise the lowest-id such team. The existing
-	// owner is kept only when that intersection is empty, and only while
-	// the owner is active. An archived team is never chosen or kept: with
-	// neither answer the claim is refused with ErrNoActiveClaimTeam and
-	// nothing is written. The result is always a team the claimer is a
-	// member of, which the RLS update check requires.
+	// On success the owning team_id consolidates to the acting team: an
+	// active team in the task's visibility set (task_teams) the claimer can
+	// write, as an admin or member and never as a viewer, preferring the
+	// current owner team when it is one and otherwise the lowest-id such
+	// team. The RLS update check requires write access to the team the row
+	// lands on, which is why a team the claimer only views is never chosen.
+	// The existing owner is kept only when there is no such team, and only
+	// while the owner is active. An archived team is never chosen or kept:
+	// with neither answer the claim is refused with ErrNoActiveClaimTeam and
+	// nothing is written.
 	//
 	// The same UPDATE records source_status (domain.SourceStatus): the
 	// status and assignee the task's Jira or Linear entity snapshot holds,
@@ -779,14 +781,14 @@ type TaskStore interface {
 
 	// ReassignClaimToUser (TFAC-561) is the user↔user handoff arm the
 	// other claim mutations don't cover: an atomic CAS that requires the
-	// task to be presently claimed by fromUserID AND toUserID to belong to
-	// an active team associated with the task (its task_teams visibility
-	// set or its current team_id), moving the claim to toUserID and the
-	// task to the team ClaimQueuedForUser would derive for toUserID — which
-	// that guard guarantees is active. Returns ok=true when
-	// the claim moved; false means either guard tripped — a genuine race
+	// task to be presently claimed by fromUserID AND toUserID to be an
+	// admin or member of an active team associated with the task (its
+	// task_teams visibility set or its current team_id), moving the claim
+	// to toUserID and the task to the team ClaimQueuedForUser would derive
+	// for toUserID — which that guard guarantees is active. Returns ok=true
+	// when the claim moved; false means either guard tripped — a genuine race
 	// (someone else changed the claim/status between the caller's read and
-	// this call) or toUserID sharing no team with the task — and the
+	// this call) or toUserID writing no team on the task — and the
 	// caller re-reads to tell the two apart before surfacing 409. A task at
 	// another version than the caller read answers ErrTaskVersion. It does
 	// NOT accept an unclaimed or bot-claimed task as a valid "from" state —
@@ -798,7 +800,8 @@ type TaskStore interface {
 	// governed solely by team_id (tasks_select RLS's task_teams branch only
 	// ever applies to an unclaimed row) — reassigning to someone with no
 	// relationship to the task's team(s) would silently hand them a claim
-	// they can't even see afterward.
+	// they can't even see afterward, and reassigning to a viewer would hand
+	// them one they can see and not act on.
 	//
 	// On success the owning team_id consolidates to the acting team derived
 	// from toUserID — the same task_teams-visibility-set derivation
