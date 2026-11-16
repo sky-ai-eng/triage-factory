@@ -24,8 +24,9 @@ func tfToolFacts(hasBlueprint bool) tooldefs.Facts {
 	return tooldefs.Facts{HasBlueprint: hasBlueprint}
 }
 
-// tfTools returns the definitions of the TF tools this engagement is offered.
-func tfTools(params Params) []schemas.ChatTool {
+// TFTools returns the definitions of the TF tools an engagement with params
+// is offered, which the loop sends the provider after the sandbox tools.
+func TFTools(params Params) []schemas.ChatTool {
 	return tooldefs.ChatTools(tooldefs.TFTools(tfToolFacts(params.HasBlueprint)))
 }
 

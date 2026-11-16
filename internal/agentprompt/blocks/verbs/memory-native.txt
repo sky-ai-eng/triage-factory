@@ -9,7 +9,7 @@ Work on this entity leaves notes for the work that comes after it, and you are b
 Beside those two, `/work/_tfac/entity-memory/task-context.md` is a verbatim copy of the `<task_context>` block your opening turn carried. Your conversation is summarized as it grows, and a summary is a restatement — re-read that file when you need a detail it may have lost, like a PR number or an exact title.
 
 **Keep your notes current.** Your own notes go in `/work/_tfac/memory.md`.
-That one path is the whole contract: Triage Factory files the file at the end of every turn, and what comes after you inherits it — the next step of a workflow, or the task's next conversation.
+That one path is the whole contract: Triage Factory files the file at the end of every turn, and whatever works on this task after you inherits it.
 Update it while you still have the full picture: whenever the work changes state or a decision is settled, and before you end a turn that changed anything, so whoever comes next never has to reconstruct your reasoning from a diff.
 Rewrite the file rather than appending to it. Aim for 150–300 words covering:
 

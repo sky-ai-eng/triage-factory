@@ -1085,33 +1085,17 @@ func (s *taskStore) Bump(ctx context.Context, orgID, taskID, eventID string) (do
 		return domain.Task{}, err
 	}
 	var t domain.Task
-	err := inTx(ctx, s.q, func(q queryer) error {
-		var prior sql.NullString
-		if err := q.QueryRowContext(ctx, `SELECT close_deferred_event_id FROM tasks WHERE id = ?`, taskID).Scan(&prior); err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-		if _, err := scanTaskBareRow(q.QueryRowContext(ctx, `
-			UPDATE tasks
-			SET `+db.TaskSetSQL(
-			db.TaskAssign{Col: "status", Expr: "CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END"},
-			db.TaskAssign{Col: "snooze_until", Expr: "CASE WHEN status = 'snoozed' THEN NULL ELSE snooze_until END"},
-			db.TaskAssign{Col: "close_deferred_event_id", Expr: "NULL"},
-			db.TaskAssign{Col: "close_deferred_at", Expr: "NULL"},
-		)+`
-			WHERE id = ?
-			RETURNING `+sqliteTaskBareColumns,
-			taskID), &t); err != nil {
-			return err
-		}
-		if !prior.Valid {
-			return nil
-		}
-		return withdrawProducerNotesForTask(ctx, q, taskID, domain.StagedInjectionProducerTaskClosing)
-	})
-	if err != nil {
-		return domain.Task{}, err
-	}
-	return t, nil
+	return scanTaskBareRow(s.q.QueryRowContext(ctx, `
+		UPDATE tasks
+		SET `+db.TaskSetSQL(
+		db.TaskAssign{Col: "status", Expr: "CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END"},
+		db.TaskAssign{Col: "snooze_until", Expr: "CASE WHEN status = 'snoozed' THEN NULL ELSE snooze_until END"},
+		db.TaskAssign{Col: "close_deferred_event_id", Expr: "NULL"},
+		db.TaskAssign{Col: "close_deferred_at", Expr: "NULL"},
+	)+`
+		WHERE id = ?
+		RETURNING `+sqliteTaskBareColumns,
+		taskID), &t)
 }
 
 func (s *taskStore) Close(ctx context.Context, orgID, taskID, closeReason, closeEventType string) (domain.Task, error) {
@@ -1350,27 +1334,19 @@ func (s *taskStore) ClearCloseDeferralSystem(ctx context.Context, orgID, taskID,
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
-	var cleared bool
-	err := inTx(ctx, s.q, func(q queryer) error {
-		res, err := q.ExecContext(ctx, `
-			UPDATE tasks
-			   SET close_deferred_event_id = NULL, close_deferred_at = NULL
-			 WHERE id = ? AND close_deferred_event_id = ?
-		`, taskID, eventID)
-		if err != nil {
-			return err
-		}
-		n, err := res.RowsAffected()
-		if err != nil || n == 0 {
-			return err
-		}
-		cleared = true
-		return withdrawProducerNotesForTask(ctx, q, taskID, domain.StagedInjectionProducerTaskClosing)
-	})
+	res, err := s.q.ExecContext(ctx, `
+		UPDATE tasks
+		   SET close_deferred_event_id = NULL, close_deferred_at = NULL
+		 WHERE id = ? AND close_deferred_event_id = ?
+	`, taskID, eventID)
 	if err != nil {
 		return false, err
 	}
-	return cleared, nil
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 func (s *taskStore) AdvanceStatusForUser(ctx context.Context, orgID, taskID, userID, newStatus string, version int64) (bool, error) {

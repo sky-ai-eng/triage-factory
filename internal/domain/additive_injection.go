@@ -85,23 +85,32 @@ func TaskCloseKey(closedAt time.Time) string {
 	return closedAt.UTC().Format(time.RFC3339Nano)
 }
 
-// TaskCloseHoldKey identifies one held close of a task
-// (TaskCloseDeferral.HeldSince), as TaskCloseKey identifies a close. The two
-// never collide, so a conversation told a close is held is still told when it
-// applies.
-func TaskCloseHoldKey(heldSince time.Time) string {
-	return "held:" + heldSince.UTC().Format(time.RFC3339Nano)
-}
+// TaskNoteAudience is who reads a note about a task's close: a conversation
+// that belongs to a blueprint run, or a chat a person works the task in. A
+// conversation is offered stop_blueprint exactly when it belongs to a
+// blueprint run, so only that audience's note names the tool. The zero value
+// is the chat, whose wording names no tool and so is true for either reader.
+type TaskNoteAudience int
 
-// taskNotePersonMessage ends every note about a task's close or held close.
-// Each tells the agent to end the workflow unless its instructions need the
-// work to go on, and a person who writes to the conversation once the task
-// is resolved is asking for something in spite of that. The note reaches a
-// parked conversation beside the message that woke it, so without this the
-// agent reads "end the workflow" next to the request. It is scoped to a
-// message arriving with or after the note, so that work a person asked for
-// earlier and then dismissed is not read as still wanted, and to a message a
-// person wrote in the conversation, which text from a source never is.
+const (
+	// TaskNoteForChat is a conversation that belongs to no blueprint run: a
+	// chat a person works the task in. It has no workflow to end and no tool
+	// to end one with.
+	TaskNoteForChat TaskNoteAudience = iota
+	// TaskNoteForBlueprint is a conversation that belongs to a blueprint run.
+	TaskNoteForBlueprint
+)
+
+// taskNotePersonMessage ends every blueprint conversation's note about a
+// task's close. Each tells the agent to end the workflow unless its
+// instructions need the work to go on, and a person who writes to the
+// conversation once the task is closed is asking for something in spite of
+// that. The note reaches a parked conversation beside the message that woke
+// it, so without this the agent reads "end the workflow" next to the
+// request. It is scoped to a message arriving with or after the note, so that
+// work a person asked for earlier and then dismissed is not read as still
+// wanted, and to a message a person wrote in the conversation, which text
+// from a source never is.
 const taskNotePersonMessage = " A message a person writes to you in this conversation, arriving with or after this note, " +
 	"still stands whatever this note says about the task: do what it asks."
 
@@ -120,44 +129,44 @@ const taskDismissedGuidance = "The task is closed now, and this run was not stop
 	"Unless your instructions say outright to go on after the task is dismissed, end the workflow now with " +
 	"stop_blueprint(type: \"finish\")." + taskNotePersonMessage
 
+// chatClosedGuidance is what a chat does about a close of the task a person
+// works in it. The chat stays for the person, so it is told to start nothing
+// new on its own. It does not end with taskNotePersonMessage: "unless
+// explicitly asked" already says that a person's request stands.
+const chatClosedGuidance = "The task you have been working on is now closed. Your conversation remains for users to ask follow-ups or continue work. " +
+	"However, because the task is closed, you should start no new work on the task unless explicitly asked."
+
+// chatDismissedNote is a chat's whole note for a dismissal. It states the
+// cause itself, so no cause sentence goes ahead of it.
+const chatDismissedNote = "The task you have been working on was dismissed by the team that owns it. " +
+	"Your conversation remains for users to ask follow-ups or continue work at a later date, but all current work in progress should stop. " +
+	"Start nothing new unless explicitly asked."
+
 // TaskClosedNote is the agent-facing copy telling a conversation that the
 // task it is on closed, how, and what to do about it: one note per kind of
-// close, the same for every conversation whoever started its work. Bare,
-// like AdditiveEventInjection. "" for a close no note tells
-// (TaskClosedWorkCompleted).
-func TaskClosedNote(c TaskClose) string {
-	guidance := taskClosedGuidance
-	switch c.Kind {
-	case TaskClosedWorkCompleted:
+// close and audience, the same for every conversation of that audience
+// whoever started its work. Bare, like AdditiveEventInjection. "" for a close
+// no note tells (TaskClosedWorkCompleted).
+func TaskClosedNote(c TaskClose, a TaskNoteAudience) string {
+	if c.Kind == TaskClosedWorkCompleted {
 		return ""
-	case TaskClosedDismissed:
+	}
+	var guidance string
+	switch {
+	case a == TaskNoteForChat && c.Kind == TaskClosedDismissed:
+		return chatDismissedNote
+	case a == TaskNoteForChat:
+		guidance = chatClosedGuidance
+	case c.Kind == TaskClosedDismissed:
 		guidance = taskDismissedGuidance
+	default:
+		guidance = taskClosedGuidance
 	}
 	if c.MetadataJSON != "" && (c.Kind == TaskClosedByEvent || c.Kind == TaskClosedReassigned) {
 		// TODO(TFAC-1418): the metadata renders outside any untrusted-marker region.
 		return fmt.Sprintf("%s Event metadata:\n%s\n%s", taskCloseCause(c), c.MetadataJSON, guidance)
 	}
 	return taskCloseCause(c) + " " + guidance
-}
-
-// TaskCloseHeldNote is the agent-facing copy telling a conversation that an
-// event resolved the situation its task is about while a deliverable on the
-// task awaits a person, so the task stays open (TaskCloseDeferral). It is the
-// one note about a task that has not closed: without it a run on such a task
-// hears nothing of the event until the person acts. metadataJSON is the
-// closing event's metadata; "" renders a body naming the event type alone.
-// Bare, like TaskClosedNote.
-func TaskCloseHeldNote(eventType, metadataJSON string) string {
-	const held = "The task is still open: a draft pull request or a pending review from the work on it is waiting for a person's decision, " +
-		"and the task closes once they have decided. This run was not stopped. Re-evaluate what you are doing: " +
-		"if your instructions do not need the work to go on now that the situation is resolved, end the workflow with " +
-		"stop_blueprint(type: \"finish\"). If they do, go on." + taskNotePersonMessage
-	cause := fmt.Sprintf("A %s event resolved the situation this task is about.", eventType)
-	if metadataJSON == "" {
-		return cause + " " + held
-	}
-	// TODO(TFAC-1418): the metadata renders outside any untrusted-marker region.
-	return fmt.Sprintf("%s Event metadata:\n%s\n%s", cause, metadataJSON, held)
 }
 
 // TaskClosedRunContext is the <run_context> line of a run launched on a task

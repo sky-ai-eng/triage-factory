@@ -166,6 +166,33 @@ func (c runConfig) container() string {
 	return c.jiraProject
 }
 
+// hasBlueprint is whether the launch's conversation belongs to a blueprint
+// run: only such a conversation has a workflow for stop_blueprint to end.
+func (c runConfig) hasBlueprint() bool {
+	return c.blueprintRunID != ""
+}
+
+// bindConversation sets on c what the claimed conversation conv decides about
+// its launch: who it runs for, under which framework prompt, and, for a
+// conversation that belongs to a blueprint run, the run br and the step
+// stepIdx it executes. A conversation a person works in belongs to none and
+// is bound none, so br may be nil for it; for any other conversation br must
+// be the run the dispatcher loaded.
+func (c *runConfig) bindConversation(orgID string, conv domain.Conversation, br *domain.BlueprintRun, stepIdx int) {
+	c.orgID = orgID
+	c.teamID = conv.TeamID
+	c.claimID = conv.ClaimID
+	c.upstreamHandBacks = conv.UpstreamHandBacks
+	c.jailLosses = conv.JailLosses
+	c.lastHandBackOutcome = conv.LastHandBackOutcome
+	c.surface = surfaceFor(conv.Type)
+	c.interactive = conv.Type == domain.ConversationTypeInteractive
+	if !c.interactive {
+		c.blueprintRunID = br.ID
+		c.blueprintStep = stepIdx
+	}
+}
+
 // ErrTaskBusy is returned by FireDelegation, on either path, when the insert
 // loses to the one-active-run-per-task index: something already holds this
 // task's single live engagement. On the event path that is a different (event,

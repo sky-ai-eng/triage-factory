@@ -848,8 +848,8 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	// Ahead of the fork between the resume path and the step launch, so the
 	// notes reach the agent whichever one drives it. The queued events go
 	// first: staged notes are read oldest first, and an event still queued
-	// on the task came before anything that closed it or resolved it, so
-	// the agent reads them in the order they happened.
+	// on the task came before anything that closed it, so the agent reads
+	// them in the order they happened.
 	s.handOffQueuedFirings(gateCtx, orgID, br, conv, task)
 	s.retireStaleAssignmentNotes(gateCtx, orgID, conv.ID)
 	s.tellTaskResolved(gateCtx, orgID, conv.ID, task.ID)
@@ -1148,18 +1148,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 		s.handlePreAgentFailure(orgID, br, *conv, err)
 		return
 	}
-	cfg.orgID = orgID
-	cfg.teamID = conv.TeamID
-	cfg.claimID = conv.ClaimID
-	cfg.upstreamHandBacks = conv.UpstreamHandBacks
-	cfg.jailLosses = conv.JailLosses
-	cfg.lastHandBackOutcome = conv.LastHandBackOutcome
-	cfg.surface = surfaceFor(conv.Type)
-	cfg.interactive = interactive
-	if !interactive {
-		cfg.blueprintRunID = br.ID
-		cfg.blueprintStep = stepIdx
-	}
+	cfg.bindConversation(orgID, *conv, br, stepIdx)
 	cfg.sidecar = sidecar
 	cfg.localGit = localGit
 

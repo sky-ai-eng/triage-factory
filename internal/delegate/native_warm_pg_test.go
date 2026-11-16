@@ -1095,7 +1095,7 @@ func TestWarmClaim_ResumeTellsOfACloseWhileWarm(t *testing.T) {
 		metadataJSON = current
 	}
 	sent := f.provider.sent(1)
-	note := domain.TaskClosedNote(domain.TaskClose{Kind: domain.TaskClosedByEvent, EventType: evt.EventType, MetadataJSON: metadataJSON})
+	note := domain.TaskClosedNote(domain.TaskClose{Kind: domain.TaskClosedByEvent, EventType: evt.EventType, MetadataJSON: metadataJSON}, domain.TaskNoteForBlueprint)
 	if !strings.Contains(sent, note) {
 		t.Errorf("the resumed turn was not told of the close %q:\n%s", note, sent)
 	}

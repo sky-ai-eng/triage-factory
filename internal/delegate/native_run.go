@@ -331,7 +331,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 		SwitchableModels: switchable,
 		SystemPrompt:     systemPrompt,
 		SystemAddendum:   launchText.systemBlock,
-		HasBlueprint:     cfg.blueprintRunID != "",
+		HasBlueprint:     cfg.hasBlueprint(),
 		// Derived from the very ceiling this jail was launched under, not from
 		// a constant that could drift from it.
 		BashMemBudgetMB: nativeBashMemBudgetMB(memoryLimitMB),
@@ -819,10 +819,11 @@ func (s *Spawner) artifactContractNudge(orgID, conversationID string, task domai
 		// nudge that sends a finished run back to work on a false premise.
 		//
 		// A task that closed, or whose close is held for a person, asks for
-		// nothing more: the run was told the situation resolved and to end
-		// unless its instructions need it to go on, and the nudge would send
-		// it back for an artifact that situation no longer calls for. Read
-		// here, since either can happen at any point in the engagement.
+		// nothing more: the situation it is about resolved, and the nudge
+		// would send the run back for an artifact that situation no longer
+		// calls for. A closed task's run was also told to end unless its
+		// instructions need it to go on. Read here, since either can happen
+		// at any point in the engagement.
 		current, err := s.tasks.GetSystem(ctx, orgID, task.ID)
 		if err != nil {
 			delegateLog.Warn("read the task for the turn-end contract check failed; not nudging", "conversation", conversationID, "error", err)

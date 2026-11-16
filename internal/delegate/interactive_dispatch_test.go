@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentloop"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/agentprompt"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -23,7 +24,6 @@ import (
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
-	"github.com/sky-ai-eng/triage-factory/internal/tooldefs"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
@@ -133,9 +133,9 @@ func (f *interactiveFixture) dispatch(t *testing.T, message string) *liveRunSpec
 // message on the conversation their claim minted through the real dispatcher,
 // on the SDK runtime this harness reaches. The claim is not failed as
 // blueprint_missing: it builds the task's workspace and launches under the
-// workbench prompt, with no mission and no stop_blueprint. No reactor runs:
-// there is no blueprint run for one to read, and the dispatch returns past the
-// runtime without asking.
+// workbench prompt, with no mission. No reactor runs: there is no blueprint
+// run for one to read, and the dispatch returns past the runtime without
+// asking.
 func TestDispatch_InteractiveConversationRunsWithNoBlueprintRun(t *testing.T) {
 	f := newInteractiveFixture(t, "1421")
 	launched := f.dispatch(t, "why is the build red?")
@@ -150,11 +150,6 @@ func TestDispatch_InteractiveConversationRunsWithNoBlueprintRun(t *testing.T) {
 	}
 	if launched.hasBlueprint {
 		t.Error("the launch reports a blueprint run for a conversation with none")
-	}
-	for _, tool := range launched.opts.TFTools {
-		if tool.Name == tooldefs.StopBlueprintName {
-			t.Errorf("the launch offers %s to a conversation with no blueprint run", tool.Name)
-		}
 	}
 
 	// No mission: the conversation's own block holds the run's facts and its
@@ -180,6 +175,41 @@ func TestDispatch_InteractiveConversationRunsWithNoBlueprintRun(t *testing.T) {
 	}
 	if strings.Contains(failure, "blueprint_run") || !strings.Contains(failure, errLaunchRecorded.Error()) {
 		t.Errorf("the conversation's failure = %q, want the runtime's refusal", failure)
+	}
+}
+
+// TestDispatch_ASDKChatIsOfferedNoTFTool: the SDK launch the dispatcher makes
+// for a chat offers its process no TF tool. stop_blueprint is the only one
+// shipped, and a chat belongs to no blueprint run for it to stop, which is
+// also why the note telling a chat its task closed names no tool.
+func TestDispatch_ASDKChatIsOfferedNoTFTool(t *testing.T) {
+	f := newInteractiveFixture(t, "1467-sdk")
+	launched := f.dispatch(t, "why is the build red?")
+
+	if len(launched.opts.TFTools) != 0 {
+		names := make([]string, 0, len(launched.opts.TFTools))
+		for _, tool := range launched.opts.TFTools {
+			names = append(names, tool.Name)
+		}
+		t.Errorf("the chat's SDK launch offers TF tools %v, want none", names)
+	}
+}
+
+// TestNativeLaunch_AChatIsOfferedNoTFTool: the launch config the dispatcher
+// binds for a claimed chat gives the native loop no TF tool to send the
+// provider. The loop cannot launch here, so the test reads the list the loop
+// builds from the params the launch would hand it.
+func TestNativeLaunch_AChatIsOfferedNoTFTool(t *testing.T) {
+	f := newInteractiveFixture(t, "1467-native")
+	claimed := f.claim(t, "why is the build red?")
+	if claimed.Type != domain.ConversationTypeInteractive {
+		t.Fatalf("setup: claimed a %q conversation, want a chat", claimed.Type)
+	}
+	var cfg runConfig
+	cfg.bindConversation(runmode.LocalDefaultOrgID, *claimed, nil, 0)
+
+	if tools := agentloop.TFTools(agentloop.Params{HasBlueprint: cfg.hasBlueprint()}); len(tools) != 0 {
+		t.Errorf("the chat's native launch offers %d TF tools, want none", len(tools))
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -97,10 +98,20 @@ type heldCIFixture struct {
 
 func newHeldCIFixture(t *testing.T, sourceID string) heldCIFixture {
 	t.Helper()
+	sp := &stubDelegator{}
+	f := holdCIClose(t, sourceID, func(*sql.DB) Delegator { return sp })
+	f.sp = sp
+	return f
+}
+
+// holdCIClose builds a heldCIFixture whose router tells through the
+// Delegator spawner builds over the fixture's database. The fixture's sp is
+// left nil.
+func holdCIClose(t *testing.T, sourceID string, spawner func(*sql.DB) Delegator) heldCIFixture {
+	t.Helper()
 	database := newTestDB(t)
 	r := newQueueWorkerRouter(t, database)
-	sp := &stubDelegator{}
-	r.spawner = sp
+	r.spawner = spawner(database)
 	entityID, taskID := seedCIFailedTaskOnEntity(t, r, database, sourceID)
 	otherID := secondCIFailedTask(t, r, database, entityID, taskID)
 	_, draftConvID := seedRunOnTask(t, database, taskID, "completed", dbtest.SeedConcluded)
@@ -118,15 +129,14 @@ func newHeldCIFixture(t *testing.T, sourceID string) heldCIFixture {
 	if eventID == "" {
 		t.Fatal("setup: the pass held no close")
 	}
-	return heldCIFixture{r: r, database: database, sp: sp, entityID: entityID, taskID: taskID, otherID: otherID,
+	return heldCIFixture{r: r, database: database, entityID: entityID, taskID: taskID, otherID: otherID,
 		draftConvID: draftConvID, runID: runID, convID: convID, eventID: eventID}
 }
 
 // TestCloseHold_DeliverableAwaitingAPersonHoldsTheClose is the headline: the
 // pass holds the close of the task whose draft awaits a person, writes
-// nothing on the work under it, and tells the working conversation that the
-// event resolved the situation, not that the task closed: it is still open.
-// The sibling task with no deliverable closes now.
+// nothing on the work under it, and tells nobody the task closed: it is
+// still open. The sibling task with no deliverable closes now.
 func TestCloseHold_DeliverableAwaitingAPersonHoldsTheClose(t *testing.T) {
 	f := newHeldCIFixture(t, "owner/repo#held")
 
@@ -142,17 +152,42 @@ func TestCloseHold_DeliverableAwaitingAPersonHoldsTheClose(t *testing.T) {
 	if got := f.sp.notedIDs(); len(got) != 0 {
 		t.Errorf("told of a close = %v, want nobody: a held close closed nothing", got)
 	}
-	if got := f.sp.heldNotedIDs(); !slices.Equal(got, []string{f.convID}) {
-		t.Errorf("told the close is held = %v, want [%s]", got, f.convID)
-	}
 	if status, reason, _ := taskRow(t, f.database, f.otherID); status != "done" || reason != "auto_closed_by_event" {
 		t.Errorf("other task = (%q, %q), want closed by the event", status, reason)
 	}
 }
 
+// TestCloseHold_TheHoldBeginningStagesNoNote: the task stays open while its
+// close holds, so the conversation working on it has nothing new to act on,
+// and the spawner that tells a close stages no note on it. The close applying
+// once the person resolves the draft stages the one close note, which shows
+// the spawner could stage on this conversation all along.
+func TestCloseHold_TheHoldBeginningStagesNoNote(t *testing.T) {
+	f := holdCIClose(t, "owner/repo#held-untold", func(database *sql.DB) Delegator {
+		return delegate.NewSpawner(database, sqlitestore.New(database), nil, nil, "m")
+	})
+	flush := func() []domain.StagedInjection {
+		t.Helper()
+		notes, err := sqlitestore.New(f.database).StagedInjections.FlushPendingSystem(t.Context(), runmode.LocalDefaultOrgID, f.convID)
+		if err != nil {
+			t.Fatalf("flush the working conversation's notes: %v", err)
+		}
+		return notes
+	}
+
+	if notes := flush(); len(notes) != 0 {
+		t.Errorf("notes staged on the working conversation when the hold began = %+v, want none", notes)
+	}
+
+	resolveDrafts(t, f.database, f.draftConvID)
+	f.r.sweepCloseDeferrals(t.Context())
+	if notes := flush(); len(notes) != 1 || notes[0].Producer != domain.StagedInjectionProducerTaskClosing {
+		t.Errorf("notes staged once the close applied = %+v, want the one close note", notes)
+	}
+}
+
 // TestCloseHold_SecondClosingEventTakesTheHoldsPlace: a later closing event
-// while the close is held takes its place, and the conversations, told when
-// the hold began, are not told again.
+// while the close is held takes its place, and closes nothing.
 func TestCloseHold_SecondClosingEventTakesTheHoldsPlace(t *testing.T) {
 	f := newHeldCIFixture(t, "owner/repo#held-twice")
 
@@ -163,9 +198,6 @@ func TestCloseHold_SecondClosingEventTakesTheHoldsPlace(t *testing.T) {
 
 	if ev := heldClose(t, f.database, f.taskID); ev == "" || ev == f.eventID {
 		t.Errorf("held close = %q, want the second pass's event", ev)
-	}
-	if got := f.sp.heldNotedIDs(); len(got) != 1 {
-		t.Errorf("told the close is held = %v, want the one note from when the hold began", got)
 	}
 	if got := f.sp.notedIDs(); len(got) != 0 {
 		t.Errorf("told of a close = %v, want nobody while the close is held", got)

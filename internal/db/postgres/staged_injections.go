@@ -65,9 +65,8 @@ func (s *stagedInjectionStore) FlushPendingSystem(ctx context.Context, orgID, co
 // withdrawProducerNotesForTaskSQL withdraws the notes producer $4 staged on
 // task $2's conversations, in org $1, that are still waiting, under any of
 // the staged subtypes ($3), as DeleteSystem withdraws one: delivered stays
-// false and the row leaves the window. The task store's clears of a held
-// close run it in their own statements, since a hold cleared without its
-// close makes its notes false.
+// false and the row leaves the window. The task store's reopen runs it in its
+// own transaction, since a reopen undoes the close its close notes tell of.
 const withdrawProducerNotesForTaskSQL = `
 	UPDATE messages SET window_state = 'inactive'
 	 WHERE org_id = $1 AND NOT delivered AND role = 'user'
