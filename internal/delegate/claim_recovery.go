@@ -195,7 +195,7 @@ func (s *Spawner) disposeOfLostConversation(ctx context.Context, conv *domain.Co
 	s.broadcastConversationUpdate(orgID, conv.ID, "failed")
 	s.kickDelegatorNotice(orgID)
 	if conv.BlueprintRunID != "" {
-		s.terminateBlueprint(orgID, conv.BlueprintRunID, conv.TaskID, conv.TriggerType, conv.CreatorUserID, time.Now(),
+		s.terminateBlueprint(orgID, conv.BlueprintRunID, conv.TaskID, time.Now(),
 			runConfig{orgID: orgID, teamID: conv.TeamID},
 			domain.BlueprintRunStatusFailed, string(domain.ConversationFailureExecutorLost), conv.BlueprintStepIndex, false)
 	}

@@ -219,6 +219,12 @@ func pgSequenceScaffold(t *testing.T, h *pgtest.Harness) (db.BlueprintStore, dbt
 				t.Fatalf("end the conversation: %v", err)
 			}
 		},
+		// Each task is seeded on a team of its own, so the acting team is
+		// another one.
+		MoveTaskToAnotherTeam: func(t *testing.T, taskID string) {
+			t.Helper()
+			pgtest.MustExec(t, h.AdminDB, `UPDATE tasks SET team_id = $2 WHERE id = $1`, taskID, actingTeamID)
+		},
 		RunCount: func(t *testing.T, taskID string) int {
 			return countOn(t, `SELECT count(*) FROM blueprint_runs WHERE task_id = $1`, taskID)
 		},

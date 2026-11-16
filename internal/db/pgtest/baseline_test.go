@@ -2023,8 +2023,8 @@ func seedBlueprintRun(t *testing.T, h *Harness, orgID, creatorID, taskID string)
 	bpID := seedBlueprint(t, h, orgID, creatorID, "bp-"+taskID[:8])
 	var id string
 	if err := h.AdminDB.QueryRow(`
-		INSERT INTO blueprint_runs (org_id, creator_user_id, blueprint_id, task_id, trigger_type, status, worktree_path, step_plan)
-		VALUES ($1, $2, $3, $4, 'manual', 'running', '/tmp/wt', '[]') RETURNING id
+		INSERT INTO blueprint_runs (org_id, team_id, creator_user_id, blueprint_id, task_id, trigger_type, status, worktree_path, step_plan)
+		VALUES ($1, (SELECT team_id FROM blueprints WHERE id = $3 AND org_id = $1), $2, $3, $4, 'manual', 'running', '/tmp/wt', '[]') RETURNING id
 	`, orgID, creatorID, bpID, taskID).Scan(&id); err != nil {
 		t.Fatalf("seed blueprint_run: %v", err)
 	}

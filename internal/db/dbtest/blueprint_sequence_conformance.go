@@ -62,6 +62,9 @@ type BlueprintSequenceScaffold struct {
 	HoldTaskClose func(t *testing.T, taskID string)
 	// ArchiveTeam stamps a team's deleted_at, as the team archive does.
 	ArchiveTeam func(t *testing.T, teamID string)
+	// MoveTaskToAnotherTeam puts the task on a team other than the one it is
+	// on, as a takeover or a reassignment across teams does.
+	MoveTaskToAnotherTeam func(t *testing.T, taskID string)
 	// SetConversationStatus puts a conversation in a stored state: "" for
 	// mid-flight, SeedConcluded, or "failed", each with no park.
 	SetConversationStatus func(t *testing.T, convID, status string)
@@ -89,9 +92,7 @@ type BlueprintSequenceScaffold struct {
 	// ConversationEnded reports whether a conversation carries an ended_at
 	// stamp: the boundary an advance writes on the step it concludes.
 	ConversationEnded func(t *testing.T, convID string) bool
-	// ConversationTeam reads a conversation's team_id. Nil on a backend whose
-	// conversations do not derive their team from the task (local mode's
-	// single-team sentinel), where the assertion would test nothing.
+	// ConversationTeam reads a conversation's team_id.
 	ConversationTeam func(t *testing.T, convID string) string
 	// GetConversation point-reads a conversation through ConversationStore's
 	// own projection, so the suite can hold each door's returned conversation
@@ -141,13 +142,48 @@ func RunBlueprintSequenceConformance(t *testing.T, mk BlueprintSequenceFactory) 
 		if got := sc.TaskAgentClaim(t, taskID); got != sc.AgentID {
 			t.Errorf("claimed_by_agent_id = %q, want %q", got, sc.AgentID)
 		}
-		if sc.ConversationTeam != nil {
-			if got := sc.ConversationTeam(t, conv.ID); got != sc.ConsolidateTeamID {
-				t.Errorf("conversation team_id = %q, want the consolidated owner %q — the step insert must read the consolidation, not the owner it replaced", got, sc.ConsolidateTeamID)
-			}
+		if got := sc.ConversationTeam(t, conv.ID); got != sc.ConsolidateTeamID {
+			t.Errorf("conversation team_id = %q, want the consolidated owner %q — the step insert must read the consolidation, not the owner it replaced", got, sc.ConsolidateTeamID)
 		}
 		AssertWriteReturnedStoredRow(t, "CreateRunWithFirstStepSystem", *conv,
 			func() (*domain.Conversation, error) { return sc.GetConversation(t, conv.ID) })
+	})
+
+	t.Run("The_run_carries_the_team_its_first_step_is_created_on", func(t *testing.T) {
+		// Both team sources the mint resolves, one per insert arm: the owner
+		// the firing consolidates onto, and the task's own team when it names
+		// none. The run's team is what its row policies read, so it has to be
+		// the team whose members read its conversations.
+		store, sc := mk(t)
+		for _, tc := range []struct {
+			name        string
+			firing      func(*testing.T, string) domain.BlueprintRun
+			ownerTeamID string
+		}{
+			{"event_arm_with_an_owner", sc.Firing, sc.ConsolidateTeamID},
+			{"manual_arm_on_the_task's_team", sc.ManualFiring, ""},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				taskID := sc.NewTask(t)
+				br := tc.firing(t, taskID)
+				inserted, _, conv, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br,
+					db.AgentClaimStamp{}, tc.ownerTeamID, sc.Step(br, 0))
+				if err != nil || !inserted || conv == nil {
+					t.Fatalf("CreateRunWithFirstStepSystem: (inserted=%v, conv=%v, err=%v)", inserted, conv != nil, err)
+				}
+				want := sc.ConversationTeam(t, conv.ID)
+				if want == "" {
+					t.Fatal("the first step has no team, so the run's team has nothing to match")
+				}
+				run, err := store.GetRunSystem(ctx, sc.OrgID, br.ID)
+				if err != nil || run == nil {
+					t.Fatalf("GetRunSystem: (%v, %v)", run, err)
+				}
+				if run.TeamID != want {
+					t.Errorf("run team_id = %q, want the first step's team %q", run.TeamID, want)
+				}
+			})
+		}
 	})
 
 	t.Run("A_failing_step_insert_rolls_the_whole_firing_back", func(t *testing.T) {
@@ -290,10 +326,8 @@ func RunBlueprintSequenceConformance(t *testing.T, mk BlueprintSequenceFactory) 
 		if got := sc.TaskOwnerTeam(t, taskID); got != sc.ConsolidateTeamID {
 			t.Errorf("task owner team = %q, want %q — consolidation rides the firing, not the stamp", got, sc.ConsolidateTeamID)
 		}
-		if sc.ConversationTeam != nil {
-			if got := sc.ConversationTeam(t, conv.ID); got != sc.ConsolidateTeamID {
-				t.Errorf("conversation team_id = %q, want %q", got, sc.ConsolidateTeamID)
-			}
+		if got := sc.ConversationTeam(t, conv.ID); got != sc.ConsolidateTeamID {
+			t.Errorf("conversation team_id = %q, want %q", got, sc.ConsolidateTeamID)
 		}
 	})
 
@@ -514,6 +548,70 @@ func RunBlueprintSequenceConformance(t *testing.T, mk BlueprintSequenceFactory) 
 		}
 	})
 
+	// A run is the agent's work on its task for the task's team. Once a person
+	// holds the task, or it is on another team, the next step would be work
+	// on a task taken off the run, and a completion would close it under its
+	// new holder. Both writes refuse, and the cancel the reactor writes
+	// instead still lands.
+	for _, left := range []struct {
+		name  string
+		leave func(t *testing.T, sc BlueprintSequenceScaffold, taskID string)
+	}{
+		{"left_its_team", func(t *testing.T, sc BlueprintSequenceScaffold, taskID string) {
+			sc.MoveTaskToAnotherTeam(t, taskID)
+		}},
+		{"a_person_holds", func(t *testing.T, sc BlueprintSequenceScaffold, taskID string) {
+			team := sc.TaskOwnerTeam(t, taskID)
+			sc.ClaimTaskForUser(t, taskID)
+			if got := sc.TaskOwnerTeam(t, taskID); got != team {
+				t.Fatalf("the claim moved the task from team %q to %q; this case is a claim on the run's team", team, got)
+			}
+		}},
+	} {
+		t.Run("An_advance_refuses_a_run_whose_task_"+left.name, func(t *testing.T) {
+			store, sc := mk(t)
+			taskID := sc.NewTask(t)
+			br, step0 := seedFiring(t, store, sc, taskID)
+			left.leave(t, sc, taskID)
+
+			advanced, ended, next, err := store.AdvanceRunToStepSystem(ctx, sc.OrgID, 0, step0.ID, sc.Step(br, 1))
+			if err != nil {
+				t.Fatalf("advancing a run its task was taken off is a refusal, not an error: %v", err)
+			}
+			if advanced || ended != nil || next != nil {
+				t.Fatalf("(advanced=%v, ended=%v, conv=%v), want (false, nil, nil)", advanced, ended != nil, next != nil)
+			}
+			if got := sc.RunCurrentStep(t, br.ID); got != 0 {
+				t.Errorf("current_step_index = %d, want 0", got)
+			}
+			if n := sc.ConversationCount(t, taskID); n != 1 {
+				t.Errorf("conversations on the task = %d, want 1 — a step was minted on a task taken off the run", n)
+			}
+			if sc.ConversationEnded(t, step0.ID) {
+				t.Error("the concluded step was ended under an advance that did not commit")
+			}
+		})
+
+		t.Run("A_completion_refuses_a_run_whose_task_"+left.name, func(t *testing.T) {
+			store, sc := mk(t)
+			taskID := sc.NewTask(t)
+			br, _ := seedFiring(t, store, sc, taskID)
+			left.leave(t, sc, taskID)
+
+			changed, err := store.MarkRunStatusSystem(ctx, sc.OrgID, br.ID, domain.BlueprintRunStatusCompleted, "", nil)
+			if err != nil {
+				t.Fatalf("completing a run its task was taken off is a refusal, not an error: %v", err)
+			}
+			if changed {
+				t.Fatal("completed a run its task was taken off")
+			}
+			changed, err = store.MarkRunStatusSystem(ctx, sc.OrgID, br.ID, domain.BlueprintRunStatusCancelled, "taken off the run", nil)
+			if err != nil || !changed {
+				t.Fatalf("cancel the run: (changed=%v, %v), want (true, nil)", changed, err)
+			}
+		})
+	}
+
 	t.Run("A_terminal_run_advances_nothing", func(t *testing.T) {
 		// The reactor refreshes the run before it decides, but a cancel can
 		// land between that read and this write. The guard carries the status
@@ -522,7 +620,7 @@ func RunBlueprintSequenceConformance(t *testing.T, mk BlueprintSequenceFactory) 
 		store, sc := mk(t)
 		taskID := sc.NewTask(t)
 		br, step0 := seedFiring(t, store, sc, taskID)
-		changed, err := store.MarkRunStatus(ctx, sc.OrgID, br.ID, domain.BlueprintRunStatusCancelled, "cancelled", nil)
+		changed, err := store.MarkRunStatusSystem(ctx, sc.OrgID, br.ID, domain.BlueprintRunStatusCancelled, "cancelled", nil)
 		if err != nil || !changed {
 			t.Fatalf("terminate the run: (changed=%v, %v)", changed, err)
 		}

@@ -735,7 +735,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 		s.failEngagement(conv.ID, fmt.Errorf("load task: %v", err))
 		s.failClaimedConversation(orgID, conv, fmt.Sprintf("load task: %v", err))
 		if br != nil {
-			s.terminateBlueprint(orgID, br.ID, conv.TaskID, conv.TriggerType, conv.CreatorUserID, startTime,
+			s.terminateBlueprint(orgID, br.ID, conv.TaskID, startTime,
 				runConfig{orgID: orgID, teamID: conv.TeamID}, domain.BlueprintRunStatusFailed, fmt.Sprintf("load task: %v", err), conv.BlueprintStepIndex, true)
 		}
 		return
@@ -788,7 +788,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 		s.broadcastConversationUpdate(orgID, conv.ID, "open")
 		if br.Status == domain.BlueprintRunStatusRunning {
 			cfg := runConfig{orgID: orgID, teamID: conv.TeamID}
-			s.terminateBlueprint(orgID, br.ID, task.ID, conv.TriggerType, conv.CreatorUserID, startTime, cfg,
+			s.terminateBlueprint(orgID, br.ID, task.ID, startTime, cfg,
 				domain.BlueprintRunStatusCancelled, "cancelled", conv.BlueprintStepIndex, false)
 		}
 		return
@@ -1100,7 +1100,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 		plan = br.StepPlan
 		if len(plan) == 0 {
 			s.failEngagement(conv.ID, errors.New("blueprint run has empty step plan"))
-			s.terminateBlueprint(orgID, br.ID, task.ID, conv.TriggerType, conv.CreatorUserID, startTime,
+			s.terminateBlueprint(orgID, br.ID, task.ID, startTime,
 				runConfig{orgID: orgID, teamID: conv.TeamID}, domain.BlueprintRunStatusFailed, "blueprint run has empty step plan", conv.BlueprintStepIndex, true)
 			return
 		}
@@ -1109,7 +1109,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 		}
 		if stepIdx < 0 || stepIdx >= len(plan) {
 			s.failEngagement(conv.ID, fmt.Errorf("step index %d out of range", stepIdx))
-			s.terminateBlueprint(orgID, br.ID, task.ID, conv.TriggerType, conv.CreatorUserID, startTime,
+			s.terminateBlueprint(orgID, br.ID, task.ID, startTime,
 				runConfig{orgID: orgID, teamID: conv.TeamID}, domain.BlueprintRunStatusFailed, fmt.Sprintf("step index %d out of range", stepIdx), conv.BlueprintStepIndex, true)
 			return
 		}
@@ -1191,7 +1191,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 		skillSpan.End()
 		if skillErr != nil {
 			s.failEngagement(conv.ID, skillErr)
-			s.terminateBlueprint(orgID, br.ID, task.ID, conv.TriggerType, conv.CreatorUserID, startTime, cfg,
+			s.terminateBlueprint(orgID, br.ID, task.ID, startTime, cfg,
 				domain.BlueprintRunStatusFailed, fmt.Sprintf("materialize step %d skill: %s", stepIdx, skillErr.Error()), &stepIdx, false)
 			return
 		}
@@ -1322,7 +1322,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	// bookkeeping still lands in the run's own trace.
 	stepConversation, err := s.conversations.GetSystem(context.WithoutCancel(ctx), orgID, conv.ID)
 	if err != nil || stepConversation == nil {
-		s.terminateBlueprint(orgID, br.ID, task.ID, conv.TriggerType, conv.CreatorUserID, startTime, cfg,
+		s.terminateBlueprint(orgID, br.ID, task.ID, startTime, cfg,
 			domain.BlueprintRunStatusFailed, fmt.Sprintf("read step %d run after agent: %v", stepIdx, err), &stepIdx, false)
 		return
 	}
@@ -1798,8 +1798,18 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 		return
 	}
 	if br.CancelRequested {
-		s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
+		s.terminateBlueprint(orgID, br.ID, br.TaskID, startTime, cfg,
 			domain.BlueprintRunStatusCancelled, "cancelled", &stepIdx, false)
+		return
+	}
+	// A run is the agent's work on its task for the task's team. A step that
+	// had already concluded when a person claimed the task, or when it moved
+	// to another team, had no live work for the claim or the move to stop, and
+	// only this reactor reads it: advancing would put the agent back on a task
+	// taken off it, and finishing would close the task under its new holder.
+	// Checked before every arm, so no arm acts on a run its task has left.
+	if left, ok := s.taskLeftRun(ctx, orgID, br); ok {
+		s.cancelRunForTaskLeft(ctx, orgID, br, left, stepConversation.ID, stepIdx, cfg, startTime)
 		return
 	}
 
@@ -1815,7 +1825,7 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 
 	switch {
 	case stepConversation.Status == domain.StatusFailed:
-		s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
+		s.terminateBlueprint(orgID, br.ID, br.TaskID, startTime, cfg,
 			domain.BlueprintRunStatusFailed, "step "+stepConversation.Status, &stepIdx, false)
 		return
 	case stepConversation.Concluded():
@@ -1839,7 +1849,7 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 	// editing the blueprint mid-flight must not redirect a running execution.
 	plan := br.StepPlan
 	if len(plan) == 0 {
-		s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
+		s.terminateBlueprint(orgID, br.ID, br.TaskID, startTime, cfg,
 			domain.BlueprintRunStatusFailed, "blueprint run has empty step plan", &stepIdx, false)
 		return
 	}
@@ -1850,7 +1860,7 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 		next := stepIdx + 1
 		task, err := s.tasks.GetSystem(ctx, orgID, br.TaskID)
 		if err != nil || task == nil {
-			s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
+			s.terminateBlueprint(orgID, br.ID, br.TaskID, startTime, cfg,
 				domain.BlueprintRunStatusFailed, "load task for advance", &stepIdx, false)
 			return
 		}
@@ -1860,13 +1870,13 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 		// would mint has not run, so refusing it costs no work.
 		teamModels, err := s.resolveModel(ctx, orgID, stepConversation.TeamID)
 		if err != nil {
-			s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
+			s.terminateBlueprint(orgID, br.ID, br.TaskID, startTime, cfg,
 				domain.BlueprintRunStatusFailed, fmt.Sprintf("step %d: %v", next, err), &stepIdx, false)
 			return
 		}
 		nextModel, err := stepModelOrInherit(plan[next].Model, stepConversation.Model, teamModels.Enabled())
 		if err != nil {
-			s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
+			s.terminateBlueprint(orgID, br.ID, br.TaskID, startTime, cfg,
 				domain.BlueprintRunStatusFailed, fmt.Sprintf("step %d: %v", next, err), &stepIdx, false)
 			return
 		}
@@ -1881,16 +1891,22 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 		advanced, ended, _, err := s.blueprints.AdvanceRunToStepSystem(ctx, orgID, stepIdx, stepConversation.ID,
 			s.buildStepConversation(ctx, orgID, br.ID, *task, plan[next].Step(br.BlueprintID), nextModel, triggerType, br.TriggerID, creatorUserID, br.ActorAgentID))
 		if err != nil {
-			s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
+			s.terminateBlueprint(orgID, br.ID, br.TaskID, startTime, cfg,
 				domain.BlueprintRunStatusFailed, fmt.Sprintf("advance to step %d: %v", next, err), &stepIdx, false)
 			return
 		}
 		if !advanced {
-			// The advance guard closed between the refresh at the top and the
-			// write: the run terminated, or another engagement already moved
-			// the pointer. Same answer as the stale-step check above, for the
-			// same reason — the sequence is somebody else's to drive, and
-			// every transition here would be decided on their state.
+			// The task was taken off the run after the check above: the guard
+			// refuses an advance onto a task a person now holds or another
+			// team now owns.
+			if left, ok := s.taskLeftRun(ctx, orgID, br); ok {
+				s.cancelRunForTaskLeft(ctx, orgID, br, left, stepConversation.ID, stepIdx, cfg, startTime)
+				return
+			}
+			// Otherwise the run terminated, or another engagement already
+			// moved the pointer. Same answer as the stale-step check above,
+			// for the same reason — the sequence is somebody else's to drive,
+			// and every transition here would be decided on their state.
 			dispatchLog.Error("reactor: the advance guard found the sequence already moved; writing no blueprint transition",
 				"blueprint_run", br.ID, "conversation", stepConversation.ID, "step", stepIdx)
 			return
@@ -1909,16 +1925,80 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 		// Nudge the dispatcher to pick the step up now.
 		s.wakeDispatcher()
 	case blueprintStepFinish:
-		s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
+		s.terminateBlueprint(orgID, br.ID, br.TaskID, startTime, cfg,
 			domain.BlueprintRunStatusCompleted, "", &stepIdx, false)
 	case blueprintStepAbort:
 		reason := abortReason
 		if reason == "" {
 			reason = stepConversation.OutcomeReason
 		}
-		s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
+		s.terminateBlueprint(orgID, br.ID, br.TaskID, startTime, cfg,
 			domain.BlueprintRunStatusAborted, reason, &stepIdx, false)
 	}
+}
+
+// taskLeave is how a task was taken off its run: the boundary the run's last
+// step ends with, and the reason its cancel records.
+type taskLeave struct {
+	ended  domain.EndedReason
+	reason string
+}
+
+var (
+	leftForAnotherTeam = taskLeave{domain.EndedReassigned, "task moved to another team"}
+	leftForAPerson     = taskLeave{domain.EndedTakenOver, "task claimed by a person"}
+)
+
+// taskLeftRun reports whether the run's task has been taken off it: moved to
+// a team other than the run's, or claimed by a person. A run with no team
+// predates the column and is held to the claim alone.
+//
+// A failed read answers false, and the reactor goes on as if the task had not
+// been taken. The arms that would act on the task, an advance and a
+// completion, are refused by the store, which reads the same team and claim
+// in the write, and the run stays running for the stranded-run replay to read
+// again. The others fail, abort, or park the run, none of which touches the
+// task.
+func (s *Spawner) taskLeftRun(ctx context.Context, orgID string, br *domain.BlueprintRun) (taskLeave, bool) {
+	task, err := s.tasks.GetSystem(ctx, orgID, br.TaskID)
+	if err != nil || task == nil {
+		dispatchLog.Warn("reactor: the run's task could not be read; reacting as if it had not been taken off the run",
+			"blueprint_run", br.ID, "task", br.TaskID, "found", task != nil, "error", err)
+		return taskLeave{}, false
+	}
+	if br.TeamID != "" && (task.TeamID == nil || *task.TeamID != br.TeamID) {
+		return leftForAnotherTeam, true
+	}
+	if task.ClaimedByUserID != "" {
+		return leftForAPerson, true
+	}
+	return taskLeave{}, false
+}
+
+// cancelRunForTaskLeft ends a run whose task was taken off it. Its last step
+// stops being the task's conversation, with its memory owed, and the run is
+// cancelled, which leaves the task, and the new holder's work on it, alone.
+//
+// The cancel is requested first, so a terminal write that fails below leaves a
+// called-off run that recovery still ends: the stranded-run replay for a
+// concluded step, and the unclaimed-stop settlement for a parked one, which
+// the replay never selects. The step is ended before the terminal, so whatever
+// the terminal lets start on the task finds the boundary already written. A
+// stamp that answers no row found the step already ended, by the claim or the
+// move, and its memory already rung for.
+func (s *Spawner) cancelRunForTaskLeft(ctx context.Context, orgID string, br *domain.BlueprintRun, left taskLeave, stepConversationID string, stepIdx int, cfg runConfig, startTime time.Time) {
+	dispatchLog.Info("reactor: the run's task was taken off it; cancelling the run",
+		"blueprint_run", br.ID, "task", br.TaskID, "step", stepIdx, "reason", left.reason)
+	s.requestBlueprintCancel(ctx, orgID, br.ID)
+	ended, err := s.conversations.EndConversationSystem(ctx, orgID, stepConversationID, left.ended)
+	if err != nil {
+		dispatchLog.Warn("stamp the boundary on the run's last step failed; cancelling the run regardless",
+			"blueprint_run", br.ID, "conversation", stepConversationID, "ended_reason", string(left.ended), "error", err)
+	} else if ended != nil {
+		s.kickMemoryOwed(orgID, ended.ID)
+	}
+	s.terminateBlueprint(orgID, br.ID, br.TaskID, startTime, cfg,
+		domain.BlueprintRunStatusCancelled, left.reason, &stepIdx, false)
 }
 
 // modelForClaim resolves the model one claim runs on.
@@ -2723,7 +2803,7 @@ func (s *Spawner) disposeOfExhaustedConversation(orgID string, br *domain.Bluepr
 // reason.
 func (s *Spawner) failUnstartedStep(orgID string, br *domain.BlueprintRun, conv domain.Conversation, reason string) {
 	s.failClaimedConversation(orgID, &conv, reason)
-	s.terminateBlueprint(orgID, br.ID, conv.TaskID, conv.TriggerType, conv.CreatorUserID, time.Now(),
+	s.terminateBlueprint(orgID, br.ID, conv.TaskID, time.Now(),
 		runConfig{orgID: orgID, teamID: conv.TeamID},
 		domain.BlueprintRunStatusFailed, reason, conv.BlueprintStepIndex, false)
 }

@@ -309,8 +309,8 @@ func SQLiteCompletedRunSQL(alias string) string {
 
 // PostgresCompletedRunSQL is a completed run over the alias the caller names.
 // It reads the run's status through tf.blueprint_run_is_completed, because
-// blueprint_runs is readable only by a manual run's creator and a count read
-// by a teammate would otherwise leave the run out.
+// blueprint_runs is readable only by the run's team and a count read by a
+// caller on another team would otherwise leave the run out.
 func PostgresCompletedRunSQL(alias string) string {
 	return `(` + ConcludedConversationSQL(alias) + ` OR (` + alias + `.status = 'open' AND tf.blueprint_run_is_completed(` + alias + `.blueprint_run_id, ` + alias + `.org_id)))`
 }
@@ -679,7 +679,7 @@ type ConversationQueueStore interface {
 	// and the release leaves the row for this pass.
 	//
 	// Lock order is run before conversation, the order a run's terminal
-	// write (BlueprintStore.MarkRunStatus) takes them in, so the two cannot
+	// write (BlueprintStore.MarkRunStatusSystem) takes them in, so the two cannot
 	// deadlock; a run another writer holds is skipped and settled on the
 	// next pass. Cross-org system sweep on the admin pool; concurrent passes
 	// skip each other's rows.
@@ -990,7 +990,7 @@ type ConversationQueueStore interface {
 	// run. Parking either here would race that pass for the same row.
 	//
 	// Current writers settle a run's conversations with the run (the atomic
-	// park in BlueprintStore.MarkRunStatus, the settlement), so every row
+	// park in BlueprintStore.MarkRunStatusSystem, the settlement), so every row
 	// returned means one of them broke, and the caller reports each. Rows
 	// another transaction holds are skipped and taken on a later pass.
 	// Cross-org system sweep on the admin pool; the brain runs it, in one

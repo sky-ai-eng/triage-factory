@@ -88,9 +88,9 @@ func newPgBreakerSeeder(conn *sql.DB, orgID, userID string) dbtest.BreakerSeeder
 			}
 			runID := uuid.New().String()
 			exec(t, "seed blueprint run", `
-				INSERT INTO blueprint_runs (id, org_id, creator_user_id, blueprint_id, task_id,
+				INSERT INTO blueprint_runs (id, org_id, team_id, creator_user_id, blueprint_id, task_id,
 				                            trigger_type, status, worktree_path, step_plan, started_at)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, '/tmp/wt', '[]', $8)
+				VALUES ($1, $2, (SELECT team_id FROM blueprints WHERE id = $4 AND org_id = $2), $3, $4, $5, $6, $7, '/tmp/wt', '[]', $8)
 			`, runID, orgID, creator, blueprintID, taskID, triggerType, status, startedAt)
 			promptID := seedPgStepPromptForClose(t, conn, orgID, userID)
 			conversationID := uuid.New().String()

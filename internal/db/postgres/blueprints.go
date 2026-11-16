@@ -722,7 +722,7 @@ func (s *blueprintStore) DuplicatePrompts(ctx context.Context, orgID, teamID str
 // in the order scanBlueprintRun reads them. Both reads SELECT it and both
 // single-row run writes RETURN it, so the write shape cannot drift from the
 // read shape.
-const pgBlueprintRunColumns = `id, blueprint_id, task_id, trigger_type, trigger_id, actor_agent_id::text, status,
+const pgBlueprintRunColumns = `id, team_id::text, blueprint_id, task_id, trigger_type, trigger_id, actor_agent_id::text, status,
 		       current_step_index, cancel_requested, step_plan,
 		       abort_reason, aborted_at_step, worktree_path, started_at, completed_at`
 
@@ -818,7 +818,7 @@ func (s *blueprintStore) CreateRunWithFirstStepSystem(ctx context.Context, orgID
 		}
 
 		// 2. The run.
-		if err := insertFiringRun(ctx, q, orgID, br, stepPlan, event, firstStep.CreatorUserID, &inserted); err != nil {
+		if err := insertFiringRun(ctx, q, orgID, br, runTeamID, stepPlan, event, firstStep.CreatorUserID, &inserted); err != nil {
 			return err
 		}
 		if !inserted {
@@ -901,6 +901,14 @@ func (s *blueprintStore) AdvanceRunToStepSystem(ctx context.Context, orgID strin
 	advanced := false
 	var ended, conv *domain.Conversation
 	err := inTx(ctx, s.admin, func(q queryer) error {
+		// 0. The run's task, share-locked, so the team and claim the guard
+		// below reads cannot change before this commits: a move or a claim
+		// either commits first, and the guard refuses the advance, or waits
+		// for this one.
+		if err := shareLockRunTask(ctx, q, orgID, nextStep.BlueprintRunID); err != nil {
+			return err
+		}
+
 		// 1. The pointer, guarded — the fence for everything below it.
 		ok, err := advanceRunCurrentStep(ctx, q, orgID, nextStep.BlueprintRunID, fromStepIndex, *nextStep.BlueprintStepIndex)
 		if err != nil || !ok {
@@ -933,15 +941,40 @@ func (s *blueprintStore) AdvanceRunToStepSystem(ctx context.Context, orgID strin
 	return advanced, ended, conv, nil
 }
 
+// pgRunIsItsTasksWorkSQL holds a run's advance and its completion to the
+// task the run is working: still on the run's team, and held by no person. A
+// person's claim takes a task off the agent, and a move to another team takes
+// it off the run's team, so in either case the run is cancelled instead. It
+// reads blueprint_runs as br.
+const pgRunIsItsTasksWorkSQL = `br.team_id = (SELECT t.team_id FROM tasks t
+	WHERE t.org_id = br.org_id AND t.id = br.task_id AND t.claimed_by_user_id IS NULL)`
+
+// shareLockRunTask share-locks the task a run is on, for a write whose guard
+// reads the task's team and claim (pgRunIsItsTasksWorkSQL): neither can
+// change between the guard and the commit. Every transaction that writes a
+// task and its run takes the task first, so this precedes the run's write.
+func shareLockRunTask(ctx context.Context, q queryer, orgID, runID string) error {
+	if _, err := q.ExecContext(ctx, `
+		SELECT 1 FROM tasks t
+		JOIN blueprint_runs br ON br.org_id = t.org_id AND br.task_id = t.id
+		WHERE br.org_id = $1 AND br.id = $2
+		FOR SHARE OF t`, orgID, runID); err != nil {
+		return fmt.Errorf("lock the run's task: %w", err)
+	}
+	return nil
+}
+
 // advanceRunCurrentStep moves a running blueprint_run's sequencing pointer one
 // step on, and reports whether it moved. The predicate is the compare-and-swap
 // the advance transaction fences on: a run that terminated since its reactor
-// read it, or whose pointer another engagement already moved, matches no row
-// and writes nothing.
+// read it, whose pointer another engagement already moved, or whose task it
+// is no longer working (pgRunIsItsTasksWorkSQL) matches no row and writes
+// nothing.
 func advanceRunCurrentStep(ctx context.Context, q queryer, orgID, id string, from, to int) (bool, error) {
 	res, err := q.ExecContext(ctx, `
-		UPDATE blueprint_runs SET current_step_index = $1
-		WHERE org_id = $2 AND id = $3 AND status = 'running' AND current_step_index = $4
+		UPDATE blueprint_runs br SET current_step_index = $1
+		WHERE br.org_id = $2 AND br.id = $3 AND br.status = 'running' AND br.current_step_index = $4
+		  AND `+pgRunIsItsTasksWorkSQL+`
 	`, to, orgID, id, from)
 	if err != nil {
 		return false, err
@@ -1008,21 +1041,21 @@ func lockFiringTeam(ctx context.Context, q queryer, orgID, teamID string) (archi
 // reports through inserted whether a row landed. Split out so the two arms'
 // only difference — the fence and the creator column the schema CHECK pairs
 // with trigger_type — reads as the two statements it is.
-func insertFiringRun(ctx context.Context, q queryer, orgID string, br domain.BlueprintRun, stepPlan string, event bool, creatorUserID string, inserted *bool) error {
+func insertFiringRun(ctx context.Context, q queryer, orgID string, br domain.BlueprintRun, teamID, stepPlan string, event bool, creatorUserID string, inserted *bool) error {
 	var res sql.Result
 	var err error
 	if event {
 		res, err = q.ExecContext(ctx, `
 			INSERT INTO blueprint_runs
-				(id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id,
+				(id, org_id, team_id, creator_user_id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id,
 				 actor_agent_id, status, worktree_path, started_at, step_plan)
 			VALUES (
-				$1, $2, NULL,
-				$3, $4, 'event', $5, $6,
-				$7, $8, $9, now(), $10
+				$1, $2, $3::uuid, NULL,
+				$4, $5, 'event', $6, $7,
+				$8, $9, $10, now(), $11
 			)
 			ON CONFLICT (triggering_event_id, trigger_id) WHERE triggering_event_id IS NOT NULL DO NOTHING
-		`, br.ID, orgID, br.BlueprintID, br.TaskID, br.TriggerID, br.TriggeringEventID,
+		`, br.ID, orgID, nullIfEmpty(teamID), br.BlueprintID, br.TaskID, br.TriggerID, br.TriggeringEventID,
 			nullIfEmpty(br.ActorAgentID), br.Status, br.WorktreePath, stepPlan)
 	} else {
 		// A manual run is attributed to the person who asked for it, and the
@@ -1034,14 +1067,14 @@ func insertFiringRun(ctx context.Context, q queryer, orgID string, br domain.Blu
 		}
 		res, err = q.ExecContext(ctx, `
 			INSERT INTO blueprint_runs
-				(id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id,
+				(id, org_id, team_id, creator_user_id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id,
 				 actor_agent_id, status, worktree_path, started_at, step_plan)
 			VALUES (
-				$1, $2, $3::uuid,
-				$4, $5, $6, $7, NULL,
-				$8, $9, $10, now(), $11
+				$1, $2, $3::uuid, $4::uuid,
+				$5, $6, $7, $8, NULL,
+				$9, $10, $11, now(), $12
 			)
-		`, br.ID, orgID, creatorUserID, br.BlueprintID, br.TaskID, br.TriggerType,
+		`, br.ID, orgID, nullIfEmpty(teamID), creatorUserID, br.BlueprintID, br.TaskID, br.TriggerType,
 			nullIfEmpty(br.TriggerID), nullIfEmpty(br.ActorAgentID), br.Status, br.WorktreePath, stepPlan)
 	}
 	if err != nil {
@@ -1085,7 +1118,7 @@ func (s *blueprintStore) IsNewestRunForTaskSystem(ctx context.Context, orgID, ta
 
 // isNewestRunForTask goes through tf.blueprint_run_is_newest_for_task on both
 // pools rather than querying blueprint_runs directly. On the app pool that is
-// the whole point — the SELECT policy hides another user's manual run, so a
+// the whole point — the SELECT policy hides a run on another team, so a
 // direct query would report a superseded run as the newest. On the admin pool
 // it changes nothing but keeps one definition of the ordering.
 func isNewestRunForTask(ctx context.Context, q queryer, orgID, taskID, blueprintRunID string) (bool, error) {
@@ -1140,7 +1173,7 @@ func scanBlueprintRun(scan func(...any) error) (domain.BlueprintRun, error) {
 		cancelRequested bool
 		stepPlanRaw     string
 	)
-	if err := scan(&br.ID, &br.BlueprintID, &br.TaskID, &br.TriggerType, &triggerID, &actorAgentID, &br.Status,
+	if err := scan(&br.ID, &br.TeamID, &br.BlueprintID, &br.TaskID, &br.TriggerType, &triggerID, &actorAgentID, &br.Status,
 		&br.CurrentStepIndex, &cancelRequested, &stepPlanRaw,
 		&abortReason, &abortedAtStep, &br.WorktreePath, &br.StartedAt, &completedAt); err != nil {
 		return br, err
@@ -1191,9 +1224,7 @@ func (s *blueprintStore) ListRuns(ctx context.Context, orgID string, f db.Bluepr
 	}
 
 	q := `
-		SELECT id, blueprint_id, task_id, trigger_type, trigger_id, actor_agent_id::text, status,
-		       current_step_index, cancel_requested, step_plan,
-		       abort_reason, aborted_at_step, worktree_path, started_at, completed_at
+		SELECT ` + pgBlueprintRunColumns + `
 		FROM blueprint_runs` + where + ` ORDER BY started_at DESC, id`
 	pageArgs := args
 	if opts.Limit > 0 {
@@ -1266,24 +1297,14 @@ func readConversationBlueprintPointer(ctx context.Context, q queryer, orgID, con
 	return blueprintRunID.String, idx, nil
 }
 
-func (s *blueprintStore) MarkRunStatus(ctx context.Context, orgID, id string, status domain.BlueprintRunStatus, abortReason string, abortedAtStep *int) (bool, error) {
-	return markBlueprintRunStatus(ctx, s.app, s.admin, orgID, id, status, abortReason, abortedAtStep)
-}
-
+// MarkRunStatusSystem flips the blueprint_run terminal and parks every child
+// conversation still mid-flight in one transaction, so a terminal parent is
+// never committed beside a live child: a cancel that raced the dispatcher's
+// claim and setup window, or a parked `open` step the sequence-cancel path
+// skips, would otherwise strand a child 'running', keeping the dispatcher on
+// phantom work and pinning its feature branch in a worktree. The children's
+// claims are released in the same statement.
 func (s *blueprintStore) MarkRunStatusSystem(ctx context.Context, orgID, id string, status domain.BlueprintRunStatus, abortReason string, abortedAtStep *int) (bool, error) {
-	return markBlueprintRunStatus(ctx, s.admin, nil, orgID, id, status, abortReason, abortedAtStep)
-}
-
-// adjacentClaims routes the parked children's claim release: nil means q
-// holds claims-write privilege and the release rides the child-cancel
-// statement itself; non-nil means q is the RLS app handle (SELECT-only on
-// claims), so the release lands on that admin-backed queryer AFTER the tx
-// work. The children it releases are parked, not terminal, so a release lost
-// between the two commits leaves a claim whose lease lapses and which the
-// executor that minted it then releases (ReleaseExpiredClaimSystem), or any
-// other dispatcher takes over (TakeOverExpiredClaimsSystem) once that
-// executor is gone too.
-func markBlueprintRunStatus(ctx context.Context, q, adjacentClaims queryer, orgID, id string, status domain.BlueprintRunStatus, abortReason string, abortedAtStep *int) (bool, error) {
 	if !isValidUUID(id) {
 		return false, nil
 	}
@@ -1297,35 +1318,22 @@ func markBlueprintRunStatus(ctx context.Context, q, adjacentClaims queryer, orgI
 	if abortedAtStep != nil {
 		stepArg = *abortedAtStep
 	}
-	// Flip the blueprint_run terminal AND cancel any still-active child
-	// conversation in one transaction, so the two writes commit together — a
-	// terminal parent is never committed alongside a live child. inTx composes
-	// with the caller's tx when markBlueprintRunStatus runs inside a
-	// SyntheticClaims tx (manual/app path) and opens a fresh one on the bare
-	// admin handle (event/system path).
-	//
-	// RLS scope: the admin pool bypasses RLS; on the app pool the child-cancel
-	// runs under the caller's claims, but a blueprint's child steps share its
-	// team, so conversations_update admits them — the cancel covers every
-	// child the parent flip's actor owns. The narrow residual is a child the
-	// caller somehow can't see under RLS: it stays non-terminal (not an error
-	// — RLS filters the row, it doesn't fail), and once the claim gate
-	// refuses it the brain's orphan park
-	// (ConversationQueueStore.ParkOrphanedConversationsSystem) is the
-	// backstop that settles it. Without this whole guard a
-	// cancel that raced the dispatcher's claim/setup window — or a parked
-	// `open` step the sequence-cancel path skips — would strand a child
-	// 'running', keeping the dispatcher on phantom work and pinning its
-	// feature branch in a worktree, requeuing forever.
+	completing := status == domain.BlueprintRunStatusCompleted
 	var changed bool
-	var parkedChildIDs []string
-	err := inTx(ctx, q, func(tx queryer) error {
+	err := inTx(ctx, s.admin, func(tx queryer) error {
+		// A completion is held to the task it works, read below.
+		if completing {
+			if err := shareLockRunTask(ctx, tx, orgID, id); err != nil {
+				return err
+			}
+		}
 		res, err := tx.ExecContext(ctx, `
-			UPDATE blueprint_runs
+			UPDATE blueprint_runs br
 			SET status = $1, abort_reason = $2, aborted_at_step = $3, completed_at = now()
-			WHERE org_id = $4 AND id = $5
-			  AND status = 'running'
-		`, string(status), reasonArg, stepArg, orgID, id)
+			WHERE br.org_id = $4 AND br.id = $5
+			  AND br.status = 'running'
+			  AND (NOT $6 OR `+pgRunIsItsTasksWorkSQL+`)
+		`, string(status), reasonArg, stepArg, orgID, id, completing)
 		if err != nil {
 			return err
 		}
@@ -1336,33 +1344,17 @@ func markBlueprintRunStatus(ctx context.Context, q, adjacentClaims queryer, orgI
 		changed = n > 0
 		// Only on a real transition to a terminal target.
 		if changed && status.Terminal() {
-			if adjacentClaims == nil {
-				return parkOrphanedChildConversationsWithClaims(ctx, tx, orgID, id)
-			}
-			parkedChildIDs, err = parkOrphanedChildConversations(ctx, tx, orgID, id)
-			return err
+			return parkOrphanedChildConversationsWithClaims(ctx, tx, orgID, id)
 		}
 		return nil
 	})
-	if err != nil {
-		return false, err
-	}
-	if adjacentClaims != nil && len(parkedChildIDs) > 0 {
-		// Adjacent, not atomic: when the app-side work is composed into a
-		// caller's still-open tx this release can land against a cancel that
-		// later rolls back (an in-flight child with no active claim, which is
-		// simply claimable), and a crash can leave parked children with
-		// claims whose leases lapse, which only the executor that minted them
-		// releases.
-		return changed, releaseParkedChildClaims(ctx, adjacentClaims, orgID, parkedChildIDs)
-	}
-	return changed, nil
+	return changed, err
 }
 
 // parkOrphanedChildConversationsWithClaims parks every still-mid-flight child run of
 // blueprintRunID `open` and releases those children's active claims in the
 // same statement — q must hold claims-write privilege. Called by
-// markBlueprintRunStatus's atomic flip.
+// MarkRunStatusSystem's atomic flip.
 //
 // A park, not a terminal: the child neither failed nor concluded, it was
 // stopped when its parent ended. Read the `open` as "stopped without
@@ -1386,43 +1378,6 @@ func parkOrphanedChildConversationsWithClaims(ctx context.Context, q queryer, or
 		FROM parked
 		WHERE claims.conversation_id = parked.id AND claims.released_at IS NULL
 	`, orgID, blueprintRunID, "Stopped: owning blueprint run reached a terminal state")
-	return err
-}
-
-// parkOrphanedChildConversations is the app-pool (claims-SELECT-only) variant of the
-// same child park: it returns the parked ids so the caller can release their
-// claims on an admin-backed queryer.
-func parkOrphanedChildConversations(ctx context.Context, q queryer, orgID, blueprintRunID string) ([]string, error) {
-	rows, err := q.QueryContext(ctx, `
-		UPDATE conversations
-		SET status = 'open',
-		    parked_at = COALESCE(parked_at, now()),
-		    park_reason = COALESCE(park_reason, 'blueprint_terminal'),
-		    result_summary = COALESCE(NULLIF(result_summary, ''), $3),
-		    stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL
-		WHERE org_id = $1 AND blueprint_run_id = $2 AND status IS NULL
-		RETURNING id
-	`, orgID, blueprintRunID, "Stopped: owning blueprint run reached a terminal state")
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	return ids, rows.Err()
-}
-
-func releaseParkedChildClaims(ctx context.Context, q queryer, orgID string, conversationIDs []string) error {
-	_, err := q.ExecContext(ctx, `
-		UPDATE claims SET released_at = now(), outcome = 'cancelled'
-		WHERE org_id = $1 AND conversation_id = ANY($2) AND released_at IS NULL
-	`, orgID, conversationIDs)
 	return err
 }
 
@@ -1497,9 +1452,9 @@ func (s *blueprintStore) RunProgress(ctx context.Context, orgID string, blueprin
 	if len(blueprintRunIDs) == 0 {
 		return out, nil
 	}
-	// App pool (RLS-active), matching the handler that asks: manual blueprint
-	// runs are creator-scoped, so another user's manual run is absent from the
-	// result rather than counted. The caller degrades to the unqualified
+	// App pool (RLS-active), matching the handler that asks: blueprint runs
+	// are team-scoped, so a run on a team the caller is not on is absent from
+	// the result rather than counted. The caller degrades to the unqualified
 	// projection there, exactly as the chain rail already does for a run whose
 	// blueprint row it cannot read.
 	rows, err := s.app.QueryContext(ctx, `

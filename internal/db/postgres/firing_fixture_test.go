@@ -118,9 +118,10 @@ func tryFirePgRun(t *testing.T, h *pgtest.Harness, stores db.Stores, orgID strin
 // creatorUserID pairs with the trigger type the way
 // blueprint_runs_creator_matches_trigger_type requires: an event-fired run has
 // no human author and takes NULL whatever is passed, a manual one must name
-// one. Fields honored: ID (minted when empty), BlueprintID, TaskID,
-// TriggerType (default manual), TriggerID, ActorAgentID, Status (default
-// running), StepPlan, WorktreePath. Returns the run id.
+// one. Fields honored: ID (minted when empty), TeamID (the task's team when
+// empty, as the mint puts it), BlueprintID, TaskID, TriggerType (default
+// manual), TriggerID, ActorAgentID, Status (default running), StepPlan,
+// WorktreePath. Returns the run id.
 //
 // One running blueprint_run per task is a schema invariant, so the task's
 // prior run is settled first — which is what a task moving on to its next
@@ -151,11 +152,13 @@ func insertPgBlueprintRun(t *testing.T, h *pgtest.Harness, orgID, creatorUserID 
 		t.Fatalf("settle the task's prior blueprint_run: %v", err)
 	}
 	pgtest.MustExec(t, h.AdminDB, `
-		INSERT INTO blueprint_runs (id, org_id, creator_user_id, blueprint_id, task_id, trigger_type,
+		INSERT INTO blueprint_runs (id, org_id, team_id, creator_user_id, blueprint_id, task_id, trigger_type,
 		                            trigger_id, actor_agent_id, status, step_plan, worktree_path, started_at)
-		VALUES ($1, $2, $3::uuid, $4, $5, $6, $7, $8::uuid, $9, $10, $11, now())
+		VALUES ($1, $2, COALESCE($12::uuid, (SELECT team_id FROM tasks WHERE id = $5 AND org_id = $2)),
+		        $3::uuid, $4, $5, $6, $7, $8::uuid, $9, $10, $11, now())
 	`, br.ID, orgID, creator, br.BlueprintID, br.TaskID, br.TriggerType,
-		nullIfEmptyPgTest(br.TriggerID), nullIfEmptyPgTest(br.ActorAgentID), br.Status, stepPlan, br.WorktreePath)
+		nullIfEmptyPgTest(br.TriggerID), nullIfEmptyPgTest(br.ActorAgentID), br.Status, stepPlan, br.WorktreePath,
+		nullIfEmptyPgTest(br.TeamID))
 	return br.ID
 }
 

@@ -385,9 +385,12 @@ func parkOpen(ctx context.Context, q queryer, orgID, conversationID string, park
 // and why the blueprint check is in this statement rather than in the caller.
 //
 // It goes through tf.blueprint_run_is_running rather than a correlated
-// subquery because this statement runs on the app pool: blueprint_runs is
-// creator-scoped for manual runs, so a non-creator teammate's subquery would
-// find nothing and the guard would fail OPEN on exactly the rows it protects.
+// subquery because this statement runs on the app pool, under two different
+// rules: the conversation's write policy admits a private row's creator and an
+// org-visible row's org admin, and the run's read policy admits its team's
+// members alone. A subquery by a caller the first admits and the second does
+// not would find nothing, and the guard would fail OPEN on exactly the rows it
+// protects.
 //
 // The other guard, that the conversation's run was not called off, cannot
 // take that route: no definer function answers it, so the run is read
@@ -647,9 +650,9 @@ func (s *conversationStore) ReleaseWarmClaimSystem(ctx context.Context, orgID, c
 // conversationRunCalledOff reports whether the conversation's blueprint run
 // was called off: cancel requested, or cancelled. It is the claim gate's
 // blueprintDrivableSQL clause for a called-off run, read on the admin pool so
-// a teammate who cannot see another user's manual run gets the same answer as
-// its creator. A conversation with no run, or no such conversation, answers
-// false.
+// a caller who is not on the run's team, and so cannot see it, gets the same
+// answer as a member of the team. A conversation with no run, or no such
+// conversation, answers false.
 func conversationRunCalledOff(ctx context.Context, admin queryer, orgID, conversationID string) (bool, error) {
 	var calledOff bool
 	err := admin.QueryRowContext(ctx, `

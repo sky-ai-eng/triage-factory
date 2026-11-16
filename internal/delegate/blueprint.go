@@ -83,9 +83,10 @@ func blueprintDecisionForStepConversation(runOutcome string, isFinal bool) (deci
 	}
 }
 
-// errRunAlreadyTerminal rolls back terminateBlueprint's transaction when the
-// run it would end was already ended by another writer.
-var errRunAlreadyTerminal = errors.New("blueprint run already terminal")
+// errRunNotEnded rolls back terminateBlueprint's transaction when its mark
+// ended nothing: another writer already ended the run, or the store refused a
+// completion because the task was taken off the run.
+var errRunNotEnded = errors.New("blueprint run not ended by this write")
 
 // terminateBlueprint finalizes the blueprint run row and runs the shared
 // worktree cleanup that runAgent's per-step defers skipped. status
@@ -94,9 +95,11 @@ var errRunAlreadyTerminal = errors.New("blueprint run already terminal")
 // for human review" (any other terminal). skipCleanup short-circuits
 // when the worktree itself is already gone (worktree_lost path).
 //
-// triggerType + creatorUserID route the terminal writes. Manual blueprints
-// write under synthetic claims as their creator; event-triggered blueprints
-// write through the admin pool.
+// The terminal writes go through the admin pool for every run, manual or
+// event-triggered. Ending a run is the orchestrator's decision rather than its
+// delegator's, and the run's row policies follow its team: a delegator who has
+// since left the team, or become a viewer on it, would have their write match
+// no row, and the run would stay running with nothing left to end it.
 //
 // The cfg here is a cleanup-scoped config (worktree fields + orgID), not the
 // full run-execution config. The run-bearing callers (dispatchClaimedConversation /
@@ -106,7 +109,7 @@ var errRunAlreadyTerminal = errors.New("blueprint run already terminal")
 // (e.g. recording a failed run's deliverables) must thread the team/identity
 // explicitly rather than trust cfg.
 func (s *Spawner) terminateBlueprint(
-	orgID, blueprintRunID, taskID, triggerType, creatorUserID string,
+	orgID, blueprintRunID, taskID string,
 	startTime time.Time,
 	cfg runConfig,
 	status domain.BlueprintRunStatus,
@@ -138,57 +141,38 @@ func (s *Spawner) terminateBlueprint(
 	// keeps: a firing locks its task before it inserts its run. Whether this
 	// write is the one that ended the run is only known from the mark, so a
 	// run another writer already ended rolls the close back with it
-	// (errRunAlreadyTerminal): that writer decided what happens to the task.
+	// (errRunNotEnded): that writer decided what happens to the task.
+	// So does a completion the mark refuses because the task was taken off
+	// the run (a person's claim, a move to another team) since the reactor
+	// checked: the run stays running, and the stranded-run replay's reactor
+	// cancels it.
 	//
 	// A task already closed (ErrNoSuchTask: the close's WHERE is
 	// state-guarded) is not a failure. Any other close error fails the whole
 	// write and leaves the run running, for the stranded-run replay to end.
-	finish := func(closeFn func() error, mark func() (bool, error)) error {
+	markErr := s.tx.SystemWithTx(bgCtx, orgID, func(ts db.SystemTxStores) error {
 		if closeTask {
-			if err := closeFn(); err != nil && !errors.Is(err, db.ErrNoSuchTask) {
+			if _, err := ts.Tasks.CloseSystem(bgCtx, orgID, taskID, db.RunCompletedCloseReason, ""); err != nil && !errors.Is(err, db.ErrNoSuchTask) {
 				return fmt.Errorf("close task: %w", err)
 			}
 		}
-		changed, err := mark()
+		changed, err := ts.Blueprints.MarkRunStatusSystem(bgCtx, orgID, blueprintRunID, status, abortReason, abortedAtStep)
 		if err != nil {
 			return err
 		}
 		if !changed {
-			return errRunAlreadyTerminal
+			return errRunNotEnded
 		}
 		return nil
-	}
-	var markErr error
-	if triggerType == "manual" {
-		markErr = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
-			return finish(
-				func() error {
-					_, err := ts.Tasks.Close(bgCtx, orgID, taskID, db.RunCompletedCloseReason, "")
-					return err
-				},
-				func() (bool, error) {
-					return ts.Blueprints.MarkRunStatus(bgCtx, orgID, blueprintRunID, status, abortReason, abortedAtStep)
-				})
-		})
-	} else {
-		markErr = s.tx.SystemWithTx(bgCtx, orgID, func(ts db.SystemTxStores) error {
-			return finish(
-				func() error {
-					_, err := ts.Tasks.CloseSystem(bgCtx, orgID, taskID, db.RunCompletedCloseReason, "")
-					return err
-				},
-				func() (bool, error) {
-					return ts.Blueprints.MarkRunStatusSystem(bgCtx, orgID, blueprintRunID, status, abortReason, abortedAtStep)
-				})
-		})
-	}
+	})
 	// Everything below belongs to the write that ended the run. A run already
 	// terminal was ended by another writer — a replay of a stranded run racing
 	// its late reactor, two executors replaying one run, a cancel that landed
 	// first — and that writer ran them. Running them twice would remove a
-	// worktree a follow-up has since been given.
-	if errors.Is(markErr, errRunAlreadyTerminal) {
-		blueprintLog.Info("blueprint_run already terminal; its terminal side effects belong to the write that ended it",
+	// worktree a follow-up has since been given. A refused completion ended
+	// nothing, and the cancel that follows it runs them.
+	if errors.Is(markErr, errRunNotEnded) {
+		blueprintLog.Info("blueprint_run not ended by this write: it is already terminal, or its task was taken off it before it could complete",
 			"blueprint_run", blueprintRunID, "status", status)
 		return
 	}

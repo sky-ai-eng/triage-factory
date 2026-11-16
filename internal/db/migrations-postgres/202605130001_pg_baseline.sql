@@ -202,10 +202,10 @@ $$;
 -- +goose StatementEnd
 
 
--- Reads one blueprint's running-ness past the creator-scoped blueprint_runs_select
+-- Reads one blueprint's running-ness past the team-scoped blueprint_runs_select
 -- policy, so the resume CAS refuses to un-terminal a completed conversation whose
--- blueprint is still running even for a non-creator caller (a plain subquery would
--- find nothing and fail open). With request claims p_org_id must equal the caller's
+-- blueprint is still running even for a caller on another team (a plain subquery
+-- would find nothing and fail open). With request claims p_org_id must equal the caller's
 -- org; with none (admin pool) that check is skipped. Pinned search_path blocks
 -- definer hijacking; a NULL id or a missing row answers false.
 -- +goose StatementBegin
@@ -229,10 +229,10 @@ $$;
 -- +goose StatementEnd
 
 
--- Reads whether one blueprint run completed past the same creator-scoped
+-- Reads whether one blueprint run completed past the same team-scoped
 -- blueprint_runs_select policy, so a count of completed runs includes a step a
 -- person followed up on whoever reads it (a plain subquery would find nothing
--- for a non-creator and drop the run from the count). The org check, the pinned
+-- for a caller on another team and drop the run from the count). The org check, the pinned
 -- search_path, and the false answer for a NULL id or a missing row are
 -- tf.blueprint_run_is_running's.
 -- +goose StatementBegin
@@ -256,11 +256,11 @@ $$;
 -- +goose StatementEnd
 
 
--- Answers "is this run the task's newest" past the same creator-scoped
+-- Answers "is this run the task's newest" past the same team-scoped
 -- blueprint_runs_select policy, for the terminal-on-last closing hooks: a task
--- re-delegated by a different user has a newer MANUAL run the resolving caller
--- cannot see, and a plain query would answer that the superseded run is still
--- the newest and close the task under the live one. A boolean rather than the
+-- that moved to another team has a newer run there that a resolving caller on
+-- the old team cannot see, and a plain query would answer that the superseded
+-- run is still the newest and close the task under the live one. A boolean rather than the
 -- newest run's id, so a caller learns only whether its own run has been
 -- superseded and nothing about whose work superseded it. Ordering breaks a
 -- started_at tie on id so the order is total. With request claims p_org_id must
@@ -3906,6 +3906,10 @@ CREATE TABLE public.blueprint_steps (
 CREATE TABLE public.blueprint_runs (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
+    -- The team the run belongs to, set at mint to the team its first step
+    -- conversation is created on, and never changed: a task that moves to
+    -- another team gets a new run there. The row policies read it.
+    team_id uuid NOT NULL,
     -- NULL for trigger_type='event' runs (system-emitted via the admin pool);
     -- manual runs carry the human delegator. Paired by the CHECK below.
     creator_user_id uuid,
@@ -4024,6 +4028,8 @@ ALTER TABLE ONLY public.blueprint_runs
 ALTER TABLE ONLY public.blueprint_runs
     ADD CONSTRAINT blueprint_runs_creator_user_id_fkey FOREIGN KEY (creator_user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.blueprint_runs
+    ADD CONSTRAINT blueprint_runs_team_fkey            FOREIGN KEY (team_id, org_id)         REFERENCES public.teams(id, org_id);
+ALTER TABLE ONLY public.blueprint_runs
     ADD CONSTRAINT blueprint_runs_blueprint_fkey       FOREIGN KEY (blueprint_id, org_id) REFERENCES public.blueprints(id, org_id);
 ALTER TABLE ONLY public.blueprint_runs
     ADD CONSTRAINT blueprint_runs_task_fkey            FOREIGN KEY (task_id, org_id)         REFERENCES public.tasks(id, org_id);
@@ -4068,34 +4074,34 @@ CREATE POLICY blueprint_steps_all ON public.blueprint_steps FOR ALL
                            WHERE b.id = blueprint_steps.blueprint_id
                              AND b.org_id = blueprint_steps.org_id)));
 
--- Creator-scoped for manual runs, org-visible for event-triggered runs, which
--- carry creator_user_id NULL (system-emitted via the admin pool).
+-- Team-scoped, as the run's conversations are: a member of the run's team reads
+-- it and a member who can write the team writes it, whoever delegated it and
+-- whether a person or a trigger did. An insert also names its caller as the
+-- creator; event-triggered runs carry creator_user_id NULL and are minted on the
+-- admin pool.
 CREATE POLICY blueprint_runs_select ON public.blueprint_runs FOR SELECT
   USING ((org_id = tf.current_org_id())
          AND tf.user_has_org_access(org_id)
-         AND ((creator_user_id IS NULL)
-              OR (creator_user_id = tf.current_user_id())));
+         AND tf.user_in_team(team_id));
 
 CREATE POLICY blueprint_runs_insert ON public.blueprint_runs FOR INSERT
   WITH CHECK ((org_id = tf.current_org_id())
               AND tf.user_has_org_access(org_id)
-              AND (creator_user_id = tf.current_user_id()));
+              AND (creator_user_id = tf.current_user_id())
+              AND tf.user_can_write_team(team_id));
 
 CREATE POLICY blueprint_runs_update ON public.blueprint_runs FOR UPDATE
   USING ((org_id = tf.current_org_id())
          AND tf.user_has_org_access(org_id)
-         AND ((creator_user_id IS NULL)
-              OR (creator_user_id = tf.current_user_id())))
+         AND tf.user_can_write_team(team_id))
   WITH CHECK ((org_id = tf.current_org_id())
               AND tf.user_has_org_access(org_id)
-              AND ((creator_user_id IS NULL)
-                   OR (creator_user_id = tf.current_user_id())));
+              AND tf.user_can_write_team(team_id));
 
 CREATE POLICY blueprint_runs_delete ON public.blueprint_runs FOR DELETE
   USING ((org_id = tf.current_org_id())
          AND tf.user_has_org_access(org_id)
-         AND ((creator_user_id IS NULL)
-              OR (creator_user_id = tf.current_user_id())));
+         AND tf.user_can_write_team(team_id));
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.blueprint_steps TO tf_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.blueprint_runs  TO tf_app;

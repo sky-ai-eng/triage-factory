@@ -218,7 +218,7 @@ func TestTerminateBlueprint_CompletedWithUnresolvedDeliverableLeavesTaskOpen(t *
 	setConversationStatus(t, database, conversationID, dbtest.SeedConcluded)
 	seedDraftPRDeliverable(t, s, conversationID)
 
-	s.terminateBlueprint(runmode.LocalDefaultOrgID, blueprintRunID, taskID, "event", "",
+	s.terminateBlueprint(runmode.LocalDefaultOrgID, blueprintRunID, taskID,
 		loadConversation(t, s, conversationID).StartedAt, runConfig{orgID: runmode.LocalDefaultOrgID},
 		domain.BlueprintRunStatusCompleted, "", nil, true)
 
@@ -280,7 +280,7 @@ func TestCloseTaskIfTerminalAndResolved_ClosesOnceTheLastDraftIsResolved(t *test
 	}
 	setConversationStatus(t, database, conversationID, dbtest.SeedConcluded)
 	seedDraftPRDeliverable(t, s, conversationID)
-	s.terminateBlueprint(runmode.LocalDefaultOrgID, blueprintRunID, taskID, "event", "",
+	s.terminateBlueprint(runmode.LocalDefaultOrgID, blueprintRunID, taskID,
 		loadConversation(t, s, conversationID).StartedAt, runConfig{orgID: runmode.LocalDefaultOrgID},
 		domain.BlueprintRunStatusCompleted, "", nil, true)
 	if got := readTaskStatus(t, database, taskID); got != "in_progress" {
@@ -347,7 +347,7 @@ func TestTerminateBlueprint_UnresolvedIsAskedOfTheWholeTask(t *testing.T) {
 	makeConversationBlueprintStep(t, database, conversationID, taskID)
 	setConversationStatus(t, database, conversationID, dbtest.SeedConcluded)
 
-	s.terminateBlueprint(runmode.LocalDefaultOrgID, "bpr-"+conversationID, taskID, "event", "",
+	s.terminateBlueprint(runmode.LocalDefaultOrgID, "bpr-"+conversationID, taskID,
 		loadConversation(t, s, conversationID).StartedAt, runConfig{orgID: runmode.LocalDefaultOrgID},
 		domain.BlueprintRunStatusCompleted, "", nil, true)
 
@@ -428,7 +428,7 @@ func TestTerminateBlueprint_CompletedClosesTheTaskWithTheRun(t *testing.T) {
 	}
 	setConversationStatus(t, database, conversationID, dbtest.SeedConcluded)
 
-	s.terminateBlueprint(runmode.LocalDefaultOrgID, "bpr-"+conversationID, taskID, "event", "",
+	s.terminateBlueprint(runmode.LocalDefaultOrgID, "bpr-"+conversationID, taskID,
 		loadConversation(t, s, conversationID).StartedAt, runConfig{orgID: runmode.LocalDefaultOrgID},
 		domain.BlueprintRunStatusCompleted, "", nil, true)
 
@@ -459,7 +459,7 @@ func TestTerminateBlueprint_RunAlreadyEndedLeavesTheTaskAlone(t *testing.T) {
 		t.Fatalf("cancel the run: %v", err)
 	}
 
-	s.terminateBlueprint(runmode.LocalDefaultOrgID, "bpr-"+conversationID, taskID, "event", "",
+	s.terminateBlueprint(runmode.LocalDefaultOrgID, "bpr-"+conversationID, taskID,
 		loadConversation(t, s, conversationID).StartedAt, runConfig{orgID: runmode.LocalDefaultOrgID},
 		domain.BlueprintRunStatusCompleted, "", nil, true)
 

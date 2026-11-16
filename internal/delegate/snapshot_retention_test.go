@@ -131,7 +131,7 @@ func TestTerminateBlueprint_RetainsSnapshot(t *testing.T) {
 				t.Fatalf("settle the snapshot lifecycle: %v", err)
 			}
 
-			s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "event", "", time.Now(),
+			s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, time.Now(),
 				runConfig{orgID: runmode.LocalDefaultOrgID}, status, "", nil, true)
 
 			assertSnapshotPresent(t, s, taskID, true)
