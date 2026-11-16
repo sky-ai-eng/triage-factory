@@ -57,3 +57,22 @@ func TestConversationJSONKeysAreSnakeCase(t *testing.T) {
 		}
 	}
 }
+
+// The conversation routes read a place in line and the ended boundary off a
+// key's presence, so a conversation that has neither carries none of the keys
+// when the struct is marshalled either.
+func TestConversationJSONOmitsUnsetPresenceKeys(t *testing.T) {
+	b, err := json.Marshal(Conversation{ID: "c1", Status: StatusRunning})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(b, &wire); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, key := range []string{"queue_position", "ended_at", "ended_reason"} {
+		if v, ok := wire[key]; ok {
+			t.Errorf("%s = %v on a live conversation, want the key absent", key, v)
+		}
+	}
+}

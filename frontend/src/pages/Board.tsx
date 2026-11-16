@@ -469,7 +469,7 @@ export default function Board() {
             status: '',
             blueprint_run_id: blueprintRunID,
             blueprint_step_index: i,
-          } as unknown as Conversation
+          } as Conversation
         })
       } catch {
         // Network error — leave chain indicator empty for now; the

@@ -1608,9 +1608,6 @@ type conversationListFilterKey struct {
 // window is over the CONVERSATIONS, ordered (task_id, started_at DESC, id), so
 // a task's conversations stay contiguous and total_count counts conversations, not
 // tasks.
-//
-// Each row in Runs is the body conversationResponse builds, the same one the
-// single-conversation read serves.
 type conversationListResponse struct {
 	Runs          map[string][]map[string]any    `json:"runs"`
 	Messages      map[string][]domain.MessageDTO `json:"messages,omitempty"`

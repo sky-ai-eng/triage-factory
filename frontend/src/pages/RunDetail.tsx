@@ -111,7 +111,7 @@ export default function RunDetail() {
             result_summary: '',
             blueprint_run_id: conversation.blueprint_run_id,
             blueprint_step_index: i,
-          } as unknown as Conversation
+          } as Conversation
         })
         setChainSteps(padded)
       })

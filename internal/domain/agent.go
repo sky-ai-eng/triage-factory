@@ -444,7 +444,7 @@ type Conversation struct {
 	// one — in a shared fleet it can therefore understate the wait, which is
 	// accepted. The deployment-truthful view is the fleet console's, behind
 	// the operator gate.
-	QueuePosition *int `json:"queue_position"`
+	QueuePosition *int `json:"queue_position,omitempty"`
 
 	// TotalCostUSD / DurationMs / NumTurns are derived at read time, not
 	// stored: cost is the SUM of the messages ledger's cost_usd stamps,
@@ -479,8 +479,8 @@ type Conversation struct {
 	// `failed` or parked `open` — what ended it is the task moving on, not
 	// the transcript finishing — so a reader asking "is this still the task's
 	// conversation" reads EndedAt and nothing else.
-	EndedAt     *time.Time  `json:"ended_at"`
-	EndedReason EndedReason `json:"ended_reason"`
+	EndedAt     *time.Time  `json:"ended_at,omitempty"`
+	EndedReason EndedReason `json:"ended_reason,omitempty"`
 
 	// StopRequestedAt / StopRequestedBy are a pending stop: someone asked for
 	// this conversation to stop and neither its holder nor the dispatcher has
@@ -535,7 +535,7 @@ type Conversation struct {
 	// memory when a boundary ends it.
 	HasRun      bool   `json:"has_run"`
 	TriggerType string `json:"trigger_type"` // "manual" | "event" (matches conversations.trigger_type / blueprint_runs.trigger_type vocabulary)
-	TriggerID   string `json:"trigger_id"`   // FK to event_handlers.id — the firing trigger, inherited from the parent blueprint_run onto every step's conversation so the llm_spend view can attribute autonomous spend by rule (TFAC-478); empty/NULL for manual conversations
+	TriggerID   string `json:"trigger_id"`   // FK to event_handlers.id — the firing trigger, inherited from the parent blueprint_run onto every step's conversation so the llm_spend view can attribute autonomous spend by rule; empty/NULL for manual conversations
 
 	// TriggeringEventID is the event instance that auto-fired this
 	// conversation. Set only on the event path; empty (→ SQL NULL) for manual
