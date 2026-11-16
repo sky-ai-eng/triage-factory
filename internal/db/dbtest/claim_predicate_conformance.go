@@ -47,7 +47,7 @@ type ClaimPredicateHarness struct {
 	// SetBlueprintState writes the shared blueprint_run's status and
 	// current_step_index directly. The store's own writes cannot reach a
 	// terminal blueprint whose sequencing column still points at a step (the
-	// guarded MarkRunStatus refuses a non-running row), and that combination
+	// guarded MarkRunStatusSystem refuses a non-running row), and that combination
 	// is exactly what the finished-blueprint arm of the claim gate reads.
 	SetBlueprintState func(t *testing.T, status string, currentStepIndex int)
 

@@ -336,15 +336,12 @@ func TestBlueprintStore_Postgres_ReplaceAndListSteps(t *testing.T) {
 	}
 }
 
-// TestBlueprintStore_Postgres_RunLifecycle exercises GetRun →
-// ConversationsForBlueprint (surfacing the step conversation's terminal
-// conversations.outcome) →
-// TestBlueprintStore_Postgres_MarkRunStatus_ParksOrphanedChild pins the
+// TestBlueprintStore_Postgres_MarkRunStatusSystem_ParksOrphanedChild pins the
 // atomic guarantee: flipping a blueprint_run to a terminal status parks any
 // still-mid-flight child conversation in the same transaction (stamping
 // parked_at), so a terminal parent is never observed alongside a live
 // child. Mirrors the SQLite coverage to prevent Postgres/SQLite divergence.
-func TestBlueprintStore_Postgres_MarkRunStatus_ParksOrphanedChild(t *testing.T) {
+func TestBlueprintStore_Postgres_MarkRunStatusSystem_ParksOrphanedChild(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 
@@ -404,34 +401,13 @@ func TestBlueprintStore_Postgres_MarkRunStatus_ParksOrphanedChild(t *testing.T) 
 		t.Errorf("child = (%q, parked=%v), want (open, true) — a terminal parent must not strand a live child", st, parked)
 	}
 	assertClaimReleased(childID)
-
-	// Same guarantee on the app-pool path, where the claim release lands
-	// adjacently on the admin pool instead of inside the cancel statement.
-	brID2 := insertPgBlueprintRun(t, h, orgID, userID, domain.BlueprintRun{
-		BlueprintID: blueprintID, TaskID: taskID, WorktreePath: "/tmp/wt-oc2",
-		StepPlan: []domain.BlueprintPlanStep{{StepIndex: 0, PromptID: stepPromptID, PromptName: "S", PromptBody: "b", Source: "user"}},
-	})
-	childID2 := seedPgStepConversation(t, h, orgID, userID, taskID, stepPromptID, brID2, 0)
-	if _, err := h.AdminDB.Exec(`UPDATE conversations SET status = NULL WHERE id = $1`, childID2); err != nil {
-		t.Fatalf("set child 2 running: %v", err)
-	}
-	seedChildClaim(childID2, "exec-oc2")
-
-	changed, err = stores.Blueprints.MarkRunStatus(ctx, orgID, brID2, domain.BlueprintRunStatusCancelled, "user_cancelled", nil)
-	if err != nil {
-		t.Fatalf("MarkRunStatus: %v", err)
-	}
-	if !changed {
-		t.Fatal("MarkRunStatus reported no change")
-	}
-	if st, parked := pgConversationParked(t, h, childID2); st != "open" || !parked {
-		t.Errorf("child 2 = (%q, parked=%v), want (open, true)", st, parked)
-	}
-	assertClaimReleased(childID2)
 }
 
-// MarkRunStatus → GetRunForConversation on a real Postgres tx. Covers the UUID/TEXT
-// column split (blueprint_runs.id UUID, blueprint_id TEXT).
+// TestBlueprintStore_Postgres_RunLifecycle exercises GetRun →
+// ConversationsForBlueprint (surfacing the step conversation's terminal
+// conversations.outcome) → MarkRunStatusSystem → GetRunForConversation on a
+// real Postgres tx. Covers the UUID/TEXT column split (blueprint_runs.id UUID,
+// blueprint_id TEXT).
 func TestBlueprintStore_Postgres_RunLifecycle(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -490,16 +466,16 @@ func TestBlueprintStore_Postgres_RunLifecycle(t *testing.T) {
 	}
 
 	// Mark the blueprint completed; second attempt should be no-op.
-	changed, err := blueprints.MarkRunStatus(ctx, orgID, blueprintRunID, domain.BlueprintRunStatusCompleted, "", nil)
+	changed, err := blueprints.MarkRunStatusSystem(ctx, orgID, blueprintRunID, domain.BlueprintRunStatusCompleted, "", nil)
 	if err != nil {
-		t.Fatalf("MarkRunStatus: %v", err)
+		t.Fatalf("MarkRunStatusSystem: %v", err)
 	}
 	if !changed {
 		t.Error("expected changed=true for running → completed")
 	}
-	changed2, err := blueprints.MarkRunStatus(ctx, orgID, blueprintRunID, domain.BlueprintRunStatusAborted, "late", nil)
+	changed2, err := blueprints.MarkRunStatusSystem(ctx, orgID, blueprintRunID, domain.BlueprintRunStatusAborted, "late", nil)
 	if err != nil {
-		t.Fatalf("MarkRunStatus second: %v", err)
+		t.Fatalf("MarkRunStatusSystem second: %v", err)
 	}
 	if changed2 {
 		t.Error("expected changed=false on terminal row (race guard)")

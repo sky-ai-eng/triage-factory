@@ -735,7 +735,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 		s.failEngagement(conv.ID, fmt.Errorf("load task: %v", err))
 		s.failClaimedConversation(orgID, conv, fmt.Sprintf("load task: %v", err))
 		if br != nil {
-			s.terminateBlueprint(orgID, br.ID, conv.TaskID, conv.TriggerType, conv.CreatorUserID, startTime,
+			s.terminateBlueprint(orgID, br.ID, conv.TaskID, startTime,
 				runConfig{orgID: orgID, teamID: conv.TeamID}, domain.BlueprintRunStatusFailed, fmt.Sprintf("load task: %v", err), conv.BlueprintStepIndex, true)
 		}
 		return
@@ -788,7 +788,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 		s.broadcastConversationUpdate(orgID, conv.ID, "open")
 		if br.Status == domain.BlueprintRunStatusRunning {
 			cfg := runConfig{orgID: orgID, teamID: conv.TeamID}
-			s.terminateBlueprint(orgID, br.ID, task.ID, conv.TriggerType, conv.CreatorUserID, startTime, cfg,
+			s.terminateBlueprint(orgID, br.ID, task.ID, startTime, cfg,
 				domain.BlueprintRunStatusCancelled, "cancelled", conv.BlueprintStepIndex, false)
 		}
 		return
@@ -1100,7 +1100,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 		plan = br.StepPlan
 		if len(plan) == 0 {
 			s.failEngagement(conv.ID, errors.New("blueprint run has empty step plan"))
-			s.terminateBlueprint(orgID, br.ID, task.ID, conv.TriggerType, conv.CreatorUserID, startTime,
+			s.terminateBlueprint(orgID, br.ID, task.ID, startTime,
 				runConfig{orgID: orgID, teamID: conv.TeamID}, domain.BlueprintRunStatusFailed, "blueprint run has empty step plan", conv.BlueprintStepIndex, true)
 			return
 		}
@@ -1109,7 +1109,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 		}
 		if stepIdx < 0 || stepIdx >= len(plan) {
 			s.failEngagement(conv.ID, fmt.Errorf("step index %d out of range", stepIdx))
-			s.terminateBlueprint(orgID, br.ID, task.ID, conv.TriggerType, conv.CreatorUserID, startTime,
+			s.terminateBlueprint(orgID, br.ID, task.ID, startTime,
 				runConfig{orgID: orgID, teamID: conv.TeamID}, domain.BlueprintRunStatusFailed, fmt.Sprintf("step index %d out of range", stepIdx), conv.BlueprintStepIndex, true)
 			return
 		}
@@ -1191,7 +1191,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 		skillSpan.End()
 		if skillErr != nil {
 			s.failEngagement(conv.ID, skillErr)
-			s.terminateBlueprint(orgID, br.ID, task.ID, conv.TriggerType, conv.CreatorUserID, startTime, cfg,
+			s.terminateBlueprint(orgID, br.ID, task.ID, startTime, cfg,
 				domain.BlueprintRunStatusFailed, fmt.Sprintf("materialize step %d skill: %s", stepIdx, skillErr.Error()), &stepIdx, false)
 			return
 		}
@@ -1322,7 +1322,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	// bookkeeping still lands in the run's own trace.
 	stepConversation, err := s.conversations.GetSystem(context.WithoutCancel(ctx), orgID, conv.ID)
 	if err != nil || stepConversation == nil {
-		s.terminateBlueprint(orgID, br.ID, task.ID, conv.TriggerType, conv.CreatorUserID, startTime, cfg,
+		s.terminateBlueprint(orgID, br.ID, task.ID, startTime, cfg,
 			domain.BlueprintRunStatusFailed, fmt.Sprintf("read step %d run after agent: %v", stepIdx, err), &stepIdx, false)
 		return
 	}
@@ -1798,7 +1798,7 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 		return
 	}
 	if br.CancelRequested {
-		s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
+		s.terminateBlueprint(orgID, br.ID, br.TaskID, startTime, cfg,
 			domain.BlueprintRunStatusCancelled, "cancelled", &stepIdx, false)
 		return
 	}
@@ -1815,7 +1815,7 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 
 	switch {
 	case stepConversation.Status == domain.StatusFailed:
-		s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
+		s.terminateBlueprint(orgID, br.ID, br.TaskID, startTime, cfg,
 			domain.BlueprintRunStatusFailed, "step "+stepConversation.Status, &stepIdx, false)
 		return
 	case stepConversation.Concluded():
@@ -1839,7 +1839,7 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 	// editing the blueprint mid-flight must not redirect a running execution.
 	plan := br.StepPlan
 	if len(plan) == 0 {
-		s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
+		s.terminateBlueprint(orgID, br.ID, br.TaskID, startTime, cfg,
 			domain.BlueprintRunStatusFailed, "blueprint run has empty step plan", &stepIdx, false)
 		return
 	}
@@ -1850,7 +1850,7 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 		next := stepIdx + 1
 		task, err := s.tasks.GetSystem(ctx, orgID, br.TaskID)
 		if err != nil || task == nil {
-			s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
+			s.terminateBlueprint(orgID, br.ID, br.TaskID, startTime, cfg,
 				domain.BlueprintRunStatusFailed, "load task for advance", &stepIdx, false)
 			return
 		}
@@ -1860,13 +1860,13 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 		// would mint has not run, so refusing it costs no work.
 		teamModels, err := s.resolveModel(ctx, orgID, stepConversation.TeamID)
 		if err != nil {
-			s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
+			s.terminateBlueprint(orgID, br.ID, br.TaskID, startTime, cfg,
 				domain.BlueprintRunStatusFailed, fmt.Sprintf("step %d: %v", next, err), &stepIdx, false)
 			return
 		}
 		nextModel, err := stepModelOrInherit(plan[next].Model, stepConversation.Model, teamModels.Enabled())
 		if err != nil {
-			s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
+			s.terminateBlueprint(orgID, br.ID, br.TaskID, startTime, cfg,
 				domain.BlueprintRunStatusFailed, fmt.Sprintf("step %d: %v", next, err), &stepIdx, false)
 			return
 		}
@@ -1881,7 +1881,7 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 		advanced, ended, _, err := s.blueprints.AdvanceRunToStepSystem(ctx, orgID, stepIdx, stepConversation.ID,
 			s.buildStepConversation(ctx, orgID, br.ID, *task, plan[next].Step(br.BlueprintID), nextModel, triggerType, br.TriggerID, creatorUserID, br.ActorAgentID))
 		if err != nil {
-			s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
+			s.terminateBlueprint(orgID, br.ID, br.TaskID, startTime, cfg,
 				domain.BlueprintRunStatusFailed, fmt.Sprintf("advance to step %d: %v", next, err), &stepIdx, false)
 			return
 		}
@@ -1909,14 +1909,14 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 		// Nudge the dispatcher to pick the step up now.
 		s.wakeDispatcher()
 	case blueprintStepFinish:
-		s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
+		s.terminateBlueprint(orgID, br.ID, br.TaskID, startTime, cfg,
 			domain.BlueprintRunStatusCompleted, "", &stepIdx, false)
 	case blueprintStepAbort:
 		reason := abortReason
 		if reason == "" {
 			reason = stepConversation.OutcomeReason
 		}
-		s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
+		s.terminateBlueprint(orgID, br.ID, br.TaskID, startTime, cfg,
 			domain.BlueprintRunStatusAborted, reason, &stepIdx, false)
 	}
 }
@@ -2723,7 +2723,7 @@ func (s *Spawner) disposeOfExhaustedConversation(orgID string, br *domain.Bluepr
 // reason.
 func (s *Spawner) failUnstartedStep(orgID string, br *domain.BlueprintRun, conv domain.Conversation, reason string) {
 	s.failClaimedConversation(orgID, &conv, reason)
-	s.terminateBlueprint(orgID, br.ID, conv.TaskID, conv.TriggerType, conv.CreatorUserID, time.Now(),
+	s.terminateBlueprint(orgID, br.ID, conv.TaskID, time.Now(),
 		runConfig{orgID: orgID, teamID: conv.TeamID},
 		domain.BlueprintRunStatusFailed, reason, conv.BlueprintStepIndex, false)
 }

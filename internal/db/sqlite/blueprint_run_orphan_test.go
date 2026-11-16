@@ -61,12 +61,12 @@ func TestMarkRunStatus_ParksOrphanedChild_OnTerminal(t *testing.T) {
 		t.Fatalf("seed oa-child claim: %v", err)
 	}
 
-	changed, err := stores.Blueprints.MarkRunStatus(ctx, org, brID, domain.BlueprintRunStatusCancelled, "user_cancelled", nil)
+	changed, err := stores.Blueprints.MarkRunStatusSystem(ctx, org, brID, domain.BlueprintRunStatusCancelled, "user_cancelled", nil)
 	if err != nil {
-		t.Fatalf("MarkRunStatus: %v", err)
+		t.Fatalf("MarkRunStatusSystem: %v", err)
 	}
 	if !changed {
-		t.Fatal("MarkRunStatus reported no change")
+		t.Fatal("MarkRunStatusSystem reported no change")
 	}
 
 	if got := childConversationStatusDB(t, conn, "oa-child"); got != "open" {
@@ -116,8 +116,8 @@ func TestMarkRunStatus_LeavesTerminalChild(t *testing.T) {
 		t.Fatalf("set child verdict: %v", err)
 	}
 
-	if _, err := stores.Blueprints.MarkRunStatus(ctx, org, brID, domain.BlueprintRunStatusCompleted, "", nil); err != nil {
-		t.Fatalf("MarkRunStatus: %v", err)
+	if _, err := stores.Blueprints.MarkRunStatusSystem(ctx, org, brID, domain.BlueprintRunStatusCompleted, "", nil); err != nil {
+		t.Fatalf("MarkRunStatusSystem: %v", err)
 	}
 
 	if got := childConversationStatusDB(t, conn, "of-child"); got != domain.StatusOpen {
@@ -156,7 +156,7 @@ func TestParkOrphanedConversations(t *testing.T) {
 		ID: "ra-child", TaskID: taskA.ID, PromptID: "ra-p0", Status: "running",
 		Model: "claude-sonnet-4-6", BlueprintRunID: brA, BlueprintStepIndex: &step0,
 	})
-	// Force the desync directly (bypassing MarkRunStatus's atomic cancel) to
+	// Force the desync directly (bypassing MarkRunStatusSystem's atomic cancel) to
 	// mimic a DB broken before the fix landed.
 	if _, err := conn.Exec(`UPDATE conversations SET status = NULL WHERE id = 'ra-child'`); err != nil {
 		t.Fatalf("set child A running: %v", err)

@@ -887,7 +887,7 @@ func TestTerminateBlueprint_CompletedJiraTask_LeavesTheTicketAlone(t *testing.T)
 	stampBotClaim(t, database, taskID)
 	bpr := blueprintRunIDForConversation(t, database, conversationID)
 
-	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "event", "",
+	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID,
 		time.Now(), runConfig{orgID: runmode.LocalDefaultOrgID}, domain.BlueprintRunStatusCompleted, "", nil, true)
 
 	if got := readTaskStatus(t, database, taskID); got != "done" {

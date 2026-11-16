@@ -342,7 +342,7 @@ type RunProgress struct {
 //     by a compare-and-swap whose `advanced` bool is the write's own answer.
 //     It returns the two conversations it wrote, which are the rows a caller
 //     acts on.
-//   - MarkRunStatus / MarkRunStatusSystem, ReopenRunForResume and
+//   - MarkRunStatusSystem, ReopenRunForResume and
 //     RequestRunCancelSystem — compare-and-swap guards whose `changed` bool is
 //     already the write's own answer about whether it landed, which is what
 //     every caller branches on. There is no miss error to retire here and no
@@ -733,11 +733,6 @@ type BlueprintStore interface {
 	// blueprint (single-conversation delegation).
 	GetRunForConversation(ctx context.Context, orgID string, stepConversationID string) (*domain.BlueprintRun, *int, error)
 
-	// MarkRunStatus transitions a blueprint run to a terminal status and
-	// records optional abort metadata. Returns (true, nil) when the row was
-	// updated, (false, nil) when the guard rejected the write.
-	MarkRunStatus(ctx context.Context, orgID string, id string, status domain.BlueprintRunStatus, abortReason string, abortedAtStep *int) (changed bool, err error)
-
 	// ReopenRunForResume flips an `aborted` blueprint_run back to `running` (a
 	// compare-and-swap guarded on status='aborted'), clearing its abort
 	// metadata, so a resume of the run's aborting step can re-run and
@@ -804,6 +799,12 @@ type BlueprintStore interface {
 	ListStepsSystem(ctx context.Context, orgID string, blueprintID string) ([]domain.BlueprintStep, error)
 	GetRunSystem(ctx context.Context, orgID string, id string) (*domain.BlueprintRun, error)
 	GetRunForConversationSystem(ctx context.Context, orgID string, stepConversationID string) (*domain.BlueprintRun, *int, error)
+	// MarkRunStatusSystem transitions a running blueprint run to a terminal
+	// status, records optional abort metadata, and parks its children still
+	// mid-flight. Returns (true, nil) when the row was updated, (false, nil)
+	// when the guard rejected the write. It has no app-pool twin: ending a run
+	// is the orchestrator's decision, and the run's write policy follows its
+	// team, which its delegator may no longer be able to write.
 	MarkRunStatusSystem(ctx context.Context, orgID string, id string, status domain.BlueprintRunStatus, abortReason string, abortedAtStep *int) (changed bool, err error)
 	ConversationsForBlueprintSystem(ctx context.Context, orgID string, blueprintRunID string) ([]domain.Conversation, error)
 	IsNewestRunForTaskSystem(ctx context.Context, orgID, taskID, blueprintRunID string) (bool, error)

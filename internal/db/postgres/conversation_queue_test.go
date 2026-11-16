@@ -1676,7 +1676,7 @@ func TestHandBack_Postgres_NoDeadlockAgainstARunsTerminal(t *testing.T) {
 
 // TestSettleUnclaimedStops_Postgres_NoDeadlockAgainstARunsTerminal pins the
 // lock order the settlement shares with a run's terminal write. The terminal
-// (markBlueprintRunStatus) locks the run and then parks its children; a
+// (MarkRunStatusSystem) locks the run and then parks its children; a
 // settlement that locked a stop-pending child first and then wrote its
 // cancel-requested run would wait on the terminal while the terminal waited on
 // the child, and Postgres would kill one of them with 40P01. Both now take the

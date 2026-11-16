@@ -180,7 +180,7 @@ type ConversationSeeder struct {
 
 	// SetBlueprintRunStatus raw-updates a blueprint_run's status, WITHOUT
 	// touching its child conversations (a plain UPDATE, not
-	// BlueprintStore.MarkRunStatus, which now cascades a terminal flip onto
+	// BlueprintStore.MarkRunStatusSystem, which now cascades a terminal flip onto
 	// children). Used to stage the "parked conversation under an
 	// already-terminal parent" precondition the worktree-preserve filter must
 	// exclude.

@@ -190,7 +190,7 @@ func TestTerminalBlueprintFailures_MarkAndEndTheStep(t *testing.T) {
 			suffix: "term-task",
 			dispose: func(t *testing.T, s *Spawner, br *domain.BlueprintRun, conv domain.Conversation) {
 				s.failClaimedConversation(org, &conv, "load task: gone")
-				s.terminateBlueprint(org, br.ID, conv.TaskID, conv.TriggerType, conv.CreatorUserID, time.Now(),
+				s.terminateBlueprint(org, br.ID, conv.TaskID, time.Now(),
 					runConfig{orgID: org, teamID: conv.TeamID}, domain.BlueprintRunStatusFailed, "load task: gone", conv.BlueprintStepIndex, true)
 			},
 		},

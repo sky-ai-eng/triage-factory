@@ -178,7 +178,7 @@ func TestDrainRunQueue_PartitionFencedSkipsClaim(t *testing.T) {
 func TestOrphanSweep_ParksOrphanUnderCancelledBlueprint(t *testing.T) {
 	s, database, brID, _, step0ConversationID := reactorFixture(t, "recon-orphan", 1, "running", "")
 
-	// Force the desync directly, bypassing the atomic park in MarkRunStatus:
+	// Force the desync directly, bypassing the atomic park in MarkRunStatusSystem:
 	// cancelled parent, child still mid-flight.
 	if _, err := database.Exec(`UPDATE conversations SET status = NULL WHERE id = ?`, step0ConversationID); err != nil {
 		t.Fatalf("force child mid-flight: %v", err)

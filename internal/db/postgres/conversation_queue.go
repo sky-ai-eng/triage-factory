@@ -943,7 +943,7 @@ func (s *conversationQueueStore) ReacquireClaimLeaseSystem(ctx context.Context, 
 // split is the lock order. The first locks every run the pass may cancel; the
 // second settles, and admits a conversation whose settlement would write its
 // run only when that run is one the first statement locked. A run's terminal
-// write (markBlueprintRunStatus) locks the run and then parks its children, so
+// write (MarkRunStatusSystem) locks the run and then parks its children, so
 // a settlement that locked a child first and its run second could wait on it
 // while it waited on the child. Both take the run first, and a run another
 // writer holds is skipped (SKIP LOCKED) and settled on the next pass.

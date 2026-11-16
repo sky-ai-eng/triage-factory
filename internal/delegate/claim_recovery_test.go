@@ -335,7 +335,7 @@ func TestTerminateBlueprint_AnAlreadyTerminalRunRunsNoSideEffects(t *testing.T) 
 	s.SetFiringWaker(waker)
 	taskBefore := readTaskStatus(t, database, taskID)
 
-	s.terminateBlueprint(runmode.LocalDefaultOrgID, blueprintRunID, taskID, "event", "",
+	s.terminateBlueprint(runmode.LocalDefaultOrgID, blueprintRunID, taskID,
 		loadConversation(t, s, conversationID).StartedAt, runConfig{orgID: runmode.LocalDefaultOrgID},
 		domain.BlueprintRunStatusCompleted, "", nil, true)
 

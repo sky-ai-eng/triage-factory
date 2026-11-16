@@ -553,7 +553,7 @@ func RunBlueprintSequenceConformance(t *testing.T, mk BlueprintSequenceFactory) 
 		store, sc := mk(t)
 		taskID := sc.NewTask(t)
 		br, step0 := seedFiring(t, store, sc, taskID)
-		changed, err := store.MarkRunStatus(ctx, sc.OrgID, br.ID, domain.BlueprintRunStatusCancelled, "cancelled", nil)
+		changed, err := store.MarkRunStatusSystem(ctx, sc.OrgID, br.ID, domain.BlueprintRunStatusCancelled, "cancelled", nil)
 		if err != nil || !changed {
 			t.Fatalf("terminate the run: (changed=%v, %v)", changed, err)
 		}

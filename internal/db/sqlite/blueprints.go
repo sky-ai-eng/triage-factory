@@ -1178,7 +1178,7 @@ func (s *blueprintStore) GetRunForConversationSystem(ctx context.Context, orgID,
 	return s.GetRunForConversation(ctx, orgID, stepConversationID)
 }
 
-func (s *blueprintStore) MarkRunStatus(ctx context.Context, orgID, id string, status domain.BlueprintRunStatus, abortReason string, abortedAtStep *int) (bool, error) {
+func (s *blueprintStore) MarkRunStatusSystem(ctx context.Context, orgID, id string, status domain.BlueprintRunStatus, abortReason string, abortedAtStep *int) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
@@ -1196,9 +1196,9 @@ func (s *blueprintStore) MarkRunStatus(ctx context.Context, orgID, id string, st
 	// Flip the blueprint_run terminal AND cancel any still-active child
 	// conversation in one transaction, so a terminal parent can never be
 	// observed (or committed) alongside a live child. inTx composes with the
-	// caller's tx when MarkRunStatus runs inside SyntheticClaimsWithTx (manual
-	// path) and opens a fresh one on the bare admin/system handle — either way
-	// the two writes are all-or-nothing. Without a non-terminal child a cancel
+	// caller's tx when this runs inside SystemWithTx and opens a fresh one on
+	// the bare handle — either way the two writes are all-or-nothing. Without a
+	// non-terminal child a cancel
 	// that raced the dispatcher's claim/setup window (or a parked `open` step
 	// the sequence-cancel path skips) would strand a child 'running', keeping
 	// the dispatcher on phantom work and pinning its feature branch in a
@@ -1235,7 +1235,7 @@ func (s *blueprintStore) MarkRunStatus(ctx context.Context, orgID, id string, st
 
 // parkOrphanedChildConversations parks every still-mid-flight child
 // conversation of blueprintRunID `open` and releases those children's active
-// claims. Called by MarkRunStatus's atomic flip.
+// claims. Called by MarkRunStatusSystem's atomic flip.
 //
 // A park, not a terminal: the child neither failed nor concluded, it was
 // stopped when its parent ended. Read the `open` as "stopped without
@@ -1450,10 +1450,6 @@ func (s *blueprintStore) RunProgress(ctx context.Context, orgID string, blueprin
 
 func (s *blueprintStore) ListStepsSystem(ctx context.Context, orgID, blueprintID string) ([]domain.BlueprintStep, error) {
 	return s.ListSteps(ctx, orgID, blueprintID)
-}
-
-func (s *blueprintStore) MarkRunStatusSystem(ctx context.Context, orgID, id string, status domain.BlueprintRunStatus, abortReason string, abortedAtStep *int) (bool, error) {
-	return s.MarkRunStatus(ctx, orgID, id, status, abortReason, abortedAtStep)
 }
 
 func (s *blueprintStore) GetRunSystem(ctx context.Context, orgID, id string) (*domain.BlueprintRun, error) {

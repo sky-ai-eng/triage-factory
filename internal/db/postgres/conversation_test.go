@@ -431,7 +431,7 @@ func newPgConversationSeeder(conn *sql.DB, orgID, userID, agentID, promptID stri
 		SetBlueprintRunStatus: func(t *testing.T, blueprintRunID, status string) {
 			t.Helper()
 			// Raw UPDATE — must NOT cascade onto child conversations (unlike
-			// BlueprintStore.MarkRunStatus), so the parked child stays parked.
+			// BlueprintStore.MarkRunStatusSystem), so the parked child stays parked.
 			if _, err := conn.Exec(`UPDATE blueprint_runs SET status = $1 WHERE id = $2`, status, blueprintRunID); err != nil {
 				t.Fatalf("set blueprint_run status: %v", err)
 			}

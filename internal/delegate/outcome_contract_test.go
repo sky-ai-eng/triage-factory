@@ -189,7 +189,7 @@ func TestTerminateBlueprint_CompletedClosesTask(t *testing.T) {
 	stampBotClaim(t, database, taskID)
 	bpr := blueprintRunIDForConversation(t, database, conversationID)
 
-	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "manual", runmode.LocalDefaultUserID,
+	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID,
 		time.Now(), runConfig{orgID: runmode.LocalDefaultOrgID}, domain.BlueprintRunStatusCompleted, "", nil, true)
 
 	if got := readTaskStatus(t, database, taskID); got != "done" {
@@ -214,7 +214,7 @@ func TestTerminateBlueprint_AbortLeavesTaskOpen(t *testing.T) {
 	}
 	bpr := blueprintRunIDForConversation(t, database, conversationID)
 
-	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "manual", runmode.LocalDefaultUserID,
+	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID,
 		time.Now(), runConfig{orgID: runmode.LocalDefaultOrgID}, domain.BlueprintRunStatusAborted, "needs a human", nil, true)
 
 	if got := readTaskStatus(t, database, taskID); got == "done" {
