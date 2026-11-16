@@ -7,6 +7,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/llm/modelaccess"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -36,12 +37,17 @@ func TestResolveTurnSettings(t *testing.T) {
 		// or completed, or "unreadable" for a read of it that fails.
 		blueprint string
 		// enabled, when set, is the team's set in place of the default one.
-		enabled  []string
-		rows     []row
-		explicit domain.TurnSettings
-		want     domain.TurnSettings
-		wantErr  error
-		field    string
+		enabled []string
+		// bedrockOff leaves Bedrock unconnected; Anthropic is always connected.
+		bedrockOff bool
+		// stepModel, when set, is the conversation's model in place of the
+		// default step model.
+		stepModel string
+		rows      []row
+		explicit  domain.TurnSettings
+		want      domain.TurnSettings
+		wantErr   error
+		field     string
 	}{
 		{name: "explicit settings are stamped",
 			explicit: domain.TurnSettings{Model: fable, Effort: domain.EffortHigh},
@@ -88,6 +94,22 @@ func TestResolveTurnSettings(t *testing.T) {
 		{name: "an inherited model outside the team's set is refused",
 			rows:    []row{{role: "user", model: disabled}},
 			wantErr: domain.ErrModelNotEnabled, field: "model"},
+		{name: "a model on an unconnected provider is refused",
+			bedrockOff: true, explicit: domain.TurnSettings{Model: bedrockSonnet},
+			wantErr: modelaccess.ErrProviderUnconfigured, field: "model"},
+		{name: "an inherited model on an unconnected provider is refused",
+			bedrockOff: true, rows: []row{{role: "user", model: bedrockSonnet}},
+			wantErr: modelaccess.ErrProviderUnconfigured, field: "model"},
+		{name: "a model both disabled and unconnected is refused as not enabled",
+			bedrockOff: true, enabled: []string{stepModel, teamDefault, fable},
+			explicit: domain.TurnSettings{Model: bedrockSonnet},
+			wantErr:  domain.ErrModelNotEnabled, field: "model"},
+		{name: "a running step on an unconnected provider is refused with no field",
+			running: true, bedrockOff: true, stepModel: bedrockSonnet,
+			wantErr: modelaccess.ErrProviderUnconfigured},
+		{name: "the step an aborted blueprint stopped on is refused the same way",
+			blueprint: "aborted", bedrockOff: true, stepModel: bedrockSonnet,
+			wantErr: modelaccess.ErrProviderUnconfigured},
 		{name: "an explicit effort the model does not take is refused",
 			explicit: domain.TurnSettings{Model: bedrockSonnet, Effort: domain.EffortMax},
 			wantErr:  ErrEffortNotSupported, field: "effort"},
@@ -111,8 +133,13 @@ func TestResolveTurnSettings(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			runmode.SetForTest(t, runmode.ModeMulti)
 			database := newDelegateTestDB(t)
+			connectProviders(t, database, true, !tc.bedrockOff)
 			seedConversation(t, database, "r-settings", "sess", t.TempDir())
-			if _, err := database.Exec(`UPDATE conversations SET model=? WHERE id='r-settings'`, stepModel); err != nil {
+			convModel := stepModel
+			if tc.stepModel != "" {
+				convModel = tc.stepModel
+			}
+			if _, err := database.Exec(`UPDATE conversations SET model=? WHERE id='r-settings'`, convModel); err != nil {
 				t.Fatalf("set the step's model: %v", err)
 			}
 			switch {
@@ -170,6 +197,35 @@ func TestResolveTurnSettings(t *testing.T) {
 				t.Errorf("settings = %+v, want %+v", got, tc.want)
 			}
 		})
+	}
+}
+
+// A running step's model is the only one a message to it may name, so the
+// composer's read keeps answering with it while its provider is not
+// connected. Omitting it would leave the composer nothing to send on, and the
+// send's refusal is what says why the message cannot run.
+func TestNextMessageSettings_ARunningStepKeepsItsModelWhileItsProviderIsUnconnected(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	const bedrockSonnet = "us.anthropic.claude-sonnet-5-5"
+	database := newDelegateTestDB(t)
+	connectProviders(t, database, true, false)
+	seedConversation(t, database, "r-step-read", "sess", t.TempDir())
+	if _, err := database.Exec(`UPDATE conversations SET model=? WHERE id='r-step-read'`, bedrockSonnet); err != nil {
+		t.Fatalf("set the step's model: %v", err)
+	}
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+	ctx := context.Background()
+	conv, err := s.conversations.GetSystem(ctx, runmode.LocalDefaultOrgID, "r-step-read")
+	if err != nil || conv == nil {
+		t.Fatalf("load conversation: %v", err)
+	}
+
+	got, err := s.NextMessageSettings(ctx, runmode.LocalDefaultOrgID, *conv)
+	if err != nil {
+		t.Fatalf("NextMessageSettings: %v", err)
+	}
+	if want := (domain.TurnSettings{Model: bedrockSonnet}); got != want {
+		t.Errorf("settings = %+v, want %+v", got, want)
 	}
 }
 

@@ -932,6 +932,29 @@ describe('the models panel', () => {
     })
   })
 
+  // The badge is the one every model picker shows. The other availability
+  // values refuse nothing, so they are not badged here.
+  it('badges a model whose provider is not connected, and no other row', async () => {
+    const routes = api.apiJSON.getMockImplementation()!
+    api.apiJSON.mockImplementation((path: string, init?: RequestInit) => {
+      if (path.endsWith('/models'))
+        return Promise.resolve({
+          items: MODELS_READ.items.map((m, i) => ({
+            ...m,
+            availability: (['verified', 'unconfigured', 'red'] as const)[i] ?? 'unverified',
+          })),
+        })
+      return routes(path, init)
+    })
+    await openPanel()
+
+    const row = within(table()).getByText('Claude Sonnet 5').closest('.tb-row') as HTMLElement
+    expect(within(row).getByText('Not connected')).toBeInTheDocument()
+    expect(within(table()).getAllByText('Not connected')).toHaveLength(1)
+    for (const word of ['Verified', 'Unavailable', 'Untested'])
+      expect(within(table()).queryByText(word)).toBeNull()
+  })
+
   it('gives a member no star and no toggle, but the same spend readings', async () => {
     roles.team = 'member'
     roles.org = false

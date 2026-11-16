@@ -241,6 +241,13 @@ const (
 	// changes nothing — the fix is a person picking a model, and a park that
 	// says "the runtime could not start" sends them looking at the runtime.
 	ParkReasonModelNotEnabled ParkReason = "model_not_enabled"
+	// ParkReasonProviderNotConnected — the model this conversation would run
+	// on is served by a provider the org holds no credential for, or the org
+	// holds no credentials at all. Its own reason rather than
+	// model_not_enabled because the fix is in a different place: the org's
+	// credentials, not the team's model set. A message naming a model on a
+	// connected provider resumes it.
+	ParkReasonProviderNotConnected ParkReason = "provider_not_connected"
 	// ParkReasonStalled — the engagement's stall watchdog stopped it: idle past
 	// its limit with nothing in flight, or an operation outlived its own
 	// deadline. Nothing retries it; a message resumes it.
@@ -275,6 +282,7 @@ func AllParkReasons() []ParkReason {
 		ParkReasonBlueprintTerminal,
 		ParkReasonLaunchFailed,
 		ParkReasonModelNotEnabled,
+		ParkReasonProviderNotConnected,
 		ParkReasonStalled,
 		ParkReasonUpstreamUnavailable,
 		ParkReasonSandboxLost,
@@ -289,8 +297,8 @@ func IsParkReason(reason string) bool {
 	switch ParkReason(reason) {
 	case ParkReasonTurnIncomplete, ParkReasonUserCancelled, ParkReasonSystemCancelled,
 		ParkReasonBlueprintCancelled, ParkReasonBlueprintTerminal,
-		ParkReasonLaunchFailed, ParkReasonModelNotEnabled, ParkReasonStalled,
-		ParkReasonUpstreamUnavailable, ParkReasonSandboxLost:
+		ParkReasonLaunchFailed, ParkReasonModelNotEnabled, ParkReasonProviderNotConnected,
+		ParkReasonStalled, ParkReasonUpstreamUnavailable, ParkReasonSandboxLost:
 		return true
 	}
 	return false
@@ -320,6 +328,7 @@ func ParkReasonsAwaitingPerson() []ParkReason {
 		ParkReasonTurnIncomplete,
 		ParkReasonLaunchFailed,
 		ParkReasonModelNotEnabled,
+		ParkReasonProviderNotConnected,
 		ParkReasonStalled,
 		ParkReasonUpstreamUnavailable,
 		ParkReasonSandboxLost,

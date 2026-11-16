@@ -688,6 +688,18 @@
   max-width: var(--container-measure);
 }
 
+/* A model's name sharing its cell with the availability badge. A cell holding
+   more than text owns its own type, so the name restates the table's sans
+   text cell. */
+.ts-model-name {
+  min-width: 0;
+  margin-right: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: var(--font-weight-regular) var(--text-card-title) / 1.5 var(--font-sans);
+}
+
 /* The models table's one footnote: the unit every price column shares. */
 .ts-models-foot {
   font-family: var(--font-mono);

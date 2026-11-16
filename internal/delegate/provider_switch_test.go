@@ -78,6 +78,7 @@ func TestWarmResume_KeepsTheEngagementForASwitchableModel(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			database := newDelegateTestDB(t)
+			connectProviders(t, database, true, true)
 			seedConversation(t, database, "r-warm-switch", "", "")
 			brID := blueprintRunIDForConversation(t, database, "r-warm-switch")
 			finishBlueprint(t, database, brID, "completed", 0)

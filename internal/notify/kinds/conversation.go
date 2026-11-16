@@ -121,6 +121,10 @@ var ConversationPaused = notify.Condition(notify.ConditionSpec[PausedConversatio
 			// A message would wake it into the same refusal.
 			cause = "Its team no longer allows the model it runs on."
 			next = "It can continue once that model is allowed again; the transcript names it."
+		case domain.ParkReasonProviderNotConnected:
+			// A message naming no model would wake it into the same refusal.
+			cause = "The provider of the model it runs on is not connected."
+			next = "It can continue once that provider is connected, or on a message that names another model; the transcript names the provider."
 		case domain.ParkReasonStalled:
 			cause = "It stopped making progress, so Triage Factory stopped it."
 		case domain.ParkReasonUpstreamUnavailable:
