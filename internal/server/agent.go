@@ -1210,7 +1210,8 @@ func steerErrorField(err error) string {
 // not connected (modelaccess.ErrProviderUnconfigured), which names the model
 // field, and an organization that brings its own credentials and has
 // connected none (modelaccess.ErrNoCredentials), which names no field because
-// no choice of model fixes it.
+// no choice of model fixes it. A message to a blueprint step names no field
+// for either, because its model cannot change.
 //
 // A concluded conversation (ErrConversationConcluded) is 409 as well, but it
 // carries its own message: this conversation's blueprint will never drive it

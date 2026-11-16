@@ -104,9 +104,12 @@ func TestResolveTurnSettings(t *testing.T) {
 			bedrockOff: true, enabled: []string{stepModel, teamDefault, fable},
 			explicit: domain.TurnSettings{Model: bedrockSonnet},
 			wantErr:  domain.ErrModelNotEnabled, field: "model"},
-		{name: "a running step on an unconnected provider is left to its claim",
+		{name: "a running step on an unconnected provider is refused with no field",
 			running: true, bedrockOff: true, stepModel: bedrockSonnet,
-			want: domain.TurnSettings{Model: bedrockSonnet}},
+			wantErr: modelaccess.ErrProviderUnconfigured},
+		{name: "the step an aborted blueprint stopped on is refused the same way",
+			blueprint: "aborted", bedrockOff: true, stepModel: bedrockSonnet,
+			wantErr: modelaccess.ErrProviderUnconfigured},
 		{name: "an explicit effort the model does not take is refused",
 			explicit: domain.TurnSettings{Model: bedrockSonnet, Effort: domain.EffortMax},
 			wantErr:  ErrEffortNotSupported, field: "effort"},
@@ -194,6 +197,35 @@ func TestResolveTurnSettings(t *testing.T) {
 				t.Errorf("settings = %+v, want %+v", got, tc.want)
 			}
 		})
+	}
+}
+
+// A running step's model is the only one a message to it may name, so the
+// composer's read keeps answering with it while its provider is not
+// connected. Omitting it would leave the composer nothing to send on, and the
+// send's refusal is what says why the message cannot run.
+func TestNextMessageSettings_ARunningStepKeepsItsModelWhileItsProviderIsUnconnected(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	const bedrockSonnet = "us.anthropic.claude-sonnet-5-5"
+	database := newDelegateTestDB(t)
+	connectProviders(t, database, true, false)
+	seedConversation(t, database, "r-step-read", "sess", t.TempDir())
+	if _, err := database.Exec(`UPDATE conversations SET model=? WHERE id='r-step-read'`, bedrockSonnet); err != nil {
+		t.Fatalf("set the step's model: %v", err)
+	}
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+	ctx := context.Background()
+	conv, err := s.conversations.GetSystem(ctx, runmode.LocalDefaultOrgID, "r-step-read")
+	if err != nil || conv == nil {
+		t.Fatalf("load conversation: %v", err)
+	}
+
+	got, err := s.NextMessageSettings(ctx, runmode.LocalDefaultOrgID, *conv)
+	if err != nil {
+		t.Fatalf("NextMessageSettings: %v", err)
+	}
+	if want := (domain.TurnSettings{Model: bedrockSonnet}); got != want {
+		t.Errorf("settings = %+v, want %+v", got, want)
 	}
 }
 

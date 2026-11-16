@@ -227,6 +227,50 @@ func TestFollowUpOnTheAbortedStepItselfIsAccepted(t *testing.T) {
 	}
 }
 
+// A message to the step an aborted blueprint stopped on, whose model's provider
+// has since been disconnected, is refused before the wake. An accepted one
+// would re-open the blueprint and withdraw its abort for a step whose claim
+// then refuses to run it.
+func TestFollowUpOnTheAbortedStep_AnUnconnectedProviderRefusesBeforeTheBlueprintReopens(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	database := newDelegateTestDB(t)
+	connectProviders(t, database, true, false)
+	bedrockModel := modelOn(t, modelcatalog.ProviderBedrock)
+	seedConversation(t, database, "r-aborted-lost", "sess-aborted-lost", t.TempDir())
+	if _, err := database.Exec(
+		`UPDATE conversations SET status = 'open', completed_at = CURRENT_TIMESTAMP, outcome='abort', model=? WHERE id='r-aborted-lost'`,
+		bedrockModel,
+	); err != nil {
+		t.Fatalf("abort conversation: %v", err)
+	}
+	bpr := blueprintRunIDForConversation(t, database, "r-aborted-lost")
+	finishBlueprint(t, database, bpr, "aborted", 0)
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+
+	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-aborted-lost", runmode.LocalDefaultUserID, "pick it back up", domain.TurnSettings{})
+	if !errors.Is(err, modelaccess.ErrProviderUnconfigured) {
+		t.Fatalf("SendMessage err = %v, want ErrProviderUnconfigured", err)
+	}
+	// A step's model cannot change, so there is no field for the person to fix.
+	var fe *SettingsFieldError
+	if errors.As(err, &fe) {
+		t.Errorf("SendMessage err names field %q, want none", fe.Field)
+	}
+	if gotStatus, _ := blueprintState(t, database, bpr); gotStatus != "aborted" {
+		t.Errorf("blueprint status = %q, want it still aborted — a refused send re-opens nothing", gotStatus)
+	}
+	var rows int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM messages WHERE conversation_id='r-aborted-lost'`).Scan(&rows); err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	if rows != 0 {
+		t.Errorf("a refused send wrote %d message row(s)", rows)
+	}
+	if !storedConcluded(t, database, "r-aborted-lost") {
+		t.Errorf("stored status = %q, want it still concluded", storedStatus(t, database, "r-aborted-lost"))
+	}
+}
+
 // TestFollowUpOnAnAbortedStep_ContinuesTheBlueprintToItsNextStep drives the
 // whole path a follow-up on an aborted step takes: the wake re-opens the
 // blueprint and withdraws the abort, the claim gate hands the step out, and

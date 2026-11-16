@@ -16,8 +16,8 @@ import (
 // The refusals a person's message settings can meet before anything is
 // written. Each reaches the client as a 409 naming the field it is about
 // (SettingsFieldError). The send also returns modelaccess's two refusals:
-// ErrProviderUnconfigured naming the model field, and ErrNoCredentials naming
-// none.
+// ErrProviderUnconfigured, naming the model field where another model would
+// fix it, and ErrNoCredentials, naming none.
 var (
 	// ErrStepSettingsFixed is a message to a step of a running blueprint that
 	// names a model or effort other than the step's: a step runs on the model
@@ -49,7 +49,31 @@ func refuseField(field string, err error) error {
 
 // resolveTurnSettings decides the model and effort a person's message runs
 // on, which the send stamps on the message's row. explicit holds what the
-// message gave, empty for a field it left out.
+// message gave, empty for a field it left out. It is turnSettings, with one
+// refusal added for a blueprint step.
+//
+// A step's model is fixed, so turnSettings does not ask whether the org can
+// authenticate it: nothing about the step is re-decided. A message to the step
+// is still new work on that model, and its claim would refuse it
+// (modelForClaim) after the wake had re-queued the step, and re-opened an
+// aborted blueprint, for a message that cannot run. So the send asks here,
+// before anything is written. The refusal names no field, because a message to
+// a step cannot name another model.
+func (s *Spawner) resolveTurnSettings(ctx context.Context, orgID string, conv domain.Conversation, explicit domain.TurnSettings) (domain.TurnSettings, error) {
+	settings, step, err := s.turnSettings(ctx, orgID, conv, explicit)
+	if err != nil {
+		return domain.TurnSettings{}, err
+	}
+	if step {
+		if err := s.checkModelProvider(ctx, orgID, settings.Model); err != nil {
+			return domain.TurnSettings{}, err
+		}
+	}
+	return settings, nil
+}
+
+// turnSettings decides the model and effort a message to conv runs on, and
+// reports whether conv is a blueprint step whose settings are fixed.
 //
 // A field the message gives wins, and one it leaves out takes the newest
 // person row's value, so a person's pick holds until they change it. With no
@@ -61,8 +85,7 @@ func refuseField(field string, err error) error {
 // effort, whatever the message says: a message naming different ones is
 // refused rather than ignored. That model is not held to the team's set
 // here, because the claim runs a step on it whatever the set says now
-// (modelForClaim): a step's work is not re-decided mid-flight. Nor is it held
-// to the org's connected providers here; the claim asks that of every model.
+// (modelForClaim): a step's work is not re-decided mid-flight.
 //
 // Otherwise the resolved model is held to the team's enabled set, which is the
 // only place a send checks it, then to the providers the org has connected
@@ -73,25 +96,25 @@ func refuseField(field string, err error) error {
 // inherited one is dropped, since the person did not send it. Last, a switch
 // to a model whose window the conversation already fills past the compaction
 // threshold is refused, so the switch can never fail a call mid-turn.
-func (s *Spawner) resolveTurnSettings(ctx context.Context, orgID string, conv domain.Conversation, explicit domain.TurnSettings) (domain.TurnSettings, error) {
+func (s *Spawner) turnSettings(ctx context.Context, orgID string, conv domain.Conversation, explicit domain.TurnSettings) (settings domain.TurnSettings, step bool, err error) {
 	br, err := s.blueprintRunForSettings(ctx, orgID, conv)
 	if err != nil {
-		return domain.TurnSettings{}, err
+		return domain.TurnSettings{}, false, err
 	}
 	if stepSettingsFixed(br, conv) {
 		if explicit.Model != "" && explicit.Model != conv.Model {
-			return domain.TurnSettings{}, refuseField("model", fmt.Errorf("%w (its model is %s)", ErrStepSettingsFixed, conv.Model))
+			return domain.TurnSettings{}, true, refuseField("model", fmt.Errorf("%w (its model is %s)", ErrStepSettingsFixed, conv.Model))
 		}
 		if explicit.Effort != "" {
-			return domain.TurnSettings{}, refuseField("effort", fmt.Errorf("%w (it runs at the provider's default effort)", ErrStepSettingsFixed))
+			return domain.TurnSettings{}, true, refuseField("effort", fmt.Errorf("%w (it runs at the provider's default effort)", ErrStepSettingsFixed))
 		}
-		return domain.TurnSettings{Model: conv.Model}, nil
+		return domain.TurnSettings{Model: conv.Model}, true, nil
 	}
 
 	var last *domain.Message
 	if explicit.Model == "" || explicit.Effort == "" {
 		if last, err = s.newestStampedPersonRow(ctx, orgID, conv.ID); err != nil {
-			return domain.TurnSettings{}, err
+			return domain.TurnSettings{}, false, err
 		}
 	}
 	got := explicit
@@ -101,7 +124,7 @@ func (s *Spawner) resolveTurnSettings(ctx context.Context, orgID string, conv do
 		} else {
 			model, err := s.claimModelWithoutPersonRow(ctx, orgID, conv)
 			if err != nil {
-				return domain.TurnSettings{}, refuseField("model", err)
+				return domain.TurnSettings{}, false, refuseField("model", err)
 			}
 			got.Model = model
 		}
@@ -114,43 +137,48 @@ func (s *Spawner) resolveTurnSettings(ctx context.Context, orgID string, conv do
 
 	models, err := s.resolveModel(ctx, orgID, conv.TeamID)
 	if err != nil {
-		return domain.TurnSettings{}, fmt.Errorf("resolve the team's models: %w", err)
+		return domain.TurnSettings{}, false, fmt.Errorf("resolve the team's models: %w", err)
 	}
 	if err := models.RequireModel(got.Model); err != nil {
 		if explicit.Model != "" {
 			err = fmt.Errorf("%w: %s is not among this team's enabled models (%s) — pick one of those", domain.ErrModelNotEnabled, got.Model, models.Enabled())
 		}
-		return domain.TurnSettings{}, refuseField("model", err)
+		return domain.TurnSettings{}, false, refuseField("model", err)
 	}
 	if err := s.checkModelProvider(ctx, orgID, got.Model); err != nil {
 		// Another model fixes an unconnected provider, so that refusal names
 		// the field. No choice of model fixes an org with no credentials.
 		if errors.Is(err, modelaccess.ErrProviderUnconfigured) {
-			return domain.TurnSettings{}, refuseField("model", err)
+			return domain.TurnSettings{}, false, refuseField("model", err)
 		}
-		return domain.TurnSettings{}, err
+		return domain.TurnSettings{}, false, err
 	}
 
 	if got.Effort != "" && !modelTakesEffort(got.Model, got.Effort) {
 		if inheritedEffort {
 			got.Effort = ""
 		} else {
-			return domain.TurnSettings{}, refuseField("effort", fmt.Errorf("%w: %s does not take %s effort", ErrEffortNotSupported, got.Model, got.Effort))
+			return domain.TurnSettings{}, false, refuseField("effort", fmt.Errorf("%w: %s does not take %s effort", ErrEffortNotSupported, got.Model, got.Effort))
 		}
 	}
 
 	if err := s.windowTakesConversation(ctx, orgID, conv.ID, got.Model); err != nil {
-		return domain.TurnSettings{}, refuseField("model", err)
+		return domain.TurnSettings{}, false, refuseField("model", err)
 	}
-	return got, nil
+	return got, false, nil
 }
 
 // NextMessageSettings is what a message that names no settings would run on,
-// for the composer to open with: resolveTurnSettings with nothing given. A
-// message the send would refuse runs on nothing, so the refusal is the
-// answer, and so is a failed read, rather than a guess.
+// for the composer to open with: turnSettings with nothing given. A message
+// the send would refuse runs on nothing, so the refusal is the answer, and so
+// is a failed read, rather than a guess.
+//
+// A blueprint step is the exception. Its model is the only one a message to
+// it may name, so this answers with it even while the org cannot authenticate
+// it, and the send's refusal says why the message cannot run.
 func (s *Spawner) NextMessageSettings(ctx context.Context, orgID string, conv domain.Conversation) (domain.TurnSettings, error) {
-	return s.resolveTurnSettings(ctx, orgID, conv, domain.TurnSettings{})
+	settings, _, err := s.turnSettings(ctx, orgID, conv, domain.TurnSettings{})
+	return settings, err
 }
 
 // newestStampedPersonRow is the conversation's newest person row when it
