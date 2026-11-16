@@ -14,15 +14,28 @@
 //
 // A local run executes under the user's own HOME, so gh would otherwise read
 // ~/.config/gh — including the hosts entry holding the user's personal GitHub
-// credential. Every channel here points gh at an empty per-run directory
-// instead, which is the local-mode analogue of the jail's HOME isolation: the
-// only credential in play is the per-run placeholder, and the only real one
-// lives in this process and is injected on the upstream hop.
+// credential. Every channel here points gh at a per-run directory instead,
+// holding no setting but the socket's, which is the local-mode analogue of the
+// jail's HOME isolation: the only credential in play is the per-run
+// placeholder, and the only real one lives in this process and is injected on
+// the upstream hop.
+//
+// # Why gh is on a unix socket
+//
+// gh resolves a command's repository by matching the checkout's git remotes
+// against GH_HOST, and drops a remote's port before it compares, so a GH_HOST
+// with a port matches no remote. Git's rewritten remotes name the injector's
+// TLS listener, "127.0.0.1:<port>", and a local process cannot bind the port
+// 443 that would let GH_HOST leave it out. So gh is given a GH_HOST of
+// "127.0.0.1" and a config whose http_unix_socket sends every request it makes
+// to the injector over a socket in the channel directory, while git keeps the
+// ported listener. When the socket cannot be set up, GH_HOST keeps the port
+// and a repository-contextual gh command needs -R.
 //
 // # Lifecycle
 //
 // One channel per run: Start before the agent subprocess, Close when the run
-// ends. Close stops the listener and removes the channel directory, so a run
+// ends. Close stops the listeners and removes the channel directory, so a run
 // that outlives its channel gets connection-refused — which surfaces to the
 // agent as an ordinary gh error, the same contract multi mode has.
 package ghchannel
@@ -36,10 +49,13 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/cabundle"
 	"github.com/sky-ai-eng/triage-factory/internal/ghcli/ghinjector"
+	"github.com/sky-ai-eng/triage-factory/internal/logging"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/proxy/proxycert"
 )
@@ -48,6 +64,19 @@ import (
 // state worth waiting on; an in-flight request either completes promptly or the
 // run is already over.
 const shutdownTimeout = 3 * time.Second
+
+// socketHost is GH_HOST while gh reaches the injector over the channel's unix
+// socket: the TLS listener's address without its port, which is what gh
+// compares a rewritten remote against.
+const socketHost = "127.0.0.1"
+
+// socketPathLimit is the size of a unix socket address's path field: 108 bytes
+// on Linux, 104 on macOS. A path that fills it leaves no room for the NUL a
+// client written in C expects after it, so the channel's socket path must be
+// shorter.
+var socketPathLimit = len(syscall.RawSockaddrUnix{}.Path)
+
+var channelLog = logging.Component("ghchannel")
 
 // Config is one run's channel inputs.
 type Config struct {
@@ -98,8 +127,8 @@ type Config struct {
 	Repositories   ghinjector.RepositorySource
 	DenyRepository func(context.Context, ghinjector.DeniedRepository)
 
-	// GitHandler, when non-nil, serves git smart HTTP on the same TLS origin as
-	// the GitHub API. This keeps GH_HOST and git's rewritten remote identical.
+	// GitHandler, when non-nil, serves git smart HTTP on the injector's TLS
+	// listener, the origin git's rewritten remotes name (Channel.GitHost).
 	GitHandler http.Handler
 }
 
@@ -107,12 +136,18 @@ type Config struct {
 // needs to use it. Every field is safe to hand to the agent: Token is the
 // per-run placeholder, never the org's credential.
 type Channel struct {
-	// Host is the injector's bound "127.0.0.1:<port>" — GH_HOST.
+	// Host is GH_HOST: "127.0.0.1" when gh reaches the injector over the
+	// channel's unix socket, which ConfigDir's config.yml names, or GitHost
+	// when the socket could not be set up.
 	Host string
+	// GitHost is the injector's TLS listener, "127.0.0.1:<port>", which git's
+	// rewritten remotes name.
+	GitHost string
 	// Token is the per-run placeholder — GH_ENTERPRISE_TOKEN. The injector
 	// strips it and injects the real credential upstream.
 	Token string
-	// CertPath is the per-run trust file — SSL_CERT_FILE.
+	// CertPath is the per-run trust file — SSL_CERT_FILE, and git's CA for
+	// GitHost.
 	CertPath string
 	// ConfigDir is the per-run gh config directory — GH_CONFIG_DIR.
 	ConfigDir string
@@ -123,9 +158,11 @@ type Channel struct {
 	channelDir string
 }
 
-// Start writes the per-run trust surface and binds the injector on loopback.
-// On any error nothing is left running and the channel directory is removed —
-// callers degrade to no gh channel rather than to a half-built one.
+// Start writes the per-run trust surface, binds the injector on loopback, and
+// serves it on the channel's unix socket. On any error nothing is left running
+// and the channel directory is removed — callers degrade to no gh channel
+// rather than to a half-built one. A socket that cannot be set up is not an
+// error: the channel starts with gh on the TLS listener (see the package doc).
 func Start(cfg Config) (*Channel, error) {
 	if cfg.ConversationID == "" {
 		return nil, fmt.Errorf("ghchannel: ConversationID is required")
@@ -193,13 +230,18 @@ func Start(cfg Config) (*Channel, error) {
 	if err != nil {
 		return fail(fmt.Errorf("ghchannel: construct injector: %w", err))
 	}
-	host, err := srv.Start(net.JoinHostPort("127.0.0.1", "0"))
+	gitHost, err := srv.Start(net.JoinHostPort("127.0.0.1", "0"))
 	if err != nil {
 		return fail(fmt.Errorf("ghchannel: start injector: %w", err))
+	}
+	host := gitHost
+	if serveSocket(srv, cfg.ConversationID, channelDir, configDir) {
+		host = socketHost
 	}
 
 	return &Channel{
 		Host:       host,
+		GitHost:    gitHost,
 		Token:      token,
 		CertPath:   certPath,
 		ConfigDir:  configDir,
@@ -207,6 +249,49 @@ func Start(cfg Config) (*Channel, error) {
 		srv:        srv,
 		channelDir: channelDir,
 	}, nil
+}
+
+// serveSocket binds the channel's unix socket, serves srv on it, and writes the
+// gh config that sends gh's requests there, reporting whether gh is on the
+// socket. A failure is logged and answered false, and leaves neither the
+// socket nor the config line behind, since a channel on the TLS listener alone
+// still works.
+func serveSocket(srv *ghinjector.Server, conversationID, channelDir, configDir string) bool {
+	path := filepath.Join(channelDir, "gh.sock")
+	if len(path) >= socketPathLimit {
+		channelLog.Warn("gh channel socket path is too long; gh stays on the ported address and needs -R to name a repository",
+			"conversation", conversationID, "path_length", len(path), "limit", socketPathLimit)
+		return false
+	}
+	warn := func(err error) bool {
+		channelLog.Warn("gh channel socket not served; gh stays on the ported address and needs -R to name a repository",
+			"conversation", conversationID, "path_length", len(path), "error", err)
+		return false
+	}
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		return warn(err)
+	}
+	// The channel directory already keeps other accounts out. The socket gets
+	// the mode of the channel's other files rather than the umask's.
+	if err := os.Chmod(path, 0o600); err != nil {
+		_ = ln.Close()
+		return warn(err)
+	}
+	// Quoted, since a home directory can hold characters a plain YAML scalar
+	// cannot. Go's escapes are YAML's for a path that is valid UTF-8, and a
+	// YAML file can hold no other.
+	configPath := filepath.Join(configDir, "config.yml")
+	if err := os.WriteFile(configPath, []byte("http_unix_socket: "+strconv.Quote(path)+"\n"), 0o600); err != nil {
+		_ = ln.Close()
+		return warn(err)
+	}
+	if err := srv.ServeUnix(ln); err != nil {
+		_ = os.Remove(configPath)
+		_ = ln.Close()
+		return warn(err)
+	}
+	return true
 }
 
 // Close stops the injector and removes the channel directory. Idempotent and

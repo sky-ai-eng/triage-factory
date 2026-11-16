@@ -11,8 +11,8 @@ import (
 // of the jail's channel env, which cell.JailEnv assembles.
 //
 // The five channel variables are identical in both modes, so the agent-facing
-// surface is one surface: GH_HOST names the injector (gh forces https to it and
-// verifies against the trust file), GH_ENTERPRISE_TOKEN carries the per-run
+// surface is one surface: GH_HOST names the injector (see
+// GHChannelParams.Host), GH_ENTERPRISE_TOKEN carries the per-run
 // PLACEHOLDER — never a real credential, in either mode — SSL_CERT_FILE points
 // at the trust file, and the two suppressors keep gh non-interactive and off the
 // release-check network.
@@ -24,9 +24,11 @@ import (
 //     TF-owned pinned binary. Without it the shell would find the user's own
 //     gh, which is authenticated as the user — the exact identity this channel
 //     exists to keep an agent off.
-//   - GH_CONFIG_DIR points at an empty per-run directory, because a local agent
-//     runs under the user's real HOME and gh would otherwise read their
-//     ~/.config/gh, hosts entry and personal credential included.
+//   - GH_CONFIG_DIR points at a per-run directory, because a local agent runs
+//     under the user's real HOME and gh would otherwise read their
+//     ~/.config/gh, hosts entry and personal credential included. It holds at
+//     most one setting, the one that sends gh's requests to the injector's
+//     unix socket.
 //
 // Empty when the channel is off, which is how a run with no provisioned binary
 // degrades to the scoped exec verbs.

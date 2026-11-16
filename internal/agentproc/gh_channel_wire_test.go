@@ -2,12 +2,14 @@ package agentproc
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -15,7 +17,9 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/ghcli/ghchannel"
+	"github.com/sky-ai-eng/triage-factory/internal/githooks"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
+	"github.com/sky-ai-eng/triage-factory/internal/proxy/gitproxy"
 )
 
 // These tests drive the REAL pinned gh binary through the LOCAL-MODE channel
@@ -84,17 +88,22 @@ const (
 )
 
 // fakeUpstream answers what `gh pr view` needs, in gh's own wire shapes, and
-// records the Authorization header it was called with.
-func fakeUpstream(t *testing.T) (*httptest.Server, func() string) {
+// records the Authorization header it was last called with and every GraphQL
+// body it was sent.
+func fakeUpstream(t *testing.T) (*httptest.Server, func() string, func() []string) {
 	t.Helper()
 	var (
-		mu   sync.Mutex
-		auth string
+		mu      sync.Mutex
+		auth    string
+		queries []string
 	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		mu.Lock()
 		auth = r.Header.Get("Authorization")
+		if strings.HasSuffix(r.URL.Path, "/graphql") {
+			queries = append(queries, string(body))
+		}
 		mu.Unlock()
 
 		w.Header().Set("Content-Type", "application/json")
@@ -124,11 +133,17 @@ func fakeUpstream(t *testing.T) (*httptest.Server, func() string) {
 		}
 	}))
 	t.Cleanup(srv.Close)
-	return srv, func() string {
+	lastAuth := func() string {
 		mu.Lock()
 		defer mu.Unlock()
 		return auth
 	}
+	graphQL := func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(queries)
+	}
+	return srv, lastAuth, graphQL
 }
 
 // TestLocalGHChannel_WiresRealGH is the ticket's outcome invariant, end to end:
@@ -137,7 +152,7 @@ func fakeUpstream(t *testing.T) (*httptest.Server, func() string) {
 // placeholder — and the binary that runs is the TF-owned one even with the
 // user's own gh on PATH.
 func TestLocalGHChannel_WiresRealGH(t *testing.T) {
-	upstream, upstreamAuth := fakeUpstream(t)
+	upstream, upstreamAuth, _ := fakeUpstream(t)
 	paths.SetForTest(t, t.TempDir())
 
 	ch, err := ghchannel.Start(ghchannel.Config{
@@ -200,7 +215,7 @@ func TestLocalGHChannel_WiresRealGH(t *testing.T) {
 // gh must not read the user's ~/.config/gh: it holds their personal credential,
 // and a local run executes under their real HOME.
 func TestLocalGHChannel_IgnoresUserGHConfig(t *testing.T) {
-	upstream, _ := fakeUpstream(t)
+	upstream, _, _ := fakeUpstream(t)
 	paths.SetForTest(t, t.TempDir())
 
 	ch, err := ghchannel.Start(ghchannel.Config{
@@ -252,7 +267,7 @@ func TestLocalGHChannel_IgnoresUserGHConfig(t *testing.T) {
 // outlives its channel gets connection-refused, which surfaces to the agent as
 // a plain gh error — the same contract multi mode has.
 func TestLocalGHChannel_CloseTearsDown(t *testing.T) {
-	upstream, _ := fakeUpstream(t)
+	upstream, _, _ := fakeUpstream(t)
 	paths.SetForTest(t, t.TempDir())
 
 	ch, err := ghchannel.Start(ghchannel.Config{
@@ -276,5 +291,121 @@ func TestLocalGHChannel_CloseTearsDown(t *testing.T) {
 	}
 	if err := ch.Close(); err != nil {
 		t.Errorf("second Close: %v, want it to be idempotent", err)
+	}
+}
+
+// TestLocalGHChannel_InfersTheRepositoryFromTheCheckout is the reason a local
+// channel serves gh on a unix socket: from a checkout whose origin is the
+// upstream URL, under the run's git config and channel env, `gh pr view` with
+// no -R resolves the checkout's repository and asks the injector about it.
+// gh matches the remote git rewrites onto the TLS listener against GH_HOST
+// after dropping the remote's port, so this resolves only while GH_HOST has
+// none.
+func TestLocalGHChannel_InfersTheRepositoryFromTheCheckout(t *testing.T) {
+	upstream, _, graphQL := fakeUpstream(t)
+	// A short state root, so the channel's socket path fits the platform's
+	// limit whatever this test is called.
+	root, err := os.MkdirTemp("", "tfgh")
+	if err != nil {
+		t.Fatalf("make state root: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	paths.SetForTest(t, root)
+
+	ch, err := ghchannel.Start(ghchannel.Config{
+		ConversationID: "conv-wire-4",
+		Upstream:       upstream.URL + "/api/v3",
+		BinDir:         wireBinDir(t),
+		TokenSource:    func(context.Context) (string, error) { return wireReal, nil },
+	})
+	if err != nil {
+		t.Fatalf("ghchannel.Start: %v", err)
+	}
+	t.Cleanup(func() { _ = ch.Close() })
+	if ch.Host == ch.GitHost {
+		t.Fatalf("the channel came up without its socket (GH_HOST %q)", ch.Host)
+	}
+
+	// The run's git config: the managed git proxy's rewrites onto the
+	// channel's TLS listener. Nothing here fetches, so the proxy's upstream is
+	// never reached.
+	const gitUpstream = "https://ghe.test"
+	git, err := StartGitProxy(context.Background(), "127.0.0.1", false, &GitProxyConfig{
+		TokenSource: func(context.Context, string, string) (gitproxy.Token, error) {
+			return gitproxy.Token{Value: "ghs_git"}, nil
+		},
+		Upstream: gitUpstream,
+	})
+	if err != nil {
+		t.Fatalf("StartGitProxy: %v", err)
+	}
+	t.Cleanup(func() { _ = git.Shutdown(context.Background()) })
+
+	gitBin, err := exec.LookPath("git")
+	if err != nil {
+		t.Skipf("git not installed: %v", err)
+	}
+	// gh reads the checkout's remotes with git, so git has to be on PATH.
+	t.Setenv("PATH", filepath.Dir(gitBin)+string(os.PathListSeparator)+"/usr/bin:/bin")
+	home := t.TempDir()
+	base := append([]string{
+		"HOME=" + home,
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_CONFIG_SYSTEM=/dev/null",
+		"GIT_TERMINAL_PROMPT=0",
+	}, directGHChannelEnv(&GHChannelParams{
+		Host:           ch.Host,
+		GitHost:        ch.GitHost,
+		Token:          ch.Token,
+		CertSourcePath: ch.CertPath,
+		BinDir:         ch.BinDir,
+		ConfigDir:      ch.ConfigDir,
+	})...)
+	env := githooks.DirectAgentEnv(base, git.GitConfigPairsWithSSH(ch.GitHost, ch.CertPath)...)
+
+	checkout := t.TempDir()
+	for _, args := range [][]string{
+		{"init", "-q"},
+		{"remote", "add", "origin", gitUpstream + "/" + wireOwner + "/" + wireRepo + ".git"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = checkout
+		cmd.Env = env
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", "gh pr view "+strconv.Itoa(wirePRNum))
+	cmd.Env = env
+	cmd.Dir = checkout
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("gh pr view with no -R failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), wirePRURL) {
+		t.Errorf("gh output = %q, want the PR url (fixture drift?)", out)
+	}
+
+	var named []string
+	for _, body := range graphQL() {
+		var req struct {
+			Query     string `json:"query"`
+			Variables struct {
+				Owner string `json:"owner"`
+				Repo  string `json:"repo"`
+			} `json:"variables"`
+		}
+		if err := json.Unmarshal([]byte(body), &req); err != nil {
+			t.Fatalf("decode GraphQL body %q: %v", body, err)
+		}
+		if strings.Contains(req.Query, "PullRequestByNumber") {
+			named = append(named, req.Variables.Owner+"/"+req.Variables.Repo)
+		}
+	}
+	if want := wireOwner + "/" + wireRepo; !slices.Equal(named, []string{want}) {
+		t.Errorf("PullRequestByNumber named %v, want the checkout's %s", named, want)
 	}
 }
