@@ -234,3 +234,18 @@ func TestSecrets_DeploymentCommitSigner(t *testing.T) {
 		}
 	}
 }
+
+// TestSecrets_DeploymentSlackApp: the deployment Slack app's three secrets are
+// captured, and its App ID and client ID, which are plain config, are not.
+func TestSecrets_DeploymentSlackApp(t *testing.T) {
+	for _, name := range []string{"TF_SLACK_CLIENT_SECRET", "TF_SLACK_SIGNING_SECRET", "TF_SLACK_APP_TOKEN"} {
+		if !slices.Contains(Secrets, name) {
+			t.Errorf("Secrets does not contain %s", name)
+		}
+	}
+	for _, name := range []string{"TF_SLACK_APP_ID", "TF_SLACK_CLIENT_ID"} {
+		if slices.Contains(Secrets, name) {
+			t.Errorf("Secrets contains %s, which is not a secret", name)
+		}
+	}
+}

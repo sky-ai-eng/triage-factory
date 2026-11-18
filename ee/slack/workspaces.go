@@ -36,6 +36,10 @@ type workspacesHandler struct {
 	// response. nil in tests that don't exercise it (TestHandlers_LocalMode404
 	// constructs a zero-value handler) — toWorkspaceView is nil-safe.
 	sockets *socketManager
+	// deployment is the deployment's own Slack app, the zero app when there
+	// is none. Connect refuses its bot token, because a pasted-token
+	// connection is always an org's own app.
+	deployment deploymentApp
 }
 
 type workspaceView struct {
@@ -221,6 +225,14 @@ func (h *workspacesHandler) handleConnect(w http.ResponseWriter, r *http.Request
 		return
 	}
 	apiAppID := botsInfo.AppID
+	if h.deployment.Configured() && apiAppID == h.deployment.AppID {
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
+			Reason:  httpx.ReasonInvalidField,
+			Message: "This bot token belongs to this deployment's Slack app. Connect it with Add to Slack instead.",
+			Field:   "bot_token",
+		})
+		return
+	}
 
 	existing, err := h.getExisting(r.Context(), orgID, userID, result.TeamID, apiAppID)
 	if err != nil {

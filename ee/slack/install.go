@@ -96,17 +96,32 @@ func install(api server.ExtensionAPI) {
 	sockets := newSocketManager(stores, pipeline, slackHTTPClient, socketConfigChanged)
 	sockets.stats = stats
 
+	// Read once and handed to every handler that needs it, so no two of them
+	// can disagree about it. A misconfigured app is logged and the deployment
+	// runs without one, as with the deployment GitHub and Linear apps: a
+	// deployment whose orgs bring their own apps must still start, and no
+	// deployment app fails closed.
+	deployment, err := deploymentAppFromEnv()
+	if err != nil {
+		slackLog.Error("read the deployment Slack app from the environment failed; the deployment runs without one", "error", err)
+		deployment = deploymentApp{}
+	}
+
 	h := &workspacesHandler{
-		tx:        api.Tx(),
-		az:        api.Authz(),
-		client:    slackHTTPClient,
-		publicURL: api.PublicURL,
-		sockets:   sockets,
+		tx:         api.Tx(),
+		az:         api.Authz(),
+		client:     slackHTTPClient,
+		publicURL:  api.PublicURL,
+		sockets:    sockets,
+		deployment: deployment,
 	}
 	api.API("GET /api/slack/workspaces", h.handleList)
 	api.APIMutating("POST /api/slack/workspaces", h.handleConnect)
 	api.APIMutating("DELETE /api/slack/workspaces/{workspace_id}/{api_app_id}", h.handleDelete)
 	api.API("GET /api/slack/manifest", h.handleManifest)
+
+	dh := &deploymentAppHandler{app: deployment, publicURL: api.PublicURL}
+	api.API("GET /api/slack/deployment-app", dh.handleGet)
 
 	ch := &channelsHandler{
 		tx:         api.Tx(),
