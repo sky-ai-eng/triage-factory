@@ -213,6 +213,9 @@ func (h *workspacesHandler) handleConnect(w http.ResponseWriter, r *http.Request
 		httpx.BadRequest(w, "bot_token is required")
 		return
 	}
+	// TODO(TFAC-1487): an xoxe. bot token comes from an app with token rotation
+	// on and expires in 12 hours, and TF never refreshes it; it should be
+	// refused here.
 
 	// The bot token is the ONLY way the handler learns the workspace id —
 	// the admin never types it. Always re-validated: there's no "keep the

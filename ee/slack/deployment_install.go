@@ -313,6 +313,9 @@ func (h *installHandler) handleCallback(w http.ResponseWriter, r *http.Request) 
 		h.fail(w, r, orgID, returnTo, "install_failed")
 		return
 	}
+	// TODO(TFAC-1487): an app with token rotation on answers with a bot token
+	// that expires in 12 hours and a refresh_token, which is dropped here, so
+	// the stored connection stops working; the install should be refused.
 	if inst.TeamID == "" {
 		slackLog.Error("slack install: Slack answered a workspace install with no workspace", "org", orgID)
 		h.fail(w, r, orgID, returnTo, "install_failed")
