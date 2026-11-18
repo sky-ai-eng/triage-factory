@@ -118,7 +118,7 @@ type webhookHandler struct {
 	// the pipeline. Nil-safe, like the pipeline's optional collaborators.
 	stats *ingestStats
 	// deployment is the deployment's own Slack app, the zero app when there
-	// is none. Only POST /api/webhooks/slack reads it.
+	// is none.
 	deployment deploymentApp
 }
 

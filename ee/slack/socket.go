@@ -118,7 +118,7 @@ type socketManager struct {
 	// into. Nil-safe downstream, so tests may leave it unset.
 	stats *ingestStats
 	// deployment is the deployment's own Slack app, the zero app when there
-	// is none. When its transport is Socket Mode it always has a connection.
+	// is none.
 	deployment deploymentApp
 
 	mu    sync.Mutex

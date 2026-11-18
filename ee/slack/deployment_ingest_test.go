@@ -482,21 +482,25 @@ func TestDeploymentSocket_TwoOrgsOnOneConnection(t *testing.T) {
 	}
 }
 
-// TestDeploymentSocket_EveryRowDeleted_KeepsRunning: deleting every
-// connection through the deployment app leaves its socket up.
+// TestDeploymentSocket_EveryRowDeleted_KeepsRunning: a reconcile pass after
+// every connection through the deployment app is deleted leaves its socket
+// up. The passes are called directly rather than through run, because
+// reconcile returns only once any teardown it decides on has finished, so the
+// assertion follows a pass that has certainly happened.
 func TestDeploymentSocket_EveryRowDeleted_KeepsRunning(t *testing.T) {
 	withFastSocketTimings(t)
 	fake := newFakeSlackSocket(t)
 	rig := newDeploymentSocketRig(t, deploymentRow(deployTestOrgID, deployTestWorkspace, true))
-	runManager(t, rig.mgr)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancel()
+		rig.mgr.stopAll()
+	})
+	rig.mgr.reconcile(ctx)
 	conn := fake.nextConn(t)
 
 	rig.wsStore.deleteRow(deployTestWorkspace, deployTestAppID)
-	select {
-	case rig.configChanged <- struct{}{}:
-	default:
-	}
-	time.Sleep(5 * socketReconcileInterval)
+	rig.mgr.reconcile(ctx)
 
 	if got := liveAppIDs(rig.mgr); !slices.Equal(got, []string{deployTestAppID}) {
 		t.Fatalf("live connections = %v; want the deployment app's", got)

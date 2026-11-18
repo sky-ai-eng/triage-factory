@@ -44,7 +44,7 @@ type socketEnvelope struct {
 // any error and dials fresh; there is no in-place recovery.
 type appConnection struct {
 	appID string
-	orgID string // the app's org (app->one-org, TFAC-533) — captured once at start; "" on the deployment app's
+	orgID string // the org an org's own app belongs to, captured once at start; "" on the deployment app's
 
 	// deployment marks the deployment's own app, whose envelopes are for
 	// whichever org holds the workspace's row (deliverDeploymentEvent). It
