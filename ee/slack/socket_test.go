@@ -65,6 +65,9 @@ type fakeSlackSocket struct {
 	badURL    atomic.Bool // apps.connections.open returns a URL that 404s on upgrade (dial failure)
 	keepAlive atomic.Bool // server CloseRead()s each conn so it auto-pongs the client's liveness pings
 	conns     chan *slackws.Conn
+	// openAuth is the Authorization header of the latest
+	// apps.connections.open call: the app token a connection dialed with.
+	openAuth atomic.Value
 }
 
 func newFakeSlackSocket(t *testing.T) *fakeSlackSocket {
@@ -83,6 +86,7 @@ func newFakeSlackSocket(t *testing.T) *fakeSlackSocket {
 }
 
 func (f *fakeSlackSocket) handleOpen(w http.ResponseWriter, r *http.Request) {
+	f.openAuth.Store(r.Header.Get("Authorization"))
 	if f.authFail.Load() {
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "invalid_auth"})
 		return
@@ -233,9 +237,10 @@ func newSocketTestRig(t *testing.T, rows ...*slackstore.Connection) *socketTestR
 	entities := newFakeEntities()
 	channels := newFakeChannelRegistryFor(entities)
 	pipeline := &ingestPipeline{
-		deliveries: newFakeDeliveries(),
-		channels:   channels,
-		publish:    func(_ context.Context, evt domain.Event) { *published = append(*published, evt) },
+		connections: wsStore,
+		deliveries:  newFakeDeliveries(),
+		channels:    channels,
+		publish:     func(_ context.Context, evt domain.Event) { *published = append(*published, evt) },
 	}
 	withFakeIngestTx(pipeline)
 

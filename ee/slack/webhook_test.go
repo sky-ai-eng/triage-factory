@@ -230,10 +230,11 @@ func newWebhookRig(t *testing.T, signingSecretRef string, licensed bool) *webhoo
 	channels := newFakeChannelRegistryFor(entities)
 	stats, metrics := newTestStats()
 	pipeline := &ingestPipeline{
-		deliveries: deliveries,
-		channels:   channels,
-		publish:    func(_ context.Context, evt domain.Event) { *published = append(*published, evt) },
-		stats:      stats,
+		connections: wsStore,
+		deliveries:  deliveries,
+		channels:    channels,
+		publish:     func(_ context.Context, evt domain.Event) { *published = append(*published, evt) },
+		stats:       stats,
 	}
 	withFakeIngestTx(pipeline)
 	return &webhookRig{

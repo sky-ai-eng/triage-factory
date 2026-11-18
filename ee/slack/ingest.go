@@ -12,6 +12,7 @@ import (
 	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/eventing/ingest"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 )
@@ -152,6 +153,63 @@ type ingestPipeline struct {
 	// counters TFAC-650's channel-firehose subscriptions made necessary.
 	// Nil-safe for the same reason as identity.
 	stats *ingestStats
+}
+
+// deliverDeploymentEvent is where an event_callback the deployment's Slack app
+// delivered goes, from either transport, once the transport knows the delivery
+// is the app's: the Events API route has checked the signing secret from the
+// environment, and a Socket Mode delivery arrived on the app's own socket.
+// appID is the deployment app's id. The connection the delivery is for is the
+// one row (team_id, api_app_id) names, whichever org holds it:
+//
+//	api_app_id is not appID                     dropped, logged at Error
+//	no row for (team_id, api_app_id)            dropped, logged at Debug
+//	the row is an org's own app                 dropped, logged at Error
+//	the row is inactive                         dropped by handleEventCallback
+//	unentitled org, and not a removal           dropped by deliverForConnection
+//	otherwise                                   handleEventCallback for the row
+//
+// A row for a workspace TF never connected is expected, not a sighting: an
+// install that TF refused leaves the app in that workspace. A row
+// holding appID as an org's own app is an error, because connect refuses the
+// deployment app's token, so nothing writes one.
+//
+// A drop returns nil, so the transport acknowledges it: Slack turns off an
+// app's event subscription after sustained failures, and a drop is never
+// Slack's fault. The error is a store or pipeline failure, which the transport
+// does not acknowledge, so Slack redelivers.
+func (p *ingestPipeline) deliverDeploymentEvent(ctx context.Context, appID string, envelope slackEventEnvelope, inner slackInnerEvent) error {
+	if envelope.APIAppID != appID {
+		slackLog.Error("slack: a delivery verified as the deployment Slack app's names another app; dropped it",
+			"deployment_app", appID, "api_app_id", envelope.APIAppID, "workspace", envelope.TeamID, "type", inner.Type)
+		return nil
+	}
+	ws, err := p.connections.GetByWorkspaceAppSystem(ctx, envelope.TeamID, envelope.APIAppID)
+	if err != nil {
+		return fmt.Errorf("resolve the deployment Slack app's connection in %s: %w", envelope.TeamID, err)
+	}
+	if ws == nil {
+		slackLog.Debug("slack: the deployment Slack app delivered for a workspace no org has connected; dropped it",
+			"app", appID, "workspace", envelope.TeamID, "type", inner.Type)
+		return nil
+	}
+	if ws.Source != slackstore.SourceDeployment {
+		slackLog.Error("slack: an org's own connection holds the deployment Slack app's id; dropped its delivery",
+			"app", appID, "workspace", ws.WorkspaceID, "org_id", ws.OrgID, "source", ws.Source, "type", inner.Type)
+		return nil
+	}
+	return p.deliverForConnection(ctx, *ws, envelope, inner)
+}
+
+// deliverForConnection runs a delivery for ws through the pipeline, once ws's
+// org holds the slack entitlement. An unentitled org's deliveries are dropped,
+// and its transport acknowledges them so Slack keeps the subscription, except
+// a removal, which removesConnection has why.
+func (p *ingestPipeline) deliverForConnection(ctx context.Context, ws slackstore.Connection, envelope slackEventEnvelope, inner slackInnerEvent) error {
+	if !removesConnection(inner.Type) && !entitlements.For(ws.OrgID).Has(entitlements.FeatureSlack) {
+		return nil
+	}
+	return p.handleEventCallback(ctx, ws, newInboundMention(envelope, inner))
 }
 
 // handleEventCallback is the one function both transports call for an inbound
