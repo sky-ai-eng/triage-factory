@@ -532,16 +532,12 @@ func (h *channelsHandler) buildChannelsResponse(ctx context.Context, orgID, user
 // channel id order, with the process-level warnings the live read raised.
 func (h *channelsHandler) mergedChannels(ctx context.Context, orgID, userID, teamID string) ([]channelView, []channelsWarning, error) {
 	var (
-		tracked    []slackstore.TeamChannel
 		registry   []slackstore.Channel
 		workspaces []slackstore.Connection
 	)
 	if err := h.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		bundle := slackstore.FromTx(tx)
 		var e error
-		if tracked, e = bundle.TeamChannels.ListForTeam(ctx, orgID, teamID); e != nil {
-			return e
-		}
 		if registry, e = bundle.Channels.ListForOrg(ctx, orgID); e != nil {
 			return e
 		}
@@ -577,12 +573,24 @@ func (h *channelsHandler) mergedChannels(ctx context.Context, orgID, userID, tea
 		return v
 	}
 
-	for _, tc := range tracked {
-		v := get(tc.ChannelID)
-		v.ID = tc.SlackChannelID
-		v.Tracked = true
-		v.IsPrimary = tc.IsPrimary
-		v.Source = "tracked"
+	// The team's own rows come from the org-wide tracker read rather than one
+	// under the caller's claims: the tracking rows' RLS admits only the team's
+	// members, and an org admin who sets a team's primary need not be one.
+	// Stored team ids are canonical, and the path's need not be.
+	if parsed, err := uuid.Parse(teamID); err == nil {
+		teamID = parsed.String()
+	}
+	for _, trackers := range trackersByChannel {
+		for _, tc := range trackers {
+			if tc.TeamID != teamID {
+				continue
+			}
+			v := get(tc.ChannelID)
+			v.ID = tc.SlackChannelID
+			v.Tracked = true
+			v.IsPrimary = tc.IsPrimary
+			v.Source = "tracked"
+		}
 	}
 	for _, c := range registry {
 		v := get(c.ChannelID)

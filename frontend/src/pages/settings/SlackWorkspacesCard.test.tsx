@@ -27,18 +27,19 @@ const connection = {
   updated_at: '2026-11-01T00:00:00Z',
 }
 
+// stubConnections answers the list with the connection until a DELETE of it,
+// and with nothing after.
 function stubConnections() {
-  const fetchMock = vi.fn((input: unknown) =>
-    Promise.resolve(
+  let deleted = false
+  const fetchMock = vi.fn((input: unknown, init?: RequestInit) => {
+    if (init?.method === 'DELETE') deleted = true
+    const items = String(input) === LIST && !deleted ? [connection] : []
+    const body =
       String(input) === LIST
-        ? {
-            ok: true,
-            status: 200,
-            ...jsonBody({ items: [connection], next_page_token: '', total_count: 1 }),
-          }
-        : { ok: true, status: 200, ...jsonBody({ status: 'deleted' }) },
-    ),
-  )
+        ? { items, next_page_token: '', total_count: items.length }
+        : { status: 'deleted' }
+    return Promise.resolve({ ok: true, status: 200, ...jsonBody(body) })
+  })
   vi.stubGlobal('fetch', fetchMock)
   return fetchMock
 }

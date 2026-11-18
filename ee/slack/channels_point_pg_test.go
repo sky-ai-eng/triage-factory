@@ -125,6 +125,28 @@ func TestChannelsHandler_Patch_Refusals(t *testing.T) {
 	}
 }
 
+// TestChannelsHandler_Patch_OrgAdminOffTheTeam: an org admin who is not on the
+// team takes its primary and is answered with the team's row as it now
+// stands: watched, and primary.
+func TestChannelsHandler_Patch_OrgAdminOffTheTeam(t *testing.T) {
+	r := newSlackChannelsRig(t)
+	orgID, owner, team1, team2 := twoTeamsWatching(t, r, "chan-patch-orgadmin")
+	orgAdmin := pgtest.SeedUser(t, r.h, "chan-patch-orgadmin-admin")
+	pgtest.AddOrgMember(t, r.h, orgAdmin, orgID, team1, "admin", "member")
+
+	rec := httptest.NewRecorder()
+	r.hdl.handlePatch(rec, r.reqPatch(orgAdmin, orgID, team2, "C1", map[string]any{"is_primary": true}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if view := decodeBody[channelView](t, rec); view.ChannelID != "C1" || !view.Tracked || !view.IsPrimary {
+		t.Fatalf("answer = %+v; want team2's row of C1, watched and primary", view)
+	}
+	if !primaryOf(t, r, owner, orgID, team2) || primaryOf(t, r, owner, orgID, team1) {
+		t.Fatal("the primary did not move to team2")
+	}
+}
+
 // TestChannelsHandler_Get_MatchesList: the point read answers the item the
 // list answers for a channel, watched or only listed in Slack, and 404 for a
 // channel the team could not watch or a caller outside the team.

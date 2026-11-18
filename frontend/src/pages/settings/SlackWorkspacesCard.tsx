@@ -121,10 +121,19 @@ export default function SlackWorkspacesCard({ orgId }: { orgId: string }) {
 
   const loadError = loadedFor === orgId ? '' : connections.error
 
-  const removeFromList = (key: string) => setItems((ws) => ws.filter((w) => rowKey(w) !== key))
+  // A write shows on the held rows at once, then rereads them: the reread
+  // supersedes a poll that began before the write and would otherwise land
+  // after it with the rows as they were, and it mints the next page's token
+  // against the list the write left.
+  const removeFromList = (key: string) => {
+    setItems((ws) => ws.filter((w) => rowKey(w) !== key))
+    void load({}, { keepDepth: true })
+  }
 
-  const upsertInList = (ws: SlackWorkspace) =>
+  const upsertInList = (ws: SlackWorkspace) => {
     setItems((list) => [...list.filter((w) => rowKey(w) !== rowKey(ws)), ws])
+    void load({}, { keepDepth: true })
+  }
 
   return (
     <div className="space-y-5">
