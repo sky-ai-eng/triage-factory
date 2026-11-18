@@ -199,6 +199,10 @@ func refFor(has bool, ref string) string {
 	return ""
 }
 
+// rotatingTokenPrefix starts every access token Slack issues to an app with
+// token rotation on.
+const rotatingTokenPrefix = "xoxe."
+
 // errAppBoundToOtherOrg is the sentinel the connect handler's tx closure
 // returns when AppBoundToOtherOrgSystem finds the derived api_app_id
 // already owned by a different org — mapped to a generic 409 below, never
@@ -232,9 +236,16 @@ func (h *workspacesHandler) handleConnect(w http.ResponseWriter, r *http.Request
 		httpx.BadRequest(w, "bot_token is required")
 		return
 	}
-	// TODO(TFAC-1487): an xoxe. bot token comes from an app with token rotation
-	// on and expires in 12 hours, and TF never refreshes it; it should be
-	// refused here.
+	// TF stores a bot token once and never refreshes it, so a token that
+	// expires in 12 hours would leave a connection that stops working.
+	if strings.HasPrefix(botToken, rotatingTokenPrefix) {
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
+			Reason:  httpx.ReasonInvalidField,
+			Message: "This bot token expires, because its Slack app has token rotation turned on. Triage Factory needs an app without token rotation, and Slack does not allow turning it off, so create a new app from the manifest.",
+			Field:   "bot_token",
+		})
+		return
+	}
 
 	// The bot token is the ONLY way the handler learns the workspace id —
 	// the admin never types it. Always re-validated: there's no "keep the

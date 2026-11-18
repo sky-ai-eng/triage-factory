@@ -140,7 +140,9 @@ func slackBotsInfo(ctx context.Context, client *http.Client, caller slackCaller,
 // oauthV2AccessResult is the subset of Slack's oauth.v2.access response the
 // install callback reads. TeamID and TeamName are "" for an Enterprise Grid
 // org-wide install, which Slack answers with no team, and EnterpriseID is ""
-// for a workspace outside Enterprise Grid.
+// for a workspace outside Enterprise Grid. TokenRotation is whether the answer
+// carried a refresh_token or an expires_in, which Slack sends only for an app
+// with token rotation on.
 type oauthV2AccessResult struct {
 	AppID               string
 	AccessToken         string
@@ -151,6 +153,7 @@ type oauthV2AccessResult struct {
 	TeamName            string
 	EnterpriseID        string
 	IsEnterpriseInstall bool
+	TokenRotation       bool
 }
 
 // slackOAuthV2Access exchanges an install's authorization code for its bot
@@ -181,7 +184,9 @@ func slackOAuthV2Access(ctx context.Context, client *http.Client, caller slackCa
 		Enterprise *struct {
 			ID string `json:"id"`
 		} `json:"enterprise"`
-		IsEnterpriseInstall bool `json:"is_enterprise_install"`
+		IsEnterpriseInstall bool   `json:"is_enterprise_install"`
+		RefreshToken        string `json:"refresh_token"`
+		ExpiresIn           *int64 `json:"expires_in"`
 	}
 	if err := doSlackJSON(ctx, client, caller, req, &out); err != nil {
 		return nil, err
@@ -199,6 +204,7 @@ func slackOAuthV2Access(ctx context.Context, client *http.Client, caller slackCa
 		Scope:               out.Scope,
 		BotUserID:           out.BotUserID,
 		IsEnterpriseInstall: out.IsEnterpriseInstall,
+		TokenRotation:       out.RefreshToken != "" || out.ExpiresIn != nil,
 	}
 	if out.Team != nil {
 		res.TeamID, res.TeamName = out.Team.ID, out.Team.Name
