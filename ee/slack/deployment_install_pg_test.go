@@ -280,8 +280,8 @@ func TestInstallStart_Refusals(t *testing.T) {
 				errs := decodeBody[struct {
 					Errors []httpx.ErrorItem `json:"errors"`
 				}](t, rec)
-				if len(errs.Errors) != 1 || errs.Errors[0].Reason != httpx.ReasonInvalidField || errs.Errors[0].Field != tc.field {
-					t.Errorf("errors = %+v; want one INVALID_FIELD on %s", errs.Errors, tc.field)
+				if len(errs.Errors) != 1 || errs.Errors[0].Reason != httpx.ReasonInvalidParam || errs.Errors[0].Field != tc.field {
+					t.Errorf("errors = %+v; want one INVALID_PARAM on %s", errs.Errors, tc.field)
 				}
 			}
 			assertNoStateCookie(t, rec)

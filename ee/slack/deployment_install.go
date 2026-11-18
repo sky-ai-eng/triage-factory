@@ -161,7 +161,7 @@ func (h *installHandler) handleStart(w http.ResponseWriter, r *http.Request) {
 	if vals, present := query["workspace_id"]; present {
 		if len(vals) != 1 || !slackWorkspaceIDPattern.MatchString(vals[0]) {
 			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-				Reason:  httpx.ReasonInvalidField,
+				Reason:  httpx.ReasonInvalidParam,
 				Message: "workspace_id must be one Slack workspace id: T followed by capital letters and digits",
 				Field:   "workspace_id",
 			})
@@ -403,6 +403,10 @@ func (h *installHandler) store(ctx context.Context, orgID, userID string, inst *
 			return errWorkspaceTaken
 		case found != nil:
 			row.RegisteredByUserID = found.RegisteredByUserID
+			// Upsert reads Active only when it inserts, which here happens
+			// only if a disconnect deleted the row after the read above; the
+			// row is then put back as it was.
+			row.Active = found.Active
 		default:
 			active, err := conns.ActiveForWorkspaceSystem(ctx, orgID, inst.TeamID)
 			if err != nil {
