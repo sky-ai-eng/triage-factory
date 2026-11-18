@@ -30,9 +30,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/ttlcache"
 )
 
-// ---------- fake Slack API (auth.test + bots.info + apps.connections.open) ----------
+// ---------- fake Slack API (auth.test, bots.info, apps.connections.open, OAuth, and the channel calls) ----------
 
 type fakeSlackServer struct {
 	srv *httptest.Server
@@ -50,6 +51,24 @@ type fakeSlackServer struct {
 	oauthAccess   map[string]map[string]any
 	oauthRequests []oauthAccessRequest
 	revokeHits    int
+
+	// scopes overrides, by bot token, the X-OAuth-Scopes auth.test answers
+	// with, which is otherwise every scope in slackBotScopes. authStatus
+	// answers auth.test for a bot token with that HTTP status and no body.
+	scopes     map[string]string
+	authStatus map[string]int
+
+	// public and memberOf answer conversations.list and users.conversations
+	// by bot token; truncate makes conversations.list claim another page for
+	// a token. listHits counts conversations.list calls. joins records each
+	// conversations.join as "<bot token> <channel>", and joinFail fails one
+	// for a channel with its error code.
+	public   map[string][]map[string]any
+	memberOf map[string][]map[string]any
+	truncate map[string]bool
+	listHits int
+	joins    []string
+	joinFail map[string]string
 }
 
 // oauthAccessRequest is one oauth.v2.access call as the fake received it.
@@ -67,17 +86,66 @@ func newFakeSlackServer(t *testing.T) *fakeSlackServer {
 		openConn: map[string]map[string]any{},
 
 		oauthAccess: map[string]map[string]any{},
+
+		scopes:     map[string]string{},
+		authStatus: map[string]int{},
+		public:     map[string][]map[string]any{},
+		memberOf:   map[string][]map[string]any{},
+		truncate:   map[string]bool{},
+		joinFail:   map[string]string{},
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/auth.test", func(w http.ResponseWriter, r *http.Request) {
+		token := bearerToken(r)
 		f.mu.Lock()
 		f.authTestHits++
-		resp, ok := f.authTest[bearerToken(r)]
+		resp, ok := f.authTest[token]
+		scopes, scoped := f.scopes[token]
+		status := f.authStatus[token]
 		f.mu.Unlock()
+		if status != 0 {
+			w.WriteHeader(status)
+			return
+		}
 		if !ok {
 			resp = map[string]any{"ok": false, "error": "invalid_auth"}
 		}
+		if !scoped {
+			scopes = strings.Join(slackBotScopes, ",")
+		}
+		w.Header().Set("X-OAuth-Scopes", scopes)
 		writeSlackFakeJSON(w, resp)
+	})
+	mux.HandleFunc("/conversations.list", func(w http.ResponseWriter, r *http.Request) {
+		token := bearerToken(r)
+		f.mu.Lock()
+		f.listHits++
+		chans := f.public[token]
+		next := ""
+		if f.truncate[token] {
+			next = "more"
+		}
+		f.mu.Unlock()
+		writeSlackFakeJSON(w, map[string]any{"ok": true, "channels": chans, "response_metadata": map[string]any{"next_cursor": next}})
+	})
+	mux.HandleFunc("/users.conversations", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		chans := f.memberOf[bearerToken(r)]
+		f.mu.Unlock()
+		writeSlackFakeJSON(w, map[string]any{"ok": true, "channels": chans, "response_metadata": map[string]any{"next_cursor": ""}})
+	})
+	mux.HandleFunc("/conversations.join", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		channel := r.FormValue("channel")
+		f.mu.Lock()
+		f.joins = append(f.joins, bearerToken(r)+" "+channel)
+		code := f.joinFail[channel]
+		f.mu.Unlock()
+		if code != "" {
+			writeSlackFakeJSON(w, map[string]any{"ok": false, "error": code})
+			return
+		}
+		writeSlackFakeJSON(w, map[string]any{"ok": true})
 	})
 	mux.HandleFunc("/bots.info", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
@@ -190,6 +258,65 @@ func (f *fakeSlackServer) stageConnectOK(token, teamID, teamName, botUserID, app
 	f.stageBotsInfoOK(botIDForToken(token), appID)
 }
 
+// stageChannels sets what conversations.list (public) and users.conversations
+// (memberOf) answer for botToken.
+func (f *fakeSlackServer) stageChannels(botToken string, public, memberOf []map[string]any) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.public[botToken] = public
+	f.memberOf[botToken] = memberOf
+}
+
+// stageScopes sets the X-OAuth-Scopes auth.test answers for botToken.
+func (f *fakeSlackServer) stageScopes(botToken, scopes string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.scopes[botToken] = scopes
+}
+
+// stageAuthTestRejected makes auth.test refuse botToken (invalid_auth).
+func (f *fakeSlackServer) stageAuthTestRejected(botToken string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.authTest, botToken)
+	delete(f.scopes, botToken)
+}
+
+// stageAuthTestStatus makes auth.test answer botToken with status and no body.
+func (f *fakeSlackServer) stageAuthTestStatus(botToken string, status int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.authStatus[botToken] = status
+}
+
+// stageTruncated makes conversations.list claim another page for botToken.
+func (f *fakeSlackServer) stageTruncated(botToken string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.truncate[botToken] = true
+}
+
+// stageJoinFail fails conversations.join for channel with code.
+func (f *fakeSlackServer) stageJoinFail(channel, code string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.joinFail[channel] = code
+}
+
+// listCalls is how many conversations.list calls the fake has answered.
+func (f *fakeSlackServer) listCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.listHits
+}
+
+// joined returns each conversations.join call, as "<bot token> <channel>".
+func (f *fakeSlackServer) joined() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.joins...)
+}
+
 // stageOpenConnFail stages a failing apps.connections.open response for token.
 func (f *fakeSlackServer) stageOpenConnFail(token, reason string) {
 	f.mu.Lock()
@@ -229,6 +356,11 @@ func newSlackWorkspaceRig(t *testing.T, publicURL string) *slackWorkspaceRig {
 		az:        az,
 		client:    slackHTTPClient,
 		publicURL: func() string { return publicURL },
+		stores:    stores,
+		channels: &channelsHandler{
+			tx: stores.Tx, stores: stores, az: az, client: slackHTTPClient,
+			candidates: ttlcache.New[slackCandidateSet](slackCandidatesTTL),
+		},
 	}
 	return &slackWorkspaceRig{t: t, h: h, stores: stores, hdl: hdl, fake: fake}
 }
@@ -956,10 +1088,11 @@ func TestHandleConnect_FirstConnectionLandsActive(t *testing.T) {
 	}
 }
 
-// TestHandleConnect_SecondAppInWorkspace_409: a different app connected into
-// a workspace where the org already has an active connection is refused, and
-// nothing is written: no row, no secret, no audit entry.
-func TestHandleConnect_SecondAppInWorkspace_409(t *testing.T) {
+// TestHandleConnect_SecondAppInWorkspace_LandsInactive: a different app
+// connected into a workspace where the org already has an active connection
+// is stored inactive and answered as a normal import, and the active one is
+// unchanged; connecting the second app again keeps it inactive.
+func TestHandleConnect_SecondAppInWorkspace_LandsInactive(t *testing.T) {
 	r := newSlackWorkspaceRig(t, "https://tf.example")
 	orgID, owner, _ := pgtest.SeedOrgWithUser(t, r.h, "slack-second-app")
 	r.fake.stageConnectOK("xoxb-one", "T0SECOND1", "Acme", "U0BOTONE", "A0SECOND01", "")
@@ -968,34 +1101,32 @@ func TestHandleConnect_SecondAppInWorkspace_409(t *testing.T) {
 	if rec := r.connectAs(owner, orgID, "xoxb-one"); rec.Code != http.StatusCreated {
 		t.Fatalf("first connect status = %d, want 201 (body=%s)", rec.Code, rec.Body.String())
 	}
-	auditBefore := len(r.auditRows(orgID))
+	conns := slackstore.FromStores(r.stores).Connections
+	before, err := conns.ActiveForWorkspaceSystem(r.t.Context(), orgID, "T0SECOND1")
+	if err != nil || before == nil {
+		t.Fatalf("active connection after the first connect = %+v (%v)", before, err)
+	}
 
 	rec := r.connectAs(owner, orgID, "xoxb-two")
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("second app status = %d, want 409 (body=%s)", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("second app status = %d, want 201 (body=%s)", rec.Code, rec.Body.String())
 	}
-	errs := decodeBody[struct {
-		Errors []httpx.ErrorItem `json:"errors"`
-	}](t, rec)
-	if len(errs.Errors) != 1 || errs.Errors[0].Reason != httpx.ReasonConflict ||
-		errs.Errors[0].Message != "This Slack workspace already has an active connection. Disconnect it before connecting another app." {
-		t.Errorf("409 body = %+v; want the one CONFLICT naming the active connection", errs)
+	if view := decodeBody[workspaceView](t, rec); view.APIAppID != "A0SECOND02" || view.Active {
+		t.Errorf("second app response = %+v; want A0SECOND02, inactive", view)
+	}
+	if v := r.secretValue(orgID, integrations.SlackConnectionKeysFor("T0SECOND1", "A0SECOND02").BotToken); v != "xoxb-two" {
+		t.Errorf("second app's bot token = %q; want xoxb-two stored", v)
+	}
+	after, err := conns.ActiveForWorkspaceSystem(r.t.Context(), orgID, "T0SECOND1")
+	if err != nil || after == nil || after.APIAppID != "A0SECOND01" || !after.UpdatedAt.Equal(before.UpdatedAt) {
+		t.Errorf("active connection = %+v (%v); want A0SECOND01 untouched", after, err)
 	}
 
-	conns := slackstore.FromStores(r.stores).Connections
-	if got, err := conns.GetByWorkspaceAppSystem(r.t.Context(), "T0SECOND1", "A0SECOND02"); err != nil || got != nil {
-		t.Errorf("refused app's row = %+v (%v); want none", got, err)
+	rec = r.connectAs(owner, orgID, "xoxb-two")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reconnect status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
 	}
-	for _, key := range integrations.SlackConnectionKeysFor("T0SECOND1", "A0SECOND02").All() {
-		if v := r.secretValue(orgID, key); v != "" {
-			t.Errorf("secret %s = %q after the refusal; want none", key, v)
-		}
-	}
-	if got := len(r.auditRows(orgID)); got != auditBefore {
-		t.Errorf("audit rows = %d after the refusal; want %d", got, auditBefore)
-	}
-	active, err := conns.ActiveForWorkspaceSystem(r.t.Context(), orgID, "T0SECOND1")
-	if err != nil || active == nil || active.APIAppID != "A0SECOND01" {
-		t.Errorf("active connection = %+v (%v); want A0SECOND01 untouched", active, err)
+	if view := decodeBody[workspaceView](t, rec); view.Active {
+		t.Errorf("reconnect response = %+v; want still inactive", view)
 	}
 }

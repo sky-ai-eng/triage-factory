@@ -214,6 +214,65 @@ func (s *connectionStore) Delete(ctx context.Context, orgID, workspaceID, apiApp
 	return nil
 }
 
+// LockWorkspace orders by app id so two callers take the rows' locks in the
+// same order and cannot deadlock on them.
+func (s *connectionStore) LockWorkspace(ctx context.Context, orgID, workspaceID string) ([]slackstore.Connection, error) {
+	rows, err := s.app.QueryContext(ctx, `
+		SELECT `+connectionColumns+`
+		FROM org_slack_connections
+		WHERE org_id = $1 AND workspace_id = $2
+		ORDER BY api_app_id ASC
+		FOR UPDATE
+	`, orgID, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("lock org_slack_connections: %w", err)
+	}
+	return scanConnections(rows)
+}
+
+// Activate is two statements, not one: the one-active index is checked as
+// each row is written, and within one statement Postgres does not promise
+// which of two updated rows it writes first, so setting the target active
+// before the current one is cleared would trip the index.
+func (s *connectionStore) Activate(ctx context.Context, orgID, workspaceID, apiAppID string) (slackstore.Connection, error) {
+	var got slackstore.Connection
+	err := inTx(ctx, s.app, func(q db.Execer) error {
+		if _, err := q.ExecContext(ctx, `
+			UPDATE org_slack_connections SET active = false
+			WHERE org_id = $1 AND workspace_id = $2 AND active AND api_app_id <> $3
+		`, orgID, workspaceID, apiAppID); err != nil {
+			return activateError("deactivate org_slack_connections", err)
+		}
+		var err error
+		got, err = scanConnection(q.QueryRowContext(ctx, `
+			UPDATE org_slack_connections SET active = true
+			WHERE org_id = $1 AND workspace_id = $2 AND api_app_id = $3
+			RETURNING `+connectionColumns,
+			orgID, workspaceID, apiAppID))
+		if errors.Is(err, sql.ErrNoRows) {
+			return slackstore.ErrNoSuchConnection
+		}
+		if err != nil {
+			return activateError("activate org_slack_connections", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return slackstore.Connection{}, err
+	}
+	return got, nil
+}
+
+// activateError maps a violation of the one-active index to
+// slackstore.ErrActiveConnectionExists and wraps anything else.
+func activateError(what string, err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == oneActiveIndex {
+		return slackstore.ErrActiveConnectionExists
+	}
+	return fmt.Errorf("%s: %w", what, err)
+}
+
 // DeleteSystem's updated_at condition holds against a concurrent connect: the
 // connect's UPDATE holds the row's lock, and once it commits Postgres
 // re-checks the condition against the row it wrote, whose updated_at the

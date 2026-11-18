@@ -35,8 +35,9 @@ func upsertActiveConnection(ctx context.Context, tx db.TxStores, c slackstore.Co
 }
 
 // insertInactiveConnection writes an inactive events_api connection of an
-// org's own app directly, as the switch that would leave one behind is not
-// built yet. Its bot token is stored under the connection's keys.
+// org's own app directly, for a fixture that needs one without the import
+// and activation that leave one behind. Its bot token is stored under the
+// connection's keys.
 func insertInactiveConnection(t *testing.T, h *pgtest.Harness, stores db.Stores, orgID, userID, workspaceID, apiAppID, botToken string) slackstore.Connection {
 	t.Helper()
 	keys := integrations.SlackConnectionKeysFor(workspaceID, apiAppID)

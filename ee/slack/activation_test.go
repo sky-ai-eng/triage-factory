@@ -1,0 +1,140 @@
+package slack
+
+import (
+	"net/http"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
+)
+
+// TestWatchedChannelStatuses: a channel the bot is in is member, a public one
+// it is not in is will_join, one it cannot see is needs_invite, and one past a
+// truncated listing is unknown; a channel nobody watches is not listed, and
+// the answer is ordered by name, then channel id.
+func TestWatchedChannelStatuses(t *testing.T) {
+	watched := []slackstore.Channel{
+		{ID: "r1", ChannelID: "C0PUBLIC", Name: "eng-alerts"},
+		{ID: "r2", ChannelID: "C0MEMBER", Name: "deploys"},
+		{ID: "r3", ChannelID: "G0PRIVATE", Name: "secret"},
+		{ID: "r4", ChannelID: "C0NONAME"},
+		{ID: "r5", ChannelID: "C0BBB", Name: "deploys"},
+	}
+	candidates := []slackCandidate{
+		{ChannelID: "C0PUBLIC", Name: "eng-alerts"},
+		{ChannelID: "C0MEMBER", Name: "deploys", BotIsMember: true},
+		{ChannelID: "C0NONAME", Name: "random"},
+		{ChannelID: "C0UNWATCHED", Name: "unwatched"},
+	}
+
+	got := watchedChannelStatuses(watched, candidates, false, false)
+	want := []activationChannel{
+		{ChannelID: "C0BBB", Name: "deploys", Status: channelNeedsInvite},
+		{ChannelID: "C0MEMBER", Name: "deploys", Status: channelMember},
+		{ChannelID: "C0PUBLIC", Name: "eng-alerts", Status: channelWillJoin},
+		{ChannelID: "C0NONAME", Name: "random", Status: channelWillJoin},
+		{ChannelID: "G0PRIVATE", Name: "secret", Status: channelNeedsInvite},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("statuses =\n%+v\nwant\n%+v", got, want)
+	}
+
+	truncated := watchedChannelStatuses(watched, candidates, true, false)
+	for _, c := range truncated {
+		wantStatus := map[string]string{
+			"C0PUBLIC": channelWillJoin, "C0MEMBER": channelMember, "C0NONAME": channelWillJoin,
+			"G0PRIVATE": channelUnknown, "C0BBB": channelUnknown,
+		}[c.ChannelID]
+		if c.Status != wantStatus {
+			t.Errorf("truncated: %s = %q; want %q", c.ChannelID, c.Status, wantStatus)
+		}
+	}
+
+	for _, c := range watchedChannelStatuses(watched, nil, false, true) {
+		if c.Status != channelUnknown {
+			t.Errorf("stopped: %s = %q; want unknown", c.ChannelID, c.Status)
+		}
+	}
+
+	if got := watchedChannelStatuses(nil, candidates, false, false); got == nil || len(got) != 0 {
+		t.Errorf("no watched channels = %#v; want an empty list", got)
+	}
+}
+
+// TestActivationFingerprint: the fingerprint moves with either connection's
+// updated_at and with the watched set, and not with the order the watched
+// channels are read in.
+func TestActivationFingerprint(t *testing.T) {
+	at := time.Date(2026, 11, 18, 12, 0, 0, 123456000, time.UTC)
+	from := &slackstore.Connection{APIAppID: "A0FROM", UpdatedAt: at}
+	to := &slackstore.Connection{APIAppID: "A0TO", UpdatedAt: at}
+	watched := []slackstore.Channel{{ID: "r1"}, {ID: "r2"}}
+	base := activationFingerprint("org", "T1", from, to, watched)
+
+	if got := activationFingerprint("org", "T1", from, to, []slackstore.Channel{{ID: "r2"}, {ID: "r1"}}); got != base {
+		t.Errorf("reordered watched set changed the fingerprint")
+	}
+	if strings.ContainsAny(base, "+/=") {
+		t.Errorf("fingerprint %q is not unpadded base64url", base)
+	}
+
+	later := at.Add(time.Microsecond)
+	for name, got := range map[string]string{
+		"from updated_at":  activationFingerprint("org", "T1", &slackstore.Connection{APIAppID: "A0FROM", UpdatedAt: later}, to, watched),
+		"to updated_at":    activationFingerprint("org", "T1", from, &slackstore.Connection{APIAppID: "A0TO", UpdatedAt: later}, watched),
+		"a channel added":  activationFingerprint("org", "T1", from, to, append(watched, slackstore.Channel{ID: "r3"})),
+		"a channel gone":   activationFingerprint("org", "T1", from, to, watched[:1]),
+		"no active":        activationFingerprint("org", "T1", nil, to, watched),
+		"another org":      activationFingerprint("org2", "T1", from, to, watched),
+		"another space":    activationFingerprint("org", "T2", from, to, watched),
+		"another from app": activationFingerprint("org", "T1", &slackstore.Connection{APIAppID: "A0OTHER", UpdatedAt: at}, to, watched),
+	} {
+		if got == base {
+			t.Errorf("%s: fingerprint unchanged", name)
+		}
+	}
+}
+
+// TestActivationBlockers: a token Slack refuses is token_rejected, a token
+// short a scope is missing_scopes naming it, a token with every scope has no
+// blocker, and an auth.test that meets no answer is an error rather than a
+// blocker.
+func TestActivationBlockers(t *testing.T) {
+	all := strings.Join(slackBotScopes, ",")
+	withFakeSlackAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		switch bearerToken(r) {
+		case "xoxb-rejected":
+			writeSlackFakeJSON(w, map[string]any{"ok": false, "error": "invalid_auth"})
+		case "xoxb-short":
+			w.Header().Set("X-OAuth-Scopes", strings.Replace(all, ",files:write", "", 1))
+			writeSlackFakeJSON(w, map[string]any{"ok": true, "team_id": "T1", "bot_id": "B1"})
+		case "xoxb-down":
+			w.WriteHeader(http.StatusServiceUnavailable)
+		default:
+			w.Header().Set("X-OAuth-Scopes", all)
+			writeSlackFakeJSON(w, map[string]any{"ok": true, "team_id": "T1", "bot_id": "B1"})
+		}
+	})
+	h := &workspacesHandler{client: slackHTTPClient}
+	target := &slackstore.Connection{WorkspaceID: "T1", APIAppID: "A1"}
+
+	for token, want := range map[string][]activationBlocker{
+		"xoxb-ok":       nil,
+		"xoxb-rejected": {{Code: blockerTokenRejected}},
+		"xoxb-short":    {{Code: blockerMissingScopes, Scopes: []string{"files:write"}}},
+	} {
+		got, err := h.activationBlockers(t.Context(), "org", target, token)
+		if err != nil {
+			t.Errorf("%s: err = %v", token, err)
+			continue
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%s: blockers = %+v; want %+v", token, got, want)
+		}
+	}
+	if _, err := h.activationBlockers(t.Context(), "org", target, "xoxb-down"); err == nil {
+		t.Error("xoxb-down: err = nil; want Slack unreachable")
+	}
+}

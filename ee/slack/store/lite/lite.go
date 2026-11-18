@@ -55,6 +55,14 @@ func (s *connectionStore) Delete(context.Context, string, string, string) error 
 	return db.ErrNotApplicableInLocal
 }
 
+func (s *connectionStore) LockWorkspace(context.Context, string, string) ([]slackstore.Connection, error) {
+	return nil, db.ErrNotApplicableInLocal
+}
+
+func (s *connectionStore) Activate(context.Context, string, string, string) (slackstore.Connection, error) {
+	return slackstore.Connection{}, db.ErrNotApplicableInLocal
+}
+
 func (s *connectionStore) DeleteSystem(context.Context, string, string, string, time.Time) (bool, error) {
 	return false, db.ErrNotApplicableInLocal
 }

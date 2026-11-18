@@ -242,6 +242,13 @@ type accessDetail struct {
 	ExpiresAt    *time.Time `json:"expires_at"`
 	MaxAgeDays   *int       `json:"max_age_days"`
 	AllowedCIDRs []string   `json:"allowed_cidrs"`
+	// The slack_connection_activated row: Name, shared with the credential
+	// rows, is the workspace's, and these are the apps it moved between, by
+	// id and by bot name.
+	FromAppID   string `json:"from_api_app_id"`
+	FromAppName string `json:"from_app_name"`
+	ToAppID     string `json:"to_api_app_id"`
+	ToAppName   string `json:"to_app_name"`
 }
 
 // accessChangeLabel renders one row's action + detail_json into the human
@@ -301,6 +308,8 @@ func accessChangeLabel(e domain.AccessChange, targetName, teamName string) strin
 		return credentialActionLabel("set the ", d)
 	case domain.AccessActionCredentialRemoved:
 		return credentialActionLabel("removed the ", d)
+	case domain.AccessActionSlackConnectionActivated:
+		return slackActivationLabel(d)
 	case domain.AccessActionEventSourceDisabled:
 		return "turned off " + eventSourcePhrase(d) + " for this org"
 	case domain.AccessActionEventSourceEnabled:
@@ -373,6 +382,22 @@ func eventSourcePhrase(d accessDetail) string {
 		return "an event source"
 	}
 	return d.Kind + " events"
+}
+
+// slackActivationLabel renders a Slack workspace's switch between connected
+// apps, naming each app by its bot name, or its id when the connection had no
+// name. A workspace that had no active connection has no app to switch from.
+func slackActivationLabel(d accessDetail) string {
+	workspace := "a Slack workspace"
+	if d.Name != "" {
+		workspace = "the Slack workspace " + d.Name
+	}
+	to := orFallback(orFallback(d.ToAppName, d.ToAppID), "another app")
+	from := orFallback(d.FromAppName, d.FromAppID)
+	if from == "" {
+		return "made " + to + " the active app in " + workspace
+	}
+	return "switched " + workspace + " from " + from + " to " + to
 }
 
 // apiTokenPhrase names a token the way its owner recognises it: the name they

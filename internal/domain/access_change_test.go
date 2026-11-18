@@ -22,6 +22,7 @@ var allAccessActions = []string{
 	AccessActionEventSourceEnabled,
 	AccessActionAPITokenCreated,
 	AccessActionAPITokenRevoked,
+	AccessActionSlackConnectionActivated,
 	AccessActionSSOConnectionCreated,
 	AccessActionSSOConnectionEnabled,
 	AccessActionSSOConnectionDisabled,

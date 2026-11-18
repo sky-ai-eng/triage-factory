@@ -117,9 +117,13 @@ type Connection struct {
 	UpdatedAt          time.Time
 }
 
-// ErrActiveConnectionExists is Upsert's error for an insert that would make a
-// second active connection in one (org, workspace).
+// ErrActiveConnectionExists is Upsert's and Activate's error for a write that
+// would make a second active connection in one (org, workspace).
 var ErrActiveConnectionExists = errors.New("slackstore: the workspace already has an active connection in this org")
+
+// ErrNoSuchConnection is Activate's error when the org has no connection of
+// the app in the workspace.
+var ErrNoSuchConnection = errors.New("slackstore: no such connection")
 
 // ConnectionStore owns the org_slack_connections table. Postgres-only; the
 // SQLite impl is a stub returning db.ErrNotApplicableInLocal (SSO posture:
@@ -155,6 +159,24 @@ type ConnectionStore interface {
 	ListForOrg(ctx context.Context, orgID string, opts db.ListOpts) ([]Connection, int, error)
 	Get(ctx context.Context, orgID, workspaceID, apiAppID string) (*Connection, error)
 	Delete(ctx context.Context, orgID, workspaceID, apiAppID string) error
+
+	// LockWorkspace returns orgID's connections in workspaceID, ordered by app
+	// id, and locks each (FOR UPDATE) until the caller's transaction ends, on
+	// the app pool. A second caller blocks until the first commits and then
+	// reads the rows as the first left them, so a decision made from what this
+	// returns holds until the caller's own write commits. Outside a
+	// transaction the locks end with the statement and serialize nothing.
+	LockWorkspace(ctx context.Context, orgID, workspaceID string) ([]Connection, error)
+
+	// Activate makes orgID's connection of apiAppID the workspace's active
+	// one, on the app pool: the workspace's current active connection, if any,
+	// is set inactive first, then the target active, and the target's row is
+	// returned as written. A target the org does not have is
+	// ErrNoSuchConnection. A concurrent write that made another connection
+	// active is ErrActiveConnectionExists. The two statements must commit
+	// together, so a caller runs Activate inside its transaction, or Activate
+	// opens one of its own.
+	Activate(ctx context.Context, orgID, workspaceID, apiAppID string) (Connection, error)
 
 	// DeleteSystem removes orgID's (workspaceID, apiAppID) row on the admin
 	// pool, and only while its updated_at still equals updatedAt, reporting
@@ -397,6 +419,13 @@ type ChannelRegistryStore interface {
 	// ListForOrg is the app-pool, member-RLS-gated read — the discovery/
 	// claim UX's "channels we know of" list.
 	ListForOrg(ctx context.Context, orgID string) ([]Channel, error)
+
+	// ListWatchedInWorkspaceSystem returns orgID's registry rows in
+	// workspaceID that at least one team watches (a team_slack_channels row),
+	// ordered by name, then Slack channel id, then row id, on the admin pool:
+	// the tracking rows' RLS admits only a team's members, and the answer is
+	// every team's.
+	ListWatchedInWorkspaceSystem(ctx context.Context, orgID, workspaceID string) ([]Channel, error)
 
 	// FindOrCreateThreadSystem returns the entity of the thread rooted at
 	// threadTS in the channel channelID names, creating one (kind, title,
