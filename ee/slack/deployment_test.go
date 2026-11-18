@@ -1,6 +1,9 @@
 package slack
 
 import (
+	"bytes"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -191,6 +194,41 @@ func TestDeploymentAppFromEnv_LocalModeReadsNothing(t *testing.T) {
 	}
 	if app != (deploymentApp{}) {
 		t.Fatalf("app = %+v; want the zero app in local mode", app)
+	}
+}
+
+// TestDeploymentApp_RedactsSecrets: fmt and both slog handlers render each
+// secret as its presence, and keep the values that are not secrets.
+func TestDeploymentApp_RedactsSecrets(t *testing.T) {
+	app := deploymentApp{
+		AppID:         testDeployAppID,
+		ClientID:      testDeployClientID,
+		ClientSecret:  testDeployClientSecret,
+		SigningSecret: testDeploySigningSecret,
+		AppToken:      testDeployAppToken,
+		Transport:     transportEventsAPI,
+	}
+
+	var text, json bytes.Buffer
+	slog.New(slog.NewTextHandler(&text, nil)).Info("app", "app", app)
+	slog.New(slog.NewJSONHandler(&json, nil)).Info("app", "app", app)
+	renderings := map[string]string{
+		"%v":        fmt.Sprintf("%v", app),
+		"%+v":       fmt.Sprintf("%+v", app),
+		"slog text": text.String(),
+		"slog json": json.String(),
+	}
+	for name, out := range renderings {
+		for _, secret := range []string{testDeployClientSecret, testDeploySigningSecret, testDeployAppToken} {
+			if strings.Contains(out, secret) {
+				t.Errorf("%s rendering %q carries %q", name, out, secret)
+			}
+		}
+		for _, kept := range []string{testDeployAppID, testDeployClientID, transportEventsAPI} {
+			if !strings.Contains(out, kept) {
+				t.Errorf("%s rendering %q lacks %q", name, out, kept)
+			}
+		}
 	}
 }
 

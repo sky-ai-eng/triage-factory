@@ -3,6 +3,7 @@ package slack
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -47,6 +48,34 @@ type deploymentApp struct {
 // deploymentAppFromEnv returns either a complete app or the zero one, so the
 // App ID alone answers it.
 func (d deploymentApp) Configured() bool { return d.AppID != "" }
+
+// String renders the app with each secret reduced to whether it is set, so a
+// stray %v never prints the client secret, the signing secret, or the app
+// token.
+func (d deploymentApp) String() string {
+	return fmt.Sprintf("slack.deploymentApp{app_id:%s, client_id:%s, client_secret:%s, signing_secret:%s, app_token:%s, transport:%s}",
+		d.AppID,
+		d.ClientID,
+		secretPresence(d.ClientSecret),
+		secretPresence(d.SigningSecret),
+		secretPresence(d.AppToken),
+		d.Transport,
+	)
+}
+
+// LogValue gives slog the same rendering. A JSON handler marshals a struct
+// field by field and never consults String, so String alone would not cover
+// it.
+func (d deploymentApp) LogValue() slog.Value {
+	return slog.StringValue(d.String())
+}
+
+func secretPresence(v string) string {
+	if v == "" {
+		return "unset"
+	}
+	return "set"
+}
 
 // deploymentAppFromEnv reads the deployment's Slack app from the environment,
 // in multi mode only: a distributed local binary can ship no shared app.
