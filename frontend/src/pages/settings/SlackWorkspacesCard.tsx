@@ -21,6 +21,7 @@ import { Tooltip } from '../../ui/tooltip/Tooltip'
 import { Check, Copy, ExternalLink, HelpCircle, Plus, Trash2, X } from 'lucide-react'
 import { apiFetch, apiJSON, httpErrorMessage } from '../../lib/apiClient'
 import { invalidateEventSources } from '../../hooks/useEventSources'
+import { usePagedList } from '../../hooks/usePagedList'
 import { toast } from '../../components/Toast/toastStore'
 import { glassInputClass } from './primitives'
 
@@ -71,7 +72,9 @@ interface SlackWorkspace {
   workspace_name: string
   app_name: string
   enterprise_id?: string
-  transport: 'socket' | 'events_api'
+  // transport is null on a deployment connection, which receives through the
+  // transport the deployment's operator configured.
+  transport: 'socket' | 'events_api' | null
   bot_user_id: string
   registered_by_user_id?: string
   created_at: string
@@ -88,43 +91,49 @@ const rowKey = (ws: Pick<SlackWorkspace, 'workspace_id' | 'api_app_id'>) =>
 const SLACK_APP_CREATE_URL = 'https://api.slack.com/apps?new_app=1'
 
 export default function SlackWorkspacesCard({ orgId }: { orgId: string }) {
-  const [workspaces, setWorkspaces] = useState<SlackWorkspace[] | null>(null)
-  const [loadError, setLoadError] = useState<string | null>(null)
+  const connections = usePagedList<SlackWorkspace>(
+    `/api/orgs/${encodeURIComponent(orgId)}/slack/connections/list`,
+    'Could not load connected Slack workspaces.',
+  )
+  const { load, setItems } = connections
+  const workspaces = connections.items
+  // The org whose list a read has answered. Only a failure before then is
+  // shown: a transient poll failure must not put a banner over the list
+  // already on screen.
+  const [loadedFor, setLoadedFor] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
-    const load = (initial: boolean) => {
-      apiJSON<SlackWorkspace[]>('/api/slack/workspaces')
-        .then((ws) => {
-          if (cancelled) return
-          setWorkspaces(ws)
-          // Clear a stale banner: a later poll succeeding means the list is
-          // current, so an error from the initial (failed) load must not linger.
-          setLoadError(null)
-        })
-        .catch((e) => {
-          // Only the initial fetch surfaces a load error; a transient poll
-          // failure must not blow away the list already on screen.
-          if (!cancelled && initial)
-            setLoadError(httpErrorMessage(e, 'Could not load connected Slack workspaces.'))
-        })
-    }
-    load(true)
+    const read = (keepDepth: boolean) =>
+      void load({}, { keepDepth }).then((page) => {
+        if (!cancelled && page) setLoadedFor(orgId)
+      })
+    read(false)
     // Poll so a row's live Socket Mode status resolves (Connecting… →
     // Connected, or a reconnect) without a manual reload — the connection
     // state lives in the backend socket manager, not the websocket stream.
-    const timer = setInterval(() => load(false), 5000)
+    const timer = setInterval(() => read(true), 5000)
     return () => {
       cancelled = true
       clearInterval(timer)
     }
-  }, [orgId])
+  }, [load, orgId])
 
-  const removeFromList = (key: string) =>
-    setWorkspaces((ws) => (ws ?? []).filter((w) => rowKey(w) !== key))
+  const loadError = loadedFor === orgId ? '' : connections.error
 
-  const upsertInList = (ws: SlackWorkspace) =>
-    setWorkspaces((list) => [...(list ?? []).filter((w) => rowKey(w) !== rowKey(ws)), ws])
+  // A write shows on the held rows at once, then rereads them: the reread
+  // supersedes a poll that began before the write and would otherwise land
+  // after it with the rows as they were, and it mints the next page's token
+  // against the list the write left.
+  const removeFromList = (key: string) => {
+    setItems((ws) => ws.filter((w) => rowKey(w) !== key))
+    void load({}, { keepDepth: true })
+  }
+
+  const upsertInList = (ws: SlackWorkspace) => {
+    setItems((list) => [...list.filter((w) => rowKey(w) !== rowKey(ws)), ws])
+    void load({}, { keepDepth: true })
+  }
 
   return (
     <div className="space-y-5">
@@ -140,11 +149,12 @@ export default function SlackWorkspacesCard({ orgId }: { orgId: string }) {
         </p>
       )}
 
-      {workspaces && workspaces.length > 0 && (
+      {workspaces.length > 0 && (
         <ul className="space-y-2">
           {workspaces.map((ws) => (
             <WorkspaceRow
               key={rowKey(ws)}
+              orgId={orgId}
               workspace={ws}
               onRemoved={() => removeFromList(rowKey(ws))}
             />
@@ -152,8 +162,20 @@ export default function SlackWorkspacesCard({ orgId }: { orgId: string }) {
         </ul>
       )}
 
+      {connections.hasMore && (
+        <button
+          type="button"
+          onClick={() => void connections.loadMore()}
+          disabled={connections.loading}
+          className="text-ui font-medium text-ink-2 transition-colors hover:text-ink-1 disabled:opacity-40"
+        >
+          Show more
+        </button>
+      )}
+
       <AddWorkspaceSection
-        hasWorkspaces={!!workspaces && workspaces.length > 0}
+        orgId={orgId}
+        hasWorkspaces={workspaces.length > 0}
         onConnected={upsertInList}
       />
     </div>
@@ -198,9 +220,11 @@ function Collapsible({ open, children }: { open: boolean; children: React.ReactN
 // the form collapses behind a single "Add another workspace" row and expands
 // back — with a close affordance — on demand.
 function AddWorkspaceSection({
+  orgId,
   hasWorkspaces,
   onConnected,
 }: {
+  orgId: string
   hasWorkspaces: boolean
   onConnected: (ws: SlackWorkspace) => void
 }) {
@@ -216,7 +240,7 @@ function AddWorkspaceSection({
 
   // First connect: no collapse chrome, the form is simply the content.
   if (!hasWorkspaces) {
-    return <ConnectFlow onConnected={onConnected} />
+    return <ConnectFlow orgId={orgId} onConnected={onConnected} />
   }
 
   return (
@@ -238,16 +262,22 @@ function AddWorkspaceSection({
       </Collapsible>
 
       <Collapsible open={expanded}>
-        <ConnectFlow onConnected={handleConnected} onCollapse={() => setExpanded(false)} />
+        <ConnectFlow
+          orgId={orgId}
+          onConnected={handleConnected}
+          onCollapse={() => setExpanded(false)}
+        />
       </Collapsible>
     </div>
   )
 }
 
 function WorkspaceRow({
+  orgId,
   workspace,
   onRemoved,
 }: {
+  orgId: string
   workspace: SlackWorkspace
   onRemoved: () => void
 }) {
@@ -266,7 +296,7 @@ function WorkspaceRow({
     setBusy(true)
     try {
       await apiFetch(
-        `/api/slack/workspaces/${encodeURIComponent(workspace.workspace_id)}/${encodeURIComponent(workspace.api_app_id)}`,
+        `/api/orgs/${encodeURIComponent(orgId)}/slack/connections/${encodeURIComponent(workspace.workspace_id)}/${encodeURIComponent(workspace.api_app_id)}`,
         { method: 'DELETE' },
       )
       // The org's last workspace going away moves slack from available back to
@@ -287,7 +317,7 @@ function WorkspaceRow({
           <span className="truncate text-body font-medium text-ink-1">
             {workspace.workspace_name || workspace.workspace_id}
           </span>
-          <TransportChip transport={workspace.transport} />
+          {workspace.transport && <TransportChip transport={workspace.transport} />}
           <ConnectionStatusChip workspace={workspace} />
         </div>
         <p className="mt-0.5 truncate text-reported text-ink-3">
@@ -427,9 +457,11 @@ function humanizeConnectError(raw: string): string {
 // (re-pasting the same bot token to update signing_secret/app_token without
 // retyping the one that isn't changing).
 function ConnectFlow({
+  orgId,
   onConnected,
   onCollapse,
 }: {
+  orgId: string
   onConnected: (ws: SlackWorkspace) => void
   // Present only when the form is a collapsible "add another" panel; renders
   // the close affordance that folds it back to the trigger row.
@@ -465,11 +497,14 @@ function ConnectFlow({
       if (signingSecret.trim()) body.signing_secret = signingSecret.trim()
       if (appToken.trim()) body.app_token = appToken.trim()
       if (transport) body.transport = transport
-      const ws = await apiJSON<SlackWorkspace>('/api/slack/workspaces', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      })
+      const ws = await apiJSON<SlackWorkspace>(
+        `/api/orgs/${encodeURIComponent(orgId)}/slack/connections/import`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        },
+      )
       invalidateEventSources()
       onConnected(ws)
       setBotToken('')
@@ -508,8 +543,12 @@ function ConnectFlow({
         >
           Create a Slack app <ExternalLink size={12} />
         </a>
-        <CopyManifestButton transport="socket" label="Copy manifest (Socket Mode)" />
-        <CopyManifestButton transport="events_api" label="Copy manifest (Events API)" />
+        <CopyManifestButton orgId={orgId} transport="socket" label="Copy manifest (Socket Mode)" />
+        <CopyManifestButton
+          orgId={orgId}
+          transport="events_api"
+          label="Copy manifest (Events API)"
+        />
       </div>
       <p className="text-reported leading-relaxed text-ink-3">
         Two ways to receive events: <strong className="font-medium text-ink-2">Socket Mode</strong>{' '}
@@ -621,9 +660,11 @@ function ConnectFlow({
 }
 
 function CopyManifestButton({
+  orgId,
   transport,
   label,
 }: {
+  orgId: string
   transport: 'socket' | 'events_api'
   label: string
 }) {
@@ -634,7 +675,9 @@ function CopyManifestButton({
     if (busy) return
     setBusy(true)
     try {
-      const resp = await apiFetch(`/api/slack/manifest?transport=${transport}`)
+      const resp = await apiFetch(
+        `/api/orgs/${encodeURIComponent(orgId)}/slack/manifest?transport=${transport}`,
+      )
       const text = await resp.text()
       await navigator.clipboard.writeText(text)
       setCopied(true)

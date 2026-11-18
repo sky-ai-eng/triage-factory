@@ -43,8 +43,8 @@ func (s *connectionStore) Upsert(context.Context, slackstore.Connection) (slacks
 	return slackstore.Connection{}, db.ErrNotApplicableInLocal
 }
 
-func (s *connectionStore) ListForOrg(context.Context, string) ([]slackstore.Connection, error) {
-	return nil, db.ErrNotApplicableInLocal
+func (s *connectionStore) ListForOrg(context.Context, string, db.ListOpts) ([]slackstore.Connection, int, error) {
+	return nil, 0, db.ErrNotApplicableInLocal
 }
 
 func (s *connectionStore) Get(context.Context, string, string, string) (*slackstore.Connection, error) {

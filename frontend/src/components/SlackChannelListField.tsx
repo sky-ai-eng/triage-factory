@@ -15,7 +15,7 @@ const REGISTRY_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1
 
 /** SlackChannelListField is the editor for slack:message's `channel_in`: a
  *  multi-select over the channels the handler's team tracks
- *  (POST /api/slack/teams/{team_id}/channels/list with `tracked: true`),
+ *  (POST /api/teams/{team_id}/slack-channels/list with `tracked: true`),
  *  submitting each channel's registry `id`. The server accepts only those,
  *  since the router delivers a team's handlers only messages from channels it
  *  tracks.

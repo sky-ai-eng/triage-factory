@@ -71,8 +71,7 @@ func TestHandleConnect_RecordsAccessChange(t *testing.T) {
 	r.fake.stageConnectOK("xoxb-audit", "T0AUDIT1", "Acme Corp", "U0BOTA", "A0AUDIT01", "")
 
 	rec := httptest.NewRecorder()
-	r.hdl.handleConnect(rec, r.req(http.MethodPost, "/api/slack/workspaces", owner, orgID, "",
-		map[string]string{"bot_token": "xoxb-audit", "app_token": "xapp-audit"}))
+	r.hdl.handleConnect(rec, r.importReq(owner, orgID, map[string]string{"bot_token": "xoxb-audit", "app_token": "xapp-audit"}))
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("connect status = %d (body=%s)", rec.Code, rec.Body.String())
 	}
@@ -111,8 +110,7 @@ func TestHandleConnect_ReconnectRecordsRotation(t *testing.T) {
 
 	for _, tok := range []string{"xoxb-first", "xoxb-second"} {
 		rec := httptest.NewRecorder()
-		r.hdl.handleConnect(rec, r.req(http.MethodPost, "/api/slack/workspaces", owner, orgID, "",
-			map[string]string{"bot_token": tok, "app_token": "xapp-rot"}))
+		r.hdl.handleConnect(rec, r.importReq(owner, orgID, map[string]string{"bot_token": tok, "app_token": "xapp-rot"}))
 		if rec.Code != http.StatusCreated && rec.Code != http.StatusOK {
 			t.Fatalf("connect %s status = %d (body=%s)", tok, rec.Code, rec.Body.String())
 		}
@@ -137,8 +135,7 @@ func TestHandleDelete_RecordsAccessChange(t *testing.T) {
 	r.fake.stageConnectOK("xoxb-del", "T0DELA1", "Acme Corp", "U0BOTD", "A0DELA01", "")
 
 	connect := httptest.NewRecorder()
-	r.hdl.handleConnect(connect, r.req(http.MethodPost, "/api/slack/workspaces", owner, orgID, "",
-		map[string]string{"bot_token": "xoxb-del", "app_token": "xapp-del"}))
+	r.hdl.handleConnect(connect, r.importReq(owner, orgID, map[string]string{"bot_token": "xoxb-del", "app_token": "xapp-del"}))
 	if connect.Code != http.StatusCreated {
 		t.Fatalf("connect status = %d (body=%s)", connect.Code, connect.Body.String())
 	}
@@ -190,8 +187,7 @@ func TestHandleConnect_Rejected_RecordsNothing(t *testing.T) {
 	// No stageConnectOK call -> the fake answers {"ok":false,"error":"invalid_auth"}.
 
 	rec := httptest.NewRecorder()
-	r.hdl.handleConnect(rec, r.req(http.MethodPost, "/api/slack/workspaces", owner, orgID, "",
-		map[string]string{"bot_token": "xoxb-bad", "app_token": "xapp-bad"}))
+	r.hdl.handleConnect(rec, r.importReq(owner, orgID, map[string]string{"bot_token": "xoxb-bad", "app_token": "xapp-bad"}))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("connect status = %d, want 400", rec.Code)
 	}

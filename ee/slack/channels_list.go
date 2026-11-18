@@ -63,7 +63,7 @@ var channelPrimaryValues = []string{
 	channelPrimaryThisTeam, channelPrimaryNone, channelPrimaryOtherTeam, channelPrimaryUnwatched,
 }
 
-// channelsListRequest is POST .../channels/list's body.
+// channelsListRequest is POST …/slack-channels/list's body.
 type channelsListRequest struct {
 	// Search is a case-insensitive literal substring the channel's name or
 	// its Slack channel id must carry. Trimmed; empty after the trim is
@@ -275,7 +275,7 @@ func channelPage(channels []channelView, page httpx.Page) []channelView {
 // anyone else in the org. It registers through apiMutating because it is a
 // POST; CSRF follows the method rather than the intent.
 //
-// POST /api/slack/teams/{team_id}/channels/list
+// POST /api/teams/{team_id}/slack-channels/list
 func (h *channelsHandler) handleList(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, teamID, role, ok := h.memberTeam(w, r)
 	if !ok {
@@ -316,7 +316,7 @@ func (h *channelsHandler) handleList(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// channelsFacetsRequest is POST .../channels/facets's body: the list's
+// channelsFacetsRequest is POST …/slack-channels/facets's body: the list's
 // narrowing fields, with the same meaning, and neither its paging nor its
 // order, which a count does not have.
 type channelsFacetsRequest struct {
@@ -376,7 +376,7 @@ func channelFacets(channels []channelView, f channelFilter) channelsFacetsRespon
 // counts cover what the list would then show, and the list's warnings are
 // where that is said. Authorization is the list's.
 //
-// POST /api/slack/teams/{team_id}/channels/facets
+// POST /api/teams/{team_id}/slack-channels/facets
 func (h *channelsHandler) handleFacets(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, teamID, _, ok := h.memberTeam(w, r)
 	if !ok {
