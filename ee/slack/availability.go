@@ -55,7 +55,7 @@ func availability(ctx context.Context, tx db.TxStores, orgID string) (eventsourc
 		// forever looking like an unconnected workspace.
 		return "", errors.New("slack store bundle absent from the transaction: the slack store extension is not registered")
 	}
-	conns, err := bundle.Connections.ListForOrg(ctx, orgID)
+	conns, _, err := bundle.Connections.ListForOrg(ctx, orgID, db.Unwindowed)
 	if err != nil {
 		return "", err
 	}

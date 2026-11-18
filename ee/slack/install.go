@@ -49,13 +49,14 @@ func init() {
 	server.RegisterExtension("slack", install)
 }
 
-// install mounts the org-admin Slack workspace surface plus both ingest
-// transports on the core server through the extension API. The workspace
-// routes go through API/APIMutating (session + CSRF, like core's own
-// routes); the two webhook routes are pre-auth (Slack has no session) so they
-// mount through Raw + SignedWebhookRateLimit and authorize themselves
-// per-request: an org's own app's by the workspace's signing secret, the
-// deployment app's by the one in the environment. It deliberately does NOT use
+// install mounts the Slack connection, install and channel surfaces plus both
+// ingest transports on the core server through the extension API
+// (mountRoutes). The connection and channel routes go through
+// API/APIMutating (session + CSRF, like core's own routes); the two webhook
+// routes are pre-auth (Slack has no session) so they mount through Raw +
+// SignedWebhookRateLimit and authorize themselves per-request: an org's own
+// app's by the workspace's signing secret, the deployment app's by the one in
+// the environment. It deliberately does NOT use
 // PreAuthRateLimit: that tier's 1 req/s budget is sized for anonymous human
 // login flows, and a subscribed workspace's own delivery volume routinely
 // clears it — the signing-secret check downstream already makes the
@@ -118,24 +119,8 @@ func install(api server.ExtensionAPI) {
 		sockets:    sockets,
 		deployment: deployment,
 	}
-	api.API("GET /api/slack/workspaces", h.handleList)
-	api.APIMutating("POST /api/slack/workspaces", h.handleConnect)
-	api.APIMutating("DELETE /api/slack/workspaces/{workspace_id}/{api_app_id}", h.handleDelete)
-	api.API("GET /api/slack/manifest", h.handleManifest)
-
 	dh := &deploymentAppHandler{app: deployment, publicURL: api.PublicURL}
-	api.API("GET /api/slack/deployment-app", dh.handleGet)
-
-	// The deployment app's install ceremony (deployment_install.go). Both legs
-	// are top-level navigations, the start from Settings and the callback from
-	// Slack's redirect, so they mount through API (session, no CSRF wrap) and
-	// carry their own state-cookie CSRF defense. The callback path is the
-	// redirect URL registered on the deployment's Slack app, so renaming it
-	// breaks every install.
 	ih := &installHandler{tx: api.Tx(), az: api.Authz(), client: slackHTTPClient, app: deployment, ceremony: api}
-	api.API("GET /api/orgs/{org_id}/slack/install/start", ih.handleStart)
-	api.API("GET "+installCallbackPath, ih.handleCallback)
-
 	ch := &channelsHandler{
 		tx:         api.Tx(),
 		stores:     stores,
@@ -143,16 +128,8 @@ func install(api server.ExtensionAPI) {
 		client:     slackHTTPClient,
 		candidates: ttlcache.New[slackCandidateSet](slackCandidatesTTL),
 	}
-	// The list and its facets node are reads; they mount through
-	// APIMutating because they are POSTs, and CSRF follows the method.
-	api.APIMutating("POST /api/slack/teams/{team_id}/channels/list", ch.handleList)
-	api.APIMutating("POST /api/slack/teams/{team_id}/channels/facets", ch.handleFacets)
-	api.APIMutating("PUT /api/slack/teams/{team_id}/channels", ch.handlePut)
-	api.APIMutating("POST /api/slack/channels/{channel_id}/primary", ch.handlePrimary)
-
 	wh := &webhookHandler{stores: stores, pipeline: pipeline, stats: stats, deployment: deployment}
-	api.Raw("POST /api/webhooks/slack/{org_id}", api.SignedWebhookRateLimit(http.HandlerFunc(wh.handleWebhook)))
-	api.Raw("POST /api/webhooks/slack", api.SignedWebhookRateLimit(http.HandlerFunc(wh.handleDeploymentWebhook)))
+	mountRoutes(api, h, dh, ih, ch, wh)
 
 	// Agent-facing exec verbs (TFAC-596) register from this package's init()
 	// (stores-free — the handler relays for policy and selects its token from
@@ -170,4 +147,46 @@ func install(api server.ExtensionAPI) {
 	api.OnReady(lifecycle.run)
 
 	api.OnReady(sockets.run)
+}
+
+// routeMounter is the part of server.ExtensionAPI the route table mounts
+// through.
+type routeMounter interface {
+	API(pattern string, h http.HandlerFunc)
+	APIMutating(pattern string, h http.HandlerFunc)
+	Raw(pattern string, h http.Handler)
+	SignedWebhookRateLimit(h http.Handler) http.Handler
+}
+
+// mountRoutes is the Slack route table. An org's connections, manifest and
+// install start are addressed by the org in the path; a team's channels are
+// the team's resource, under its own path, with the org the credential's as on
+// every core team route. The list and facets reads mount through APIMutating
+// because they are POSTs, and CSRF follows the method.
+func mountRoutes(api routeMounter, h *workspacesHandler, dh *deploymentAppHandler, ih *installHandler, ch *channelsHandler, wh *webhookHandler) {
+	api.API("GET /api/orgs/{org_id}/slack/manifest", h.handleManifest)
+	api.APIMutating("POST /api/orgs/{org_id}/slack/connections/import", h.handleConnect)
+	api.APIMutating("POST /api/orgs/{org_id}/slack/connections/list", h.handleList)
+	api.API("GET /api/orgs/{org_id}/slack/connections/{workspace_id}/{api_app_id}", h.handleGet)
+	api.APIMutating("DELETE /api/orgs/{org_id}/slack/connections/{workspace_id}/{api_app_id}", h.handleDelete)
+
+	api.API("GET /api/slack/deployment-app", dh.handleGet)
+
+	// The deployment app's install ceremony (deployment_install.go). Both legs
+	// are top-level navigations, the start from Settings and the callback from
+	// Slack's redirect, so they mount through API (session, no CSRF wrap) and
+	// carry their own state-cookie CSRF defense. The callback path is the
+	// redirect URL registered on the deployment's Slack app, so renaming it
+	// breaks every install.
+	api.API("GET /api/orgs/{org_id}/slack/install/start", ih.handleStart)
+	api.API("GET "+installCallbackPath, ih.handleCallback)
+
+	api.APIMutating("PUT /api/teams/{team_id}/slack-channels", ch.handlePut)
+	api.APIMutating("POST /api/teams/{team_id}/slack-channels/list", ch.handleList)
+	api.APIMutating("POST /api/teams/{team_id}/slack-channels/facets", ch.handleFacets)
+	api.API("GET /api/teams/{team_id}/slack-channels/{channel_id}", ch.handleGet)
+	api.APIMutating("PATCH /api/teams/{team_id}/slack-channels/{channel_id}", ch.handlePatch)
+
+	api.Raw("POST /api/webhooks/slack/{org_id}", api.SignedWebhookRateLimit(http.HandlerFunc(wh.handleWebhook)))
+	api.Raw("POST /api/webhooks/slack", api.SignedWebhookRateLimit(http.HandlerFunc(wh.handleDeploymentWebhook)))
 }

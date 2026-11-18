@@ -70,12 +70,12 @@ func (f *fakeConnectionStore) deleteRow(workspaceID, apiAppID string) {
 func (f *fakeConnectionStore) Upsert(_ context.Context, c slackstore.Connection) (slackstore.Connection, error) {
 	return c, nil
 }
-func (f *fakeConnectionStore) ListForOrgSystem(ctx context.Context, orgID string) ([]slackstore.Connection, error) {
-	return f.ListForOrg(ctx, orgID)
+func (f *fakeConnectionStore) ListForOrgSystem(context.Context, string) ([]slackstore.Connection, error) {
+	return nil, nil
 }
 
-func (f *fakeConnectionStore) ListForOrg(context.Context, string) ([]slackstore.Connection, error) {
-	return nil, nil
+func (f *fakeConnectionStore) ListForOrg(context.Context, string, db.ListOpts) ([]slackstore.Connection, int, error) {
+	return nil, 0, nil
 }
 func (f *fakeConnectionStore) Get(context.Context, string, string, string) (*slackstore.Connection, error) {
 	return nil, nil

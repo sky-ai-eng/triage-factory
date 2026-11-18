@@ -1,16 +1,16 @@
 // Slack channel tracking API (TFAC-543): a team lists channels it's
-// tracking (union sightings + live Slack candidates), tracks/untracks a
-// full set, and reassigns a channel's primary tracking team. The primary
-// lifecycle (first-tracker default, oldest-tracker succession) is handled
-// server-side by TeamChannelStore.ReconcilePrimariesSystem; a team's first
-// tracked channel seeds its default slack:message blueprint so mentions in a
-// newly tracked channel have somewhere to route once TFAC-510's routing flip
-// lands. Deliberately under /api/slack/* rather than
-// /api/teams/{team_id}/... — ee-owned routes stay in the slack namespace.
+// tracking (union sightings + live Slack candidates), reads one, tracks/
+// untracks a full set, and takes a channel's primary. The primary lifecycle
+// (first-tracker default, oldest-tracker succession) is handled server-side
+// by TeamChannelStore.ReconcilePrimariesSystem; a team's first tracked
+// channel seeds its default slack:message blueprint so mentions in a newly
+// tracked channel have somewhere to route. The routes are the team's
+// resource, under /api/teams/{team_id}/slack-channels.
 package slack
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -32,35 +32,50 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/ttlcache"
 )
 
-// slackEntitlementGate is the shared local-mode-404 + entitlement-404 gate
-// every Slack route runs before its own authz: local mode 404s
-// unconditionally (the Slack store is Postgres-only — see
-// workspacesHandler's doc), then the `slack` entitlement is checked for the
-// resolved org. workspacesHandler.memberGate delegates here so the two
-// handler families can't drift.
+// refuseInLocalMode answers 404 in local mode, where every Slack route is
+// absent: the Slack store is Postgres-only (see workspacesHandler's doc). It
+// reports whether it answered.
+func refuseInLocalMode(w http.ResponseWriter) bool {
+	if runmode.Current() != runmode.ModeLocal {
+		return false
+	}
+	httpx.NotFound(w, "route")
+	return true
+}
+
+// refuseUnentitled answers 404 for an org without the `slack` entitlement, to
+// which every Slack route is absent. It reports whether it answered.
+func refuseUnentitled(w http.ResponseWriter, orgID string) bool {
+	if entitlements.For(orgID).Has(entitlements.FeatureSlack) {
+		return false
+	}
+	httpx.NotFound(w, "route")
+	return true
+}
+
+// slackEntitlementGate is the gate every team route runs before its team
+// checks: local mode 404s, the org is the credential's, as on every core
+// /api/teams/{team_id} route, and that org must hold the `slack` entitlement.
 func slackEntitlementGate(w http.ResponseWriter, r *http.Request) (orgID string, ok bool) {
-	if runmode.Current() == runmode.ModeLocal {
-		httpx.NotFound(w, "route")
+	if refuseInLocalMode(w) {
 		return "", false
 	}
 	orgID, ok = httpx.RequireOrg(w, r)
 	if !ok {
 		return "", false
 	}
-	if !entitlements.For(orgID).Has(entitlements.FeatureSlack) {
-		httpx.NotFound(w, "route")
+	if refuseUnentitled(w, orgID) {
 		return "", false
 	}
 	return orgID, true
 }
 
-// channelsHandler serves /api/slack/teams/{team_id}/channels (PUT),
-// /api/slack/teams/{team_id}/channels/list and /facets, and
-// /api/slack/channels/{channel_id}/primary — the channel tracking surface a
-// team's settings page builds against. Needs both the transactional store
-// runner (RLS-gated team/registry reads + the tracking write) and the
-// non-tx admin-pool aggregate (cross-team trackers, secrets, post-commit
-// reconcile/ensure/auto-join).
+// channelsHandler serves /api/teams/{team_id}/slack-channels (PUT), its /list
+// and /facets, and /api/teams/{team_id}/slack-channels/{channel_id} (GET,
+// PATCH) — the channel tracking surface a team's settings page builds against.
+// Needs both the transactional store runner (RLS-gated team/registry reads +
+// the tracking write) and the non-tx admin-pool aggregate (cross-team
+// trackers, secrets, post-commit reconcile/ensure/auto-join).
 type channelsHandler struct {
 	tx     db.TxRunner
 	stores db.Stores
@@ -203,7 +218,7 @@ type putChannelsRequest struct {
 	ChannelIDs []string `json:"channel_ids"`
 }
 
-// PUT /api/slack/teams/{team_id}/channels — team admin, full-set replace.
+// PUT /api/teams/{team_id}/slack-channels — team admin, full-set replace.
 func (h *channelsHandler) handlePut(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := slackEntitlementGate(w, r)
 	if !ok {
@@ -342,50 +357,97 @@ func (h *channelsHandler) handlePut(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, resp)
 }
 
-// primaryRequest is POST .../primary's body.
-type primaryRequest struct {
-	TeamID string `json:"team_id"`
+// channelIDFromPath reads {channel_id}, Slack's id for a channel, and answers
+// 404 for one that is not the id of a channel a team can track.
+func channelIDFromPath(w http.ResponseWriter, r *http.Request) (string, bool) {
+	channelID := r.PathValue("channel_id")
+	if !slackChannelIDRe.MatchString(channelID) {
+		httpx.NotFound(w, "channel")
+		return "", false
+	}
+	return channelID, true
 }
 
-// POST /api/slack/channels/{channel_id}/primary — org admin, primary
-// reassignment. Plain intra-org errors: unlike the workspace-connect
-// surface, this route may name teams freely (the ratified disclosure line
-// for intra-org errors here).
-func (h *channelsHandler) handlePrimary(w http.ResponseWriter, r *http.Request) {
+// handleGet reads one channel of the team's list: the row the list would
+// answer for it, or 404 when the list holds none, which is a channel the team
+// could not watch. An id Slack has since replaced reads the channel under its
+// current id. Authorization is the list's.
+//
+// GET /api/teams/{team_id}/slack-channels/{channel_id}
+func (h *channelsHandler) handleGet(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, teamID, _, ok := h.memberTeam(w, r)
+	if !ok {
+		return
+	}
+	channelID, ok := channelIDFromPath(w, r)
+	if !ok {
+		return
+	}
+	view, err := h.findChannel(r.Context(), orgID, userID, teamID, channelID)
+	if err != nil {
+		httpx.InternalError(w, "slack/channels", err)
+		return
+	}
+	if view == nil {
+		httpx.NotFound(w, "channel")
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, view)
+}
+
+// patchChannelRequest is PATCH's body. IsPrimary is raw so that an absent
+// field and an explicit null read differently.
+type patchChannelRequest struct {
+	IsPrimary json.RawMessage `json:"is_primary"`
+}
+
+// handlePatch writes the team's tracking row of a channel. Its one field,
+// is_primary, takes only true, which makes the team the channel's primary: a
+// watched channel always has a primary, so a team stops being it when another
+// team takes it, and false or null is refused. An absent field writes nothing.
+// The answer is the channel's row of the team's list.
+//
+// Only an org admin may write it, because which team is primary decides which
+// team the channel's events route to. A team that does not watch the channel
+// answers 404, and an archived team is refused: it may not become a channel's
+// routing owner.
+//
+// PATCH /api/teams/{team_id}/slack-channels/{channel_id}
+func (h *channelsHandler) handlePatch(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := slackEntitlementGate(w, r)
 	if !ok {
 		return
 	}
 	userID := httpx.ClaimsFrom(r.Context()).Subject
-	if !h.az.RequireOrgAdminRole(w, r, orgID, userID) {
-		return
-	}
-
-	channelID := r.PathValue("channel_id")
-	if channelID == "" {
-		httpx.NotFound(w, "channel")
-		return
-	}
-
-	var req primaryRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
-		return
-	}
-	if req.TeamID == "" {
-		httpx.BadRequest(w, "team_id is required")
-		return
-	}
-	teamID, err := h.az.ResolveTeamID(r.Context(), orgID, userID, req.TeamID)
-	if err != nil {
-		authz.WriteResolveError(w, "slack/channels", err)
+	teamID, ok := h.az.TeamIDFromPath(w, r, "slack/channels", orgID, userID)
+	if !ok {
 		return
 	}
 	if !h.az.VerifyTeamInOrg(w, r, orgID, userID, teamID) {
 		return
 	}
-	// An archived team is read-only-and-vanished (TFAC-448) — reassignment
-	// must not make one the live routing owner of a channel, mirroring
-	// handlePut's destination-team guard (VerifyTeamNotArchived above).
+	if !h.az.RequireOrgAdminRole(w, r, orgID, userID) {
+		return
+	}
+	channelID, ok := channelIDFromPath(w, r)
+	if !ok {
+		return
+	}
+
+	var req patchChannelRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	isPrimary, state := httpx.PatchBool(&v, req.IsPrimary, "is_primary")
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+	if state == httpx.PatchClear || (state == httpx.PatchSet && !isPrimary) {
+		v.Invalid("is_primary", "is_primary can only be set to true: a watched channel always has a primary, so it moves by setting it on another team")
+		v.Flush(w, http.StatusUnprocessableEntity)
+		return
+	}
 	if !h.az.VerifyTeamNotArchived(w, r, orgID, userID, teamID) {
 		return
 	}
@@ -396,19 +458,62 @@ func (h *channelsHandler) handlePrimary(w http.ResponseWriter, r *http.Request) 
 		httpx.InternalError(w, "slack/channels", err)
 		return
 	}
-	if channel == nil {
-		httpx.BadRequest(w, "team does not track this channel")
-		return
-	}
-	if err := admin.TeamChannels.SetPrimarySystem(r.Context(), orgID, channel.ID, teamID); err != nil {
-		if errors.Is(err, slackstore.ErrTeamNotTrackingChannel) {
-			httpx.BadRequest(w, "team does not track this channel")
+	tracks := false
+	if channel != nil {
+		if tracks, err = admin.TeamChannels.TracksChannelSystem(r.Context(), orgID, teamID, channel.ID); err != nil {
+			httpx.InternalError(w, "slack/channels", err)
 			return
 		}
+	}
+	if !tracks {
+		httpx.NotFound(w, "channel")
+		return
+	}
+	if state == httpx.PatchSet {
+		if err := admin.TeamChannels.SetPrimarySystem(r.Context(), orgID, channel.ID, teamID); err != nil {
+			// The team stopped watching the channel since the read above.
+			if errors.Is(err, slackstore.ErrTeamNotTrackingChannel) {
+				httpx.NotFound(w, "channel")
+				return
+			}
+			httpx.InternalError(w, "slack/channels", err)
+			return
+		}
+	}
+
+	view, err := h.findChannel(r.Context(), orgID, userID, teamID, channel.ChannelID)
+	if err != nil {
 		httpx.InternalError(w, "slack/channels", err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "primary set"})
+	if view == nil {
+		httpx.NotFound(w, "channel")
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, view)
+}
+
+// findChannel returns channelID's row of the team's list, or nil when the list
+// holds none. A channel TF holds a row for is found under its current Slack id,
+// whichever id names it.
+func (h *channelsHandler) findChannel(ctx context.Context, orgID, userID, teamID, channelID string) (*channelView, error) {
+	row, err := slackstore.FromStores(h.stores).Channels.ResolveSystem(ctx, orgID, channelID)
+	if err != nil {
+		return nil, err
+	}
+	if row != nil {
+		channelID = row.ChannelID
+	}
+	channels, _, err := h.mergedChannels(ctx, orgID, userID, teamID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range channels {
+		if channels[i].ChannelID == channelID {
+			return &channels[i], nil
+		}
+	}
+	return nil, nil
 }
 
 // buildChannelsResponse is PUT's answer: the whole merged set, in channel id
@@ -427,20 +532,16 @@ func (h *channelsHandler) buildChannelsResponse(ctx context.Context, orgID, user
 // channel id order, with the process-level warnings the live read raised.
 func (h *channelsHandler) mergedChannels(ctx context.Context, orgID, userID, teamID string) ([]channelView, []channelsWarning, error) {
 	var (
-		tracked    []slackstore.TeamChannel
 		registry   []slackstore.Channel
 		workspaces []slackstore.Connection
 	)
 	if err := h.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		bundle := slackstore.FromTx(tx)
 		var e error
-		if tracked, e = bundle.TeamChannels.ListForTeam(ctx, orgID, teamID); e != nil {
-			return e
-		}
 		if registry, e = bundle.Channels.ListForOrg(ctx, orgID); e != nil {
 			return e
 		}
-		conns, e := bundle.Connections.ListForOrg(ctx, orgID)
+		conns, _, e := bundle.Connections.ListForOrg(ctx, orgID, db.Unwindowed)
 		if e != nil {
 			return e
 		}
@@ -472,12 +573,24 @@ func (h *channelsHandler) mergedChannels(ctx context.Context, orgID, userID, tea
 		return v
 	}
 
-	for _, tc := range tracked {
-		v := get(tc.ChannelID)
-		v.ID = tc.SlackChannelID
-		v.Tracked = true
-		v.IsPrimary = tc.IsPrimary
-		v.Source = "tracked"
+	// The team's own rows come from the org-wide tracker read rather than one
+	// under the caller's claims: the tracking rows' RLS admits only the team's
+	// members, and an org admin who sets a team's primary need not be one.
+	// Stored team ids are canonical, and the path's need not be.
+	if parsed, err := uuid.Parse(teamID); err == nil {
+		teamID = parsed.String()
+	}
+	for _, trackers := range trackersByChannel {
+		for _, tc := range trackers {
+			if tc.TeamID != teamID {
+				continue
+			}
+			v := get(tc.ChannelID)
+			v.ID = tc.SlackChannelID
+			v.Tracked = true
+			v.IsPrimary = tc.IsPrimary
+			v.Source = "tracked"
+		}
 	}
 	for _, c := range registry {
 		v := get(c.ChannelID)
@@ -643,7 +756,7 @@ func (h *channelsHandler) orgWorkspaces(ctx context.Context, orgID, userID strin
 	var conns []slackstore.Connection
 	err := h.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		var e error
-		conns, e = slackstore.FromTx(tx).Connections.ListForOrg(ctx, orgID)
+		conns, _, e = slackstore.FromTx(tx).Connections.ListForOrg(ctx, orgID, db.Unwindowed)
 		return e
 	})
 	return activeConnections(conns), err

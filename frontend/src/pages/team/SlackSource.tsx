@@ -258,7 +258,7 @@ export default function SlackSource({ teamId, teamName, isAdmin, onBack }: Sourc
     (actionId: string, ids: Array<string | number>) => {
       const picked = [...new Set(ids.map(String))]
       const put = (channelIds: string[]) =>
-        apiFetch(`/api/slack/teams/${encodeURIComponent(teamId)}/channels`, {
+        apiFetch(`/api/teams/${encodeURIComponent(teamId)}/slack-channels`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ channel_ids: channelIds }),
@@ -270,17 +270,20 @@ export default function SlackSource({ teamId, teamName, isAdmin, onBack }: Sourc
         if (tracked === null) throw new Error('tracked channels unreadable')
         const current = tracked.map((c) => c.channel_id)
         if (actionId === 'primary') {
-          // The backend promotes an existing tracker, so a channel has to be
-          // tracked before it can be claimed. One set-replace, then one
-          // promotion per channel.
+          // Primary is a field of the team's tracking row, so a channel has to
+          // be tracked before it can be claimed. One set-replace, then one
+          // PATCH per channel.
           const missing = picked.filter((id) => !current.includes(id))
           if (missing.length) await put(current.concat(missing))
           for (const id of picked) {
-            await apiFetch(`/api/slack/channels/${encodeURIComponent(id)}/primary`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ team_id: teamId }),
-            })
+            await apiFetch(
+              `/api/teams/${encodeURIComponent(teamId)}/slack-channels/${encodeURIComponent(id)}`,
+              {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ is_primary: true }),
+              },
+            )
           }
         } else {
           const on = new Set(picked)

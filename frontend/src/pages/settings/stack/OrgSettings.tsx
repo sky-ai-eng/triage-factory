@@ -127,7 +127,7 @@ export default function OrgSettings({
   const parkedWork = useParkedWork(orgId, true)
 
   // EE SSO / Slack entitlements — dark until the probe resolves, matching the
-  // backend's 404-and-hide at every /api/sso/* and /api/slack/* seam.
+  // backend's 404-and-hide at every SSO and Slack route.
   const { has, loaded: entLoaded } = useEntitlements()
   const sso = entLoaded && has(FeatureSSO)
   const slackEnt = entLoaded && has(FeatureSlack)
@@ -843,7 +843,7 @@ export default function OrgSettings({
         </SettingsSection>
       )}
 
-      {/* ── Slack (TFAC-529) ── EE, multi-mode only: every /api/slack/* seam
+      {/* ── Slack (TFAC-529) ── EE, multi-mode only: every Slack route
           404s an unlicensed org, so the FE hides the surface rather than
           presenting a dead flow — same gating shape as SSO below. An action
           section (no Save footer): the card owns its own connect/disconnect

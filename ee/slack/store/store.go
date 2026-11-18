@@ -147,7 +147,12 @@ type ConnectionStore interface {
 	// does not catch a different workspace_id already carrying this org's
 	// api_app_id under another org, since api_app_id isn't unique on its own.
 	Upsert(ctx context.Context, c Connection) (Connection, error)
-	ListForOrg(ctx context.Context, orgID string) ([]Connection, error)
+
+	// ListForOrg returns one window of orgID's connections, active or not,
+	// and how many there are, ordered by workspace name, then workspace id,
+	// then app id. db.Unwindowed reads every one, for a caller deciding
+	// something from the whole set.
+	ListForOrg(ctx context.Context, orgID string, opts db.ListOpts) ([]Connection, int, error)
 	Get(ctx context.Context, orgID, workspaceID, apiAppID string) (*Connection, error)
 	Delete(ctx context.Context, orgID, workspaceID, apiAppID string) error
 
@@ -163,10 +168,11 @@ type ConnectionStore interface {
 	// doc.
 	ListAllSystem(ctx context.Context) ([]Connection, error)
 
-	// ListForOrgSystem mirrors ListForOrg on the admin pool (bypasses RLS),
-	// for claims-free system callers — the availability SystemProbe the
-	// brain's source manifest resolves through. System-code-only, same
-	// discipline as ListAllSystem.
+	// ListForOrgSystem returns every one of orgID's connections, in
+	// ListForOrg's order, on the admin pool (bypasses RLS), for claims-free
+	// system callers — the availability SystemProbe the brain's source
+	// manifest resolves through. System-code-only, same discipline as
+	// ListAllSystem.
 	ListForOrgSystem(ctx context.Context, orgID string) ([]Connection, error)
 
 	// ActiveForWorkspaceSystem returns orgID's active connection in
