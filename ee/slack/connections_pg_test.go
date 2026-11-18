@@ -212,11 +212,11 @@ func TestActiveConnection_Availability(t *testing.T) {
 	}
 }
 
-// makeInactive connects removalTestApp in workspaceID over the Events API,
-// then makes it the inactive one beside another active app.
-func (r *removalRig) makeInactive(workspaceID string) {
+// makeInactive connects removalTestApp in workspaceID over transport, then
+// makes it the inactive one beside another active app.
+func (r *removalRig) makeInactive(workspaceID, transport string) {
 	r.t.Helper()
-	r.connect(workspaceID, "xoxb-"+workspaceID, transportEventsAPI)
+	r.connect(workspaceID, "xoxb-"+workspaceID, transport)
 	if _, err := r.h.AdminDB.Exec(`
 		UPDATE org_slack_connections SET active = false WHERE workspace_id = $1 AND api_app_id = $2
 	`, workspaceID, removalTestApp); err != nil {
@@ -240,7 +240,7 @@ func TestActiveConnection_InactiveDeliveryDropped(t *testing.T) {
 
 	t.Run("webhook", func(t *testing.T) {
 		r := newRemovalRig(t)
-		r.makeInactive("T0INACT1")
+		r.makeInactive("T0INACT1", transportEventsAPI)
 		rec := r.postSigned("T0INACT1", eventCallbackPayload("T0INACT1", removalTestApp, "Ev-inactive", mention))
 		if rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != "{}" {
 			t.Fatalf("delivery = %d %q; want 200 {}", rec.Code, rec.Body.String())
@@ -250,7 +250,7 @@ func TestActiveConnection_InactiveDeliveryDropped(t *testing.T) {
 
 	t.Run("socket", func(t *testing.T) {
 		r := newRemovalRig(t)
-		r.makeInactive("T0INACT1")
+		r.makeInactive("T0INACT1", transportSocket)
 		c := &appConnection{appID: removalTestApp, orgID: r.orgID, sightings: map[string]*sightingView{}}
 		env := socketEnvelope{
 			Type: "events_api", EnvelopeID: "env-1",
@@ -281,19 +281,40 @@ func (r *removalRig) assertDropped() {
 }
 
 // TestActiveConnection_InactiveRemovalApplied: Slack reporting the inactive
-// app removed still disconnects it, leaving the active one.
+// app removed still disconnects it, over either transport, leaving the active
+// one.
 func TestActiveConnection_InactiveRemovalApplied(t *testing.T) {
-	r := newRemovalRig(t)
-	r.makeInactive("T0INACT1")
-	rec := r.postSigned("T0INACT1", removalPayload("T0INACT1", "Ev-removal", time.Now(), appUninstalledInner))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	removal := func() map[string]any {
+		return removalPayload("T0INACT1", "Ev-removal", time.Now(), appUninstalledInner)
 	}
-	if ws := r.row("T0INACT1"); ws != nil {
-		t.Errorf("inactive connection after the removal = %+v; want deleted", ws)
+	assertRemoved := func(r *removalRig) {
+		r.t.Helper()
+		if ws := r.row("T0INACT1"); ws != nil {
+			r.t.Errorf("inactive connection after the removal = %+v; want deleted", ws)
+		}
+		active, err := slackstore.FromStores(r.stores).Connections.ActiveForWorkspaceSystem(r.t.Context(), r.orgID, "T0INACT1")
+		if err != nil || active == nil || active.APIAppID != "A0ACTIVE01" {
+			r.t.Errorf("active connection after the removal = %+v (%v); want A0ACTIVE01 kept", active, err)
+		}
 	}
-	active, err := slackstore.FromStores(r.stores).Connections.ActiveForWorkspaceSystem(t.Context(), r.orgID, "T0INACT1")
-	if err != nil || active == nil || active.APIAppID != "A0ACTIVE01" {
-		t.Errorf("active connection after the removal = %+v (%v); want A0ACTIVE01 kept", active, err)
-	}
+
+	t.Run("webhook", func(t *testing.T) {
+		r := newRemovalRig(t)
+		r.makeInactive("T0INACT1", transportEventsAPI)
+		if rec := r.postSigned("T0INACT1", removal()); rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+		}
+		assertRemoved(r)
+	})
+
+	t.Run("socket", func(t *testing.T) {
+		r := newRemovalRig(t)
+		r.makeInactive("T0INACT1", transportSocket)
+		c := &appConnection{appID: removalTestApp, orgID: r.orgID, sightings: map[string]*sightingView{}}
+		env := socketEnvelope{Type: "events_api", EnvelopeID: "env-1", Payload: mustJSON(t, removal())}
+		if !c.processEventsAPIEnvelope(t.Context(), r.stores, r.pipeline, env) {
+			t.Fatal("envelope not acked; want acked")
+		}
+		assertRemoved(r)
+	})
 }

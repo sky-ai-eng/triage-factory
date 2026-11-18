@@ -384,27 +384,26 @@ func TestDesiredApps_TwoRowsSameApp_OneEntry(t *testing.T) {
 	}
 }
 
-// TestDesiredApps_InactiveRowsExcluded: an app with no active socket row gets
-// no connection, and an app's inactive row adds no token to dial with.
-func TestDesiredApps_InactiveRowsExcluded(t *testing.T) {
+// TestDesiredApps_InactiveConnectionKeepsItsSocket: an app connected only
+// where it is inactive still gets a socket, which is how Slack's report of its
+// removal reaches TF.
+func TestDesiredApps_InactiveConnectionKeepsItsSocket(t *testing.T) {
 	entitlements.RegisterProvider(entitlements.Static(entitlements.FeatureSlack))
 	t.Cleanup(entitlements.Reset)
 
 	active := &slackstore.Connection{Source: slackstore.SourceOrg, Active: true, WorkspaceID: "T1", APIAppID: socketTestAppID, OrgID: socketTestOrgID, Transport: transportSocket, AppTokenRef: socketTestAppRef}
-	inactiveSameApp := &slackstore.Connection{Source: slackstore.SourceOrg, WorkspaceID: "T2", APIAppID: socketTestAppID, OrgID: socketTestOrgID, Transport: transportSocket, AppTokenRef: "inactive_app_token"}
-	inactiveOtherApp := &slackstore.Connection{Source: slackstore.SourceOrg, WorkspaceID: "T1", APIAppID: "A0INACTIVE", OrgID: socketTestOrgID, Transport: transportSocket, AppTokenRef: "other_app_token"}
-	rig := newSocketTestRig(t, active, inactiveSameApp, inactiveOtherApp)
+	inactive := &slackstore.Connection{Source: slackstore.SourceOrg, WorkspaceID: "T1", APIAppID: "A0INACTIVE", OrgID: socketTestOrgID, Transport: transportSocket, AppTokenRef: "inactive_app_token"}
+	rig := newSocketTestRig(t, active, inactive)
 
 	desired, err := rig.mgr.desiredApps(context.Background())
 	if err != nil {
 		t.Fatalf("desiredApps: %v", err)
 	}
-	if len(desired) != 1 {
-		t.Fatalf("desiredApps = %v; want only the app with an active row", desired)
+	if len(desired) != 2 {
+		t.Fatalf("desiredApps = %v; want both apps, the inactive one included", desired)
 	}
-	d, ok := desired[socketTestAppID]
-	if !ok || len(d.tokenRefs) != 1 || !d.tokenRefs[socketTestAppRef] {
-		t.Errorf("desired = %+v; want %s with only its active row's token", d, socketTestAppID)
+	if d, ok := desired["A0INACTIVE"]; !ok || !d.tokenRefs["inactive_app_token"] {
+		t.Errorf("desired[A0INACTIVE] = %+v; want it dialed with its own app token", d)
 	}
 }
 

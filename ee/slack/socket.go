@@ -184,15 +184,16 @@ type desiredApp struct {
 	appID       string
 	orgID       string
 	appTokenRef string
-	// tokenRefs holds the app-token ref of every one of the app's active
-	// socket rows. The token belongs to the app, so any of them dials.
+	// tokenRefs holds the app-token ref of every one of the app's socket
+	// rows. The token belongs to the app, so any of them dials.
 	tokenRefs map[string]bool
 }
 
 // desiredApps computes the full desired connection set: every api_app_id
-// with at least one active transport=socket row in an entitled org. An app
-// connected only where it is inactive gets no socket: its deliveries would
-// all be dropped. app->one-org
+// with at least one transport=socket row in an entitled org, active or not.
+// Ingest drops an inactive connection's deliveries, but not Slack reporting
+// the app removed (handleAppRemoved), and that report reaches TF only through
+// the app's socket. app->one-org
 // (TFAC-533) means every row sharing an api_app_id carries the same org_id,
 // so entitlement and the app-token secret ref are well-defined regardless
 // of which matching row supplies them — "credentials come off any of its
@@ -218,7 +219,7 @@ func (m *socketManager) desiredApps(ctx context.Context) (map[string]desiredApp,
 
 	desired := make(map[string]desiredApp)
 	for _, row := range rows {
-		if !row.Active || row.Transport != transportSocket {
+		if row.Transport != transportSocket {
 			continue
 		}
 		if !entitlements.For(row.OrgID).Has(entitlements.FeatureSlack) {
