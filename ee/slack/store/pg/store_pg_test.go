@@ -131,7 +131,7 @@ func TestConnectionStore_Postgres_UpsertReturnsTheStoredRow(t *testing.T) {
 	var list []slackstore.Connection
 	mustWithUser(t, stores, ctx, orgID, userID, func(tx db.TxStores) error {
 		var e error
-		list, e = slackstore.FromTx(tx).Connections.ListForOrg(ctx, orgID)
+		list, _, e = slackstore.FromTx(tx).Connections.ListForOrg(ctx, orgID, db.Unwindowed)
 		return e
 	})
 	if len(list) != 1 || !reflect.DeepEqual(list[0], *got) {
@@ -165,7 +165,7 @@ func TestConnectionStore_Postgres_UpsertUpdatesInPlace(t *testing.T) {
 	var list []slackstore.Connection
 	mustWithUser(t, stores, ctx, orgID, userID, func(tx db.TxStores) error {
 		var e error
-		list, e = slackstore.FromTx(tx).Connections.ListForOrg(ctx, orgID)
+		list, _, e = slackstore.FromTx(tx).Connections.ListForOrg(ctx, orgID, db.Unwindowed)
 		return e
 	})
 	if len(list) != 1 {
@@ -440,12 +440,12 @@ func TestConnectionStore_Postgres_CrossOrgConflict(t *testing.T) {
 	var listA, listB []slackstore.Connection
 	mustWithUser(t, stores, ctx, orgA, userA, func(tx db.TxStores) error {
 		var e error
-		listA, e = slackstore.FromTx(tx).Connections.ListForOrg(ctx, orgA)
+		listA, _, e = slackstore.FromTx(tx).Connections.ListForOrg(ctx, orgA, db.Unwindowed)
 		return e
 	})
 	mustWithUser(t, stores, ctx, orgB, userB, func(tx db.TxStores) error {
 		var e error
-		listB, e = slackstore.FromTx(tx).Connections.ListForOrg(ctx, orgB)
+		listB, _, e = slackstore.FromTx(tx).Connections.ListForOrg(ctx, orgB, db.Unwindowed)
 		return e
 	})
 	if len(listA) != 1 || listA[0].OrgID != orgA {
@@ -520,12 +520,12 @@ func TestConnectionStore_Postgres_TwoAppsSameWorkspaceDifferentOrgs(t *testing.T
 	var listA, listB []slackstore.Connection
 	mustWithUser(t, stores, ctx, orgA, userA, func(tx db.TxStores) error {
 		var e error
-		listA, e = slackstore.FromTx(tx).Connections.ListForOrg(ctx, orgA)
+		listA, _, e = slackstore.FromTx(tx).Connections.ListForOrg(ctx, orgA, db.Unwindowed)
 		return e
 	})
 	mustWithUser(t, stores, ctx, orgB, userB, func(tx db.TxStores) error {
 		var e error
-		listB, e = slackstore.FromTx(tx).Connections.ListForOrg(ctx, orgB)
+		listB, _, e = slackstore.FromTx(tx).Connections.ListForOrg(ctx, orgB, db.Unwindowed)
 		return e
 	})
 	if len(listA) != 1 || listA[0].APIAppID != "A0FIRST001" || listA[0].WorkspaceID != "T0SHARED2" {

@@ -26,7 +26,7 @@ func rateLimitNames(ctx context.Context, tx db.TxStores, orgID string) (map[stri
 	if bundle == nil {
 		return nil, errors.New("slack store bundle absent from the transaction: the slack store extension is not registered")
 	}
-	conns, err := bundle.Connections.ListForOrg(ctx, orgID)
+	conns, _, err := bundle.Connections.ListForOrg(ctx, orgID, db.Unwindowed)
 	if err != nil {
 		return nil, err
 	}

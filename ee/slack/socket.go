@@ -60,8 +60,8 @@ var (
 
 // Per-connection lifecycle states (dialing -> open -> draining -> dead,
 // never repaired) plus the two states that describe why a connection isn't
-// open right now. These are also the wire values GET /api/slack/workspaces
-// exposes for the frontend's status chip.
+// open right now. These are also the wire values the connection reads
+// expose for the frontend's status chip.
 const (
 	stateDialing    = "dialing"
 	stateOpen       = "open"
@@ -72,7 +72,7 @@ const (
 
 // connStatus is the observable state of one per-app connection — held by
 // its appConnection (mutex-guarded there) and returned as a value snapshot
-// by StatusFor / appConnection.snapshot for GET /api/slack/workspaces.
+// by StatusFor / appConnection.snapshot for the connection reads.
 // ConnectedAt / LastEventAt are *time.Time, not time.Time: encoding/json's
 // omitempty is a no-op on a plain struct field (time.Time is a struct) — it
 // only elides false/0/nil-pointer/empty-string/empty-slice-or-map, so a
@@ -138,8 +138,8 @@ func newSocketManager(stores db.Stores, pipeline *ingestPipeline, client *http.C
 // StatusFor returns the live status of appID's socket connection, if the
 // manager currently has one running (started by a reconcile pass, not yet
 // torn down by a later one). ok=false covers every "no connection" case
-// alike — webhook-only app, unentitled org, not yet reconciled — GET
-// /api/slack/workspaces treats them identically (omits the field).
+// alike — webhook-only app, unentitled org, not yet reconciled — the
+// connection reads treat them identically (omit the field).
 func (m *socketManager) StatusFor(appID string) (connStatus, bool) {
 	m.mu.Lock()
 	conn, ok := m.conns[appID]

@@ -1301,7 +1301,7 @@ export interface SlackChannelTracker {
   is_primary: boolean
 }
 
-/** One merged row of POST /api/slack/teams/{team_id}/channels/list — the
+/** One merged row of POST /api/teams/{team_id}/slack-channels/list — the
  *  union of this team's tracked rows, the org's sighting registry, and live
  *  Slack candidates, deduped by channel_id. `name` is empty when only a bare
  *  channel_id is known (no live/sighting resolution yet) — render the raw id

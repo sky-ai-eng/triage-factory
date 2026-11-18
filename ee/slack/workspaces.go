@@ -16,15 +16,15 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// workspacesHandler serves /api/slack/workspaces* and /api/slack/manifest —
-// the org-admin Slack workspace connect/disconnect lifecycle plus the
-// member-visible list. Gates on the `slack` entitlement per-request, plus a
-// local-mode 404 (see memberGate) — narrower than SSO's runmode gate (which
-// exists because SSO structurally can't work without GoTrue), ours exists
-// because the Slack store is Postgres-only: local mode's org-context shim
-// would otherwise let a locally-licensed request past the entitlement check
-// only to hit db.ErrNotApplicableInLocal as a 500. Revisit if/when local
-// mode gets a real Slack story.
+// workspacesHandler serves /api/orgs/{org_id}/slack/connections/* and
+// /api/orgs/{org_id}/slack/manifest — the org-admin connect/disconnect
+// lifecycle of an org's Slack connections plus the member-visible reads. Every
+// route is addressed by the org in its path and gated per request (see
+// memberGate): a local-mode 404, the caller's standing in that org, and the
+// `slack` entitlement. The local-mode 404 is narrower than SSO's runmode gate
+// (which exists because SSO structurally can't work without GoTrue); ours
+// exists because the Slack store is Postgres-only, so a local request that got
+// past the entitlement check would hit db.ErrNotApplicableInLocal as a 500.
 type workspacesHandler struct {
 	tx     db.TxRunner
 	az     *authz.Checker
@@ -43,14 +43,16 @@ type workspacesHandler struct {
 }
 
 type workspaceView struct {
-	WorkspaceID        string    `json:"workspace_id"`
-	APIAppID           string    `json:"api_app_id"`
-	Source             string    `json:"source"`
-	Active             bool      `json:"active"`
-	WorkspaceName      string    `json:"workspace_name"`
-	AppName            string    `json:"app_name"`
-	EnterpriseID       string    `json:"enterprise_id,omitempty"`
-	Transport          string    `json:"transport"`
+	WorkspaceID   string `json:"workspace_id"`
+	APIAppID      string `json:"api_app_id"`
+	Source        string `json:"source"`
+	Active        bool   `json:"active"`
+	WorkspaceName string `json:"workspace_name"`
+	AppName       string `json:"app_name"`
+	EnterpriseID  string `json:"enterprise_id,omitempty"`
+	// Transport is null on a deployment connection, which receives through
+	// the transport the operator's environment configures.
+	Transport          *string   `json:"transport"`
 	BotUserID          string    `json:"bot_user_id"`
 	RegisteredByUserID string    `json:"registered_by_user_id,omitempty"`
 	CreatedAt          time.Time `json:"created_at"`
@@ -71,11 +73,14 @@ func toWorkspaceView(w *slackstore.Connection, sockets *socketManager) workspace
 		WorkspaceName:      w.WorkspaceName,
 		AppName:            w.AppName,
 		EnterpriseID:       w.EnterpriseID,
-		Transport:          w.Transport,
 		BotUserID:          w.BotUserID,
 		RegisteredByUserID: w.RegisteredByUserID,
 		CreatedAt:          w.CreatedAt,
 		UpdatedAt:          w.UpdatedAt,
+	}
+	if w.Transport != "" {
+		transport := w.Transport
+		v.Transport = &transport
 	}
 	if sockets != nil {
 		if status, ok := sockets.StatusFor(w.APIAppID); ok {
@@ -85,52 +90,81 @@ func toWorkspaceView(w *slackstore.Connection, sockets *socketManager) workspace
 	return v
 }
 
-// memberGate resolves the active org and confirms the `slack` entitlement.
-// Any org member may reach a member-gated route once past this — used by
-// the read-only list. Delegates to slackEntitlementGate (channels_handler.go),
-// the shared local-mode-404 + entitlement-404 gate every Slack route runs
-// before its own authz — factored out so channelsHandler can share it.
-func (h *workspacesHandler) memberGate(w http.ResponseWriter, r *http.Request) (orgID string, ok bool) {
-	return slackEntitlementGate(w, r)
-}
-
-// adminGate is memberGate plus an org-admin check — 404 (non-disclosure) on
-// a non-admin, mirroring ee/sso's adminGate. Used by every route that
-// mutates connection state or reads the manifest.
-func (h *workspacesHandler) adminGate(w http.ResponseWriter, r *http.Request) (orgID, userID string, ok bool) {
-	orgID, ok = h.memberGate(w, r)
-	if !ok {
+// memberGate runs the gates a member-readable org route runs, in order: local
+// mode 404s, the caller must be a member of the org the path names (core's
+// {org_id} gate, which also answers 404 to an API token minted for another
+// org), and that org must hold the `slack` entitlement, else 404.
+func (h *workspacesHandler) memberGate(w http.ResponseWriter, r *http.Request) (orgID, userID string, ok bool) {
+	if refuseInLocalMode(w) {
 		return "", "", false
 	}
-	userID = httpx.ClaimsFrom(r.Context()).Subject
-	isAdmin, err := h.az.UserIsOrgAdmin(r.Context(), userID, orgID)
-	if err != nil {
-		httpx.InternalError(w, "slack", err)
+	if orgID, userID, ok = h.az.RequireOrgMember(w, r); !ok {
 		return "", "", false
 	}
-	if !isAdmin {
-		// The caller is a member of this org, so the org is visible to them:
-		// name the missing role rather than denying it exists.
-		httpx.WriteErrors(w, http.StatusForbidden, httpx.ErrorItem{
-			Reason: httpx.ReasonForbidden, Message: "org admin role required",
-		})
+	if refuseUnentitled(w, orgID) {
 		return "", "", false
 	}
 	return orgID, userID, true
 }
 
-// GET /api/slack/workspaces
+// adminGate is memberGate with the caller an admin of the path's org: 403 to a
+// member who is not one, 404 to anyone else. Every route that changes an org's
+// connections, or reads the manifest, runs it.
+func (h *workspacesHandler) adminGate(w http.ResponseWriter, r *http.Request) (orgID, userID string, ok bool) {
+	if refuseInLocalMode(w) {
+		return "", "", false
+	}
+	if orgID, userID, ok = h.az.RequireOrgAdmin(w, r); !ok {
+		return "", "", false
+	}
+	if refuseUnentitled(w, orgID) {
+		return "", "", false
+	}
+	return orgID, userID, true
+}
+
+// connectionsListRequest is POST …/connections/list's body: the paging fields
+// and nothing else.
+type connectionsListRequest struct {
+	httpx.PageRequest
+}
+
+// connectionsListKey is the list's page-token fingerprint. It names the org,
+// so a token one org's list minted is refused on another's.
+type connectionsListKey struct {
+	List  string `json:"list"`
+	OrgID string `json:"org_id"`
+}
+
+// handleList answers one page of the org's connections, active and inactive,
+// ordered by workspace name, then workspace id, then app id. Any member of the
+// org may read it.
+//
+// POST /api/orgs/{org_id}/slack/connections/list
 func (h *workspacesHandler) handleList(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := h.memberGate(w, r)
+	orgID, userID, ok := h.memberGate(w, r)
 	if !ok {
 		return
 	}
-	userID := httpx.ClaimsFrom(r.Context()).Subject
 
-	var list []slackstore.Connection
+	var req connectionsListRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(connectionsListKey{List: "slack_connections", OrgID: orgID}), 0)
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+
+	var (
+		list  []slackstore.Connection
+		total int
+	)
 	if err := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		list, e = slackstore.FromTx(tx).Connections.ListForOrg(r.Context(), orgID)
+		list, total, e = slackstore.FromTx(tx).Connections.ListForOrg(r.Context(), orgID,
+			db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		return e
 	}); err != nil {
 		httpx.InternalError(w, "slack", err)
@@ -141,7 +175,28 @@ func (h *workspacesHandler) handleList(w http.ResponseWriter, r *http.Request) {
 	for i := range list {
 		out[i] = toWorkspaceView(&list[i], h.sockets)
 	}
-	httpx.WriteJSON(w, http.StatusOK, out)
+	httpx.WriteList(w, page, out, total)
+}
+
+// handleGet reads one of the org's connections, by the workspace and the app
+// it connects. Any member of the org may read it.
+//
+// GET /api/orgs/{org_id}/slack/connections/{workspace_id}/{api_app_id}
+func (h *workspacesHandler) handleGet(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := h.memberGate(w, r)
+	if !ok {
+		return
+	}
+	conn, err := h.getExisting(r.Context(), orgID, userID, r.PathValue("workspace_id"), r.PathValue("api_app_id"))
+	if err != nil {
+		httpx.InternalError(w, "slack", err)
+		return
+	}
+	if conn == nil {
+		httpx.NotFound(w, "connection")
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, toWorkspaceView(conn, h.sockets))
 }
 
 // getExisting reads the org's current row for (workspaceID, apiAppID), or
@@ -190,7 +245,10 @@ var errAppBoundToOtherOrg = errors.New("slack app already connected to a differe
 // app in a workspace where the org already has an active connection.
 var errWorkspaceHasActiveConnection = errors.New("slack workspace already has an active connection")
 
-// POST /api/slack/workspaces  body: {bot_token, signing_secret?, app_token?, transport?}
+// handleConnect connects an org's own Slack app from the tokens an org admin
+// pasted.
+//
+// POST /api/orgs/{org_id}/slack/connections/import  body: {bot_token, signing_secret?, app_token?, transport?}
 func (h *workspacesHandler) handleConnect(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := h.adminGate(w, r)
 	if !ok {
@@ -311,7 +369,7 @@ func (h *workspacesHandler) handleConnect(w http.ResponseWriter, r *http.Request
 		if boundElsewhere {
 			return errAppBoundToOtherOrg
 		}
-		conns, e := bundle.Connections.ListForOrg(r.Context(), orgID)
+		conns, _, e := bundle.Connections.ListForOrg(r.Context(), orgID, db.Unwindowed)
 		if e != nil {
 			return e
 		}
@@ -426,7 +484,13 @@ func connectionsInWorkspace(conns []slackstore.Connection, workspaceID, apiAppID
 	return own, active
 }
 
-// DELETE /api/slack/workspaces/{workspace_id}/{api_app_id}
+// handleDelete disconnects one of the org's connections: TF forgets its row and
+// its secrets, and the app stays installed in Slack, for the workspace's admin
+// to remove there. A deployment connection is deleted the same way. Deleting a
+// workspace's active connection leaves the workspace with none, whatever else
+// is connected in it: a connection becomes active only by being activated.
+//
+// DELETE /api/orgs/{org_id}/slack/connections/{workspace_id}/{api_app_id}
 func (h *workspacesHandler) handleDelete(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := h.adminGate(w, r)
 	if !ok {
@@ -435,7 +499,7 @@ func (h *workspacesHandler) handleDelete(w http.ResponseWriter, r *http.Request)
 	workspaceID := r.PathValue("workspace_id")
 	apiAppID := r.PathValue("api_app_id")
 	if workspaceID == "" || apiAppID == "" {
-		httpx.NotFound(w, "workspace")
+		httpx.NotFound(w, "connection")
 		return
 	}
 
@@ -466,8 +530,9 @@ func (h *workspacesHandler) handleDelete(w http.ResponseWriter, r *http.Request)
 			return fmt.Errorf("audit slack disconnect: %w", e)
 		}
 		// Sweep the full keyset regardless of which refs this (workspace,
-		// app) pair actually populated — deleting an absent key is a
-		// no-op, mirrors teardownAppSecrets for GitHub Apps.
+		// app) pair actually populated — a deployment connection holds only
+		// its bot token, and deleting an absent key is a no-op. Mirrors
+		// teardownAppSecrets for GitHub Apps.
 		for _, k := range integrations.SlackConnectionKeysFor(workspaceID, apiAppID).All() {
 			if _, e := tx.Secrets.Delete(r.Context(), orgID, k); e != nil {
 				return fmt.Errorf("delete slack secret %s: %w", k, e)
@@ -479,7 +544,7 @@ func (h *workspacesHandler) handleDelete(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if !existed {
-		httpx.NotFound(w, "workspace")
+		httpx.NotFound(w, "connection")
 		return
 	}
 
@@ -488,7 +553,10 @@ func (h *workspacesHandler) handleDelete(w http.ResponseWriter, r *http.Request)
 	httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
-// GET /api/slack/manifest?transport=socket|events_api
+// handleManifest answers the manifest an org admin creates the org's own Slack
+// app from.
+//
+// GET /api/orgs/{org_id}/slack/manifest?transport=socket|events_api
 func (h *workspacesHandler) handleManifest(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := h.adminGate(w, r)
 	if !ok {

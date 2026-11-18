@@ -77,7 +77,7 @@ func (r *removalRig) connect(workspaceID, botToken, transport string) {
 		body["transport"] = transportEventsAPI
 	}
 	rec := httptest.NewRecorder()
-	r.hdl.handleConnect(rec, r.req(http.MethodPost, "/api/slack/workspaces", r.owner, r.orgID, "", body))
+	r.hdl.handleConnect(rec, r.importReq(r.owner, r.orgID, body))
 	if rec.Code != http.StatusCreated && rec.Code != http.StatusOK {
 		r.t.Fatalf("connect %s: status = %d (body=%s)", workspaceID, rec.Code, rec.Body.String())
 	}

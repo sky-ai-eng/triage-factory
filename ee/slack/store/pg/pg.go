@@ -148,21 +148,42 @@ func (s *connectionStore) Upsert(ctx context.Context, c slackstore.Connection) (
 	return got, nil
 }
 
-func (s *connectionStore) ListForOrg(ctx context.Context, orgID string) ([]slackstore.Connection, error) {
-	return s.listForOrg(ctx, s.app, orgID)
+// ListForOrg counts in its own statement, on the same transaction as the page
+// when the caller runs it in one, so the total and the page describe one set.
+func (s *connectionStore) ListForOrg(ctx context.Context, orgID string, opts db.ListOpts) ([]slackstore.Connection, int, error) {
+	var total int
+	if err := s.app.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM org_slack_connections WHERE org_id = $1
+	`, orgID).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count org_slack_connections: %w", err)
+	}
+	if opts.CountOnly {
+		return []slackstore.Connection{}, total, nil
+	}
+	conns, err := s.listForOrg(ctx, s.app, orgID, opts)
+	if err != nil {
+		return nil, 0, err
+	}
+	return conns, total, nil
 }
 
 func (s *connectionStore) ListForOrgSystem(ctx context.Context, orgID string) ([]slackstore.Connection, error) {
-	return s.listForOrg(ctx, s.admin, orgID)
+	return s.listForOrg(ctx, s.admin, orgID, db.Unwindowed)
 }
 
-func (s *connectionStore) listForOrg(ctx context.Context, q db.Execer, orgID string) ([]slackstore.Connection, error) {
-	rows, err := q.QueryContext(ctx, `
-		SELECT `+connectionColumns+`
+func (s *connectionStore) listForOrg(ctx context.Context, q db.Execer, orgID string, opts db.ListOpts) ([]slackstore.Connection, error) {
+	query := `
+		SELECT ` + connectionColumns + `
 		FROM org_slack_connections
 		WHERE org_id = $1
-		ORDER BY created_at DESC, workspace_id ASC, api_app_id ASC
-	`, orgID)
+		ORDER BY workspace_name ASC, workspace_id ASC, api_app_id ASC`
+	args := []any{orgID}
+	if opts.Limit > 0 {
+		query += `
+		LIMIT $2 OFFSET $3`
+		args = append(args, opts.Limit, opts.Offset)
+	}
+	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list org_slack_connections: %w", err)
 	}

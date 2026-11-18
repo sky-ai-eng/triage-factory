@@ -32,7 +32,7 @@ func newListRig(t *testing.T, slug string, channels map[string]string, tracked .
 	r.fake.setChannels("xoxb-list", listed, listed)
 	if len(tracked) > 0 {
 		rec := httptest.NewRecorder()
-		r.hdl.handlePut(rec, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
+		r.hdl.handlePut(rec, r.req(http.MethodPut, "/api/teams/"+teamID+"/slack-channels", owner, orgID, teamID,
 			map[string]any{"channel_ids": tracked}))
 		if rec.Code != http.StatusOK {
 			t.Fatalf("PUT status = %d (body=%s)", rec.Code, rec.Body.String())
@@ -322,7 +322,7 @@ func TestChannelsList_EnumeratesSlackOncePerWindow(t *testing.T) {
 	}
 
 	rec = httptest.NewRecorder()
-	l.hdl.handlePut(rec, l.req(http.MethodPut, "/api/slack/teams/"+l.teamID+"/channels", l.owner, l.orgID, l.teamID,
+	l.hdl.handlePut(rec, l.req(http.MethodPut, "/api/teams/"+l.teamID+"/slack-channels", l.owner, l.orgID, l.teamID,
 		map[string]any{"channel_ids": []string{"C1"}}))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("PUT status = %d (body=%s)", rec.Code, rec.Body.String())

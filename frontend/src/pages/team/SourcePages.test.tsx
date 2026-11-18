@@ -1006,8 +1006,8 @@ describe('Jira source page', () => {
 })
 
 describe('Slack source page', () => {
-  const LIST = '/api/slack/teams/t1/channels/list'
-  const FACETS = '/api/slack/teams/t1/channels/facets'
+  const LIST = '/api/teams/t1/slack-channels/list'
+  const FACETS = '/api/teams/t1/slack-channels/facets'
   const ROWS = [
     {
       id: 'sc-1',
@@ -1275,7 +1275,7 @@ describe('Slack source page', () => {
     const fetchMock = stubSlack((body) => (body.tracked === true ? [ROWS[0], ROWS[1]] : ROWS))
     const puts = (): string[][] =>
       fetchMock.mock.calls
-        .filter(([path, init]) => path === '/api/slack/teams/t1/channels' && init?.method === 'PUT')
+        .filter(([path, init]) => path === '/api/teams/t1/slack-channels' && init?.method === 'PUT')
         .map(([, init]) => JSON.parse(String(init!.body)).channel_ids)
     render(<SlackSource {...BODY} />)
     await waitFor(() => expect(screen.getByText('#eng-general')).toBeInTheDocument())
@@ -1285,6 +1285,20 @@ describe('Slack source page', () => {
     expect(puts()[0]).toEqual(['C1', 'C2', 'C3'])
     // The set it wrote back is the tracked read's, not the page's.
     expect(listBodies(fetchMock).some((b) => b.tracked === true)).toBe(true)
+  })
+
+  it('claims a watched channel by setting is_primary on the team’s row of it', async () => {
+    const fetchMock = stubSlack((body) => (body.tracked === true ? [ROWS[0], ROWS[1]] : ROWS))
+    const writes = () =>
+      fetchMock.mock.calls
+        .filter(([, init]) => init?.method === 'PATCH' || init?.method === 'PUT')
+        .map(([path, init]) => [init!.method, path, JSON.parse(String(init!.body))])
+    render(<SlackSource {...BODY} />)
+    await waitFor(() => expect(screen.getByText('#oncall-platform')).toBeInTheDocument())
+
+    commitVerb('#oncall-platform', 'Claim as primary', 300)
+    await waitFor(() => expect(writes()).toHaveLength(1))
+    expect(writes()[0]).toEqual(['PATCH', '/api/teams/t1/slack-channels/C2', { is_primary: true }])
   })
 })
 

@@ -757,14 +757,11 @@ export async function saveTeamGitHubGroups(
   }
 }
 
-// slackChannelsListPath is the ee/slack channel list route — deliberately
-// under /api/slack/* rather than teamPath()'s /api/teams/... (see
-// ee/slack/channels_handler.go's package doc: ee-owned routes stay in the
-// slack namespace). It searches (`search`: name or Slack channel id),
-// narrows (`tracked`, `ids`) and orders (`sort_key`: name, last_mention_at,
-// primary) on the server.
+// slackChannelsListPath is the team's Slack channel list route. It searches
+// (`search`: name or Slack channel id), narrows (`tracked`, `ids`) and orders
+// (`sort_key`: name, last_mention_at, primary) on the server.
 export const slackChannelsListPath = (teamId: string) =>
-  `/api/slack/teams/${encodeURIComponent(teamId)}/channels/list`
+  `/api/teams/${encodeURIComponent(teamId)}/slack-channels/list`
 
 // TrackedRepository is a row of POST /api/repos/list as the repo_in picker
 // reads it: the registry id a filter stores, and the owner/repo it is shown as.
@@ -875,7 +872,7 @@ export async function fetchTeamSlackChannelFacets(
   teamId: string,
 ): Promise<SlackChannelFacets | null> {
   return apiJSON<Partial<SlackChannelFacets>>(
-    `/api/slack/teams/${encodeURIComponent(teamId)}/channels/facets`,
+    `/api/teams/${encodeURIComponent(teamId)}/slack-channels/facets`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

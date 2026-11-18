@@ -40,7 +40,7 @@ type socketEnvelope struct {
 
 // appConnection is one running Socket Mode connection: a goroutine (run,
 // started by socketManager.startConn) plus the mutex-guarded status/sightings
-// the reconciler's diff and GET /api/slack/workspaces read as a snapshot.
+// the reconciler's diff and the connection reads read as a snapshot.
 // Disposable, never repaired — run's loop tears the whole connection down on
 // any error and dials fresh; there is no in-place recovery.
 type appConnection struct {
