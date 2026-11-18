@@ -49,12 +49,14 @@ func init() {
 	server.RegisterExtension("slack", install)
 }
 
-// install mounts the Slack connection and channel surfaces plus both ingest
-// transports on the core server through the extension API (mountRoutes). The
-// connection and channel routes go through API/APIMutating (session + CSRF,
-// like core's own routes); the webhook is pre-auth (Slack has no session) so
-// it mounts through Raw + SignedWebhookRateLimit and authorizes itself
-// per-request via the workspace's signing secret. It deliberately does NOT use
+// install mounts the Slack connection, install and channel surfaces plus both
+// ingest transports on the core server through the extension API
+// (mountRoutes). The connection and channel routes go through
+// API/APIMutating (session + CSRF, like core's own routes); the two webhook
+// routes are pre-auth (Slack has no session) so they mount through Raw +
+// SignedWebhookRateLimit and authorize themselves per-request: an org's own
+// app's by the workspace's signing secret, the deployment app's by the one in
+// the environment. It deliberately does NOT use
 // PreAuthRateLimit: that tier's 1 req/s budget is sized for anonymous human
 // login flows, and a subscribed workspace's own delivery volume routinely
 // clears it — the signing-secret check downstream already makes the
@@ -93,8 +95,6 @@ func install(api server.ExtensionAPI) {
 		title:       NewTitleResolver(stores),
 		stats:       stats,
 	}
-	sockets := newSocketManager(stores, pipeline, slackHTTPClient, socketConfigChanged)
-	sockets.stats = stats
 
 	// Read once and handed to every handler that needs it, so no two of them
 	// can disagree about it. A misconfigured app is logged and the deployment
@@ -107,6 +107,10 @@ func install(api server.ExtensionAPI) {
 		deployment = deploymentApp{}
 	}
 
+	sockets := newSocketManager(stores, pipeline, slackHTTPClient, socketConfigChanged)
+	sockets.stats = stats
+	sockets.deployment = deployment
+
 	h := &workspacesHandler{
 		tx:         api.Tx(),
 		az:         api.Authz(),
@@ -116,6 +120,7 @@ func install(api server.ExtensionAPI) {
 		deployment: deployment,
 	}
 	dh := &deploymentAppHandler{app: deployment, publicURL: api.PublicURL}
+	ih := &installHandler{tx: api.Tx(), az: api.Authz(), client: slackHTTPClient, app: deployment, ceremony: api}
 	ch := &channelsHandler{
 		tx:         api.Tx(),
 		stores:     stores,
@@ -123,8 +128,8 @@ func install(api server.ExtensionAPI) {
 		client:     slackHTTPClient,
 		candidates: ttlcache.New[slackCandidateSet](slackCandidatesTTL),
 	}
-	wh := &webhookHandler{stores: stores, pipeline: pipeline, stats: stats}
-	mountRoutes(api, h, dh, ch, wh)
+	wh := &webhookHandler{stores: stores, pipeline: pipeline, stats: stats, deployment: deployment}
+	mountRoutes(api, h, dh, ih, ch, wh)
 
 	// Agent-facing exec verbs (TFAC-596) register from this package's init()
 	// (stores-free — the handler relays for policy and selects its token from
@@ -153,12 +158,12 @@ type routeMounter interface {
 	SignedWebhookRateLimit(h http.Handler) http.Handler
 }
 
-// mountRoutes is the Slack route table. An org's connections and manifest are
-// addressed by the org in the path; a team's channels are the team's resource,
-// under its own path, with the org the credential's as on every core team
-// route. The list and facets reads mount through APIMutating because they are
-// POSTs, and CSRF follows the method.
-func mountRoutes(api routeMounter, h *workspacesHandler, dh *deploymentAppHandler, ch *channelsHandler, wh *webhookHandler) {
+// mountRoutes is the Slack route table. An org's connections, manifest and
+// install start are addressed by the org in the path; a team's channels are
+// the team's resource, under its own path, with the org the credential's as on
+// every core team route. The list and facets reads mount through APIMutating
+// because they are POSTs, and CSRF follows the method.
+func mountRoutes(api routeMounter, h *workspacesHandler, dh *deploymentAppHandler, ih *installHandler, ch *channelsHandler, wh *webhookHandler) {
 	api.API("GET /api/orgs/{org_id}/slack/manifest", h.handleManifest)
 	api.APIMutating("POST /api/orgs/{org_id}/slack/connections/import", h.handleConnect)
 	api.APIMutating("POST /api/orgs/{org_id}/slack/connections/list", h.handleList)
@@ -167,6 +172,15 @@ func mountRoutes(api routeMounter, h *workspacesHandler, dh *deploymentAppHandle
 
 	api.API("GET /api/slack/deployment-app", dh.handleGet)
 
+	// The deployment app's install ceremony (deployment_install.go). Both legs
+	// are top-level navigations, the start from Settings and the callback from
+	// Slack's redirect, so they mount through API (session, no CSRF wrap) and
+	// carry their own state-cookie CSRF defense. The callback path is the
+	// redirect URL registered on the deployment's Slack app, so renaming it
+	// breaks every install.
+	api.API("GET /api/orgs/{org_id}/slack/install/start", ih.handleStart)
+	api.API("GET "+installCallbackPath, ih.handleCallback)
+
 	api.APIMutating("PUT /api/teams/{team_id}/slack-channels", ch.handlePut)
 	api.APIMutating("POST /api/teams/{team_id}/slack-channels/list", ch.handleList)
 	api.APIMutating("POST /api/teams/{team_id}/slack-channels/facets", ch.handleFacets)
@@ -174,4 +188,5 @@ func mountRoutes(api routeMounter, h *workspacesHandler, dh *deploymentAppHandle
 	api.APIMutating("PATCH /api/teams/{team_id}/slack-channels/{channel_id}", ch.handlePatch)
 
 	api.Raw("POST /api/webhooks/slack/{org_id}", api.SignedWebhookRateLimit(http.HandlerFunc(wh.handleWebhook)))
+	api.Raw("POST /api/webhooks/slack", api.SignedWebhookRateLimit(http.HandlerFunc(wh.handleDeploymentWebhook)))
 }

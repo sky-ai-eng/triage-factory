@@ -28,7 +28,7 @@ func (m muxMounter) SignedWebhookRateLimit(h http.Handler) http.Handler { return
 // the paths that replace them are served.
 func TestRoutes_OldPathsAreGone(t *testing.T) {
 	m := muxMounter{mux: http.NewServeMux()}
-	mountRoutes(m, &workspacesHandler{}, &deploymentAppHandler{}, &channelsHandler{}, &webhookHandler{})
+	mountRoutes(m, &workspacesHandler{}, &deploymentAppHandler{}, &installHandler{}, &channelsHandler{}, &webhookHandler{})
 
 	const org = "00000000-0000-0000-0000-000000000001"
 	gone := []struct{ method, path string }{
@@ -56,12 +56,15 @@ func TestRoutes_OldPathsAreGone(t *testing.T) {
 		{http.MethodGet, "/api/orgs/" + org + "/slack/connections/T1/A1"},
 		{http.MethodDelete, "/api/orgs/" + org + "/slack/connections/T1/A1"},
 		{http.MethodGet, "/api/slack/deployment-app"},
+		{http.MethodGet, "/api/orgs/" + org + "/slack/install/start"},
+		{http.MethodGet, "/api/slack/install/callback"},
 		{http.MethodPut, "/api/teams/team1/slack-channels"},
 		{http.MethodPost, "/api/teams/team1/slack-channels/list"},
 		{http.MethodPost, "/api/teams/team1/slack-channels/facets"},
 		{http.MethodGet, "/api/teams/team1/slack-channels/C1"},
 		{http.MethodPatch, "/api/teams/team1/slack-channels/C1"},
 		{http.MethodPost, "/api/webhooks/slack/" + org},
+		{http.MethodPost, "/api/webhooks/slack"},
 	}
 	for _, tc := range served {
 		rec := httptest.NewRecorder()

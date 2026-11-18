@@ -15,6 +15,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -43,6 +44,19 @@ type fakeSlackServer struct {
 	authTestHits int
 	botsInfoHits int
 	openConnHits int
+
+	// oauthAccess answers oauth.v2.access by the code it is sent; an unstaged
+	// code answers invalid_code. oauthRequests records each exchange.
+	oauthAccess   map[string]map[string]any
+	oauthRequests []oauthAccessRequest
+	revokeHits    int
+}
+
+// oauthAccessRequest is one oauth.v2.access call as the fake received it.
+type oauthAccessRequest struct {
+	ClientID, ClientSecret string
+	BasicAuth              bool
+	Form                   url.Values
 }
 
 func newFakeSlackServer(t *testing.T) *fakeSlackServer {
@@ -51,6 +65,8 @@ func newFakeSlackServer(t *testing.T) *fakeSlackServer {
 		authTest: map[string]map[string]any{},
 		botsInfo: map[string]map[string]any{},
 		openConn: map[string]map[string]any{},
+
+		oauthAccess: map[string]map[string]any{},
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/auth.test", func(w http.ResponseWriter, r *http.Request) {
@@ -82,6 +98,27 @@ func newFakeSlackServer(t *testing.T) *fakeSlackServer {
 			resp = map[string]any{"ok": true, "url": "wss://fake.slack.example/link/1"}
 		}
 		writeSlackFakeJSON(w, resp)
+	})
+	mux.HandleFunc("/oauth.v2.access", func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		id, secret, basic := r.BasicAuth()
+		f.mu.Lock()
+		f.oauthRequests = append(f.oauthRequests, oauthAccessRequest{ClientID: id, ClientSecret: secret, BasicAuth: basic, Form: r.PostForm})
+		resp, ok := f.oauthAccess[r.PostForm.Get("code")]
+		f.mu.Unlock()
+		if !ok {
+			resp = map[string]any{"ok": false, "error": "invalid_code"}
+		}
+		writeSlackFakeJSON(w, resp)
+	})
+	mux.HandleFunc("/auth.revoke", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		f.revokeHits++
+		f.mu.Unlock()
+		writeSlackFakeJSON(w, map[string]any{"ok": true, "revoked": true})
 	})
 	f.srv = httptest.NewServer(mux)
 	t.Cleanup(f.srv.Close)

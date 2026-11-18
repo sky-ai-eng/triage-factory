@@ -2,6 +2,7 @@ package slack
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -61,7 +62,25 @@ type workspaceView struct {
 	// omitted for a webhook-only app, an unentitled org, or before the
 	// reconciler's first pass. Rows sharing an app report the same
 	// connection (socket_conn.go's connections are per-app, not per-row).
-	Connection *connStatus `json:"connection,omitempty"`
+	Connection *connectionView `json:"connection,omitempty"`
+}
+
+// connectionView is a Socket Mode connection's status as the connection reads
+// show it. For a connection through the deployment's app it is the state
+// alone: that socket carries every org's traffic, so its timestamps, failures,
+// and sightings describe other orgs as well as the reader's.
+type connectionView struct {
+	status    connStatus
+	stateOnly bool
+}
+
+func (v connectionView) MarshalJSON() ([]byte, error) {
+	if v.stateOnly {
+		return json.Marshal(struct {
+			State string `json:"state"`
+		}{v.status.State})
+	}
+	return json.Marshal(v.status)
 }
 
 func toWorkspaceView(w *slackstore.Connection, sockets *socketManager) workspaceView {
@@ -84,7 +103,7 @@ func toWorkspaceView(w *slackstore.Connection, sockets *socketManager) workspace
 	}
 	if sockets != nil {
 		if status, ok := sockets.StatusFor(w.APIAppID); ok {
-			v.Connection = &status
+			v.Connection = &connectionView{status: status, stateOnly: w.Source == slackstore.SourceDeployment}
 		}
 	}
 	return v
@@ -271,6 +290,9 @@ func (h *workspacesHandler) handleConnect(w http.ResponseWriter, r *http.Request
 		httpx.BadRequest(w, "bot_token is required")
 		return
 	}
+	// TODO(TFAC-1487): an xoxe. bot token comes from an app with token rotation
+	// on and expires in 12 hours, and TF never refreshes it; it should be
+	// refused here.
 
 	// The bot token is the ONLY way the handler learns the workspace id —
 	// the admin never types it. Always re-validated: there's no "keep the

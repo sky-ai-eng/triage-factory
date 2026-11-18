@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"path"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
@@ -134,6 +135,78 @@ func slackBotsInfo(ctx context.Context, client *http.Client, caller slackCaller,
 		return nil, fmt.Errorf("slack bots.info: response carried no app_id")
 	}
 	return &botsInfoResult{AppID: out.Bot.AppID, Name: out.Bot.Name}, nil
+}
+
+// oauthV2AccessResult is the subset of Slack's oauth.v2.access response the
+// install callback reads. TeamID and TeamName are "" for an Enterprise Grid
+// org-wide install, which Slack answers with no team, and EnterpriseID is ""
+// for a workspace outside Enterprise Grid.
+type oauthV2AccessResult struct {
+	AppID               string
+	AccessToken         string
+	TokenType           string
+	Scope               string
+	BotUserID           string
+	TeamID              string
+	TeamName            string
+	EnterpriseID        string
+	IsEnterpriseInstall bool
+}
+
+// slackOAuthV2Access exchanges an install's authorization code for its bot
+// token. The app authenticates with HTTP Basic, which Slack recommends over
+// sending the client id and secret in the body. A Slack-level {"ok":false}
+// is an error carrying Slack's code, and so is an ok answer with no token.
+func slackOAuthV2Access(ctx context.Context, client *http.Client, caller slackCaller, clientID, clientSecret, code, redirectURI string) (*oauthV2AccessResult, error) {
+	form := url.Values{"code": {code}, "redirect_uri": {redirectURI}}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, slackAPIBase+"/oauth.v2.access", strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth(clientID, clientSecret)
+
+	var out struct {
+		OK          bool   `json:"ok"`
+		Error       string `json:"error"`
+		AppID       string `json:"app_id"`
+		AccessToken string `json:"access_token"`
+		TokenType   string `json:"token_type"`
+		Scope       string `json:"scope"`
+		BotUserID   string `json:"bot_user_id"`
+		Team        *struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"team"`
+		Enterprise *struct {
+			ID string `json:"id"`
+		} `json:"enterprise"`
+		IsEnterpriseInstall bool `json:"is_enterprise_install"`
+	}
+	if err := doSlackJSON(ctx, client, caller, req, &out); err != nil {
+		return nil, err
+	}
+	if !out.OK {
+		return nil, fmt.Errorf("slack oauth.v2.access: %s", nonEmpty(out.Error, "not ok"))
+	}
+	if out.AccessToken == "" {
+		return nil, fmt.Errorf("slack oauth.v2.access: response carried no access_token")
+	}
+	res := &oauthV2AccessResult{
+		AppID:               out.AppID,
+		AccessToken:         out.AccessToken,
+		TokenType:           out.TokenType,
+		Scope:               out.Scope,
+		BotUserID:           out.BotUserID,
+		IsEnterpriseInstall: out.IsEnterpriseInstall,
+	}
+	if out.Team != nil {
+		res.TeamID, res.TeamName = out.Team.ID, out.Team.Name
+	}
+	if out.Enterprise != nil {
+		res.EnterpriseID = out.Enterprise.ID
+	}
+	return res, nil
 }
 
 // slackOpenConnection validates appToken (an app-level xapp- token) via

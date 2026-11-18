@@ -1,9 +1,9 @@
 package slack
 
 // pgtest-backed suite for an app removal Slack reports (app_uninstalled, or
-// tokens_revoked naming a bot token): through either transport, the
-// connection's row and secrets are removed, licensed or not, unless the row
-// was connected again since.
+// tokens_revoked naming a bot token): through either transport, for an org's
+// own app or the deployment's, the connection's row and secrets are removed,
+// licensed or not, unless the row was connected again since.
 
 import (
 	"context"
@@ -18,6 +18,7 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 
 	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
@@ -380,6 +381,94 @@ func TestAppRemoval_Socket_FailedDeleteNotAcked(t *testing.T) {
 	assertSecretsUnchanged(t, before, r.secretValues("T0REMOVE1"))
 	if got := r.outcomes(); got[outcomeError] != 1 {
 		t.Errorf("outcomes = %v; want one %q", got, outcomeError)
+	}
+}
+
+// connectDeployment writes an active connection through the deployment's app
+// in workspaceID directly, as the install that writes one is not built yet,
+// and stores its bot token, the one secret such a connection has.
+func (r *removalRig) connectDeployment(workspaceID, botToken string) {
+	r.t.Helper()
+	keys := integrations.SlackConnectionKeysFor(workspaceID, deployTestAppID)
+	if _, err := r.h.AdminDB.Exec(`
+		INSERT INTO org_slack_connections (
+			workspace_id, api_app_id, org_id, source, active, workspace_name, bot_user_id, bot_token_ref
+		) VALUES ($1, $2, $3, 'deployment', true, 'Acme', 'U0DEPBOT', $4)
+	`, workspaceID, deployTestAppID, r.orgID, keys.BotToken); err != nil {
+		r.t.Fatalf("insert deployment connection: %v", err)
+	}
+	if err := r.stores.Tx.WithTx(r.t.Context(), r.orgID, r.owner, func(tx db.TxStores) error {
+		return tx.Secrets.Put(r.t.Context(), r.orgID, keys.BotToken, botToken, "Slack bot token")
+	}); err != nil {
+		r.t.Fatalf("store deployment connection's bot token: %v", err)
+	}
+}
+
+// TestAppRemoval_DeploymentConnection: an app removal through the
+// deployment's app, over either transport and licensed or not, deletes the
+// connection's row and its bot token, and leaves the same org's connection
+// through the app in another workspace.
+func TestAppRemoval_DeploymentConnection(t *testing.T) {
+	for _, tr := range []string{transportEventsAPI, transportSocket} {
+		for _, licensed := range []bool{true, false} {
+			name := tr + "/licensed"
+			if !licensed {
+				name = tr + "/unlicensed"
+			}
+			t.Run(name, func(t *testing.T) {
+				r := newRemovalRig(t)
+				r.connectDeployment("T0DEPREM1", "xoxb-deployment-1")
+				r.connectDeployment("T0DEPREM2", "xoxb-deployment-2")
+				if !licensed {
+					entitlements.RegisterProvider(entitlements.Static())
+				}
+				botToken := func(workspaceID string) string {
+					t.Helper()
+					v, err := r.stores.Secrets.GetSystem(t.Context(), r.orgID, integrations.SlackConnectionKeysFor(workspaceID, deployTestAppID).BotToken)
+					if err != nil {
+						t.Fatalf("read bot token: %v", err)
+					}
+					return v
+				}
+				row := func(workspaceID string) *slackstore.Connection {
+					t.Helper()
+					ws, err := slackstore.FromStores(r.stores).Connections.GetByWorkspaceAppSystem(t.Context(), workspaceID, deployTestAppID)
+					if err != nil {
+						t.Fatalf("read connection: %v", err)
+					}
+					return ws
+				}
+
+				payload := eventCallbackPayload("T0DEPREM1", deployTestAppID, "Ev-deployment-removal", appUninstalledInner)
+				payload["event_time"] = time.Now().Unix()
+				switch tr {
+				case transportEventsAPI:
+					wh := &webhookHandler{stores: r.stores, pipeline: r.pipeline, deployment: eventsAPIDeploymentApp()}
+					if rec := postSignedDeployment(t, wh, payload); rec.Code != http.StatusOK {
+						t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+					}
+				case transportSocket:
+					c := &appConnection{appID: deployTestAppID, deployment: true, appToken: deployTestAppToken, sightings: map[string]*sightingView{}}
+					env := socketEnvelope{Type: "events_api", EnvelopeID: "env-1", Payload: mustJSON(t, payload)}
+					if !c.processEventsAPIEnvelope(t.Context(), r.stores, r.pipeline, env) {
+						t.Fatal("envelope not acked; want acked")
+					}
+				}
+
+				if ws := row("T0DEPREM1"); ws != nil {
+					t.Errorf("row after the removal = %+v; want deleted", ws)
+				}
+				if v := botToken("T0DEPREM1"); v != "" {
+					t.Errorf("bot token after the removal = %q; want deleted", v)
+				}
+				if row("T0DEPREM2") == nil || botToken("T0DEPREM2") != "xoxb-deployment-2" {
+					t.Error("the other workspace's connection or its bot token is gone; want both kept")
+				}
+				if got := r.outcomes(); got[outcomeDisconnected] != 1 || len(got) != 1 {
+					t.Errorf("outcomes = %v; want exactly one %q", got, outcomeDisconnected)
+				}
+			})
+		}
 	}
 }
 
