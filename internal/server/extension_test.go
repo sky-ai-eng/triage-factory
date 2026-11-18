@@ -7,11 +7,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventing/eventbus"
 	"github.com/sky-ai-eng/triage-factory/internal/eventing/ingest"
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // enqueueForbidden is an event queue whose Enqueue fails the test: the
@@ -292,6 +294,78 @@ func TestServer_StartBrainExtensionWorkers_MultipleHooksAllFire(t *testing.T) {
 		case <-ch:
 		case <-time.After(2 * time.Second):
 			t.Fatal("timed out waiting for a registered hook to fire")
+		}
+	}
+}
+
+// TestExtensionAPI_ConnectState: a state the API signs parses back to what it
+// returned, with a fresh CSRF value each time; a state another key signed, an
+// altered one, and an expired one are refused.
+func TestExtensionAPI_ConnectState(t *testing.T) {
+	srv := &Server{}
+	srv.SetDeployConfig("https://tf.example", [32]byte{1})
+	api := serverExtensionAPI{srv}
+
+	signed, st, err := api.SignConnectState("org-1", "user-1", "/orgs/org-1/settings", 10*time.Minute)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	if len(st.CSRF) != 32 || st.OrgID != "org-1" || st.UserID != "user-1" || st.ReturnTo != "/orgs/org-1/settings" {
+		t.Errorf("signed state = %+v; want the org, user and return_to with a 32-character CSRF value", st)
+	}
+	got, err := api.ParseConnectState(signed)
+	if err != nil || got != st {
+		t.Errorf("parse = %+v (%v); want %+v", got, err, st)
+	}
+	if _, again, _ := api.SignConnectState("org-1", "user-1", "", time.Minute); again.CSRF == st.CSRF {
+		t.Error("two states share a CSRF value")
+	}
+
+	other := &Server{}
+	other.SetDeployConfig("https://tf.example", [32]byte{2})
+	if _, err := (serverExtensionAPI{other}).ParseConnectState(signed); err == nil {
+		t.Error("a state signed under another key parsed")
+	}
+	payload, mac, _ := strings.Cut(signed, ".")
+	if _, err := api.ParseConnectState(payload + "x." + mac); err == nil {
+		t.Error("an altered state parsed")
+	}
+
+	prev := timeNow
+	timeNow = func() time.Time { return prev().Add(11 * time.Minute) }
+	t.Cleanup(func() { timeNow = prev })
+	if _, err := api.ParseConnectState(signed); err == nil {
+		t.Error("an expired state parsed")
+	}
+}
+
+// TestExtensionAPI_ConnectState_Unwired: with no deployment config there is
+// no key, so nothing is signed or parsed.
+func TestExtensionAPI_ConnectState_Unwired(t *testing.T) {
+	api := serverExtensionAPI{&Server{}}
+	if _, _, err := api.SignConnectState("org-1", "user-1", "", time.Minute); err == nil {
+		t.Error("signed a state with no deployment config")
+	}
+	if _, err := api.ParseConnectState("a.b"); err == nil {
+		t.Error("parsed a state with no deployment config")
+	}
+}
+
+// TestExtensionAPI_SSOBarred asks the login extension about the request's
+// principal and the org named.
+func TestExtensionAPI_SSOBarred(t *testing.T) {
+	ext := &barringLoginExt{}
+	ext.bar("org-barred")
+	api := serverExtensionAPI{&Server{loginExt: ext}}
+	ctx := httpx.WithClaims(context.Background(), &verify.Claims{Subject: "user-1"})
+
+	for _, tc := range []struct {
+		org  string
+		want bool
+	}{{"org-barred", true}, {"org-open", false}} {
+		got, err := api.SSOBarred(ctx, tc.org)
+		if err != nil || got != tc.want {
+			t.Errorf("SSOBarred(%s) = %v (%v), want %v", tc.org, got, err, tc.want)
 		}
 	}
 }

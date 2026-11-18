@@ -123,6 +123,16 @@ func install(api server.ExtensionAPI) {
 	dh := &deploymentAppHandler{app: deployment, publicURL: api.PublicURL}
 	api.API("GET /api/slack/deployment-app", dh.handleGet)
 
+	// The deployment app's install ceremony (deployment_install.go). Both legs
+	// are top-level navigations, the start from Settings and the callback from
+	// Slack's redirect, so they mount through API (session, no CSRF wrap) and
+	// carry their own state-cookie CSRF defense. The callback path is the
+	// redirect URL registered on the deployment's Slack app, so renaming it
+	// breaks every install.
+	ih := &installHandler{tx: api.Tx(), az: api.Authz(), client: slackHTTPClient, app: deployment, ceremony: api}
+	api.API("GET /api/orgs/{org_id}/slack/install/start", ih.handleStart)
+	api.API("GET "+installCallbackPath, ih.handleCallback)
+
 	ch := &channelsHandler{
 		tx:         api.Tx(),
 		stores:     stores,
