@@ -49,12 +49,14 @@ function FieldHelp({ children }: { children: React.ReactNode }) {
 // (TFAC-534) — present only when the backend's socket manager has a
 // connection running for this row's api_app_id (rows sharing an app share
 // the same connection). Absent for a webhook-only app, an unentitled org,
-// or before the reconciler's first pass — rendered as "n/a".
+// or before the reconciler's first pass — rendered as "n/a". A connection
+// through the deployment's app carries only `state`, because its socket
+// serves every org.
 interface SlackConnectionStatus {
   state: 'dialing' | 'open' | 'draining' | 'backing_off' | 'auth_failed'
   connected_at?: string
   last_event_at?: string
-  consecutive_failures: number
+  consecutive_failures?: number
   last_error?: string
 }
 

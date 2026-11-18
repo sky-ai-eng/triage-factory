@@ -52,9 +52,10 @@ func init() {
 // install mounts the org-admin Slack workspace surface plus both ingest
 // transports on the core server through the extension API. The workspace
 // routes go through API/APIMutating (session + CSRF, like core's own
-// routes); the webhook is pre-auth (Slack has no session) so it mounts
-// through Raw + SignedWebhookRateLimit and authorizes itself per-request
-// via the workspace's signing secret. It deliberately does NOT use
+// routes); the two webhook routes are pre-auth (Slack has no session) so they
+// mount through Raw + SignedWebhookRateLimit and authorize themselves
+// per-request: an org's own app's by the workspace's signing secret, the
+// deployment app's by the one in the environment. It deliberately does NOT use
 // PreAuthRateLimit: that tier's 1 req/s budget is sized for anonymous human
 // login flows, and a subscribed workspace's own delivery volume routinely
 // clears it — the signing-secret check downstream already makes the
@@ -93,8 +94,6 @@ func install(api server.ExtensionAPI) {
 		title:       NewTitleResolver(stores),
 		stats:       stats,
 	}
-	sockets := newSocketManager(stores, pipeline, slackHTTPClient, socketConfigChanged)
-	sockets.stats = stats
 
 	// Read once and handed to every handler that needs it, so no two of them
 	// can disagree about it. A misconfigured app is logged and the deployment
@@ -106,6 +105,10 @@ func install(api server.ExtensionAPI) {
 		slackLog.Error("read the deployment Slack app from the environment failed; the deployment runs without one", "error", err)
 		deployment = deploymentApp{}
 	}
+
+	sockets := newSocketManager(stores, pipeline, slackHTTPClient, socketConfigChanged)
+	sockets.stats = stats
+	sockets.deployment = deployment
 
 	h := &workspacesHandler{
 		tx:         api.Tx(),
@@ -137,8 +140,9 @@ func install(api server.ExtensionAPI) {
 	api.APIMutating("PUT /api/slack/teams/{team_id}/channels", ch.handlePut)
 	api.APIMutating("POST /api/slack/channels/{channel_id}/primary", ch.handlePrimary)
 
-	wh := &webhookHandler{stores: stores, pipeline: pipeline, stats: stats}
+	wh := &webhookHandler{stores: stores, pipeline: pipeline, stats: stats, deployment: deployment}
 	api.Raw("POST /api/webhooks/slack/{org_id}", api.SignedWebhookRateLimit(http.HandlerFunc(wh.handleWebhook)))
+	api.Raw("POST /api/webhooks/slack", api.SignedWebhookRateLimit(http.HandlerFunc(wh.handleDeploymentWebhook)))
 
 	// Agent-facing exec verbs (TFAC-596) register from this package's init()
 	// (stores-free — the handler relays for policy and selects its token from
