@@ -2,6 +2,7 @@ package slack
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -61,7 +62,25 @@ type workspaceView struct {
 	// omitted for a webhook-only app, an unentitled org, or before the
 	// reconciler's first pass. Rows sharing an app report the same
 	// connection (socket_conn.go's connections are per-app, not per-row).
-	Connection *connStatus `json:"connection,omitempty"`
+	Connection *connectionView `json:"connection,omitempty"`
+}
+
+// connectionView is a Socket Mode connection's status as the list read shows
+// it. For a connection through the deployment's app it is the state alone:
+// that socket carries every org's traffic, so its timestamps, failures, and
+// sightings describe other orgs as well as the reader's.
+type connectionView struct {
+	status    connStatus
+	stateOnly bool
+}
+
+func (v connectionView) MarshalJSON() ([]byte, error) {
+	if v.stateOnly {
+		return json.Marshal(struct {
+			State string `json:"state"`
+		}{v.status.State})
+	}
+	return json.Marshal(v.status)
 }
 
 func toWorkspaceView(w *slackstore.Connection, sockets *socketManager) workspaceView {
@@ -84,7 +103,7 @@ func toWorkspaceView(w *slackstore.Connection, sockets *socketManager) workspace
 	}
 	if sockets != nil {
 		if status, ok := sockets.StatusFor(w.APIAppID); ok {
-			v.Connection = &status
+			v.Connection = &connectionView{status: status, stateOnly: w.Source == slackstore.SourceDeployment}
 		}
 	}
 	return v
