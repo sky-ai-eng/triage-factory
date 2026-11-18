@@ -630,8 +630,7 @@ func TestHandleConnect_RotatingToken_422(t *testing.T) {
 	r.fake.stageConnectOK(token, "T0ROTATE1", "Acme", "U0BOTROT", "A0ROTATE01", "")
 
 	rec := httptest.NewRecorder()
-	r.hdl.handleConnect(rec, r.req(http.MethodPost, "/api/slack/workspaces", owner, orgID, "",
-		map[string]string{"bot_token": token, "signing_secret": "shh"}))
+	r.hdl.handleConnect(rec, r.importReq(owner, orgID, map[string]string{"bot_token": token, "signing_secret": "shh"}))
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status = %d, want 422 (body=%s)", rec.Code, rec.Body.String())
 	}
@@ -646,10 +645,8 @@ func TestHandleConnect_RotatingToken_422(t *testing.T) {
 		t.Errorf("auth.test called %d times, bots.info %d; want neither", r.fake.authTestHits, r.fake.botsInfoHits)
 	}
 
-	list := httptest.NewRecorder()
-	r.hdl.handleList(list, r.req(http.MethodGet, "/api/slack/workspaces", owner, orgID, "", nil))
-	if got := decodeBody[[]workspaceView](t, list); len(got) != 0 {
-		t.Errorf("workspaces after the refusal = %+v; want none", got)
+	if got := r.listConnections(owner, orgID); len(got) != 0 {
+		t.Errorf("connections after the refusal = %+v; want none", got)
 	}
 	if got := r.secretValue(orgID, "slack_ws_T0ROTATE1_A0ROTATE01_bot_token"); got != "" {
 		t.Errorf("bot token stored = %q; want none", got)
