@@ -463,6 +463,69 @@ func TestHandleConnect_BotsInfoFailure_400(t *testing.T) {
 	}
 }
 
+// TestHandleConnect_DeploymentAppToken_422: a bot token whose app is the
+// deployment's own Slack app is refused before any write, so a pasted-token
+// connection never holds the deployment app. A token from any other app
+// connects as before with a deployment app configured.
+func TestHandleConnect_DeploymentAppToken_422(t *testing.T) {
+	r := newSlackWorkspaceRig(t, "https://tf.example")
+	r.hdl.deployment = deploymentApp{
+		AppID:         "A0DEPLOYAPP",
+		ClientID:      "1234.5678",
+		ClientSecret:  "client-secret",
+		SigningSecret: "signing-secret",
+		Transport:     transportEventsAPI,
+	}
+	orgID, owner, _ := pgtest.SeedOrgWithUser(t, r.h, "slack-deployapp")
+	r.fake.stageConnectOK("xoxb-deploy", "T0DEPLOYWS", "Acme", "U0BOTDEPLOY", "A0DEPLOYAPP", "")
+	r.fake.stageConnectOK("xoxb-own", "T0DEPLOYWS", "Acme", "U0BOTOWN", "A0OWNAPP01", "")
+
+	rec := httptest.NewRecorder()
+	r.hdl.handleConnect(rec, r.req(http.MethodPost, "/api/slack/workspaces", owner, orgID, "",
+		map[string]string{"bot_token": "xoxb-deploy", "signing_secret": "shh"}))
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422 (body=%s)", rec.Code, rec.Body.String())
+	}
+	errs := decodeBody[struct {
+		Errors []httpx.ErrorItem `json:"errors"`
+	}](t, rec).Errors
+	want := httpx.ErrorItem{
+		Reason:  httpx.ReasonInvalidField,
+		Message: "This bot token belongs to this deployment's Slack app. Connect it with Add to Slack instead.",
+		Field:   "bot_token",
+	}
+	if len(errs) != 1 || errs[0] != want {
+		t.Fatalf("errors = %+v; want [%+v]", errs, want)
+	}
+
+	list := httptest.NewRecorder()
+	r.hdl.handleList(list, r.req(http.MethodGet, "/api/slack/workspaces", owner, orgID, "", nil))
+	if got := decodeBody[[]workspaceView](t, list); len(got) != 0 {
+		t.Errorf("workspaces after the refusal = %+v; want none", got)
+	}
+	for _, key := range []string{
+		"slack_ws_T0DEPLOYWS_A0DEPLOYAPP_bot_token",
+		"slack_ws_T0DEPLOYWS_A0DEPLOYAPP_signing_secret",
+	} {
+		if got := r.secretValue(orgID, key); got != "" {
+			t.Errorf("secret %s = %q after the refusal; want none stored", key, got)
+		}
+	}
+	if rows := r.auditRows(orgID); len(rows) != 0 {
+		t.Errorf("audit rows after the refusal = %+v; want none", rows)
+	}
+
+	own := httptest.NewRecorder()
+	r.hdl.handleConnect(own, r.req(http.MethodPost, "/api/slack/workspaces", owner, orgID, "",
+		map[string]string{"bot_token": "xoxb-own", "signing_secret": "shh"}))
+	if own.Code != http.StatusCreated {
+		t.Fatalf("own app connect status = %d, want 201 (body=%s)", own.Code, own.Body.String())
+	}
+	if view := decodeBody[workspaceView](t, own); view.APIAppID != "A0OWNAPP01" {
+		t.Errorf("api_app_id = %q; want A0OWNAPP01", view.APIAppID)
+	}
+}
+
 // ---------- app-single-org invariant + two-apps-one-workspace ----------
 
 // TestHandleConnect_AppBoundToOtherOrg_SameWorkspace_409Generic: org B

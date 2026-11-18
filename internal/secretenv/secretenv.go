@@ -58,6 +58,9 @@ var Secrets = []string{
 	"TF_GOTRUE_SERVICE_ROLE_TOKEN", // RS256 admin bearer for GoTrue's SSO admin API
 	"TF_ATLASSIAN_CLIENT_SECRET",   // deployment Atlassian OAuth (3LO) app secret
 	"TF_LINEAR_CLIENT_SECRET",      // deployment Linear OAuth app secret
+	"TF_SLACK_CLIENT_SECRET",       // deployment Slack app's OAuth client secret
+	"TF_SLACK_SIGNING_SECRET",      // deployment Slack app's Events API signing secret
+	"TF_SLACK_APP_TOKEN",           // deployment Slack app's Socket Mode app-level token
 	// The deployment GitHub App's three undisclosable halves. Its numeric App
 	// ID is deliberately absent: it is not a secret, and GET /app returns the
 	// rest of the App's identity anyway. The private key most wants the _FILE
