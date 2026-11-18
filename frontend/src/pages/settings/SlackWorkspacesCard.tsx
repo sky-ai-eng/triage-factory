@@ -61,7 +61,13 @@ interface SlackConnectionStatus {
 interface SlackWorkspace {
   workspace_id: string
   api_app_id: string
+  // source is whose Slack app the connection is through: the org's own, or
+  // the deployment's. Of an org's connections in one workspace, the active
+  // one is the one that acts.
+  source: 'org' | 'deployment'
+  active: boolean
   workspace_name: string
+  app_name: string
   enterprise_id?: string
   transport: 'socket' | 'events_api'
   bot_user_id: string

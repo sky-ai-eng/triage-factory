@@ -80,20 +80,21 @@ type channelsHandler struct {
 const slackCandidatesTTL = time.Minute
 
 // slackCandidateSet is one org's live enumeration, as liveSlackCandidates
-// answered it, and the workspaces it enumerated.
+// answered it, and the connections it enumerated through.
 type slackCandidateSet struct {
-	workspaces   string
+	connections  string
 	candidates   []slackCandidate
 	anyFailed    bool
 	anyTruncated bool
 }
 
-// slackWorkspaceKey names a set of workspaces, so an enumeration taken
-// before one was connected or disconnected is not served for the new set.
-func slackWorkspaceKey(workspaces []slackstore.Workspace) string {
-	ids := make([]string, len(workspaces))
-	for i, ws := range workspaces {
-		ids[i] = ws.WorkspaceID
+// slackConnectionsKey names a set of connections, so an enumeration taken
+// before one was connected, disconnected or switched to is not served for the
+// new set: a different app's bot can see different channels.
+func slackConnectionsKey(conns []slackstore.Connection) string {
+	ids := make([]string, len(conns))
+	for i, c := range conns {
+		ids[i] = c.WorkspaceID + ":" + c.APIAppID
 	}
 	slices.Sort(ids)
 	return strings.Join(ids, ",")
@@ -102,15 +103,15 @@ func slackWorkspaceKey(workspaces []slackstore.Workspace) string {
 // cachedSlackCandidates is liveSlackCandidates through the org's cache entry.
 // An enumeration in which a workspace failed is answered but not kept, so the
 // next read asks Slack again rather than serving the gap for a minute.
-func (h *channelsHandler) cachedSlackCandidates(ctx context.Context, orgID string, workspaces []slackstore.Workspace) ([]slackCandidate, bool, bool) {
-	key := slackWorkspaceKey(workspaces)
+func (h *channelsHandler) cachedSlackCandidates(ctx context.Context, orgID string, workspaces []slackstore.Connection) ([]slackCandidate, bool, bool) {
+	key := slackConnectionsKey(workspaces)
 	load := func(ctx context.Context) (slackCandidateSet, bool, error) {
 		candidates, failed, truncated := h.liveSlackCandidates(ctx, orgID, workspaces)
-		return slackCandidateSet{workspaces: key, candidates: candidates, anyFailed: failed, anyTruncated: truncated}, !failed, nil
+		return slackCandidateSet{connections: key, candidates: candidates, anyFailed: failed, anyTruncated: truncated}, !failed, nil
 	}
 	// load never errs: a failed workspace is reported in the set.
 	set, _ := h.candidates.Get(ctx, orgID, load)
-	if set.workspaces != key {
+	if set.connections != key {
 		h.candidates.Forget(orgID)
 		set, _ = h.candidates.Get(ctx, orgID, load)
 	}
@@ -428,7 +429,7 @@ func (h *channelsHandler) mergedChannels(ctx context.Context, orgID, userID, tea
 	var (
 		tracked    []slackstore.TeamChannel
 		registry   []slackstore.Channel
-		workspaces []slackstore.Workspace
+		workspaces []slackstore.Connection
 	)
 	if err := h.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		bundle := slackstore.FromTx(tx)
@@ -439,8 +440,12 @@ func (h *channelsHandler) mergedChannels(ctx context.Context, orgID, userID, tea
 		if registry, e = bundle.Channels.ListForOrg(ctx, orgID); e != nil {
 			return e
 		}
-		workspaces, e = bundle.Workspaces.ListForOrg(ctx, orgID)
-		return e
+		conns, e := bundle.Connections.ListForOrg(ctx, orgID)
+		if e != nil {
+			return e
+		}
+		workspaces = activeConnections(conns)
+		return nil
 	}); err != nil {
 		return nil, nil, err
 	}
@@ -583,7 +588,7 @@ type slackCandidate struct {
 // candidates for that workspace are a prefix, not the whole channel
 // universe, so the caller must not treat "channel absent from candidates"
 // as "channel doesn't exist" (it surfaces a warning instead).
-func (h *channelsHandler) liveSlackCandidates(ctx context.Context, orgID string, workspaces []slackstore.Workspace) (candidates []slackCandidate, anyFailed, anyTruncated bool) {
+func (h *channelsHandler) liveSlackCandidates(ctx context.Context, orgID string, workspaces []slackstore.Connection) (candidates []slackCandidate, anyFailed, anyTruncated bool) {
 	for _, ws := range workspaces {
 		botToken, err := h.stores.Secrets.GetSystem(ctx, orgID, ws.BotTokenRef)
 		if err != nil || botToken == "" {
@@ -631,16 +636,17 @@ func (h *channelsHandler) liveSlackCandidates(ctx context.Context, orgID string,
 	return candidates, anyFailed, anyTruncated
 }
 
-// orgWorkspaces lists the org's connected workspaces, for PUT's gate and
-// auto-join.
-func (h *channelsHandler) orgWorkspaces(ctx context.Context, orgID, userID string) ([]slackstore.Workspace, error) {
-	var workspaces []slackstore.Workspace
+// orgWorkspaces lists the org's active connections, one per workspace that
+// has one, for PUT's gate and auto-join: the bot that would act in a channel
+// is the one that answers whether it can see it.
+func (h *channelsHandler) orgWorkspaces(ctx context.Context, orgID, userID string) ([]slackstore.Connection, error) {
+	var conns []slackstore.Connection
 	err := h.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		var e error
-		workspaces, e = slackstore.FromTx(tx).Workspaces.ListForOrg(ctx, orgID)
+		conns, e = slackstore.FromTx(tx).Connections.ListForOrg(ctx, orgID)
 		return e
 	})
-	return workspaces, err
+	return activeConnections(conns), err
 }
 
 // slackChannelIDRe is the shape of a channel id a team can track: a public
@@ -652,7 +658,7 @@ var slackChannelIDRe = regexp.MustCompile(`^[CG][0-9A-Z]{1,31}$`)
 // and live candidates, which the auto-join reads.
 type channelGate struct {
 	adding     []channelWish
-	workspaces []slackstore.Workspace
+	workspaces []slackstore.Connection
 	candidates []slackCandidate
 }
 
@@ -796,7 +802,7 @@ func (h *channelsHandler) gateChannels(w http.ResponseWriter, r *http.Request, o
 // lookUpChannel asks each connected workspace for channelID directly, for a
 // channel a truncated listing may have stopped short of. found=false with a
 // nil error means every workspace answered that the bot cannot see it.
-func (h *channelsHandler) lookUpChannel(ctx context.Context, orgID string, workspaces []slackstore.Workspace, channelID string) (channelWish, bool, error) {
+func (h *channelsHandler) lookUpChannel(ctx context.Context, orgID string, workspaces []slackstore.Connection, channelID string) (channelWish, bool, error) {
 	for _, ws := range workspaces {
 		caller, botToken, ok := h.botTokenForWorkspace(ctx, orgID, workspaces, ws.WorkspaceID)
 		if !ok {
@@ -818,7 +824,7 @@ func (h *channelsHandler) lookUpChannel(ctx context.Context, orgID string, works
 // tracking write): best-effort conversations.join for added PUBLIC channels
 // the bot isn't already a member of. Returns the join-related warnings — a
 // tracked-but-botless channel is never silently reported as healthy.
-func (h *channelsHandler) autoJoin(ctx context.Context, orgID string, workspaces []slackstore.Workspace, candidates []slackCandidate, added []slackstore.Channel) []channelsWarning {
+func (h *channelsHandler) autoJoin(ctx context.Context, orgID string, workspaces []slackstore.Connection, candidates []slackCandidate, added []slackstore.Channel) []channelsWarning {
 	byID := make(map[string]slackCandidate, len(candidates))
 	for _, c := range candidates {
 		byID[c.ChannelID] = c
@@ -858,7 +864,7 @@ func (h *channelsHandler) autoJoin(ctx context.Context, orgID string, workspaces
 
 // botTokenForWorkspace resolves workspaceID's bot token among workspaces, and
 // the caller a call made with it is.
-func (h *channelsHandler) botTokenForWorkspace(ctx context.Context, orgID string, workspaces []slackstore.Workspace, workspaceID string) (slackCaller, string, bool) {
+func (h *channelsHandler) botTokenForWorkspace(ctx context.Context, orgID string, workspaces []slackstore.Connection, workspaceID string) (slackCaller, string, bool) {
 	for _, ws := range workspaces {
 		if ws.WorkspaceID != workspaceID {
 			continue

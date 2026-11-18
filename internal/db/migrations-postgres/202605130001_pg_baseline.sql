@@ -5684,30 +5684,42 @@ REVOKE ALL ON public.seat_claims FROM PUBLIC;
 REVOKE ALL ON public.seat_claims FROM anon, authenticated, service_role;
 
 
--- org_slack_workspaces: the (Slack workspace, Slack app) <-> org bind, keyed on
--- Slack's workspace/team ID (their legacy naming, unrelated to TF teams) and the
--- app's api_app_id, which rides every event delivery. A workspace may host many
--- apps; a Slack app belongs to exactly one TF org across every workspace it is
--- installed in. api_app_id is not unique on its own, so no SQL constraint
--- expresses that second rule: the connect handler takes an advisory lock on
--- api_app_id (ee/slack WorkspaceStore.LockApp) and checks for a row under
--- another org in the same transaction. The PK violation is the backstop, mapped
--- to a 409 that never names the owning org.
+-- org_slack_connections: a Slack app connected to a TF org in one Slack
+-- workspace, keyed on Slack's workspace/team ID (their legacy naming, unrelated
+-- to TF teams) and the app's api_app_id, which rides every event delivery. The
+-- key makes one TF org per (workspace, app) install: Slack gives an app one
+-- install, one bot token and one event stream per workspace.
 --
--- transport is inferred at connect from which credentials were supplied; a row
--- may carry both signing_secret_ref and app_token_ref, so the one-ref-per-
--- transport pairing is an ee/slack invariant, not a CHECK. The *_ref columns are
--- org_secrets key names (internal/integrations.SlackWorkspaceKeysFor), never
--- credential values. Postgres-only; the SQLite store is a stub returning
--- ErrNotApplicableInLocal.
+-- source says whose app it is. An 'org' row is an app the org created itself:
+-- its transport and every credential ref are on the row, and a Slack app of
+-- this kind belongs to exactly one TF org across every workspace it is
+-- installed in. api_app_id is not unique on its own, so no SQL constraint
+-- expresses that rule: the connect handler takes an advisory lock on
+-- api_app_id (ee/slack ConnectionStore.LockApp) and checks for an org row under
+-- another org in the same transaction. A 'deployment' row is a connection
+-- through the app the deployment's operator configured: only its bot token is
+-- the org's; its transport, signing secret and app token are the operator's
+-- environment, which org_slack_connections_source_shape keeps off the row. For
+-- the deployment app, the key is the whole one-org-per-workspace rule.
+--
+-- An org may connect several apps in one workspace, and exactly one of them is
+-- active: outbound calls use it, and deliveries for the others are dropped.
+-- org_slack_connections_one_active is that rule.
+--
+-- The *_ref columns are org_secrets key names
+-- (internal/integrations.SlackConnectionKeysFor), never credential values.
+-- Postgres-only; the SQLite store is a stub returning ErrNotApplicableInLocal.
 
-CREATE TABLE public.org_slack_workspaces (
+CREATE TABLE public.org_slack_connections (
     workspace_id text NOT NULL,
     api_app_id text NOT NULL,
     org_id uuid NOT NULL REFERENCES public.orgs(id) ON DELETE CASCADE,
+    source text NOT NULL CHECK (source IN ('org', 'deployment')),
+    active boolean NOT NULL,
     workspace_name text NOT NULL DEFAULT '',
+    app_name text NOT NULL DEFAULT '',
     enterprise_id text,
-    transport text NOT NULL CHECK (transport IN ('socket', 'events_api')),
+    transport text CHECK (transport IN ('socket', 'events_api')),
     bot_user_id text NOT NULL DEFAULT '',
     bot_token_ref text NOT NULL,
     signing_secret_ref text,
@@ -5715,38 +5727,53 @@ CREATE TABLE public.org_slack_workspaces (
     registered_by_user_id uuid REFERENCES public.users(id) ON DELETE SET NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (workspace_id, api_app_id)
+    PRIMARY KEY (workspace_id, api_app_id),
+    -- A deployment row holding a transport or the app's secrets would be a
+    -- second source of truth beside the operator's environment; an org row
+    -- without a transport, or without its transport's secret, can receive
+    -- nothing. The org arm tests transport IS NOT NULL itself because a NULL
+    -- transport makes the comparisons NULL, which a CHECK passes.
+    CONSTRAINT org_slack_connections_source_shape CHECK (
+        (source = 'deployment' AND transport IS NULL
+            AND signing_secret_ref IS NULL AND app_token_ref IS NULL)
+        OR (source = 'org' AND transport IS NOT NULL AND (
+            (transport = 'events_api' AND signing_secret_ref IS NOT NULL)
+            OR (transport = 'socket' AND app_token_ref IS NOT NULL))))
 );
 
--- Serves the per-org list/count reads (ListForOrg) and the org_id FK.
-CREATE INDEX org_slack_workspaces_org_idx ON public.org_slack_workspaces (org_id);
+-- At most one active connection per (org, workspace).
+CREATE UNIQUE INDEX org_slack_connections_one_active
+    ON public.org_slack_connections (org_id, workspace_id) WHERE active;
 
-CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.org_slack_workspaces
+-- Serves the per-org list reads (ListForOrg) and the org_id FK.
+CREATE INDEX org_slack_connections_org_idx ON public.org_slack_connections (org_id);
+
+CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.org_slack_connections
     FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
 
-ALTER TABLE public.org_slack_workspaces ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.org_slack_connections ENABLE ROW LEVEL SECURITY;
 
 -- SELECT is member-visible (any org member may see what is connected); writes
--- are org-admin-only, since connecting a workspace is a credential gesture.
-CREATE POLICY org_slack_workspaces_select ON public.org_slack_workspaces FOR SELECT TO tf_app
+-- are org-admin-only, since connecting an app is a credential gesture.
+CREATE POLICY org_slack_connections_select ON public.org_slack_connections FOR SELECT TO tf_app
   USING ((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id));
 
-CREATE POLICY org_slack_workspaces_insert ON public.org_slack_workspaces FOR INSERT TO tf_app
+CREATE POLICY org_slack_connections_insert ON public.org_slack_connections FOR INSERT TO tf_app
   WITH CHECK ((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id));
 
-CREATE POLICY org_slack_workspaces_update ON public.org_slack_workspaces FOR UPDATE TO tf_app
+CREATE POLICY org_slack_connections_update ON public.org_slack_connections FOR UPDATE TO tf_app
   USING ((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id))
   WITH CHECK ((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id));
 
-CREATE POLICY org_slack_workspaces_delete ON public.org_slack_workspaces FOR DELETE TO tf_app
+CREATE POLICY org_slack_connections_delete ON public.org_slack_connections FOR DELETE TO tf_app
   USING ((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id));
 
 -- supabase_admin's default privileges auto-grant new public tables to
 -- anon/authenticated/service_role; strip them so only tf_app (under RLS) and the
 -- admin pool reach this table.
-REVOKE ALL ON public.org_slack_workspaces FROM PUBLIC;
-REVOKE ALL ON public.org_slack_workspaces FROM anon, authenticated, service_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON public.org_slack_workspaces TO tf_app;
+REVOKE ALL ON public.org_slack_connections FROM PUBLIC;
+REVOKE ALL ON public.org_slack_connections FROM anon, authenticated, service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.org_slack_connections TO tf_app;
 
 
 -- user_slack_identities: maps the Slack sender who @mentioned the bot to a TF
@@ -5762,7 +5789,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON public.org_slack_workspaces TO tf_app;
 -- display name audit rendering needs. source is 'auto_email' (today's only
 -- writer) or 'oidc' (reserved for Sign-in-with-Slack). The key omits api_app_id
 -- so two apps in one workspace share these rows; there is therefore no FK to
--- org_slack_workspaces, and disconnecting the last app leaves identity rows to
+-- org_slack_connections, and disconnecting the last app leaves identity rows to
 -- go stale. Postgres-only; the SQLite store returns ErrNotApplicableInLocal.
 CREATE TABLE public.user_slack_identities (
     workspace_id text NOT NULL,
@@ -7566,7 +7593,7 @@ GRANT SELECT ON TABLE public.system_llm_runs TO tf_system;
 GRANT SELECT ON TABLE public.team_slack_channels TO tf_system;
 GRANT SELECT ON TABLE public.slack_channels TO tf_system;
 GRANT SELECT ON TABLE public.slack_channel_id_changes TO tf_system;
-GRANT SELECT ON TABLE public.org_slack_workspaces TO tf_system;
+GRANT SELECT ON TABLE public.org_slack_connections TO tf_system;
 -- The executor's schema-compatibility assert reads this; no DDL, ever.
 GRANT SELECT ON TABLE public.goose_db_version TO tf_system;
 

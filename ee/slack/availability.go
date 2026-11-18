@@ -13,14 +13,14 @@ import (
 // init plugs Slack into core's per-org event-source availability, the third
 // core seam this package registers into (after the routing hooks and the
 // dormancy gate) and the same shape as the other two: core holds no Slack
-// symbol, and the answer is computed here where the workspace store is.
+// symbol, and the answer is computed here where the connection store is.
 //
 // Registered from init() rather than install() because the probe captures
 // nothing — it reads the caller's own transaction — and init() runs exactly
 // once per process, which is what the registry's duplicate panic wants.
 //
 // MultiOnly, because every route in this package 404s in local mode: the
-// workspace store is Postgres-only, so a local deployment cannot connect a
+// connection store is Postgres-only, so a local deployment cannot connect a
 // workspace at all. Reporting `unlicensed` there would be a claim about a
 // purchasing decision local mode never asks anyone to make.
 func init() {
@@ -33,10 +33,12 @@ func init() {
 
 // availability splits three ways, and the split is the point: an org without
 // the entitlement is told the licence is missing (not its concern to fix), an
-// entitled org with no connected workspace is told setup is missing (exactly
-// its concern), and only a connected one is available.
+// entitled org with no active connection is told setup is missing (exactly
+// its concern), and only an org with one is available. An org whose
+// connections are all inactive has nothing that acts or receives, so it is
+// unconfigured.
 //
-// The connection test is the presence of a workspace ROW, never a
+// The connection test is the presence of an active connection ROW, never a
 // workspaceView's live Socket Mode status: that status is absent for a
 // webhook-only app and before the reconciler's first pass, so keying on it
 // would report a perfectly healthy Events API workspace as unconfigured.
@@ -53,21 +55,18 @@ func availability(ctx context.Context, tx db.TxStores, orgID string) (eventsourc
 		// forever looking like an unconnected workspace.
 		return "", errors.New("slack store bundle absent from the transaction: the slack store extension is not registered")
 	}
-	workspaces, err := bundle.Workspaces.ListForOrg(ctx, orgID)
+	conns, err := bundle.Connections.ListForOrg(ctx, orgID)
 	if err != nil {
 		return "", err
 	}
-	if len(workspaces) == 0 {
-		return eventsource.StateUnconfigured, nil
-	}
-	return eventsource.StateAvailable, nil
+	return availabilityOf(conns), nil
 }
 
 // availabilitySystem is availability's claims-free twin, registered as the
 // SystemProbe: the same three-way split, read through the admin-pool
-// workspace door for the JWT-less callers eventsource.ResolveSystem
+// connection door for the JWT-less callers eventsource.ResolveSystem
 // serves. The entitlement read is process-local either way, so only the
-// workspace read changes doors.
+// connection read changes doors.
 func availabilitySystem(ctx context.Context, stores db.Stores, orgID string) (eventsource.State, error) {
 	if !entitlements.For(orgID).Has(entitlements.FeatureSlack) {
 		return eventsource.StateUnlicensed, nil
@@ -78,12 +77,17 @@ func availabilitySystem(ctx context.Context, stores db.Stores, orgID string) (ev
 		// reason: this package being linked links its store factories too.
 		return "", errors.New("slack store bundle absent from the stores: the slack store extension is not registered")
 	}
-	workspaces, err := bundle.Workspaces.ListForOrgSystem(ctx, orgID)
+	conns, err := bundle.Connections.ListForOrgSystem(ctx, orgID)
 	if err != nil {
 		return "", err
 	}
-	if len(workspaces) == 0 {
-		return eventsource.StateUnconfigured, nil
+	return availabilityOf(conns), nil
+}
+
+// availabilityOf is an entitled org's state, from its connections.
+func availabilityOf(conns []slackstore.Connection) eventsource.State {
+	if len(activeConnections(conns)) == 0 {
+		return eventsource.StateUnconfigured
 	}
-	return eventsource.StateAvailable, nil
+	return eventsource.StateAvailable
 }

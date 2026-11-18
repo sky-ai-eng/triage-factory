@@ -3,12 +3,16 @@ package pg_test
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 )
@@ -26,16 +30,30 @@ func mustWithUser(t *testing.T, stores db.Stores, ctx context.Context, orgID, us
 // this package (and delivery_pg_test.go) needs no change.
 func defaultAppID(workspaceID string) string { return "A0" + workspaceID }
 
-func testWorkspace(orgID, workspaceID string) slackstore.Workspace {
+// upsertActiveConnection upserts c as an active connection, through an org's
+// own app unless c names another source.
+func upsertActiveConnection(ctx context.Context, tx db.TxStores, c slackstore.Connection) error {
+	if c.Source == "" {
+		c.Source = slackstore.SourceOrg
+	}
+	c.Active = true
+	_, err := slackstore.FromTx(tx).Connections.Upsert(ctx, c)
+	return err
+}
+
+func testWorkspace(orgID, workspaceID string) slackstore.Connection {
 	return testWorkspaceApp(orgID, workspaceID, defaultAppID(workspaceID))
 }
 
-func testWorkspaceApp(orgID, workspaceID, apiAppID string) slackstore.Workspace {
-	return slackstore.Workspace{
+func testWorkspaceApp(orgID, workspaceID, apiAppID string) slackstore.Connection {
+	return slackstore.Connection{
 		WorkspaceID:      workspaceID,
 		APIAppID:         apiAppID,
 		OrgID:            orgID,
+		Source:           slackstore.SourceOrg,
+		Active:           true,
 		WorkspaceName:    "Acme Corp",
+		AppName:          "Acme Bot",
 		Transport:        "socket",
 		BotUserID:        "U0BOT123",
 		BotTokenRef:      "slack_ws_" + workspaceID + "_" + apiAppID + "_bot_token",
@@ -44,35 +62,53 @@ func testWorkspaceApp(orgID, workspaceID, apiAppID string) slackstore.Workspace 
 	}
 }
 
-// TestWorkspaceStore_Postgres_UpsertCreatesAndReads: a fresh Upsert inserts
-// the row; Get and ListForOrg both see it, with nullable columns round-
-// tripping "" for the unset signing_secret_ref.
-func TestWorkspaceStore_Postgres_UpsertCreatesAndReads(t *testing.T) {
+// upsert runs Upsert in a claims transaction as userID and returns its row.
+func upsert(t *testing.T, stores db.Stores, orgID, userID string, c slackstore.Connection) slackstore.Connection {
+	t.Helper()
+	var got slackstore.Connection
+	mustWithUser(t, stores, context.Background(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		got, e = slackstore.FromTx(tx).Connections.Upsert(context.Background(), c)
+		return e
+	})
+	return got
+}
+
+// get reads (workspaceID, apiAppID) back through the point read.
+func get(t *testing.T, stores db.Stores, orgID, userID, workspaceID, apiAppID string) *slackstore.Connection {
+	t.Helper()
+	var got *slackstore.Connection
+	mustWithUser(t, stores, context.Background(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		got, e = slackstore.FromTx(tx).Connections.Get(context.Background(), orgID, workspaceID, apiAppID)
+		return e
+	})
+	return got
+}
+
+// TestConnectionStore_Postgres_UpsertReturnsTheStoredRow: the row Upsert
+// returns, on insert and on update, is the row the point read reads, with
+// nullable columns round-tripping "" for the unset signing_secret_ref.
+func TestConnectionStore_Postgres_UpsertReturnsTheStoredRow(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgID, userID, _ := pgtest.SeedOrgWithUser(t, h, "slack-crud")
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	ctx := context.Background()
 
-	ws := testWorkspace(orgID, "T0CRUD001")
-	mustWithUser(t, stores, ctx, orgID, userID, func(tx db.TxStores) error {
-		return slackstore.FromTx(tx).Workspaces.Upsert(ctx, ws)
-	})
+	read := func() (*slackstore.Connection, error) {
+		return get(t, stores, orgID, userID, "T0CRUD001", defaultAppID("T0CRUD001")), nil
+	}
 
-	var got *slackstore.Workspace
-	mustWithUser(t, stores, ctx, orgID, userID, func(tx db.TxStores) error {
-		var e error
-		got, e = slackstore.FromTx(tx).Workspaces.Get(ctx, orgID, "T0CRUD001", defaultAppID("T0CRUD001"))
-		return e
-	})
-	if got == nil {
-		t.Fatal("Get returned nil for a just-upserted workspace")
+	ws := testWorkspace(orgID, "T0CRUD001")
+	ws.RegisteredByUserID = userID
+	dbtest.AssertWriteReturnedStoredRow(t, "Upsert (insert)", upsert(t, stores, orgID, userID, ws), read)
+	got, _ := read()
+	if got.Source != slackstore.SourceOrg || !got.Active || got.AppName != "Acme Bot" {
+		t.Errorf("got = %+v; want source org, active, and the app name from the upsert", got)
 	}
 	if got.WorkspaceName != "Acme Corp" || got.Transport != "socket" || got.BotUserID != "U0BOT123" {
 		t.Errorf("got = %+v; want name/transport/bot_user_id from the upsert", got)
-	}
-	if got.APIAppID != defaultAppID("T0CRUD001") {
-		t.Errorf("api_app_id = %q; want %q", got.APIAppID, defaultAppID("T0CRUD001"))
 	}
 	if got.SigningSecretRef != "" {
 		t.Errorf("signing_secret_ref = %q; want \"\" (never supplied -> NULL)", got.SigningSecretRef)
@@ -80,25 +116,34 @@ func TestWorkspaceStore_Postgres_UpsertCreatesAndReads(t *testing.T) {
 	if got.AppTokenRef == "" {
 		t.Error("app_token_ref empty; want the ref we upserted")
 	}
-	if got.RegisteredByUserID != "" {
-		t.Errorf("registered_by_user_id = %q; want \"\" (never set in this fixture)", got.RegisteredByUserID)
+	if got.RegisteredByUserID != userID {
+		t.Errorf("registered_by_user_id = %q; want %q", got.RegisteredByUserID, userID)
 	}
 
-	var list []slackstore.Workspace
+	rotated := ws
+	rotated.AppName = "Acme Bot (renamed)"
+	dbtest.AssertWriteReturnedStoredRow(t, "Upsert (update)", upsert(t, stores, orgID, userID, rotated), read)
+	got, _ = read()
+	if got.AppName != "Acme Bot (renamed)" {
+		t.Errorf("app_name after the update = %q; want the new name", got.AppName)
+	}
+
+	var list []slackstore.Connection
 	mustWithUser(t, stores, ctx, orgID, userID, func(tx db.TxStores) error {
 		var e error
-		list, e = slackstore.FromTx(tx).Workspaces.ListForOrg(ctx, orgID)
+		list, e = slackstore.FromTx(tx).Connections.ListForOrg(ctx, orgID)
 		return e
 	})
-	if len(list) != 1 || list[0].WorkspaceID != "T0CRUD001" {
-		t.Fatalf("ListForOrg = %d rows; want 1 (the upserted workspace)", len(list))
+	if len(list) != 1 || !reflect.DeepEqual(list[0], *got) {
+		t.Fatalf("ListForOrg = %+v; want exactly the upserted connection", list)
 	}
 }
 
-// TestWorkspaceStore_Postgres_UpsertUpdatesInPlace: a second Upsert for the
-// same (workspace_id, org) updates the existing row rather than creating a
-// duplicate — the "re-submit the connect form" upsert contract.
-func TestWorkspaceStore_Postgres_UpsertUpdatesInPlace(t *testing.T) {
+// TestConnectionStore_Postgres_UpsertUpdatesInPlace: a second Upsert for the
+// same (workspace_id, api_app_id, org) updates the existing row's credential
+// and display columns rather than creating a duplicate — the "re-submit the
+// connect form" upsert contract — and keeps the active and source it has.
+func TestConnectionStore_Postgres_UpsertUpdatesInPlace(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgID, userID, _ := pgtest.SeedOrgWithUser(t, h, "slack-upsert")
@@ -106,23 +151,21 @@ func TestWorkspaceStore_Postgres_UpsertUpdatesInPlace(t *testing.T) {
 	ctx := context.Background()
 
 	first := testWorkspace(orgID, "T0UPSERT1")
-	mustWithUser(t, stores, ctx, orgID, userID, func(tx db.TxStores) error {
-		return slackstore.FromTx(tx).Workspaces.Upsert(ctx, first)
-	})
+	upsert(t, stores, orgID, userID, first)
 
 	second := first
 	second.WorkspaceName = "Acme Corp (renamed)"
 	second.Transport = "events_api"
 	second.AppTokenRef = ""
 	second.SigningSecretRef = "slack_ws_T0UPSERT1_" + defaultAppID("T0UPSERT1") + "_signing_secret"
-	mustWithUser(t, stores, ctx, orgID, userID, func(tx db.TxStores) error {
-		return slackstore.FromTx(tx).Workspaces.Upsert(ctx, second)
-	})
+	second.Active = false
+	second.Source = slackstore.SourceDeployment
+	got := upsert(t, stores, orgID, userID, second)
 
-	var list []slackstore.Workspace
+	var list []slackstore.Connection
 	mustWithUser(t, stores, ctx, orgID, userID, func(tx db.TxStores) error {
 		var e error
-		list, e = slackstore.FromTx(tx).Workspaces.ListForOrg(ctx, orgID)
+		list, e = slackstore.FromTx(tx).Connections.ListForOrg(ctx, orgID)
 		return e
 	})
 	if len(list) != 1 {
@@ -137,10 +180,129 @@ func TestWorkspaceStore_Postgres_UpsertUpdatesInPlace(t *testing.T) {
 	if list[0].SigningSecretRef == "" {
 		t.Error("signing_secret_ref empty; want the ref set by the second upsert")
 	}
+	if !got.Active || got.Source != slackstore.SourceOrg {
+		t.Errorf("after an upsert asking for inactive/deployment: active=%v source=%q; want the stored true/org", got.Active, got.Source)
+	}
 }
 
-// TestWorkspaceStore_Postgres_Delete: Delete removes the row and only that org's row.
-func TestWorkspaceStore_Postgres_Delete(t *testing.T) {
+// TestConnectionStore_Postgres_OneActivePerWorkspace: the partial unique
+// index refuses a second active connection in one (org, workspace), as
+// ErrActiveConnectionExists, and allows a second inactive one. Another org's
+// active connection in the same workspace is its own.
+func TestConnectionStore_Postgres_OneActivePerWorkspace(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, userID, _ := pgtest.SeedOrgWithUser(t, h, "slack-one-active")
+	otherOrg, otherUser, _ := pgtest.SeedOrgWithUser(t, h, "slack-one-active-other")
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	upsert(t, stores, orgID, userID, testWorkspaceApp(orgID, "T0ONEACT1", "A0ACTIVE01"))
+
+	err := stores.Tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		_, e := slackstore.FromTx(tx).Connections.Upsert(ctx, testWorkspaceApp(orgID, "T0ONEACT1", "A0ACTIVE02"))
+		return e
+	})
+	if !errors.Is(err, slackstore.ErrActiveConnectionExists) {
+		t.Fatalf("second active connection in the workspace: err = %v; want ErrActiveConnectionExists", err)
+	}
+
+	inactive := testWorkspaceApp(orgID, "T0ONEACT1", "A0INACTIV1")
+	inactive.Active = false
+	if got := upsert(t, stores, orgID, userID, inactive); got.Active {
+		t.Errorf("inactive connection stored active=%v; want false", got.Active)
+	}
+
+	if got := upsert(t, stores, otherOrg, otherUser, testWorkspaceApp(otherOrg, "T0ONEACT1", "A0OTHERORG")); !got.Active {
+		t.Error("another org's connection in the same workspace was stored inactive; want active (the rule is per org)")
+	}
+}
+
+// TestConnectionStore_Postgres_SourceShape: the CHECK refuses a deployment row
+// carrying a transport or a signing secret, and an org row without the secret
+// its transport needs; it accepts a bare deployment row.
+func TestConnectionStore_Postgres_SourceShape(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, _, _ := pgtest.SeedOrgWithUser(t, h, "slack-source-shape")
+
+	insert := func(app, source, transport, signingSecretRef, appTokenRef string) error {
+		_, err := h.AdminDB.Exec(`
+			INSERT INTO org_slack_connections (
+				workspace_id, api_app_id, org_id, source, active, transport, bot_token_ref,
+				signing_secret_ref, app_token_ref
+			) VALUES ('T0SHAPE01', $1, $2, $3, false, NULLIF($4, ''), 'bot', NULLIF($5, ''), NULLIF($6, ''))
+		`, app, orgID, source, transport, signingSecretRef, appTokenRef)
+		return err
+	}
+	for _, tc := range []struct {
+		name                                     string
+		source, transport, signingSecret, appTok string
+		ok                                       bool
+	}{
+		{"deployment, bare", "deployment", "", "", "", true},
+		{"deployment with a transport", "deployment", "events_api", "", "", false},
+		{"deployment with a signing secret", "deployment", "", "sig", "", false},
+		{"deployment with an app token", "deployment", "", "", "xapp", false},
+		{"org events_api with its signing secret", "org", "events_api", "sig", "", true},
+		{"org events_api without a signing secret", "org", "events_api", "", "", false},
+		{"org socket with its app token", "org", "socket", "", "xapp", true},
+		{"org socket without an app token", "org", "socket", "", "", false},
+		{"org without a transport", "org", "", "sig", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := insert("A0"+strings.ReplaceAll(tc.name, " ", "_"), tc.source, tc.transport, tc.signingSecret, tc.appTok)
+			if tc.ok && err != nil {
+				t.Fatalf("insert: %v; want accepted", err)
+			}
+			if !tc.ok && (err == nil || !strings.Contains(err.Error(), "org_slack_connections_source_shape")) {
+				t.Fatalf("insert: err = %v; want the source-shape CHECK to refuse it", err)
+			}
+		})
+	}
+}
+
+// TestConnectionStore_Postgres_ActiveForWorkspaceSystem: the org's active
+// connection in a workspace, and nil when the workspace has only inactive
+// connections, none, or only another org's.
+func TestConnectionStore_Postgres_ActiveForWorkspaceSystem(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, userID, _ := pgtest.SeedOrgWithUser(t, h, "slack-active-for")
+	otherOrg, otherUser, _ := pgtest.SeedOrgWithUser(t, h, "slack-active-for-other")
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	conns := slackstore.FromStores(stores).Connections
+	ctx := context.Background()
+
+	inactive := testWorkspaceApp(orgID, "T0ACTFOR1", "A0ACTFOR0I")
+	inactive.Active = false
+	upsert(t, stores, orgID, userID, inactive)
+	active := upsert(t, stores, orgID, userID, testWorkspaceApp(orgID, "T0ACTFOR1", "A0ACTFOR0A"))
+	onlyInactive := testWorkspaceApp(orgID, "T0ACTFOR2", "A0ACTFOR2I")
+	onlyInactive.Active = false
+	upsert(t, stores, orgID, userID, onlyInactive)
+	upsert(t, stores, otherOrg, otherUser, testWorkspaceApp(otherOrg, "T0ACTFOR3", "A0ACTFOR3O"))
+
+	got, err := conns.ActiveForWorkspaceSystem(ctx, orgID, "T0ACTFOR1")
+	if err != nil {
+		t.Fatalf("ActiveForWorkspaceSystem: %v", err)
+	}
+	if got == nil || !reflect.DeepEqual(*got, active) {
+		t.Errorf("ActiveForWorkspaceSystem = %+v; want the active connection %+v", got, active)
+	}
+	for _, workspaceID := range []string{"T0ACTFOR2", "T0ACTFOR3", "T0ACTFOR4"} {
+		got, err := conns.ActiveForWorkspaceSystem(ctx, orgID, workspaceID)
+		if err != nil {
+			t.Fatalf("ActiveForWorkspaceSystem(%s): %v", workspaceID, err)
+		}
+		if got != nil {
+			t.Errorf("ActiveForWorkspaceSystem(%s) = %+v; want nil", workspaceID, got)
+		}
+	}
+}
+
+// TestConnectionStore_Postgres_Delete: Delete removes the row and only that org's row.
+func TestConnectionStore_Postgres_Delete(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgID, userID, _ := pgtest.SeedOrgWithUser(t, h, "slack-delete")
@@ -148,16 +310,16 @@ func TestWorkspaceStore_Postgres_Delete(t *testing.T) {
 	ctx := context.Background()
 
 	mustWithUser(t, stores, ctx, orgID, userID, func(tx db.TxStores) error {
-		return slackstore.FromTx(tx).Workspaces.Upsert(ctx, testWorkspace(orgID, "T0DEL0001"))
+		return upsertActiveConnection(ctx, tx, testWorkspace(orgID, "T0DEL0001"))
 	})
 	mustWithUser(t, stores, ctx, orgID, userID, func(tx db.TxStores) error {
-		return slackstore.FromTx(tx).Workspaces.Delete(ctx, orgID, "T0DEL0001", defaultAppID("T0DEL0001"))
+		return slackstore.FromTx(tx).Connections.Delete(ctx, orgID, "T0DEL0001", defaultAppID("T0DEL0001"))
 	})
 
-	var got *slackstore.Workspace
+	var got *slackstore.Connection
 	mustWithUser(t, stores, ctx, orgID, userID, func(tx db.TxStores) error {
 		var e error
-		got, e = slackstore.FromTx(tx).Workspaces.Get(ctx, orgID, "T0DEL0001", defaultAppID("T0DEL0001"))
+		got, e = slackstore.FromTx(tx).Connections.Get(ctx, orgID, "T0DEL0001", defaultAppID("T0DEL0001"))
 		return e
 	})
 	if got != nil {
@@ -165,36 +327,36 @@ func TestWorkspaceStore_Postgres_Delete(t *testing.T) {
 	}
 }
 
-// TestWorkspaceStore_Postgres_DeleteSystem: DeleteSystem removes the row only
+// TestConnectionStore_Postgres_DeleteSystem: DeleteSystem removes the row only
 // while its updated_at is the one the caller read, and reports a miss —
 // whether an Upsert moved updated_at, the row is another org's, or there is no
 // row — as false with the row left as it was.
-func TestWorkspaceStore_Postgres_DeleteSystem(t *testing.T) {
+func TestConnectionStore_Postgres_DeleteSystem(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgID, userID, _ := pgtest.SeedOrgWithUser(t, h, "slack-delete-system")
 	otherOrg, _, _ := pgtest.SeedOrgWithUser(t, h, "slack-delete-system-other")
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
-	workspaces := slackstore.FromStores(stores).Workspaces
+	conns := slackstore.FromStores(stores).Connections
 	ctx := context.Background()
 
-	read := func(workspaceID string) *slackstore.Workspace {
+	read := func(workspaceID string) *slackstore.Connection {
 		t.Helper()
-		ws, err := workspaces.GetByWorkspaceAppSystem(ctx, workspaceID, defaultAppID(workspaceID))
+		ws, err := conns.GetByWorkspaceAppSystem(ctx, workspaceID, defaultAppID(workspaceID))
 		if err != nil {
 			t.Fatalf("GetByWorkspaceAppSystem(%s): %v", workspaceID, err)
 		}
 		return ws
 	}
-	upsert := func(ws slackstore.Workspace) {
+	upsert := func(ws slackstore.Connection) {
 		t.Helper()
 		mustWithUser(t, stores, ctx, orgID, userID, func(tx db.TxStores) error {
-			return slackstore.FromTx(tx).Workspaces.Upsert(ctx, ws)
+			return upsertActiveConnection(ctx, tx, ws)
 		})
 	}
 	deleteSystem := func(org, workspaceID string, updatedAt time.Time) bool {
 		t.Helper()
-		deleted, err := workspaces.DeleteSystem(ctx, org, workspaceID, defaultAppID(workspaceID), updatedAt)
+		deleted, err := conns.DeleteSystem(ctx, org, workspaceID, defaultAppID(workspaceID), updatedAt)
 		if err != nil {
 			t.Fatalf("DeleteSystem(%s): %v", workspaceID, err)
 		}
@@ -246,16 +408,16 @@ func TestWorkspaceStore_Postgres_DeleteSystem(t *testing.T) {
 	})
 }
 
-// TestWorkspaceStore_Postgres_CrossOrgConflict: the (workspace_id,
+// TestConnectionStore_Postgres_CrossOrgConflict: the (workspace_id,
 // api_app_id) composite PRIMARY KEY binds a (workspace, app) pair to
 // exactly one org, deployment-wide — a second org's Upsert for an
 // already-bound (workspace_id, api_app_id) pair fails with a real
 // constraint violation (not a silent steal, not a silent no-op). This is
 // the SQL-level backstop; the app-single-org invariant itself (same
 // api_app_id, any workspace_id) is enforced by the connect handler, not
-// this constraint — see TestWorkspaceStore_Postgres_AppBoundToOtherOrgSystem
+// this constraint — see TestConnectionStore_Postgres_AppBoundToOtherOrgSystem
 // and the handler acceptance tests.
-func TestWorkspaceStore_Postgres_CrossOrgConflict(t *testing.T) {
+func TestConnectionStore_Postgres_CrossOrgConflict(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgA, userA, _ := pgtest.SeedOrgWithUser(t, h, "slack-xorg-a")
@@ -264,26 +426,26 @@ func TestWorkspaceStore_Postgres_CrossOrgConflict(t *testing.T) {
 	ctx := context.Background()
 
 	mustWithUser(t, stores, ctx, orgA, userA, func(tx db.TxStores) error {
-		return slackstore.FromTx(tx).Workspaces.Upsert(ctx, testWorkspace(orgA, "T0SHARED1"))
+		return upsertActiveConnection(ctx, tx, testWorkspace(orgA, "T0SHARED1"))
 	})
 
 	err := stores.Tx.WithTx(ctx, orgB, userB, func(tx db.TxStores) error {
-		return slackstore.FromTx(tx).Workspaces.Upsert(ctx, testWorkspace(orgB, "T0SHARED1"))
+		return upsertActiveConnection(ctx, tx, testWorkspace(orgB, "T0SHARED1"))
 	})
 	if err == nil {
 		t.Fatal("org B upserted a (workspace_id, api_app_id) pair already bound to org A; want a constraint violation")
 	}
 
 	// Org A's row is untouched; org B still has none.
-	var listA, listB []slackstore.Workspace
+	var listA, listB []slackstore.Connection
 	mustWithUser(t, stores, ctx, orgA, userA, func(tx db.TxStores) error {
 		var e error
-		listA, e = slackstore.FromTx(tx).Workspaces.ListForOrg(ctx, orgA)
+		listA, e = slackstore.FromTx(tx).Connections.ListForOrg(ctx, orgA)
 		return e
 	})
 	mustWithUser(t, stores, ctx, orgB, userB, func(tx db.TxStores) error {
 		var e error
-		listB, e = slackstore.FromTx(tx).Workspaces.ListForOrg(ctx, orgB)
+		listB, e = slackstore.FromTx(tx).Connections.ListForOrg(ctx, orgB)
 		return e
 	})
 	if len(listA) != 1 || listA[0].OrgID != orgA {
@@ -294,10 +456,10 @@ func TestWorkspaceStore_Postgres_CrossOrgConflict(t *testing.T) {
 	}
 }
 
-// TestWorkspaceStore_Postgres_ListAllSystem: the admin-pool read sees every
+// TestConnectionStore_Postgres_ListAllSystem: the admin-pool read sees every
 // org's workspace in one call — the future socket connection manager's
 // boot-time enumeration.
-func TestWorkspaceStore_Postgres_ListAllSystem(t *testing.T) {
+func TestConnectionStore_Postgres_ListAllSystem(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgA, userA, _ := pgtest.SeedOrgWithUser(t, h, "slack-sys-a")
@@ -306,13 +468,13 @@ func TestWorkspaceStore_Postgres_ListAllSystem(t *testing.T) {
 	ctx := context.Background()
 
 	mustWithUser(t, stores, ctx, orgA, userA, func(tx db.TxStores) error {
-		return slackstore.FromTx(tx).Workspaces.Upsert(ctx, testWorkspace(orgA, "T0SYSA001"))
+		return upsertActiveConnection(ctx, tx, testWorkspace(orgA, "T0SYSA001"))
 	})
 	mustWithUser(t, stores, ctx, orgB, userB, func(tx db.TxStores) error {
-		return slackstore.FromTx(tx).Workspaces.Upsert(ctx, testWorkspace(orgB, "T0SYSB001"))
+		return upsertActiveConnection(ctx, tx, testWorkspace(orgB, "T0SYSB001"))
 	})
 
-	all, err := slackstore.FromStores(stores).Workspaces.ListAllSystem(ctx)
+	all, err := slackstore.FromStores(stores).Connections.ListAllSystem(ctx)
 	if err != nil {
 		t.Fatalf("ListAllSystem: %v", err)
 	}
@@ -333,14 +495,14 @@ func keysOf(m map[string]bool) []string {
 	return out
 }
 
-// TestWorkspaceStore_Postgres_TwoAppsSameWorkspaceDifferentOrgs: the schema
+// TestConnectionStore_Postgres_TwoAppsSameWorkspaceDifferentOrgs: the schema
 // itself imposes no workspace<->org cardinality limit — two different apps
 // (distinct api_app_id) can both be bound to the same workspace_id under
 // two different orgs (e.g. a prod TF org and an eval TF org each running
 // their own bot in the same workspace). The app-single-org invariant that
 // would forbid two ORGS sharing one APP lives one layer up, at the connect
 // handler (LockApp + AppBoundToOtherOrgSystem) — not enforced here.
-func TestWorkspaceStore_Postgres_TwoAppsSameWorkspaceDifferentOrgs(t *testing.T) {
+func TestConnectionStore_Postgres_TwoAppsSameWorkspaceDifferentOrgs(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgA, userA, _ := pgtest.SeedOrgWithUser(t, h, "slack-2apps-a")
@@ -349,21 +511,21 @@ func TestWorkspaceStore_Postgres_TwoAppsSameWorkspaceDifferentOrgs(t *testing.T)
 	ctx := context.Background()
 
 	mustWithUser(t, stores, ctx, orgA, userA, func(tx db.TxStores) error {
-		return slackstore.FromTx(tx).Workspaces.Upsert(ctx, testWorkspaceApp(orgA, "T0SHARED2", "A0FIRST001"))
+		return upsertActiveConnection(ctx, tx, testWorkspaceApp(orgA, "T0SHARED2", "A0FIRST001"))
 	})
 	mustWithUser(t, stores, ctx, orgB, userB, func(tx db.TxStores) error {
-		return slackstore.FromTx(tx).Workspaces.Upsert(ctx, testWorkspaceApp(orgB, "T0SHARED2", "A0SECOND01"))
+		return upsertActiveConnection(ctx, tx, testWorkspaceApp(orgB, "T0SHARED2", "A0SECOND01"))
 	})
 
-	var listA, listB []slackstore.Workspace
+	var listA, listB []slackstore.Connection
 	mustWithUser(t, stores, ctx, orgA, userA, func(tx db.TxStores) error {
 		var e error
-		listA, e = slackstore.FromTx(tx).Workspaces.ListForOrg(ctx, orgA)
+		listA, e = slackstore.FromTx(tx).Connections.ListForOrg(ctx, orgA)
 		return e
 	})
 	mustWithUser(t, stores, ctx, orgB, userB, func(tx db.TxStores) error {
 		var e error
-		listB, e = slackstore.FromTx(tx).Workspaces.ListForOrg(ctx, orgB)
+		listB, e = slackstore.FromTx(tx).Connections.ListForOrg(ctx, orgB)
 		return e
 	})
 	if len(listA) != 1 || listA[0].APIAppID != "A0FIRST001" || listA[0].WorkspaceID != "T0SHARED2" {
@@ -374,11 +536,11 @@ func TestWorkspaceStore_Postgres_TwoAppsSameWorkspaceDifferentOrgs(t *testing.T)
 	}
 }
 
-// TestWorkspaceStore_Postgres_AppBoundToOtherOrgSystem: the app-single-org
+// TestConnectionStore_Postgres_AppBoundToOtherOrgSystem: the app-single-org
 // invariant's check primitive — true only when some row (ANY workspace_id)
 // carries apiAppID under a DIFFERENT org; the owning org and unrelated app
 // ids both report false.
-func TestWorkspaceStore_Postgres_AppBoundToOtherOrgSystem(t *testing.T) {
+func TestConnectionStore_Postgres_AppBoundToOtherOrgSystem(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgA, userA, _ := pgtest.SeedOrgWithUser(t, h, "slack-appinv-a")
@@ -387,10 +549,10 @@ func TestWorkspaceStore_Postgres_AppBoundToOtherOrgSystem(t *testing.T) {
 	ctx := context.Background()
 
 	mustWithUser(t, stores, ctx, orgA, userA, func(tx db.TxStores) error {
-		return slackstore.FromTx(tx).Workspaces.Upsert(ctx, testWorkspaceApp(orgA, "T0INVA0001", "A0SHARED01"))
+		return upsertActiveConnection(ctx, tx, testWorkspaceApp(orgA, "T0INVA0001", "A0SHARED01"))
 	})
 
-	bound, err := slackstore.FromStores(stores).Workspaces.AppBoundToOtherOrgSystem(ctx, "A0SHARED01", orgA)
+	bound, err := slackstore.FromStores(stores).Connections.AppBoundToOtherOrgSystem(ctx, "A0SHARED01", orgA)
 	if err != nil {
 		t.Fatalf("AppBoundToOtherOrgSystem (owning org): %v", err)
 	}
@@ -401,7 +563,7 @@ func TestWorkspaceStore_Postgres_AppBoundToOtherOrgSystem(t *testing.T) {
 	// A DIFFERENT workspace_id carrying the same api_app_id under org B
 	// would also report bound — the invariant spans every workspace an app
 	// is installed in, not just the one it was first seen on.
-	bound, err = slackstore.FromStores(stores).Workspaces.AppBoundToOtherOrgSystem(ctx, "A0SHARED01", orgB)
+	bound, err = slackstore.FromStores(stores).Connections.AppBoundToOtherOrgSystem(ctx, "A0SHARED01", orgB)
 	if err != nil {
 		t.Fatalf("AppBoundToOtherOrgSystem (other org): %v", err)
 	}
@@ -409,16 +571,32 @@ func TestWorkspaceStore_Postgres_AppBoundToOtherOrgSystem(t *testing.T) {
 		t.Error("AppBoundToOtherOrgSystem = false for a different org; want true (app-single-org invariant)")
 	}
 
-	bound, err = slackstore.FromStores(stores).Workspaces.AppBoundToOtherOrgSystem(ctx, "A0NEVERSEEN", orgB)
+	bound, err = slackstore.FromStores(stores).Connections.AppBoundToOtherOrgSystem(ctx, "A0NEVERSEEN", orgB)
 	if err != nil {
 		t.Fatalf("AppBoundToOtherOrgSystem (unrelated app): %v", err)
 	}
 	if bound {
 		t.Error("AppBoundToOtherOrgSystem = true for an unconnected app id; want false")
 	}
+
+	// The deployment's app is in many orgs, one per workspace: its rows bind
+	// no app to an org.
+	if _, err := h.AdminDB.Exec(`
+		INSERT INTO org_slack_connections (workspace_id, api_app_id, org_id, source, active, bot_token_ref)
+		VALUES ('T0INVDEP01', 'A0DEPLOY01', $1, 'deployment', true, 'bot')
+	`, orgA); err != nil {
+		t.Fatalf("insert deployment connection: %v", err)
+	}
+	bound, err = slackstore.FromStores(stores).Connections.AppBoundToOtherOrgSystem(ctx, "A0DEPLOY01", orgB)
+	if err != nil {
+		t.Fatalf("AppBoundToOtherOrgSystem (deployment app): %v", err)
+	}
+	if bound {
+		t.Error("AppBoundToOtherOrgSystem = true for the deployment's app connected in another org; want false")
+	}
 }
 
-// TestWorkspaceStore_Postgres_LockApp_SerializesSameAppID is the regression
+// TestConnectionStore_Postgres_LockApp_SerializesSameAppID is the regression
 // test for the app-single-org invariant's actual concurrency-safety
 // mechanism: without a real lock, two concurrent connect transactions for
 // the same api_app_id under different orgs could each run
@@ -429,7 +607,7 @@ func TestWorkspaceStore_Postgres_AppBoundToOtherOrgSystem(t *testing.T) {
 // api_app_id. This test proves the lock actually blocks: transaction A
 // holds it across a deliberate delay; transaction B's LockApp call for the
 // SAME api_app_id must not return until A commits (releasing the lock).
-func TestWorkspaceStore_Postgres_LockApp_SerializesSameAppID(t *testing.T) {
+func TestConnectionStore_Postgres_LockApp_SerializesSameAppID(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgA, userA, _ := pgtest.SeedOrgWithUser(t, h, "slack-lockapp-a")
@@ -447,7 +625,7 @@ func TestWorkspaceStore_Postgres_LockApp_SerializesSameAppID(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		if err := stores.Tx.WithTx(ctx, orgA, userA, func(tx db.TxStores) error {
-			if err := slackstore.FromTx(tx).Workspaces.LockApp(ctx, apiAppID); err != nil {
+			if err := slackstore.FromTx(tx).Connections.LockApp(ctx, apiAppID); err != nil {
 				return err
 			}
 			close(aHolding)
@@ -463,7 +641,7 @@ func TestWorkspaceStore_Postgres_LockApp_SerializesSameAppID(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		if err := stores.Tx.WithTx(ctx, orgB, userB, func(tx db.TxStores) error {
-			if err := slackstore.FromTx(tx).Workspaces.LockApp(ctx, apiAppID); err != nil {
+			if err := slackstore.FromTx(tx).Connections.LockApp(ctx, apiAppID); err != nil {
 				return err
 			}
 			bAcquiredAt = time.Now()
@@ -479,11 +657,11 @@ func TestWorkspaceStore_Postgres_LockApp_SerializesSameAppID(t *testing.T) {
 	}
 }
 
-// TestWorkspaceStore_Postgres_LockApp_DoesNotSerializeDifferentAppIDs proves
+// TestConnectionStore_Postgres_LockApp_DoesNotSerializeDifferentAppIDs proves
 // LockApp's key is actually api_app_id-scoped, not a single global lock: two
 // concurrent transactions locking DIFFERENT api_app_id values must not block
 // each other.
-func TestWorkspaceStore_Postgres_LockApp_DoesNotSerializeDifferentAppIDs(t *testing.T) {
+func TestConnectionStore_Postgres_LockApp_DoesNotSerializeDifferentAppIDs(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgA, userA, _ := pgtest.SeedOrgWithUser(t, h, "slack-lockapp-diff-a")
@@ -499,7 +677,7 @@ func TestWorkspaceStore_Postgres_LockApp_DoesNotSerializeDifferentAppIDs(t *test
 	go func() {
 		defer wg.Done()
 		if err := stores.Tx.WithTx(ctx, orgA, userA, func(tx db.TxStores) error {
-			if err := slackstore.FromTx(tx).Workspaces.LockApp(ctx, "A0DIFFERENTA"); err != nil {
+			if err := slackstore.FromTx(tx).Connections.LockApp(ctx, "A0DIFFERENTA"); err != nil {
 				return err
 			}
 			close(aHolding)
@@ -513,7 +691,7 @@ func TestWorkspaceStore_Postgres_LockApp_DoesNotSerializeDifferentAppIDs(t *test
 	<-aHolding
 	bStart := time.Now()
 	if err := stores.Tx.WithTx(ctx, orgB, userB, func(tx db.TxStores) error {
-		return slackstore.FromTx(tx).Workspaces.LockApp(ctx, "A0DIFFERENTB")
+		return slackstore.FromTx(tx).Connections.LockApp(ctx, "A0DIFFERENTB")
 	}); err != nil {
 		t.Fatalf("transaction B: %v", err)
 	}
@@ -523,10 +701,10 @@ func TestWorkspaceStore_Postgres_LockApp_DoesNotSerializeDifferentAppIDs(t *test
 	wg.Wait()
 }
 
-// TestWorkspaceStore_Postgres_RLS_MemberReadsAdminWrites: any org member can
-// SELECT (org_slack_workspaces_select mirrors org_jira_apps's member-visible
+// TestConnectionStore_Postgres_RLS_MemberReadsAdminWrites: any org member can
+// SELECT (org_slack_connections_select mirrors org_jira_apps's member-visible
 // read), but only an org admin can INSERT/UPDATE/DELETE.
-func TestWorkspaceStore_Postgres_RLS_MemberReadsAdminWrites(t *testing.T) {
+func TestConnectionStore_Postgres_RLS_MemberReadsAdminWrites(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgID, ownerID, teamID := pgtest.SeedOrgWithUser(t, h, "slack-rls")
@@ -534,16 +712,18 @@ func TestWorkspaceStore_Postgres_RLS_MemberReadsAdminWrites(t *testing.T) {
 	pgtest.AddOrgMember(t, h, memberID, orgID, teamID, "member", "member")
 
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO org_slack_workspaces (workspace_id, api_app_id, org_id, transport, bot_token_ref)
-		VALUES ('T0RLS0001', 'A0RLS0001', $1, 'socket', 'slack_ws_T0RLS0001_A0RLS0001_bot_token')
+		INSERT INTO org_slack_connections (
+			workspace_id, api_app_id, org_id, source, active, transport, bot_token_ref, app_token_ref
+		)
+		VALUES ('T0RLS0001', 'A0RLS0001', $1, 'org', true, 'socket', 'slack_ws_T0RLS0001_A0RLS0001_bot_token', 'x')
 	`, orgID); err != nil {
-		t.Fatalf("seed org_slack_workspaces: %v", err)
+		t.Fatalf("seed org_slack_connections: %v", err)
 	}
 
 	// Member: SELECT sees the row.
 	if err := h.WithUser(t, memberID, orgID, func(tx *sql.Tx) error {
 		var n int
-		if e := tx.QueryRow(`SELECT count(*) FROM org_slack_workspaces`).Scan(&n); e != nil {
+		if e := tx.QueryRow(`SELECT count(*) FROM org_slack_connections`).Scan(&n); e != nil {
 			return e
 		}
 		if n != 1 {
@@ -557,15 +737,17 @@ func TestWorkspaceStore_Postgres_RLS_MemberReadsAdminWrites(t *testing.T) {
 	// Member: INSERT/UPDATE/DELETE are all rejected/no-op.
 	if err := h.WithUser(t, memberID, orgID, func(tx *sql.Tx) error {
 		_, e := tx.Exec(`
-			INSERT INTO org_slack_workspaces (workspace_id, api_app_id, org_id, transport, bot_token_ref)
-			VALUES ('T0RLS0002', 'A0RLS0002', $1, 'socket', 'x')
+			INSERT INTO org_slack_connections (
+				workspace_id, api_app_id, org_id, source, active, transport, bot_token_ref, app_token_ref
+			)
+			VALUES ('T0RLS0002', 'A0RLS0002', $1, 'org', false, 'socket', 'x', 'x')
 		`, orgID)
 		return e
 	}); err == nil {
-		t.Error("member INSERT into org_slack_workspaces succeeded; want RLS rejection")
+		t.Error("member INSERT into org_slack_connections succeeded; want RLS rejection")
 	}
 	if err := h.WithUser(t, memberID, orgID, func(tx *sql.Tx) error {
-		res, e := tx.Exec(`UPDATE org_slack_workspaces SET workspace_name = 'hijacked' WHERE workspace_id = 'T0RLS0001'`)
+		res, e := tx.Exec(`UPDATE org_slack_connections SET workspace_name = 'hijacked' WHERE workspace_id = 'T0RLS0001'`)
 		if e != nil {
 			return e
 		}
@@ -577,7 +759,7 @@ func TestWorkspaceStore_Postgres_RLS_MemberReadsAdminWrites(t *testing.T) {
 		t.Fatalf("member update tx: %v", err)
 	}
 	if err := h.WithUser(t, memberID, orgID, func(tx *sql.Tx) error {
-		res, e := tx.Exec(`DELETE FROM org_slack_workspaces WHERE workspace_id = 'T0RLS0001'`)
+		res, e := tx.Exec(`DELETE FROM org_slack_connections WHERE workspace_id = 'T0RLS0001'`)
 		if e != nil {
 			return e
 		}
@@ -591,7 +773,7 @@ func TestWorkspaceStore_Postgres_RLS_MemberReadsAdminWrites(t *testing.T) {
 
 	// Org admin (owner): UPDATE and DELETE both take effect.
 	if err := h.WithUser(t, ownerID, orgID, func(tx *sql.Tx) error {
-		res, e := tx.Exec(`UPDATE org_slack_workspaces SET workspace_name = 'renamed' WHERE workspace_id = 'T0RLS0001'`)
+		res, e := tx.Exec(`UPDATE org_slack_connections SET workspace_name = 'renamed' WHERE workspace_id = 'T0RLS0001'`)
 		if e != nil {
 			return e
 		}

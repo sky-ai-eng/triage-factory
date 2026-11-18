@@ -164,7 +164,7 @@ func (h *webhookHandler) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ws, err := slackstore.FromStores(h.stores).Workspaces.GetByWorkspaceAppSystem(r.Context(), envelope.TeamID, envelope.APIAppID)
+	ws, err := slackstore.FromStores(h.stores).Connections.GetByWorkspaceAppSystem(r.Context(), envelope.TeamID, envelope.APIAppID)
 	if err != nil {
 		httpx.InternalError(w, "slack-webhook", err)
 		return
@@ -233,7 +233,7 @@ func (h *webhookHandler) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *webhookHandler) handleEventCallback(w http.ResponseWriter, r *http.Request, ws slackstore.Workspace, envelope slackEventEnvelope) {
+func (h *webhookHandler) handleEventCallback(w http.ResponseWriter, r *http.Request, ws slackstore.Connection, envelope slackEventEnvelope) {
 	var inner slackInnerEvent
 	if err := json.Unmarshal(envelope.Event, &inner); err != nil {
 		httpx.BadRequest(w, "malformed event payload")

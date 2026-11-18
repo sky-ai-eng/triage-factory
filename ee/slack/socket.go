@@ -190,7 +190,10 @@ type desiredApp struct {
 }
 
 // desiredApps computes the full desired connection set: every api_app_id
-// with at least one transport=socket row in an entitled org. app->one-org
+// with at least one transport=socket row in an entitled org, active or not.
+// Ingest drops an inactive connection's deliveries, but not Slack reporting
+// the app removed (handleAppRemoved), and that report reaches TF only through
+// the app's socket. app->one-org
 // (TFAC-533) means every row sharing an api_app_id carries the same org_id,
 // so entitlement and the app-token secret ref are well-defined regardless
 // of which matching row supplies them — "credentials come off any of its
@@ -206,7 +209,7 @@ func (m *socketManager) desiredApps(ctx context.Context) (map[string]desiredApp,
 	if bundle == nil {
 		return nil, nil
 	}
-	rows, err := bundle.Workspaces.ListAllSystem(ctx)
+	rows, err := bundle.Connections.ListAllSystem(ctx)
 	if err != nil {
 		if errors.Is(err, db.ErrNotApplicableInLocal) {
 			return nil, nil

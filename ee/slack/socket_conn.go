@@ -21,7 +21,7 @@ import (
 // type; events_api carries envelope_id + payload (the same event_callback
 // JSON the webhook receives, unmarshaled below into slackEventEnvelope);
 // disconnect carries reason. Aliased ws import (slackws) avoids colliding
-// with this package's pervasive use of "ws" as a slackstore.Workspace
+// with this package's pervasive use of "ws" as a slackstore.Connection
 // variable name.
 type socketEnvelope struct {
 	Type       string          `json:"type"`
@@ -422,7 +422,7 @@ func (c *appConnection) processEventsAPIEnvelope(ctx context.Context, stores db.
 	}
 
 	bundle := slackstore.FromStores(stores)
-	ws, err := bundle.Workspaces.GetByWorkspaceAppSystem(ctx, payload.TeamID, payload.APIAppID)
+	ws, err := bundle.Connections.GetByWorkspaceAppSystem(ctx, payload.TeamID, payload.APIAppID)
 	if err != nil {
 		slackLog.Error("slack socket mode: resolve workspace failed", "app", c.appID, "error", err)
 		return false // transient — worth a redelivery retry

@@ -12,7 +12,7 @@ import (
 // The Slack channel registry is a multi-mode concept — it only matters once
 // more than one team/org can see the same channel; local mode never runs
 // the ingest pipeline that would call this, so every method returns
-// db.ErrNotApplicableInLocal. Mirrors workspaceStore.
+// db.ErrNotApplicableInLocal. Mirrors connectionStore.
 type channelRegistryStore struct{ q db.Execer }
 
 func newChannelRegistryStore(q, _ db.Execer) slackstore.ChannelRegistryStore {

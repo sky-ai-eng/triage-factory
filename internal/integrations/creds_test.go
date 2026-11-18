@@ -448,12 +448,12 @@ func TestGitHubAppKeysFor_Format(t *testing.T) {
 	}
 }
 
-// TestSlackWorkspaceKeysFor_Format pins the per-(workspace, app) key shape
+// TestSlackConnectionKeysFor_Format pins the per-(workspace, app) key shape
 // (slack_ws_<ws>_<app>_{bot_token,signing_secret,app_token}) — the single
 // source ee/slack's connect and delete handlers compose through, so the
 // names written and the names later removed can't drift.
-func TestSlackWorkspaceKeysFor_Format(t *testing.T) {
-	ks := integrations.SlackWorkspaceKeysFor("T0123ABCD", "A0987ZYXW")
+func TestSlackConnectionKeysFor_Format(t *testing.T) {
+	ks := integrations.SlackConnectionKeysFor("T0123ABCD", "A0987ZYXW")
 	if ks.BotToken != "slack_ws_T0123ABCD_A0987ZYXW_bot_token" {
 		t.Errorf("BotToken = %q, want slack_ws_T0123ABCD_A0987ZYXW_bot_token", ks.BotToken)
 	}

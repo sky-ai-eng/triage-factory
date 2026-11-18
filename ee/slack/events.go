@@ -26,13 +26,13 @@ type SlackMessageMetadata struct {
 	// (routing, exec verbs) resolves token/workspace context from THIS
 	// field, never from the entity key.
 	WorkspaceID string `json:"workspace_id"`
-	// APIAppID is the Slack app id, alongside WorkspaceID, needed to resolve
-	// the exact org_slack_workspaces row this message belongs to — since
-	// TFAC-533's re-key, one org can hold two Slack apps in the same
-	// workspace, so WorkspaceID alone can't select the row (and the wrong
-	// row means acting as the wrong bot identity). Downstream consumers
-	// resolve via WorkspaceStore.GetByWorkspaceAppSystem(workspaceID,
-	// apiAppID). No fallback for pre-release events — none exist.
+	// APIAppID records the connection that delivered the event: the Slack
+	// app, alongside WorkspaceID. No token is resolved from it. An org can
+	// connect several apps in one workspace, and the one that acts is
+	// whichever is active when the call is made
+	// (ConnectionStore.ActiveForWorkspaceSystem, by org and WorkspaceID), not
+	// necessarily the one the event arrived through. Events are append-only,
+	// so stored events carry this field.
 	APIAppID string `json:"api_app_id"`
 	// Channel is the id Slack gave the channel when the message arrived; it
 	// can change, and the current view (slackMessageCurrentView) reads it as

@@ -109,10 +109,10 @@ type ingestPipeline struct {
 	// delivery mark, a mention's thread and the event's queue row commit
 	// together, through the Slack bundle and event queue it binds.
 	tx db.TxRunner
-	// workspaces and secrets remove a connection Slack reports dead
+	// connections and secrets remove a connection Slack reports dead
 	// (handleAppRemoved): its row on the admin pool, and its secrets after.
-	workspaces slackstore.WorkspaceStore
-	secrets    db.SecretStore
+	connections slackstore.ConnectionStore
+	secrets     db.SecretStore
 	// deliveries prunes the dedup table after each delivery's transaction;
 	// DeliveryStore.PruneDeliveredSystem has why never inside it.
 	deliveries slackstore.DeliveryStore
@@ -161,7 +161,10 @@ type ingestPipeline struct {
 // follow-up that publishes only if it lands in a thread the bot already owns;
 // a channel_id_changed moves the channel's rows to its new id; an
 // app_uninstalled, or a tokens_revoked naming a bot token, removes the
-// connection. Any other type is dropped defensively. Returns an error only
+// connection. Any other type is dropped defensively, and so is every delivery
+// through an inactive connection but a removal: the org's active connection
+// in the workspace is the one TF listens through, and a removal of an
+// inactive one still has its row and secrets to clean up. Returns an error only
 // for a genuine failure (store error, marshal failure); every "nothing to do"
 // case is a nil-error early return, logged at debug — none of those are
 // failures the caller should retry or 5xx on.
@@ -170,9 +173,14 @@ type ingestPipeline struct {
 // path (accepted, or the drop reason), and an error return overrides it as
 // outcomeError — so tf_slack_ingest_events_total's sum over outcomes IS the
 // received total.
-func (p *ingestPipeline) handleEventCallback(ctx context.Context, ws slackstore.Workspace, ev inboundMention) error {
+func (p *ingestPipeline) handleEventCallback(ctx context.Context, ws slackstore.Connection, ev inboundMention) error {
 	var outcome string
 	var err error
+	if !ws.Active && !removesConnection(ev.Type) {
+		slackLog.Debug("dropping a delivery through an inactive connection", "type", ev.Type, "workspace", ws.WorkspaceID, "app", ws.APIAppID)
+		p.stats.recordIngest(ctx, ws.APIAppID, dropInactive)
+		return nil
+	}
 	switch ev.Type {
 	case "app_mention":
 		outcome, err = p.handleAppMention(ctx, ws, ev)
@@ -210,7 +218,7 @@ func (p *ingestPipeline) handleEventCallback(ctx context.Context, ws slackstore.
 // fan-out — well inside Slack's 3-second webhook ack budget. Publishes
 // slack:message with Mentioned=true. Returns the delivery's outcome label for
 // handleEventCallback's single recordIngest.
-func (p *ingestPipeline) handleAppMention(ctx context.Context, ws slackstore.Workspace, ev inboundMention) (string, error) {
+func (p *ingestPipeline) handleAppMention(ctx context.Context, ws slackstore.Connection, ev inboundMention) (string, error) {
 	// EventID feeds the dedup key and Channel/TS identify the thread — an
 	// empty value in any of them (a malformed or unexpectedly-shaped
 	// payload) would dedup unrelated deliveries together or collide threads
@@ -311,7 +319,7 @@ func (p *ingestPipeline) handleAppMention(ctx context.Context, ws slackstore.Wor
 // Mentioned=false — in an engaged thread every message is addressed to the
 // bot, the @ being transport detail the thread doesn't require. Returns the
 // delivery's outcome label for handleEventCallback's single recordIngest.
-func (p *ingestPipeline) handleThreadMessage(ctx context.Context, ws slackstore.Workspace, ev inboundMention) (string, error) {
+func (p *ingestPipeline) handleThreadMessage(ctx context.Context, ws slackstore.Connection, ev inboundMention) (string, error) {
 	// (1) subtype gate: a plain reply ("") or a reply also broadcast to the
 	// channel ("thread_broadcast") is a real human message; every other
 	// subtype (message_changed, message_deleted, channel_join, bot_message, …)
@@ -419,7 +427,7 @@ func (p *ingestPipeline) handleThreadMessage(ctx context.Context, ws slackstore.
 // its own and mints a thread entity on that row. The move absorbs that row
 // into the channel's, and when the channel already has an active entity for
 // the same thread, closes the newer of the two.
-func (p *ingestPipeline) handleChannelIDChanged(ctx context.Context, ws slackstore.Workspace, ev inboundMention) (string, error) {
+func (p *ingestPipeline) handleChannelIDChanged(ctx context.Context, ws slackstore.Connection, ev inboundMention) (string, error) {
 	if ev.OldChannelID == "" || ev.NewChannelID == "" || ev.OldChannelID == ev.NewChannelID {
 		slackLog.Debug("dropping malformed channel_id_changed: missing or unchanged channel id", "workspace", ws.WorkspaceID)
 		return dropMalformed, nil
@@ -454,7 +462,7 @@ func (p *ingestPipeline) handleChannelIDChanged(ctx context.Context, ws slacksto
 //
 // Not deduped through slack_event_deliveries: a redelivery finds no row, and
 // its receiver acks it empty. An error is returned for Slack to redeliver.
-func (p *ingestPipeline) handleAppRemoved(ctx context.Context, ws slackstore.Workspace, ev inboundMention) (string, error) {
+func (p *ingestPipeline) handleAppRemoved(ctx context.Context, ws slackstore.Connection, ev inboundMention) (string, error) {
 	// The receiver reads the row per delivery, so a retry of a removal that
 	// failed, or was acked late, reads the row an admin has connected again
 	// since. Slack generated the removal before that connection; it is not
@@ -467,7 +475,7 @@ func (p *ingestPipeline) handleAppRemoved(ctx context.Context, ws slackstore.Wor
 		return dropReconnected, nil
 	}
 
-	keys := integrations.SlackWorkspaceKeysFor(ws.WorkspaceID, ws.APIAppID).All()
+	keys := integrations.SlackConnectionKeysFor(ws.WorkspaceID, ws.APIAppID).All()
 	values := make([]string, len(keys))
 	for i, key := range keys {
 		v, err := p.secrets.GetSystem(ctx, ws.OrgID, key)
@@ -477,7 +485,7 @@ func (p *ingestPipeline) handleAppRemoved(ctx context.Context, ws slackstore.Wor
 		values[i] = v
 	}
 
-	deleted, err := p.workspaces.DeleteSystem(ctx, ws.OrgID, ws.WorkspaceID, ws.APIAppID, ws.UpdatedAt)
+	deleted, err := p.connections.DeleteSystem(ctx, ws.OrgID, ws.WorkspaceID, ws.APIAppID, ws.UpdatedAt)
 	if err != nil {
 		return outcomeError, fmt.Errorf("delete removed slack workspace: %w", err)
 	}
@@ -510,7 +518,7 @@ func (p *ingestPipeline) handleAppRemoved(ctx context.Context, ws slackstore.Wor
 // resolveChannel returns the registry row a delivered channel id names now —
 // Slack may deliver an event it generated before changing the channel's id
 // after the change — or nil when TF holds no row for the channel.
-func (p *ingestPipeline) resolveChannel(ctx context.Context, ws slackstore.Workspace, channelID string) (*slackstore.Channel, error) {
+func (p *ingestPipeline) resolveChannel(ctx context.Context, ws slackstore.Connection, channelID string) (*slackstore.Channel, error) {
 	channel, err := p.channels.ResolveSystem(ctx, ws.OrgID, channelID)
 	if err != nil {
 		return nil, fmt.Errorf("resolve slack channel %s: %w", channelID, err)
@@ -526,7 +534,7 @@ func (p *ingestPipeline) resolveChannel(ctx context.Context, ws slackstore.Works
 // Slack redeliver and the redelivery runs fresh; and because the mark and
 // the event commit together, a delivery never enqueues twice. fresh=false is
 // a duplicate: nothing was written and nothing is published.
-func (p *ingestPipeline) deliver(ctx context.Context, ws slackstore.Workspace, eventID string, build func(*slackstore.Bundle) (domain.Event, error)) (fresh bool, err error) {
+func (p *ingestPipeline) deliver(ctx context.Context, ws slackstore.Connection, eventID string, build func(*slackstore.Bundle) (domain.Event, error)) (fresh bool, err error) {
 	var evt domain.Event
 	err = p.tx.SystemWithTx(ctx, ws.OrgID, func(tx db.SystemTxStores) error {
 		bundle := slackstore.FromSystemTx(tx)
@@ -561,7 +569,7 @@ func (p *ingestPipeline) deliver(ctx context.Context, ws slackstore.Workspace, e
 // identical but for the Mentioned flag (an explicit @-mention vs an
 // engaged-thread follow-up) and the resolved channel row and entity the
 // event hangs off — with its durable audit metadata.
-func slackMessageEvent(ws slackstore.Workspace, ev inboundMention, channelRowID, entityID string, mentioned bool, occurredAt time.Time) (domain.Event, error) {
+func slackMessageEvent(ws slackstore.Connection, ev inboundMention, channelRowID, entityID string, mentioned bool, occurredAt time.Time) (domain.Event, error) {
 	metaJSON, err := json.Marshal(SlackMessageMetadata{
 		WorkspaceID:  ws.WorkspaceID,
 		APIAppID:     ws.APIAppID,
@@ -591,7 +599,7 @@ func slackMessageEvent(ws slackstore.Workspace, ev inboundMention, channelRowID,
 // has gone stale — detached from the publish path exactly like sender
 // identity capture (resolveSender): a slow conversations.info round-trip must
 // never withhold the publish or the transport's ack.
-func (p *ingestPipeline) resolveChannelNameIfStale(ws slackstore.Workspace, channel slackstore.Channel) {
+func (p *ingestPipeline) resolveChannelNameIfStale(ws slackstore.Connection, channel slackstore.Channel) {
 	if p.channelName == nil {
 		return
 	}

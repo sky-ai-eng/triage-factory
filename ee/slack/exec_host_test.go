@@ -30,6 +30,7 @@ func withFastThreadRootRetries(t *testing.T) {
 type fakeRelayRuntime struct {
 	relayErrs  []error
 	relayCalls int
+	cred       json.RawMessage
 	credErr    error
 }
 
@@ -47,7 +48,7 @@ func (f *fakeRelayRuntime) Relay(_ context.Context, _, _ string, _, _ any) error
 func (f *fakeRelayRuntime) RelayNotify(context.Context, string, string, any) {}
 
 func (f *fakeRelayRuntime) ProviderCredential(context.Context, string) (json.RawMessage, error) {
-	return nil, f.credErr
+	return f.cred, f.credErr
 }
 
 func (f *fakeRelayRuntime) Record(context.Context, *domain.Deliverable, *domain.ExternalAction, domain.EntityContainer, domain.GitHubIdentity) {
@@ -58,18 +59,48 @@ func (f *fakeRelayRuntime) RecordReadTouch(context.Context, string, string, stri
 
 var _ agenthost.ExtensionRuntime = (*fakeRelayRuntime)(nil)
 
+// TestSelectBotToken_MatchesTheWorkspace: the sidecar selects a sealed token by
+// workspace alone. A set sealed before a switch holds the old app's token,
+// which still works, so it serves the identity of the connection active now,
+// and the caller names the app the token belongs to.
+func TestSelectBotToken_MatchesTheWorkspace(t *testing.T) {
+	sealed, err := json.Marshal(slackBundleCreds{Workspaces: []slackWorkspaceToken{
+		{WorkspaceID: "T1", APIAppID: "A-old", BotToken: "xoxb-old"},
+		{WorkspaceID: "T2", APIAppID: "A-two", BotToken: "xoxb-two"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt := &fakeRelayRuntime{cred: sealed}
+
+	caller, token, err := selectBotToken(context.Background(), rt, slackWorkspaceIdentity{WorkspaceID: "T1", APIAppID: "A-new"})
+	if err != nil {
+		t.Fatalf("selectBotToken: %v", err)
+	}
+	if token != "xoxb-old" {
+		t.Errorf("token = %q; want the token sealed for T1, xoxb-old", token)
+	}
+	if want := slackBotCaller("", "T1", "A-old"); caller != want {
+		t.Errorf("caller = %+v; want %+v (the app the token belongs to)", caller, want)
+	}
+
+	if _, _, err := selectBotToken(context.Background(), rt, slackWorkspaceIdentity{WorkspaceID: "T3", APIAppID: "A-two"}); err == nil {
+		t.Error("selectBotToken for a workspace outside the sealed set = nil error; want a refusal")
+	}
+}
+
 // TestSelectBotToken_PassesARefusalThrough pins what a Slack verb with no
 // sealed credential tells the agent: the refusal table's explanation of the
 // source's state, unprefixed because it already names Slack, while any other
 // failure keeps the "slack:" prefix that says which verb family failed.
 func TestSelectBotToken_PassesARefusalThrough(t *testing.T) {
 	refusal := &agenthost.SourceRefusal{Kind: "slack", State: domain.SourceUnconfigured}
-	_, err := selectBotToken(context.Background(), &fakeRelayRuntime{credErr: refusal}, slackWorkspaceIdentity{WorkspaceID: "T1", APIAppID: "A1"})
+	_, _, err := selectBotToken(context.Background(), &fakeRelayRuntime{credErr: refusal}, slackWorkspaceIdentity{WorkspaceID: "T1", APIAppID: "A1"})
 	if err == nil || err.Error() != refusal.Error() {
 		t.Errorf("refusal crossed as %v, want the table's %q", err, refusal.Error())
 	}
 
-	_, err = selectBotToken(context.Background(), &fakeRelayRuntime{credErr: errors.New("boom")}, slackWorkspaceIdentity{WorkspaceID: "T1", APIAppID: "A1"})
+	_, _, err = selectBotToken(context.Background(), &fakeRelayRuntime{credErr: errors.New("boom")}, slackWorkspaceIdentity{WorkspaceID: "T1", APIAppID: "A1"})
 	if err == nil || err.Error() != "slack: boom" {
 		t.Errorf("other failure = %v, want it prefixed", err)
 	}

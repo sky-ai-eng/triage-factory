@@ -82,7 +82,7 @@ func install(api server.ExtensionAPI) {
 	stats := newIngestStats(otel.GetMeterProvider())
 	pipeline := &ingestPipeline{
 		tx:          api.Tx(),
-		workspaces:  bundle.Workspaces,
+		connections: bundle.Connections,
 		secrets:     stores.Secrets,
 		deliveries:  bundle.Deliveries,
 		channels:    bundle.Channels,
