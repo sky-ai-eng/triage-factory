@@ -2,10 +2,13 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
@@ -180,6 +183,32 @@ type ExtensionAPI interface {
 	// recordAuthEvent: on a store failure it logs at ERROR and the auth flow
 	// proceeds, never rolled back.
 	RecordAuthEvent(ctx context.Context, r *http.Request, e domain.AuthEvent)
+
+	// --- browser install ceremony (core's own is linear_install.go) ---
+
+	// SignConnectState mints a CSRF value and signs the state with the
+	// deployment's HMAC key. It errors when the deployment config is not
+	// wired.
+	SignConnectState(orgID, userID, returnTo string, ttl time.Duration) (signed string, st ConnectState, err error)
+	// ParseConnectState verifies the signature and the expiry.
+	ParseConnectState(signed string) (ConnectState, error)
+	// CookieSecure reports whether a cookie set on this request is marked
+	// Secure.
+	CookieSecure(r *http.Request) bool
+	// SSOBarred reports whether "Require SSO" bars this request's principal
+	// from orgID.
+	SSOBarred(ctx context.Context, orgID string) (bool, error)
+	// SettingsPath is the org's Settings page.
+	SettingsPath(orgID string) string
+}
+
+// ConnectState is what a browser install ceremony carries between its start
+// and its callback.
+type ConnectState struct {
+	OrgID    string
+	UserID   string
+	CSRF     string
+	ReturnTo string
 }
 
 // extensionInstaller is one registered extension: a name (diagnostics) and
@@ -394,6 +423,59 @@ func (a serverExtensionAPI) GrantOrgMembership(ctx context.Context, userID, orgI
 
 func (a serverExtensionAPI) EmailDomain(email string) (string, bool) { return emailDomain(email) }
 func (a serverExtensionAPI) NormalizeReturnTo(raw string) string     { return normalizeReturnTo(raw) }
+
+// errDeployConfigNotWired backs the state-signing ExtensionAPI methods before
+// the deployment config, which holds the HMAC key, is set.
+var errDeployConfigNotWired = errors.New("deploy config not wired")
+
+func (a serverExtensionAPI) SignConnectState(orgID, userID, returnTo string, ttl time.Duration) (string, ConnectState, error) {
+	if a.s.deployCfg == nil {
+		return "", ConnectState{}, errDeployConfigNotWired
+	}
+	nonce := make([]byte, 16)
+	if _, err := rand.Read(nonce); err != nil {
+		return "", ConnectState{}, err
+	}
+	st := connectState{
+		OrgID:     orgID,
+		UserID:    userID,
+		CSRF:      hex.EncodeToString(nonce),
+		ReturnTo:  returnTo,
+		ExpiresAt: timeNow().Add(ttl).Unix(),
+	}
+	signed, err := st.sign(a.s.deployCfg.hmacKey)
+	if err != nil {
+		return "", ConnectState{}, err
+	}
+	return signed, st.public(), nil
+}
+
+func (a serverExtensionAPI) ParseConnectState(signed string) (ConnectState, error) {
+	if a.s.deployCfg == nil {
+		return ConnectState{}, errDeployConfigNotWired
+	}
+	st, err := parseConnectState(signed, a.s.deployCfg.hmacKey)
+	if err != nil {
+		return ConnectState{}, err
+	}
+	return st.public(), nil
+}
+
+func (c connectState) public() ConnectState {
+	return ConnectState{OrgID: c.OrgID, UserID: c.UserID, CSRF: c.CSRF, ReturnTo: c.ReturnTo}
+}
+
+func (a serverExtensionAPI) CookieSecure(r *http.Request) bool { return a.s.cookieSecure(r) }
+
+func (a serverExtensionAPI) SSOBarred(ctx context.Context, orgID string) (bool, error) {
+	gate, err := a.s.requestSSOGate(ctx, orgID)
+	if err != nil {
+		return false, err
+	}
+	return gate.Barred, nil
+}
+
+func (a serverExtensionAPI) SettingsPath(orgID string) string { return settingsRedirectPath(orgID) }
 
 func (a serverExtensionAPI) RecordAuthEvent(ctx context.Context, r *http.Request, e domain.AuthEvent) {
 	// Enrich with the request's source fields (IP via canonical clientIP
