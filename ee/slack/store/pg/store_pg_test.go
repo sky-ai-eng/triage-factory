@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -11,6 +12,7 @@ import (
 
 	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 )
@@ -94,16 +96,14 @@ func TestConnectionStore_Postgres_UpsertReturnsTheStoredRow(t *testing.T) {
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	ctx := context.Background()
 
+	read := func() (*slackstore.Connection, error) {
+		return get(t, stores, orgID, userID, "T0CRUD001", defaultAppID("T0CRUD001")), nil
+	}
+
 	ws := testWorkspace(orgID, "T0CRUD001")
 	ws.RegisteredByUserID = userID
-	inserted := upsert(t, stores, orgID, userID, ws)
-	got := get(t, stores, orgID, userID, "T0CRUD001", defaultAppID("T0CRUD001"))
-	if got == nil {
-		t.Fatal("Get returned nil for a just-upserted connection")
-	}
-	if inserted != *got {
-		t.Errorf("Upsert (insert) returned %+v; the point read reads %+v", inserted, *got)
-	}
+	dbtest.AssertWriteReturnedStoredRow(t, "Upsert (insert)", upsert(t, stores, orgID, userID, ws), read)
+	got, _ := read()
 	if got.Source != slackstore.SourceOrg || !got.Active || got.AppName != "Acme Bot" {
 		t.Errorf("got = %+v; want source org, active, and the app name from the upsert", got)
 	}
@@ -122,11 +122,8 @@ func TestConnectionStore_Postgres_UpsertReturnsTheStoredRow(t *testing.T) {
 
 	rotated := ws
 	rotated.AppName = "Acme Bot (renamed)"
-	updated := upsert(t, stores, orgID, userID, rotated)
-	got = get(t, stores, orgID, userID, "T0CRUD001", defaultAppID("T0CRUD001"))
-	if updated != *got {
-		t.Errorf("Upsert (update) returned %+v; the point read reads %+v", updated, *got)
-	}
+	dbtest.AssertWriteReturnedStoredRow(t, "Upsert (update)", upsert(t, stores, orgID, userID, rotated), read)
+	got, _ = read()
 	if got.AppName != "Acme Bot (renamed)" {
 		t.Errorf("app_name after the update = %q; want the new name", got.AppName)
 	}
@@ -137,7 +134,7 @@ func TestConnectionStore_Postgres_UpsertReturnsTheStoredRow(t *testing.T) {
 		list, e = slackstore.FromTx(tx).Connections.ListForOrg(ctx, orgID)
 		return e
 	})
-	if len(list) != 1 || list[0] != *got {
+	if len(list) != 1 || !reflect.DeepEqual(list[0], *got) {
 		t.Fatalf("ListForOrg = %+v; want exactly the upserted connection", list)
 	}
 }
@@ -290,7 +287,7 @@ func TestConnectionStore_Postgres_ActiveForWorkspaceSystem(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ActiveForWorkspaceSystem: %v", err)
 	}
-	if got == nil || *got != active {
+	if got == nil || !reflect.DeepEqual(*got, active) {
 		t.Errorf("ActiveForWorkspaceSystem = %+v; want the active connection %+v", got, active)
 	}
 	for _, workspaceID := range []string{"T0ACTFOR2", "T0ACTFOR3", "T0ACTFOR4"} {

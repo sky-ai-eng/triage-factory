@@ -308,10 +308,12 @@ func (h *workspacesHandler) handleConnect(w http.ResponseWriter, r *http.Request
 			return errWorkspaceHasActiveConnection
 		}
 		// Upsert reads Active only when it inserts: a row this app already
-		// has keeps its own. A concurrent connect of another app into the
-		// workspace, which this read cannot see, is refused by the one-active
-		// index (slackstore.ErrActiveConnectionExists).
-		ws.Active = active == nil
+		// has keeps its own. It inserts for an own row too when a disconnect
+		// deleted that row after this read, and then the row was the active
+		// one. A concurrent connect of another app into the workspace, which
+		// this read cannot see, is refused by the one-active index
+		// (slackstore.ErrActiveConnectionExists).
+		ws.Active = active == nil || active == own
 
 		if err := tx.Secrets.Put(r.Context(), orgID, keys.BotToken, botToken, "Slack bot token"); err != nil {
 			return fmt.Errorf("put bot token: %w", err)

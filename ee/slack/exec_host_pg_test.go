@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/google/uuid"
@@ -34,8 +35,8 @@ type fakeSlackFile struct {
 }
 
 // fakeExecSlack is a minimal fake covering the endpoints the exec verbs
-// exercise. chat.getPermalink answers a bland "there's a link" response —
-// fine, since no test asserts on the best-effort permalink.
+// exercise. chat.getPermalink answers a bland "there's a link" response and
+// records only the token it was called with.
 type fakeExecSlack struct {
 	lastPostText, lastPostMarkdown, lastPostChannel, lastPostThreadTS string
 	// lastPostToken is the bot token chat.postMessage was called with: which
@@ -79,6 +80,11 @@ type fakeExecSlack struct {
 	// lastAttachThreadTS captures the thread_ts files.completeUploadExternal
 	// was called with — the field the wrong-thread_ts regression test pins.
 	lastAttachThreadTS string
+
+	// permalinkTokens records the bot token of each chat.getPermalink call.
+	// The permalink resolver calls it from its own goroutine, hence the lock.
+	permalinkMu     sync.Mutex
+	permalinkTokens []string
 }
 
 func newFakeExecSlack(t *testing.T) *fakeExecSlack {
@@ -118,6 +124,9 @@ func newFakeExecSlack(t *testing.T) *fakeExecSlack {
 			f.lastReactionEmoji = r.FormValue("name")
 			writeSlackFakeJSON(w, map[string]any{"ok": true})
 		case strings.HasSuffix(r.URL.Path, "/chat.getPermalink"):
+			f.permalinkMu.Lock()
+			f.permalinkTokens = append(f.permalinkTokens, bearerToken(r))
+			f.permalinkMu.Unlock()
 			writeSlackFakeJSON(w, map[string]any{"ok": true, "permalink": "https://acme.slack.com/archives/x"})
 		case strings.HasSuffix(r.URL.Path, "/conversations.history"):
 			f.historyCalls++

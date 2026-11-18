@@ -119,6 +119,35 @@ func TestActiveConnection_ResolveWorkspace(t *testing.T) {
 	}
 }
 
+// TestActiveConnection_RecordThreadRootResolvesTheActiveConnection: the
+// permalink a channel-root post dispatches is resolved with the org's active
+// connection in the workspace the sidecar names, not a connection named by an
+// app id it supplies.
+func TestActiveConnection_RecordThreadRootResolvesTheActiveConnection(t *testing.T) {
+	r := newSlackExecRig(t)
+	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "slack-active-thread-root")
+	r.seedWorkspace(orgID, owner, "T1", "A-active", "xoxb-active")
+	insertInactiveConnection(t, r.h, r.stor, orgID, owner, "T1", "A-inactive", "xoxb-inactive")
+	r.seedChannel(orgID, "T1", "C1")
+	conversationID := r.seedConversation(orgID, teamID, owner, true)
+	info := agenthost.ConversationInfo{OrgID: orgID, UserID: owner, ConversationID: conversationID, TeamID: teamID, IsEventTriggered: true}
+
+	args := json.RawMessage(`{"workspace_id":"T1","api_app_id":"A-inactive","channel":"C1","ts":"1700000000.000200","text":"root"}`)
+	if _, err := slackOpRecordThreadRoot(t.Context(), r.stor, info, args); err != nil {
+		t.Fatalf("record_thread_root: %v", err)
+	}
+	var tokens []string
+	waitForCondition(t, 2*time.Second, func() bool {
+		r.fake.permalinkMu.Lock()
+		defer r.fake.permalinkMu.Unlock()
+		tokens = slices.Clone(r.fake.permalinkTokens)
+		return len(tokens) > 0
+	})
+	if !slices.Equal(tokens, []string{"xoxb-active"}) {
+		t.Errorf("chat.getPermalink tokens = %v; want the active connection's xoxb-active", tokens)
+	}
+}
+
 // TestActiveConnection_ResolveWorkspaceForDownload: with no Slack context, a
 // download speaks as the active connection of the org's one workspace that
 // has one; a workspace holding only an inactive connection doesn't count, and

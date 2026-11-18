@@ -405,7 +405,7 @@ var recordThreadRootRetryDelay = 200 * time.Millisecond
 // silently swallowed — a silent failure here has a permanent consequence, so
 // it must be loud instead.
 func (h *slackExecHandler) recordThreadRoot(ctx context.Context, rt agenthost.ExtensionRuntime, ws slackWorkspaceIdentity, channel, ts, text string) error {
-	args := slackThreadRootArg{WorkspaceID: ws.WorkspaceID, APIAppID: ws.APIAppID, Channel: channel, TS: ts, Text: text}
+	args := slackThreadRootArg{WorkspaceID: ws.WorkspaceID, Channel: channel, TS: ts, Text: text}
 	var err error
 retry:
 	for attempt := 1; attempt <= recordThreadRootMaxAttempts; attempt++ {

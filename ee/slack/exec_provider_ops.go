@@ -44,8 +44,8 @@ const (
 )
 
 // Wire payloads for the policy ops. A workspace IDENTITY (workspace_id,
-// api_app_id) is the SELECTION key the handler picks a sealed bot token by — it
-// is not itself secret.
+// api_app_id) names the connection that acts; its workspace is the key the
+// handler selects a sealed bot token by. It is not itself secret.
 type (
 	slackChannelArg struct {
 		Channel string `json:"channel"`
@@ -67,11 +67,10 @@ type (
 		APIAppID    string `json:"api_app_id"`
 	}
 	// slackThreadRootArg is opRecordThreadRoot's wire shape: the workspace
-	// identity exec_host.go already resolved for the send, plus the
-	// channel-root message's own coordinates and text.
+	// exec_host.go already resolved for the send, plus the channel-root
+	// message's own coordinates and text.
 	slackThreadRootArg struct {
 		WorkspaceID string `json:"workspace_id"`
-		APIAppID    string `json:"api_app_id"`
 		Channel     string `json:"channel"`
 		TS          string `json:"ts"`
 		Text        string `json:"text"`
@@ -252,7 +251,9 @@ func slackOpRecordThreadRoot(ctx context.Context, stores db.Stores, info agentho
 		return nil, nil
 	}
 	entityID := thread.EntityID
-	ws, err := bundle.Connections.GetByWorkspaceAppSystem(ctx, a.WorkspaceID, a.APIAppID)
+	// The workspace comes from the sidecar, so the connection is the
+	// conversation's org's active one there, never a row the argument names.
+	ws, err := bundle.Connections.ActiveForWorkspaceSystem(ctx, info.OrgID, a.WorkspaceID)
 	if err != nil {
 		slackLog.Warn("record thread root: resolve workspace for permalink failed", "workspace", a.WorkspaceID, "entity", entityID, "error", err)
 		return nil, nil
