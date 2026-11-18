@@ -245,7 +245,7 @@ func (a *lifecycleAdapter) acknowledgeMention(ctx context.Context, orgID, eventI
 	if !ok || !meta.Mentioned {
 		return
 	}
-	token, ok := a.resolveBotToken(ctx, orgID, meta.WorkspaceID, meta.APIAppID)
+	caller, token, ok := a.resolveBotToken(ctx, orgID, meta.WorkspaceID)
 	if !ok {
 		return
 	}
@@ -253,7 +253,6 @@ func (a *lifecycleAdapter) acknowledgeMention(ctx context.Context, orgID, eventI
 	if !ok {
 		return
 	}
-	caller := slackBotCaller(orgID, meta.WorkspaceID, meta.APIAppID)
 	if err := slackReactionsAdd(ctx, a.client, caller, token, channel, meta.TS, slackLifecycleAckReaction); err != nil {
 		slackLog.Warn("slack lifecycle: reactions.add failed", "error", err)
 	}
@@ -271,7 +270,7 @@ func (a *lifecycleAdapter) replyNotConfigured(ctx context.Context, orgID, eventI
 	if !ok || !meta.Mentioned {
 		return
 	}
-	token, ok := a.resolveBotToken(ctx, orgID, meta.WorkspaceID, meta.APIAppID)
+	caller, token, ok := a.resolveBotToken(ctx, orgID, meta.WorkspaceID)
 	if !ok {
 		return
 	}
@@ -283,7 +282,6 @@ func (a *lifecycleAdapter) replyNotConfigured(ctx context.Context, orgID, eventI
 	if threadTS == "" {
 		threadTS = meta.TS
 	}
-	caller := slackBotCaller(orgID, meta.WorkspaceID, meta.APIAppID)
 	if _, err := slackChatPostMessage(ctx, a.client, caller, token, slackMessageParams{
 		Channel: channel, ThreadTS: threadTS, Text: slackLifecycleNoMatchCopy,
 	}); err != nil {
@@ -296,7 +294,7 @@ func (a *lifecycleAdapter) replyNotConfigured(ctx context.Context, orgID, eventI
 // proceed", logged and dropped. Resolving the bot token is a deliberately
 // SEPARATE step (resolveBotToken) rather than folded in here: both callers
 // gate on meta.Mentioned first, so an un-mentioned engaged-thread follow-up
-// never touches the workspace row or the secret store (and never emits their
+// never touches the connection row or the secret store (and never emits their
 // warning logs) just to be dropped.
 func (a *lifecycleAdapter) messageMetadata(ctx context.Context, orgID, eventID string) (SlackMessageMetadata, bool) {
 	metaJSON, err := a.stores.Events.GetMetadataSystem(ctx, orgID, eventID)
@@ -333,34 +331,36 @@ func (a *lifecycleAdapter) currentChannel(ctx context.Context, orgID, channelID 
 	return channel.ChannelID, true
 }
 
-// resolveBotToken resolves the (workspace, api_app_id) pair to its bot
-// token. ok=false covers both "no such connected workspace" and "no/empty
-// token stored" — neither is an error worth surfacing past a log line, since
-// every caller here is best-effort.
-func (a *lifecycleAdapter) resolveBotToken(ctx context.Context, orgID, workspaceID, apiAppID string) (string, bool) {
+// resolveBotToken resolves the bot token of orgID's active connection in
+// workspaceID, and the caller its calls are made as. The workspace comes from
+// the event's metadata and the app does not: after a switch, the app the event
+// arrived through is no longer the one that acts. ok=false covers both "no
+// active connection" and "no/empty token stored" — neither is an error worth
+// surfacing past a log line, since every caller here is best-effort.
+func (a *lifecycleAdapter) resolveBotToken(ctx context.Context, orgID, workspaceID string) (slackCaller, string, bool) {
 	bundle := slackstore.FromStores(a.stores)
 	if bundle == nil {
-		return "", false
+		return slackCaller{}, "", false
 	}
-	ws, err := bundle.Workspaces.GetByWorkspaceAppSystem(ctx, workspaceID, apiAppID)
+	conn, err := bundle.Connections.ActiveForWorkspaceSystem(ctx, orgID, workspaceID)
 	if err != nil {
-		slackLog.Warn("slack lifecycle: resolve workspace failed", "error", err)
-		return "", false
+		slackLog.Warn("slack lifecycle: resolve active connection failed", "error", err)
+		return slackCaller{}, "", false
 	}
-	if ws == nil {
-		slackLog.Warn("slack lifecycle: no connected workspace for (workspace, app), dropping", "workspace", workspaceID, "app", apiAppID)
-		return "", false
+	if conn == nil {
+		slackLog.Warn("slack lifecycle: no active connection in the workspace, dropping", "workspace", workspaceID)
+		return slackCaller{}, "", false
 	}
-	token, err := a.stores.Secrets.GetSystem(ctx, orgID, ws.BotTokenRef)
+	token, err := a.stores.Secrets.GetSystem(ctx, orgID, conn.BotTokenRef)
 	if err != nil {
 		slackLog.Warn("slack lifecycle: read bot token failed", "error", err)
-		return "", false
+		return slackCaller{}, "", false
 	}
 	if token == "" {
-		slackLog.Warn("slack lifecycle: workspace has no bot token configured, dropping", "workspace", workspaceID, "app", apiAppID)
-		return "", false
+		slackLog.Warn("slack lifecycle: active connection has no bot token configured, dropping", "workspace", workspaceID, "app", conn.APIAppID)
+		return slackCaller{}, "", false
 	}
-	return token, true
+	return slackBotCaller(orgID, conn.WorkspaceID, conn.APIAppID), token, true
 }
 
 // --- conversation-status / conversation-activity consumer: setStatus lifecycle + failure note ---
@@ -568,7 +568,7 @@ func (a *lifecycleAdapter) resolveConversationEntry(ctx context.Context, orgID, 
 		return entry
 	}
 
-	token, ok := a.resolveBotToken(ctx, orgID, meta.WorkspaceID, meta.APIAppID)
+	caller, token, ok := a.resolveBotToken(ctx, orgID, meta.WorkspaceID)
 	if !ok {
 		return entry
 	}
@@ -589,7 +589,7 @@ func (a *lifecycleAdapter) resolveConversationEntry(ctx context.Context, orgID, 
 	entry.channel = channel
 	entry.threadTS = threadTS
 	entry.botToken = token
-	entry.caller = slackBotCaller(orgID, meta.WorkspaceID, meta.APIAppID)
+	entry.caller = caller
 	return entry
 }
 

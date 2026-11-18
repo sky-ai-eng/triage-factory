@@ -254,7 +254,7 @@ func (r *slackChannelsRig) seedWorkspace(orgID, userID, workspaceID, botToken st
 		if err := tx.Secrets.Put(r.t.Context(), orgID, botTokenRef, botToken, "test bot token"); err != nil {
 			return err
 		}
-		return slackstore.FromTx(tx).Workspaces.Upsert(r.t.Context(), slackstore.Workspace{
+		return upsertActiveConnection(r.t.Context(), tx, slackstore.Connection{
 			WorkspaceID:        workspaceID,
 			APIAppID:           apiAppID,
 			OrgID:              orgID,
@@ -262,6 +262,7 @@ func (r *slackChannelsRig) seedWorkspace(orgID, userID, workspaceID, botToken st
 			Transport:          "socket",
 			BotUserID:          "U0BOT",
 			BotTokenRef:        botTokenRef,
+			AppTokenRef:        "slack_ws_" + workspaceID + "_" + apiAppID + "_app_token",
 			RegisteredByUserID: userID,
 		})
 	}); err != nil {

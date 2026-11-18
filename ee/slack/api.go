@@ -93,9 +93,11 @@ func slackAuthTest(ctx context.Context, client *http.Client, caller slackCaller,
 
 // botsInfoResult is the subset of Slack's bots.info response the connect
 // handler needs: the app id that owns this bot — the key material for the
-// app-single-org invariant.
+// app-single-org invariant — and the bot's name, which the connection shows
+// as its app's name.
 type botsInfoResult struct {
 	AppID string
+	Name  string
 }
 
 // slackBotsInfo looks up a bot's owning app id via bots.info — the second
@@ -119,6 +121,7 @@ func slackBotsInfo(ctx context.Context, client *http.Client, caller slackCaller,
 		Error string `json:"error"`
 		Bot   struct {
 			AppID string `json:"app_id"`
+			Name  string `json:"name"`
 		} `json:"bot"`
 	}
 	if err := doSlackJSON(ctx, client, caller, req, &out); err != nil {
@@ -130,7 +133,7 @@ func slackBotsInfo(ctx context.Context, client *http.Client, caller slackCaller,
 	if out.Bot.AppID == "" {
 		return nil, fmt.Errorf("slack bots.info: response carried no app_id")
 	}
-	return &botsInfoResult{AppID: out.Bot.AppID}, nil
+	return &botsInfoResult{AppID: out.Bot.AppID, Name: out.Bot.Name}, nil
 }
 
 // slackOpenConnection validates appToken (an app-level xapp- token) via

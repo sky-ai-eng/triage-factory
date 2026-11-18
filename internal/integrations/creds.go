@@ -240,30 +240,30 @@ func (k GitHubAppKeyset) All() []string {
 	return []string{k.PEM, k.ClientSecret, k.WebhookSecret}
 }
 
-// SlackWorkspaceKeyset is the trio of org_secrets key names one connected
-// (Slack workspace, Slack app) pair custodies its credentials under: the bot
-// token (always present — every transport needs it to call the Slack API),
-// the signing secret (events_api transport), and the app-level token
-// (socket transport). Composed per (workspace id, app id) — Slack's team ID
-// and app ID — the dynamic-keyset analog of GitHubAppKeyset. Keyed on the
-// pair, not the workspace id alone, because the binding is (workspace,
-// app): two different apps installed in the same workspace (one per TF org,
-// say) must never share a credential slot.
-type SlackWorkspaceKeyset struct {
+// SlackConnectionKeyset is the trio of org_secrets key names one Slack
+// connection (a Slack app connected in a Slack workspace) custodies its
+// credentials under: the bot token (always present — every transport needs it
+// to call the Slack API), the signing secret (an org's own app on the
+// events_api transport), and the app-level token (an org's own app on the
+// socket transport). Composed per (workspace id, app id) — Slack's team ID and
+// app ID — the dynamic-keyset analog of GitHubAppKeyset. Keyed on the pair,
+// not the workspace id alone, because two apps connected in the same
+// workspace must never share a credential slot.
+type SlackConnectionKeyset struct {
 	BotToken      string
 	SigningSecret string
 	AppToken      string
 }
 
-// SlackWorkspaceKeysFor composes a connected (workspace, app) pair's
-// secret-key names from its workspace id and app id. This is the single
-// source of truth for the slack_ws_<ws>_<app>_* shape: ee/slack's connect
-// handler (which writes these secrets) and its delete handler (which sweeps
-// them) both compose through here, so the names written and the names later
-// removed can't drift — mirrors GitHubAppKeysFor.
-func SlackWorkspaceKeysFor(workspaceID, apiAppID string) SlackWorkspaceKeyset {
+// SlackConnectionKeysFor composes a connection's secret-key names from its
+// workspace id and app id. This is the single source of truth for the
+// slack_ws_<ws>_<app>_* shape: ee/slack's connect handler (which writes these
+// secrets) and its delete handler (which sweeps them) both compose through
+// here, so the names written and the names later removed can't drift —
+// mirrors GitHubAppKeysFor. Stored secrets carry these names.
+func SlackConnectionKeysFor(workspaceID, apiAppID string) SlackConnectionKeyset {
 	prefix := "slack_ws_" + workspaceID + "_" + apiAppID + "_"
-	return SlackWorkspaceKeyset{
+	return SlackConnectionKeyset{
 		BotToken:      prefix + "bot_token",
 		SigningSecret: prefix + "signing_secret",
 		AppToken:      prefix + "app_token",
@@ -272,8 +272,8 @@ func SlackWorkspaceKeysFor(workspaceID, apiAppID string) SlackWorkspaceKeyset {
 
 // All returns the keyset as a slice (bot token, signing secret, app token)
 // for the disconnect sweep, which deletes all three regardless of which the
-// workspace actually populated — a Delete of an absent key is a no-op.
-func (k SlackWorkspaceKeyset) All() []string {
+// connection actually populated — a Delete of an absent key is a no-op.
+func (k SlackConnectionKeyset) All() []string {
 	return []string{k.BotToken, k.SigningSecret, k.AppToken}
 }
 

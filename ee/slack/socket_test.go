@@ -191,7 +191,7 @@ const (
 // published-events sink.
 type socketTestRig struct {
 	mgr           *socketManager
-	wsStore       *fakeWorkspaceStore
+	wsStore       *fakeConnectionStore
 	secrets       *fakeSecretStore
 	configChanged chan struct{}
 	published     *[]domain.Event
@@ -206,13 +206,13 @@ type socketTestRig struct {
 // lifetime. Callers that need different entitlement/mode state override it
 // AFTER this returns, relying on this function's t.Cleanup registrations
 // (LIFO) to restore the true defaults last.
-func newSocketTestRig(t *testing.T, rows ...*slackstore.Workspace) *socketTestRig {
+func newSocketTestRig(t *testing.T, rows ...*slackstore.Connection) *socketTestRig {
 	t.Helper()
 	runmode.SetForTest(t, runmode.ModeMulti)
 	entitlements.RegisterProvider(entitlements.Static(entitlements.FeatureSlack))
 	t.Cleanup(entitlements.Reset)
 
-	wsStore := newFakeWorkspaceStore(rows...)
+	wsStore := newFakeConnectionStore(rows...)
 	// Seed the app-token secret for every row's (org, ref) pair, plus the
 	// standard test org/ref unconditionally — tests that add a row AFTER
 	// construction (e.g. via wsStore.setRow, simulating a connect that
@@ -226,7 +226,7 @@ func newSocketTestRig(t *testing.T, rows ...*slackstore.Workspace) *socketTestRi
 	secrets := &fakeSecretStore{values: secretsValues}
 	stores := db.Stores{
 		Secrets: secrets,
-		Ext:     map[string]any{slackstore.ExtKey: &slackstore.Bundle{Workspaces: wsStore, Deliveries: newFakeDeliveries()}},
+		Ext:     map[string]any{slackstore.ExtKey: &slackstore.Bundle{Connections: wsStore, Deliveries: newFakeDeliveries()}},
 	}
 
 	published := &[]domain.Event{}
@@ -244,10 +244,10 @@ func newSocketTestRig(t *testing.T, rows ...*slackstore.Workspace) *socketTestRi
 	return &socketTestRig{mgr: mgr, wsStore: wsStore, secrets: secrets, configChanged: configChanged, published: published, channels: channels}
 }
 
-func socketTestRow(orgID string) *slackstore.Workspace {
-	return &slackstore.Workspace{
+func socketTestRow(orgID string) *slackstore.Connection {
+	return &slackstore.Connection{
 		WorkspaceID: socketTestWorkspace, APIAppID: socketTestAppID, OrgID: orgID,
-		Transport: transportSocket, BotUserID: "U0BOT", AppTokenRef: socketTestAppRef,
+		Source: slackstore.SourceOrg, Active: true, Transport: transportSocket, BotUserID: "U0BOT", AppTokenRef: socketTestAppRef,
 	}
 }
 
@@ -368,8 +368,8 @@ func TestDesiredApps_TwoRowsSameApp_OneEntry(t *testing.T) {
 	entitlements.RegisterProvider(entitlements.Static(entitlements.FeatureSlack))
 	t.Cleanup(entitlements.Reset)
 
-	row1 := &slackstore.Workspace{WorkspaceID: "T1", APIAppID: socketTestAppID, OrgID: socketTestOrgID, Transport: transportSocket, AppTokenRef: socketTestAppRef}
-	row2 := &slackstore.Workspace{WorkspaceID: "T2", APIAppID: socketTestAppID, OrgID: socketTestOrgID, Transport: transportSocket, AppTokenRef: socketTestAppRef}
+	row1 := &slackstore.Connection{Source: slackstore.SourceOrg, Active: true, WorkspaceID: "T1", APIAppID: socketTestAppID, OrgID: socketTestOrgID, Transport: transportSocket, AppTokenRef: socketTestAppRef}
+	row2 := &slackstore.Connection{Source: slackstore.SourceOrg, Active: true, WorkspaceID: "T2", APIAppID: socketTestAppID, OrgID: socketTestOrgID, Transport: transportSocket, AppTokenRef: socketTestAppRef}
 	rig := newSocketTestRig(t, row1, row2)
 
 	desired, err := rig.mgr.desiredApps(context.Background())
@@ -381,6 +381,30 @@ func TestDesiredApps_TwoRowsSameApp_OneEntry(t *testing.T) {
 	}
 	if d := desired[socketTestAppID]; d.orgID != socketTestOrgID {
 		t.Errorf("desired app org = %q; want %q", d.orgID, socketTestOrgID)
+	}
+}
+
+// TestDesiredApps_InactiveRowsExcluded: an app with no active socket row gets
+// no connection, and an app's inactive row adds no token to dial with.
+func TestDesiredApps_InactiveRowsExcluded(t *testing.T) {
+	entitlements.RegisterProvider(entitlements.Static(entitlements.FeatureSlack))
+	t.Cleanup(entitlements.Reset)
+
+	active := &slackstore.Connection{Source: slackstore.SourceOrg, Active: true, WorkspaceID: "T1", APIAppID: socketTestAppID, OrgID: socketTestOrgID, Transport: transportSocket, AppTokenRef: socketTestAppRef}
+	inactiveSameApp := &slackstore.Connection{Source: slackstore.SourceOrg, WorkspaceID: "T2", APIAppID: socketTestAppID, OrgID: socketTestOrgID, Transport: transportSocket, AppTokenRef: "inactive_app_token"}
+	inactiveOtherApp := &slackstore.Connection{Source: slackstore.SourceOrg, WorkspaceID: "T1", APIAppID: "A0INACTIVE", OrgID: socketTestOrgID, Transport: transportSocket, AppTokenRef: "other_app_token"}
+	rig := newSocketTestRig(t, active, inactiveSameApp, inactiveOtherApp)
+
+	desired, err := rig.mgr.desiredApps(context.Background())
+	if err != nil {
+		t.Fatalf("desiredApps: %v", err)
+	}
+	if len(desired) != 1 {
+		t.Fatalf("desiredApps = %v; want only the app with an active row", desired)
+	}
+	d, ok := desired[socketTestAppID]
+	if !ok || len(d.tokenRefs) != 1 || !d.tokenRefs[socketTestAppRef] {
+		t.Errorf("desired = %+v; want %s with only its active row's token", d, socketTestAppID)
 	}
 }
 
@@ -398,7 +422,7 @@ func TestDesiredApps_UnentitledOrg_Excluded(t *testing.T) {
 }
 
 func TestDesiredApps_WebhookOnlyRow_Excluded(t *testing.T) {
-	row := &slackstore.Workspace{WorkspaceID: socketTestWorkspace, APIAppID: socketTestAppID, OrgID: socketTestOrgID, Transport: transportEventsAPI}
+	row := &slackstore.Connection{Source: slackstore.SourceOrg, Active: true, WorkspaceID: socketTestWorkspace, APIAppID: socketTestAppID, OrgID: socketTestOrgID, Transport: transportEventsAPI}
 	rig := newSocketTestRig(t, row)
 	desired, err := rig.mgr.desiredApps(context.Background())
 	if err != nil {
@@ -550,8 +574,8 @@ func TestSocketManager_UnsubscribedEnvelopeType_StillAcked(t *testing.T) {
 func TestSocketManager_LoadBalancing_TwoWorkspacesOneApp(t *testing.T) {
 	withFastSocketTimings(t)
 	fake := newFakeSlackSocket(t)
-	row1 := &slackstore.Workspace{WorkspaceID: "T1LB", APIAppID: socketTestAppID, OrgID: socketTestOrgID, Transport: transportSocket, AppTokenRef: socketTestAppRef, BotUserID: "U0BOT"}
-	row2 := &slackstore.Workspace{WorkspaceID: "T2LB", APIAppID: socketTestAppID, OrgID: socketTestOrgID, Transport: transportSocket, AppTokenRef: socketTestAppRef, BotUserID: "U0BOT"}
+	row1 := &slackstore.Connection{Source: slackstore.SourceOrg, Active: true, WorkspaceID: "T1LB", APIAppID: socketTestAppID, OrgID: socketTestOrgID, Transport: transportSocket, AppTokenRef: socketTestAppRef, BotUserID: "U0BOT"}
+	row2 := &slackstore.Connection{Source: slackstore.SourceOrg, Active: true, WorkspaceID: "T2LB", APIAppID: socketTestAppID, OrgID: socketTestOrgID, Transport: transportSocket, AppTokenRef: socketTestAppRef, BotUserID: "U0BOT"}
 	rig := newSocketTestRig(t, row1, row2)
 	runManager(t, rig.mgr)
 
@@ -841,8 +865,8 @@ func TestSocketManager_RowDeleted_TornDown(t *testing.T) {
 func TestSocketManager_TwoRowsOneApp_ExactlyOneConnection(t *testing.T) {
 	withFastSocketTimings(t)
 	fake := newFakeSlackSocket(t)
-	row1 := &slackstore.Workspace{WorkspaceID: "T1ONE", APIAppID: socketTestAppID, OrgID: socketTestOrgID, Transport: transportSocket, AppTokenRef: socketTestAppRef}
-	row2 := &slackstore.Workspace{WorkspaceID: "T2ONE", APIAppID: socketTestAppID, OrgID: socketTestOrgID, Transport: transportSocket, AppTokenRef: socketTestAppRef}
+	row1 := &slackstore.Connection{Source: slackstore.SourceOrg, Active: true, WorkspaceID: "T1ONE", APIAppID: socketTestAppID, OrgID: socketTestOrgID, Transport: transportSocket, AppTokenRef: socketTestAppRef}
+	row2 := &slackstore.Connection{Source: slackstore.SourceOrg, Active: true, WorkspaceID: "T2ONE", APIAppID: socketTestAppID, OrgID: socketTestOrgID, Transport: transportSocket, AppTokenRef: socketTestAppRef}
 	rig := newSocketTestRig(t, row1, row2)
 	runManager(t, rig.mgr)
 
@@ -872,8 +896,8 @@ func TestSocketManager_RowWithTheConnectionsTokenRemoved_RedialsWithAnother(t *t
 	fake := newFakeSlackSocket(t)
 	refA := "slack_ws_T1A_" + socketTestAppID + "_app_token"
 	refB := "slack_ws_T2B_" + socketTestAppID + "_app_token"
-	rowA := &slackstore.Workspace{WorkspaceID: "T1A", APIAppID: socketTestAppID, OrgID: socketTestOrgID, Transport: transportSocket, AppTokenRef: refA}
-	rowB := &slackstore.Workspace{WorkspaceID: "T2B", APIAppID: socketTestAppID, OrgID: socketTestOrgID, Transport: transportSocket, AppTokenRef: refB}
+	rowA := &slackstore.Connection{Source: slackstore.SourceOrg, Active: true, WorkspaceID: "T1A", APIAppID: socketTestAppID, OrgID: socketTestOrgID, Transport: transportSocket, AppTokenRef: refA}
+	rowB := &slackstore.Connection{Source: slackstore.SourceOrg, Active: true, WorkspaceID: "T2B", APIAppID: socketTestAppID, OrgID: socketTestOrgID, Transport: transportSocket, AppTokenRef: refB}
 	rig := newSocketTestRig(t, rowA, rowB)
 	runManager(t, rig.mgr)
 	conn1 := fake.nextConn(t)

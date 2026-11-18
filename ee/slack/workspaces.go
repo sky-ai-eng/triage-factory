@@ -41,7 +41,10 @@ type workspacesHandler struct {
 type workspaceView struct {
 	WorkspaceID        string    `json:"workspace_id"`
 	APIAppID           string    `json:"api_app_id"`
+	Source             string    `json:"source"`
+	Active             bool      `json:"active"`
 	WorkspaceName      string    `json:"workspace_name"`
+	AppName            string    `json:"app_name"`
 	EnterpriseID       string    `json:"enterprise_id,omitempty"`
 	Transport          string    `json:"transport"`
 	BotUserID          string    `json:"bot_user_id"`
@@ -55,11 +58,14 @@ type workspaceView struct {
 	Connection *connStatus `json:"connection,omitempty"`
 }
 
-func toWorkspaceView(w *slackstore.Workspace, sockets *socketManager) workspaceView {
+func toWorkspaceView(w *slackstore.Connection, sockets *socketManager) workspaceView {
 	v := workspaceView{
 		WorkspaceID:        w.WorkspaceID,
 		APIAppID:           w.APIAppID,
+		Source:             w.Source,
+		Active:             w.Active,
 		WorkspaceName:      w.WorkspaceName,
+		AppName:            w.AppName,
 		EnterpriseID:       w.EnterpriseID,
 		Transport:          w.Transport,
 		BotUserID:          w.BotUserID,
@@ -117,10 +123,10 @@ func (h *workspacesHandler) handleList(w http.ResponseWriter, r *http.Request) {
 	}
 	userID := httpx.ClaimsFrom(r.Context()).Subject
 
-	var list []slackstore.Workspace
+	var list []slackstore.Connection
 	if err := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		list, e = slackstore.FromTx(tx).Workspaces.ListForOrg(r.Context(), orgID)
+		list, e = slackstore.FromTx(tx).Connections.ListForOrg(r.Context(), orgID)
 		return e
 	}); err != nil {
 		httpx.InternalError(w, "slack", err)
@@ -139,11 +145,11 @@ func (h *workspacesHandler) handleList(w http.ResponseWriter, r *http.Request) {
 // a different org is invisible here — RLS plus the explicit org_id filter —
 // which is exactly right: the merge logic below must never see another
 // org's stored refs).
-func (h *workspacesHandler) getExisting(ctx context.Context, orgID, userID, workspaceID, apiAppID string) (*slackstore.Workspace, error) {
-	var ws *slackstore.Workspace
+func (h *workspacesHandler) getExisting(ctx context.Context, orgID, userID, workspaceID, apiAppID string) (*slackstore.Connection, error) {
+	var ws *slackstore.Connection
 	if err := h.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		var e error
-		ws, e = slackstore.FromTx(tx).Workspaces.Get(ctx, orgID, workspaceID, apiAppID)
+		ws, e = slackstore.FromTx(tx).Connections.Get(ctx, orgID, workspaceID, apiAppID)
 		return e
 	}); err != nil {
 		return nil, err
@@ -175,6 +181,10 @@ func refFor(has bool, ref string) string {
 // already owned by a different org — mapped to a generic 409 below, never
 // naming the owning org (the app-single-org invariant).
 var errAppBoundToOtherOrg = errors.New("slack app already connected to a different org")
+
+// errWorkspaceHasActiveConnection is the connect handler's refusal of a new
+// app in a workspace where the org already has an active connection.
+var errWorkspaceHasActiveConnection = errors.New("slack workspace already has an active connection")
 
 // POST /api/slack/workspaces  body: {bot_token, signing_secret?, app_token?, transport?}
 func (h *workspacesHandler) handleConnect(w http.ResponseWriter, r *http.Request) {
@@ -248,12 +258,14 @@ func (h *workspacesHandler) handleConnect(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	keys := integrations.SlackWorkspaceKeysFor(result.TeamID, apiAppID)
-	ws := slackstore.Workspace{
+	keys := integrations.SlackConnectionKeysFor(result.TeamID, apiAppID)
+	ws := slackstore.Connection{
 		WorkspaceID:        result.TeamID,
 		APIAppID:           apiAppID,
 		OrgID:              orgID,
+		Source:             slackstore.SourceOrg,
 		WorkspaceName:      result.Team,
+		AppName:            botsInfo.Name,
 		EnterpriseID:       result.EnterpriseID,
 		Transport:          transport,
 		BotUserID:          result.UserID,
@@ -263,7 +275,7 @@ func (h *workspacesHandler) handleConnect(w http.ResponseWriter, r *http.Request
 		RegisteredByUserID: userID,
 	}
 
-	var persisted *slackstore.Workspace
+	var persisted slackstore.Connection
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		bundle := slackstore.FromTx(tx)
 		// LockApp MUST run before the AppBoundToOtherOrgSystem check below
@@ -273,20 +285,33 @@ func (h *workspacesHandler) handleConnect(w http.ResponseWriter, r *http.Request
 		// unique index, and each could observe "not bound" before either
 		// commits. The advisory lock serializes every connect attempt for
 		// this api_app_id so that can't happen — see LockApp's doc.
-		if e := bundle.Workspaces.LockApp(r.Context(), apiAppID); e != nil {
+		if e := bundle.Connections.LockApp(r.Context(), apiAppID); e != nil {
 			return e
 		}
 		// The app-single-org invariant has no SQL constraint behind it
 		// (api_app_id is only unique in combination with workspace_id), so
 		// it's enforced here, before any write — see
 		// AppBoundToOtherOrgSystem's doc.
-		boundElsewhere, e := bundle.Workspaces.AppBoundToOtherOrgSystem(r.Context(), apiAppID, orgID)
+		boundElsewhere, e := bundle.Connections.AppBoundToOtherOrgSystem(r.Context(), apiAppID, orgID)
 		if e != nil {
 			return e
 		}
 		if boundElsewhere {
 			return errAppBoundToOtherOrg
 		}
+		conns, e := bundle.Connections.ListForOrg(r.Context(), orgID)
+		if e != nil {
+			return e
+		}
+		own, active := connectionsInWorkspace(conns, result.TeamID, apiAppID)
+		if own == nil && active != nil {
+			return errWorkspaceHasActiveConnection
+		}
+		// Upsert reads Active only when it inserts: a row this app already
+		// has keeps its own. A concurrent connect of another app into the
+		// workspace, which this read cannot see, is refused by the one-active
+		// index (slackstore.ErrActiveConnectionExists).
+		ws.Active = active == nil
 
 		if err := tx.Secrets.Put(r.Context(), orgID, keys.BotToken, botToken, "Slack bot token"); err != nil {
 			return fmt.Errorf("put bot token: %w", err)
@@ -301,8 +326,8 @@ func (h *workspacesHandler) handleConnect(w http.ResponseWriter, r *http.Request
 				return fmt.Errorf("put app token: %w", err)
 			}
 		}
-		if err := bundle.Workspaces.Upsert(r.Context(), ws); err != nil {
-			return err
+		if persisted, e = bundle.Connections.Upsert(r.Context(), ws); e != nil {
+			return e
 		}
 		// Unconditional, including on a re-connect: the bot token is always
 		// re-submitted and re-Put above (there is no keep-current path for it),
@@ -317,14 +342,23 @@ func (h *workspacesHandler) handleConnect(w http.ResponseWriter, r *http.Request
 		}); err != nil {
 			return fmt.Errorf("audit slack connect: %w", err)
 		}
-		persisted, e = bundle.Workspaces.Get(r.Context(), orgID, result.TeamID, apiAppID)
-		return e
+		return nil
 	}); err != nil {
 		if errors.Is(err, errAppBoundToOtherOrg) {
 			// Deliberately generic: the caller may learn "already
 			// connected", never which org holds it (the app-single-org
 			// invariant).
 			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this app is already connected"})
+			return
+		}
+		if errors.Is(err, errWorkspaceHasActiveConnection) || errors.Is(err, slackstore.ErrActiveConnectionExists) {
+			// TODO(TFAC-1445): connecting a second app into a workspace with an
+			// active connection should leave the new connection inactive,
+			// once a connection can be activated; until then it is refused.
+			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+				Reason:  httpx.ReasonConflict,
+				Message: "This Slack workspace already has an active connection. Disconnect it before connecting another app.",
+			})
 			return
 		}
 		if httpx.IsUniqueViolation(err) {
@@ -337,11 +371,6 @@ func (h *workspacesHandler) handleConnect(w http.ResponseWriter, r *http.Request
 		httpx.InternalError(w, "slack", err)
 		return
 	}
-	if persisted == nil {
-		httpx.InternalError(w, "slack", fmt.Errorf("slack workspace upsert reported success but the row is missing"))
-		return
-	}
-
 	notifyConfigChanged(orgID)
 	slackLog.Info("slack workspace connected", "org", orgID, "workspace", result.TeamID, "app", apiAppID, "transport", transport)
 
@@ -349,7 +378,38 @@ func (h *workspacesHandler) handleConnect(w http.ResponseWriter, r *http.Request
 	if existing != nil {
 		status = http.StatusOK
 	}
-	httpx.WriteJSON(w, status, toWorkspaceView(persisted, h.sockets))
+	httpx.WriteJSON(w, status, toWorkspaceView(&persisted, h.sockets))
+}
+
+// activeConnections returns the active members of conns, in order: the
+// connections outbound calls use, at most one per (org, workspace).
+func activeConnections(conns []slackstore.Connection) []slackstore.Connection {
+	var out []slackstore.Connection
+	for _, c := range conns {
+		if c.Active {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// connectionsInWorkspace finds, among conns, the connection of apiAppID in
+// workspaceID and the workspace's active connection; either is nil when there
+// is none.
+func connectionsInWorkspace(conns []slackstore.Connection, workspaceID, apiAppID string) (own, active *slackstore.Connection) {
+	for i := range conns {
+		c := &conns[i]
+		if c.WorkspaceID != workspaceID {
+			continue
+		}
+		if c.APIAppID == apiAppID {
+			own = c
+		}
+		if c.Active {
+			active = c
+		}
+	}
+	return own, active
 }
 
 // DELETE /api/slack/workspaces/{workspace_id}/{api_app_id}
@@ -368,7 +428,7 @@ func (h *workspacesHandler) handleDelete(w http.ResponseWriter, r *http.Request)
 	var existed bool
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		bundle := slackstore.FromTx(tx)
-		ws, e := bundle.Workspaces.Get(r.Context(), orgID, workspaceID, apiAppID)
+		ws, e := bundle.Connections.Get(r.Context(), orgID, workspaceID, apiAppID)
 		if e != nil {
 			return e
 		}
@@ -376,7 +436,7 @@ func (h *workspacesHandler) handleDelete(w http.ResponseWriter, r *http.Request)
 			return nil
 		}
 		existed = true
-		if e := bundle.Workspaces.Delete(r.Context(), orgID, workspaceID, apiAppID); e != nil {
+		if e := bundle.Connections.Delete(r.Context(), orgID, workspaceID, apiAppID); e != nil {
 			return fmt.Errorf("delete workspace row: %w", e)
 		}
 		// Named from the row we just read, not from the path params: the
@@ -394,7 +454,7 @@ func (h *workspacesHandler) handleDelete(w http.ResponseWriter, r *http.Request)
 		// Sweep the full keyset regardless of which refs this (workspace,
 		// app) pair actually populated — deleting an absent key is a
 		// no-op, mirrors teardownAppSecrets for GitHub Apps.
-		for _, k := range integrations.SlackWorkspaceKeysFor(workspaceID, apiAppID).All() {
+		for _, k := range integrations.SlackConnectionKeysFor(workspaceID, apiAppID).All() {
 			if _, e := tx.Secrets.Delete(r.Context(), orgID, k); e != nil {
 				return fmt.Errorf("delete slack secret %s: %w", k, e)
 			}

@@ -38,9 +38,12 @@ type fakeSlackFile struct {
 // fine, since no test asserts on the best-effort permalink.
 type fakeExecSlack struct {
 	lastPostText, lastPostMarkdown, lastPostChannel, lastPostThreadTS string
-	lastUpdateText, lastUpdateChannel, lastUpdateTS                   string
-	lastReactionEmoji, lastReactionChannel, lastReactionTS            string
-	postTS                                                            string
+	// lastPostToken is the bot token chat.postMessage was called with: which
+	// connection acted.
+	lastPostToken                                          string
+	lastUpdateText, lastUpdateChannel, lastUpdateTS        string
+	lastReactionEmoji, lastReactionChannel, lastReactionTS string
+	postTS                                                 string
 
 	// historyMessages / repliesMessages are returned verbatim for every
 	// conversations.history / conversations.replies call in a test — good
@@ -94,6 +97,7 @@ func newFakeExecSlack(t *testing.T) *fakeExecSlack {
 			}
 			_ = decodeSlackFakeBody(r, &body)
 			f.lastPostChannel, f.lastPostText, f.lastPostThreadTS = body.Channel, body.Text, body.ThreadTS
+			f.lastPostToken = bearerToken(r)
 			if len(body.Blocks) > 0 {
 				f.lastPostMarkdown = body.Blocks[0].Text
 			}
@@ -221,7 +225,7 @@ func (r *slackExecRig) rt(info agenthost.ConversationInfo) agenthost.ExtensionRu
 	return agenthost.NewDirectRuntime(r.stor, info)
 }
 
-// seedWorkspace connects a Slack workspace (bot token + org_slack_workspaces
+// seedWorkspace connects a Slack workspace (bot token + org_slack_connections
 // row) for orgID, mirroring channels_handler_pg_test.go's seedWorkspace.
 func (r *slackExecRig) seedWorkspace(orgID, userID, workspaceID, apiAppID, botToken string) {
 	r.t.Helper()
@@ -230,9 +234,10 @@ func (r *slackExecRig) seedWorkspace(orgID, userID, workspaceID, apiAppID, botTo
 		if err := tx.Secrets.Put(r.t.Context(), orgID, botTokenRef, botToken, "test bot token"); err != nil {
 			return err
 		}
-		return slackstore.FromTx(tx).Workspaces.Upsert(r.t.Context(), slackstore.Workspace{
+		return upsertActiveConnection(r.t.Context(), tx, slackstore.Connection{
 			WorkspaceID: workspaceID, APIAppID: apiAppID, OrgID: orgID, WorkspaceName: "Acme",
 			Transport: "socket", BotUserID: "U0BOT", BotTokenRef: botTokenRef, RegisteredByUserID: userID,
+			AppTokenRef: "slack_ws_" + workspaceID + "_" + apiAppID + "_app_token",
 		})
 	}); err != nil {
 		r.t.Fatalf("seed workspace: %v", err)
@@ -1087,27 +1092,24 @@ func TestSlackExecHandler_Send_UnknownChannel(t *testing.T) {
 	}
 }
 
-func TestSlackExecHandler_Send_WorkspaceAmbiguity_TwoAppsOneWorkspace(t *testing.T) {
+// TestSlackExecHandler_Send_TwoAppsOneWorkspace_ActsAsTheActiveConnection: two
+// apps connected in one workspace under one org is not ambiguous — the active
+// one acts, with its own bot token.
+func TestSlackExecHandler_Send_TwoAppsOneWorkspace_ActsAsTheActiveConnection(t *testing.T) {
 	r := newSlackExecRig(t)
-	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "slack-ambiguous")
-	// Two apps (A1, A2) both installed into the SAME Slack workspace (T1),
-	// under the same org — the exact TFAC-533 shape the ticket calls out.
+	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "slack-two-apps")
 	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-app1")
-	r.seedWorkspace(orgID, owner, "T1", "A2", "xoxb-app2")
+	insertInactiveConnection(t, r.h, r.stor, orgID, owner, "T1", "A2", "xoxb-app2")
 	r.seedChannel(orgID, "T1", "C1")
 	r.trackChannel(orgID, owner, teamID, "C1")
 	conversationID := r.seedConversation(orgID, teamID, owner, true)
 	info := agenthost.ConversationInfo{OrgID: orgID, UserID: owner, ConversationID: conversationID, TeamID: teamID, IsEventTriggered: true}
 
-	_, err := r.hdl.send(context.Background(), r.rt(info), slackSendArgs{Channel: "C1", Body: "hi"})
-	if err == nil {
-		t.Fatal("expected an ambiguity refusal, got nil")
+	if _, err := r.hdl.send(context.Background(), r.rt(info), slackSendArgs{Channel: "C1", Body: "hi"}); err != nil {
+		t.Fatalf("send: %v", err)
 	}
-	if !strings.Contains(err.Error(), "cannot determine which bot identity") {
-		t.Errorf("error = %q, want it to name the ambiguity", err)
-	}
-	if r.fake.lastPostChannel != "" {
-		t.Error("must never guess which bot identity to act as")
+	if r.fake.lastPostToken != "xoxb-app1" {
+		t.Errorf("posted with token %q; want the active connection's xoxb-app1", r.fake.lastPostToken)
 	}
 }
 
@@ -1449,7 +1451,7 @@ func TestSlackProviderCredential_SealsOnlyTrackedWorkspaces(t *testing.T) {
 		t.Fatalf("sealed the wrong workspace: %+v", got)
 	}
 	// The untracked workspace's token must be unreachable from the sealed set.
-	if tok, ok := creds.tokenFor("T-other", "A-other"); ok || tok != "" {
-		t.Fatalf("untracked workspace T-other leaked into the sealed set: tok=%q ok=%v", tok, ok)
+	if tok, ok := creds.tokenFor("T-other"); ok || tok.BotToken != "" {
+		t.Fatalf("untracked workspace T-other leaked into the sealed set: tok=%+v ok=%v", tok, ok)
 	}
 }

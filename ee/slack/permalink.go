@@ -63,7 +63,7 @@ func NewPermalinkResolver(stores db.Stores) *PermalinkResolver {
 // a thread — the one that creates the entity — triggers this at all; see
 // ingest.go's handleEventCallback). Callers should call this instead of
 // spawning resolvePermalink directly.
-func (r *PermalinkResolver) dispatch(ws slackstore.Workspace, entityID, channel, rootTS string) {
+func (r *PermalinkResolver) dispatch(ws slackstore.Connection, entityID, channel, rootTS string) {
 	key := ws.OrgID + "/" + entityID
 	r.mu.Lock()
 	if r.inFlight == nil {
@@ -92,7 +92,7 @@ func (r *PermalinkResolver) dispatch(ws slackstore.Workspace, entityID, channel,
 // request path — callers dispatch it via dispatch (above), never directly.
 // Never writes on API failure — an unresolved entity keeps its empty url
 // rather than risk a wrong fallback.
-func (r *PermalinkResolver) resolvePermalink(ctx context.Context, ws slackstore.Workspace, entityID, channel, rootTS string) {
+func (r *PermalinkResolver) resolvePermalink(ctx context.Context, ws slackstore.Connection, entityID, channel, rootTS string) {
 	ctx, cancel := context.WithTimeout(ctx, permalinkResolveTimeout)
 	defer cancel()
 

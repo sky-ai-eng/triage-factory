@@ -12,8 +12,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-func testWorkspaceForPermalinkResolver() slackstore.Workspace {
-	return slackstore.Workspace{WorkspaceID: "T0PERM0001", OrgID: "org-1", BotTokenRef: "slack_ws_T0PERM0001_bot_token"}
+func testWorkspaceForPermalinkResolver() slackstore.Connection {
+	return slackstore.Connection{WorkspaceID: "T0PERM0001", OrgID: "org-1", BotTokenRef: "slack_ws_T0PERM0001_bot_token"}
 }
 
 // fakeEntityURLUpdater is a minimal entityURLUpdater fake: an in-memory map

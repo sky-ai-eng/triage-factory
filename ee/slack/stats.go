@@ -39,6 +39,7 @@ const (
 	dropUserTokensOnly     = "user_tokens_only"    // tokens_revoked naming no bot token; TF holds no user tokens
 	dropReconnected        = "reconnected"         // app removal Slack generated before the row's current connection
 	dropRowChanged         = "row_changed"         // app removal whose row changed after the receiver read it
+	dropInactive           = "inactive"            // delivered through a connection that is not the workspace's active one
 )
 
 // ingestStats owns the Slack ingest metric instruments — the message-volume

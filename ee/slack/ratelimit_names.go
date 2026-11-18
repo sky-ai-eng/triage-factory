@@ -12,7 +12,7 @@ import (
 
 // init names Slack's rate-limit credentials for the readings route, the same
 // registration shape as the event-source probe beside it: core holds no Slack
-// symbol, and the names live in the workspace store here.
+// symbol, and the names live in the connection store here.
 func init() {
 	ratelimits.RegisterNamer(upstream.Slack, rateLimitNames)
 }
@@ -26,12 +26,12 @@ func rateLimitNames(ctx context.Context, tx db.TxStores, orgID string) (map[stri
 	if bundle == nil {
 		return nil, errors.New("slack store bundle absent from the transaction: the slack store extension is not registered")
 	}
-	workspaces, err := bundle.Workspaces.ListForOrg(ctx, orgID)
+	conns, err := bundle.Connections.ListForOrg(ctx, orgID)
 	if err != nil {
 		return nil, err
 	}
-	out := make(map[string]string, len(workspaces))
-	for _, ws := range workspaces {
+	out := make(map[string]string, len(conns))
+	for _, ws := range conns {
 		if ws.WorkspaceName != "" {
 			out[slackBotCaller(orgID, ws.WorkspaceID, ws.APIAppID).credential] = ws.WorkspaceName
 		}

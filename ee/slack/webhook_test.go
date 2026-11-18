@@ -25,24 +25,24 @@ import (
 
 // ---------- fakes ----------
 
-// fakeWorkspaceStore is a minimal slackstore.WorkspaceStore fake, keyed on
+// fakeConnectionStore is a minimal slackstore.ConnectionStore fake, keyed on
 // (workspace_id, api_app_id) — GetByWorkspaceAppSystem is the only method
 // the webhook handler actually calls. The socket manager's reconciler also
 // calls ListAllSystem and (in the reconciler tests) mutates the row set
 // concurrently with a running reconcile loop, so every method is guarded by
 // mu — a no-op for callers that only ever read this fake before starting
 // any goroutine, and required for the ones that don't.
-type fakeWorkspaceStore struct {
+type fakeConnectionStore struct {
 	mu             sync.Mutex
-	byWorkspaceApp map[string]*slackstore.Workspace // "workspace_id/api_app_id" -> row
+	byWorkspaceApp map[string]*slackstore.Connection // "workspace_id/api_app_id" -> row
 }
 
-var _ slackstore.WorkspaceStore = (*fakeWorkspaceStore)(nil)
+var _ slackstore.ConnectionStore = (*fakeConnectionStore)(nil)
 
-// newFakeWorkspaceStore builds a fake seeded with rows, keyed by
+// newFakeConnectionStore builds a fake seeded with rows, keyed by
 // (workspace_id, api_app_id).
-func newFakeWorkspaceStore(rows ...*slackstore.Workspace) *fakeWorkspaceStore {
-	f := &fakeWorkspaceStore{byWorkspaceApp: map[string]*slackstore.Workspace{}}
+func newFakeConnectionStore(rows ...*slackstore.Connection) *fakeConnectionStore {
+	f := &fakeConnectionStore{byWorkspaceApp: map[string]*slackstore.Connection{}}
 	for _, r := range rows {
 		f.setRow(r)
 	}
@@ -51,35 +51,37 @@ func newFakeWorkspaceStore(rows ...*slackstore.Workspace) *fakeWorkspaceStore {
 
 // setRow inserts or replaces a row — the reconciler tests use this to
 // simulate a connect/disconnect happening while the manager is running.
-func (f *fakeWorkspaceStore) setRow(r *slackstore.Workspace) {
+func (f *fakeConnectionStore) setRow(r *slackstore.Connection) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.byWorkspaceApp == nil {
-		f.byWorkspaceApp = map[string]*slackstore.Workspace{}
+		f.byWorkspaceApp = map[string]*slackstore.Connection{}
 	}
 	f.byWorkspaceApp[r.WorkspaceID+"/"+r.APIAppID] = r
 }
 
 // deleteRow removes a row — simulates the disconnect handler's DELETE.
-func (f *fakeWorkspaceStore) deleteRow(workspaceID, apiAppID string) {
+func (f *fakeConnectionStore) deleteRow(workspaceID, apiAppID string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.byWorkspaceApp, workspaceID+"/"+apiAppID)
 }
 
-func (f *fakeWorkspaceStore) Upsert(context.Context, slackstore.Workspace) error { return nil }
-func (f *fakeWorkspaceStore) ListForOrgSystem(ctx context.Context, orgID string) ([]slackstore.Workspace, error) {
+func (f *fakeConnectionStore) Upsert(_ context.Context, c slackstore.Connection) (slackstore.Connection, error) {
+	return c, nil
+}
+func (f *fakeConnectionStore) ListForOrgSystem(ctx context.Context, orgID string) ([]slackstore.Connection, error) {
 	return f.ListForOrg(ctx, orgID)
 }
 
-func (f *fakeWorkspaceStore) ListForOrg(context.Context, string) ([]slackstore.Workspace, error) {
+func (f *fakeConnectionStore) ListForOrg(context.Context, string) ([]slackstore.Connection, error) {
 	return nil, nil
 }
-func (f *fakeWorkspaceStore) Get(context.Context, string, string, string) (*slackstore.Workspace, error) {
+func (f *fakeConnectionStore) Get(context.Context, string, string, string) (*slackstore.Connection, error) {
 	return nil, nil
 }
-func (f *fakeWorkspaceStore) Delete(context.Context, string, string, string) error { return nil }
-func (f *fakeWorkspaceStore) DeleteSystem(_ context.Context, orgID, workspaceID, apiAppID string, updatedAt time.Time) (bool, error) {
+func (f *fakeConnectionStore) Delete(context.Context, string, string, string) error { return nil }
+func (f *fakeConnectionStore) DeleteSystem(_ context.Context, orgID, workspaceID, apiAppID string, updatedAt time.Time) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	key := workspaceID + "/" + apiAppID
@@ -90,22 +92,32 @@ func (f *fakeWorkspaceStore) DeleteSystem(_ context.Context, orgID, workspaceID,
 	delete(f.byWorkspaceApp, key)
 	return true, nil
 }
-func (f *fakeWorkspaceStore) ListAllSystem(context.Context) ([]slackstore.Workspace, error) {
+func (f *fakeConnectionStore) ListAllSystem(context.Context) ([]slackstore.Connection, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	out := make([]slackstore.Workspace, 0, len(f.byWorkspaceApp))
+	out := make([]slackstore.Connection, 0, len(f.byWorkspaceApp))
 	for _, r := range f.byWorkspaceApp {
 		out = append(out, *r)
 	}
 	return out, nil
 }
-func (f *fakeWorkspaceStore) GetByWorkspaceAppSystem(_ context.Context, workspaceID, apiAppID string) (*slackstore.Workspace, error) {
+func (f *fakeConnectionStore) ActiveForWorkspaceSystem(_ context.Context, orgID, workspaceID string) (*slackstore.Connection, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, r := range f.byWorkspaceApp {
+		if r.OrgID == orgID && r.WorkspaceID == workspaceID && r.Active {
+			return r, nil
+		}
+	}
+	return nil, nil
+}
+func (f *fakeConnectionStore) GetByWorkspaceAppSystem(_ context.Context, workspaceID, apiAppID string) (*slackstore.Connection, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.byWorkspaceApp[workspaceID+"/"+apiAppID], nil
 }
-func (f *fakeWorkspaceStore) LockApp(context.Context, string) error { return nil }
-func (f *fakeWorkspaceStore) AppBoundToOtherOrgSystem(context.Context, string, string) (bool, error) {
+func (f *fakeConnectionStore) LockApp(context.Context, string) error { return nil }
+func (f *fakeConnectionStore) AppBoundToOtherOrgSystem(context.Context, string, string) (bool, error) {
 	return false, nil
 }
 
@@ -196,18 +208,20 @@ func newWebhookRig(t *testing.T, signingSecretRef string, licensed bool) *webhoo
 	}
 	t.Cleanup(entitlements.Reset)
 
-	ws := &slackstore.Workspace{
+	ws := &slackstore.Connection{
 		WorkspaceID:      webhookTestWorkspaceID,
 		APIAppID:         webhookTestAppID,
 		OrgID:            webhookTestOrgID,
+		Source:           slackstore.SourceOrg,
+		Active:           true,
 		BotUserID:        "U0BOT",
 		SigningSecretRef: signingSecretRef,
 	}
-	wsStore := &fakeWorkspaceStore{byWorkspaceApp: map[string]*slackstore.Workspace{webhookTestWorkspaceID + "/" + webhookTestAppID: ws}}
+	wsStore := &fakeConnectionStore{byWorkspaceApp: map[string]*slackstore.Connection{webhookTestWorkspaceID + "/" + webhookTestAppID: ws}}
 	secrets := &fakeSecretStore{values: map[string]string{webhookTestOrgID + "/" + webhookTestSigningRef: webhookTestSecret}}
 	stores := db.Stores{
 		Secrets: secrets,
-		Ext:     map[string]any{slackstore.ExtKey: &slackstore.Bundle{Workspaces: wsStore}},
+		Ext:     map[string]any{slackstore.ExtKey: &slackstore.Bundle{Connections: wsStore}},
 	}
 
 	published := &[]domain.Event{}
@@ -583,9 +597,9 @@ func TestHandleWebhook_TwoAppsOneWorkspace_SignatureSelectionFollowsRow(t *testi
 		secret1           = "11111111111111111111111111111111"
 		secret2           = "22222222222222222222222222222222"
 	)
-	ws1 := &slackstore.Workspace{WorkspaceID: sharedWorkspaceID, APIAppID: app1, OrgID: org1, BotUserID: "U0BOT1", SigningSecretRef: ref1}
-	ws2 := &slackstore.Workspace{WorkspaceID: sharedWorkspaceID, APIAppID: app2, OrgID: org2, BotUserID: "U0BOT2", SigningSecretRef: ref2}
-	wsStore := &fakeWorkspaceStore{byWorkspaceApp: map[string]*slackstore.Workspace{
+	ws1 := &slackstore.Connection{Source: slackstore.SourceOrg, Active: true, WorkspaceID: sharedWorkspaceID, APIAppID: app1, OrgID: org1, BotUserID: "U0BOT1", SigningSecretRef: ref1}
+	ws2 := &slackstore.Connection{Source: slackstore.SourceOrg, Active: true, WorkspaceID: sharedWorkspaceID, APIAppID: app2, OrgID: org2, BotUserID: "U0BOT2", SigningSecretRef: ref2}
+	wsStore := &fakeConnectionStore{byWorkspaceApp: map[string]*slackstore.Connection{
 		sharedWorkspaceID + "/" + app1: ws1,
 		sharedWorkspaceID + "/" + app2: ws2,
 	}}
@@ -593,7 +607,7 @@ func TestHandleWebhook_TwoAppsOneWorkspace_SignatureSelectionFollowsRow(t *testi
 		org1 + "/" + ref1: secret1,
 		org2 + "/" + ref2: secret2,
 	}}
-	stores := db.Stores{Secrets: secrets, Ext: map[string]any{slackstore.ExtKey: &slackstore.Bundle{Workspaces: wsStore}}}
+	stores := db.Stores{Secrets: secrets, Ext: map[string]any{slackstore.ExtKey: &slackstore.Bundle{Connections: wsStore}}}
 	published := &[]domain.Event{}
 	entities := newFakeEntities()
 	pipeline := &ingestPipeline{

@@ -11,7 +11,7 @@ import (
 // channel tracking is a multi-mode concept (team<->channel binds only
 // matter once more than one team can track Slack channels); local mode
 // never runs the Slack routing this backs, so every method returns
-// db.ErrNotApplicableInLocal. Mirrors workspaceStore.
+// db.ErrNotApplicableInLocal. Mirrors connectionStore.
 type teamChannelStore struct{ q db.Execer }
 
 func newTeamChannelStore(q, _ db.Execer) slackstore.TeamChannelStore {

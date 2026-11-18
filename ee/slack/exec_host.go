@@ -149,14 +149,13 @@ func (h *slackExecHandler) resolveWorkspaceIdentity(ctx context.Context, rt agen
 
 // resolveToken resolves which bot token to act as for channelID, and the
 // caller its calls are made as: relay the workspace-identity decision, then
-// select that (workspace, app)'s token from the sealed bundle.
+// select that workspace's token from the sealed bundle.
 func (h *slackExecHandler) resolveToken(ctx context.Context, rt agenthost.ExtensionRuntime, channelID string) (slackCaller, string, error) {
 	ws, err := h.resolveWorkspaceIdentity(ctx, rt, channelID)
 	if err != nil {
 		return slackCaller{}, "", err
 	}
-	token, err := selectBotToken(ctx, rt, ws)
-	return slackBotCaller(rt.Info().OrgID, ws.WorkspaceID, ws.APIAppID), token, err
+	return selectBotToken(ctx, rt, ws)
 }
 
 // resolveTokenForDownload resolves a bot token for `download`, which carries no
@@ -167,8 +166,7 @@ func (h *slackExecHandler) resolveTokenForDownload(ctx context.Context, rt agent
 	if err := rt.Relay(ctx, "slack", opResolveWorkspaceForDownload, struct{}{}, &ws); err != nil {
 		return slackCaller{}, "", err
 	}
-	token, err := selectBotToken(ctx, rt, ws)
-	return slackBotCaller(rt.Info().OrgID, ws.WorkspaceID, ws.APIAppID), token, err
+	return selectBotToken(ctx, rt, ws)
 }
 
 // authorizeFileChannels is download's gate, run after files.info resolves the
@@ -177,30 +175,31 @@ func (h *slackExecHandler) authorizeFileChannels(ctx context.Context, rt agentho
 	return rt.Relay(ctx, "slack", opAuthorizeFileChannels, slackFileChannelsArg{Channels: channelIDs}, nil)
 }
 
-// selectBotToken picks the bot token for a resolved (workspace, app) identity
-// from the claim's sealed bundle — in-process, never asking the orchestrator for
-// a secret. A pair outside the sealed (== authorizable) set is an error,
-// symmetric with a channel the team doesn't track.
-func selectBotToken(ctx context.Context, rt agenthost.ExtensionRuntime, ws slackWorkspaceIdentity) (string, error) {
+// selectBotToken picks the bot token for a resolved identity's workspace from
+// the claim's sealed bundle — in-process, never asking the orchestrator for a
+// secret — and the caller its calls are made as, which names the app the token
+// was sealed for: the identity's app, unless a switch landed after the seal. A workspace outside the sealed (== authorizable) set is an
+// error, symmetric with a channel the team doesn't track.
+func selectBotToken(ctx context.Context, rt agenthost.ExtensionRuntime, ws slackWorkspaceIdentity) (slackCaller, string, error) {
 	raw, err := rt.ProviderCredential(ctx, "slack")
 	if err != nil {
 		// A refusal already names Slack and says what to do about it; a
 		// prefix would only repeat the name.
 		var refusal *agenthost.SourceRefusal
 		if errors.As(err, &refusal) {
-			return "", err
+			return slackCaller{}, "", err
 		}
-		return "", fmt.Errorf("slack: %w", err)
+		return slackCaller{}, "", fmt.Errorf("slack: %w", err)
 	}
 	var creds slackBundleCreds
 	if err := json.Unmarshal(raw, &creds); err != nil {
-		return "", fmt.Errorf("slack: parse sealed credentials: %w", err)
+		return slackCaller{}, "", fmt.Errorf("slack: parse sealed credentials: %w", err)
 	}
-	token, ok := creds.tokenFor(ws.WorkspaceID, ws.APIAppID)
+	sealed, ok := creds.tokenFor(ws.WorkspaceID)
 	if !ok {
-		return "", fmt.Errorf("slack: no bot token for workspace %s (app %s) in this claim's sealed set", ws.WorkspaceID, ws.APIAppID)
+		return slackCaller{}, "", fmt.Errorf("slack: no bot token for workspace %s in this claim's sealed set", ws.WorkspaceID)
 	}
-	return token, nil
+	return slackBotCaller(rt.Info().OrgID, sealed.WorkspaceID, sealed.APIAppID), sealed.BotToken, nil
 }
 
 // --- send / edit / react ---
@@ -221,11 +220,10 @@ func (h *slackExecHandler) send(ctx context.Context, rt agenthost.ExtensionRunti
 	if err != nil {
 		return slackSendResult{}, err
 	}
-	token, err := selectBotToken(ctx, rt, ws)
+	caller, token, err := selectBotToken(ctx, rt, ws)
 	if err != nil {
 		return slackSendResult{}, err
 	}
-	caller := slackBotCaller(rt.Info().OrgID, ws.WorkspaceID, ws.APIAppID)
 
 	var ts string
 	var attachErr error

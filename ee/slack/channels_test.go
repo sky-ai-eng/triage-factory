@@ -11,8 +11,8 @@ import (
 	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
 )
 
-func testWorkspaceForChannelResolver() slackstore.Workspace {
-	return slackstore.Workspace{WorkspaceID: "T0RESOLVE1", OrgID: "org-1", BotTokenRef: "slack_ws_T0RESOLVE1_bot_token"}
+func testWorkspaceForChannelResolver() slackstore.Connection {
+	return slackstore.Connection{WorkspaceID: "T0RESOLVE1", OrgID: "org-1", BotTokenRef: "slack_ws_T0RESOLVE1_bot_token"}
 }
 
 // newConversationsInfoServer serves a fixed conversations.info JSON body

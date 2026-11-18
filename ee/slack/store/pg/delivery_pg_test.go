@@ -197,10 +197,10 @@ func countDeliveries(t *testing.T, h *pgtest.Harness, apiAppID string) int {
 	return n
 }
 
-// TestWorkspaceStore_Postgres_GetByWorkspaceAppSystem: the admin-pool lookup
+// TestConnectionStore_Postgres_GetByWorkspaceAppSystem: the admin-pool lookup
 // by (workspace_id, api_app_id) alone (no org_id to scope by) is how the
 // pre-auth webhook receiver resolves which org a delivery belongs to.
-func TestWorkspaceStore_Postgres_GetByWorkspaceAppSystem(t *testing.T) {
+func TestConnectionStore_Postgres_GetByWorkspaceAppSystem(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgID, userID, _ := pgtest.SeedOrgWithUser(t, h, "slack-getbyid")
@@ -208,10 +208,10 @@ func TestWorkspaceStore_Postgres_GetByWorkspaceAppSystem(t *testing.T) {
 	ctx := context.Background()
 
 	mustWithUser(t, stores, ctx, orgID, userID, func(tx db.TxStores) error {
-		return slackstore.FromTx(tx).Workspaces.Upsert(ctx, testWorkspace(orgID, "T0GETSYS1"))
+		return upsertActiveConnection(ctx, tx, testWorkspace(orgID, "T0GETSYS1"))
 	})
 
-	got, err := slackstore.FromStores(stores).Workspaces.GetByWorkspaceAppSystem(ctx, "T0GETSYS1", defaultAppID("T0GETSYS1"))
+	got, err := slackstore.FromStores(stores).Connections.GetByWorkspaceAppSystem(ctx, "T0GETSYS1", defaultAppID("T0GETSYS1"))
 	if err != nil {
 		t.Fatalf("GetByWorkspaceAppSystem: %v", err)
 	}
@@ -219,7 +219,7 @@ func TestWorkspaceStore_Postgres_GetByWorkspaceAppSystem(t *testing.T) {
 		t.Fatalf("GetByWorkspaceAppSystem = %+v; want a row bound to org %s", got, orgID)
 	}
 
-	missing, err := slackstore.FromStores(stores).Workspaces.GetByWorkspaceAppSystem(ctx, "T0GETSYS1", "A0WRONGAPP")
+	missing, err := slackstore.FromStores(stores).Connections.GetByWorkspaceAppSystem(ctx, "T0GETSYS1", "A0WRONGAPP")
 	if err != nil {
 		t.Fatalf("GetByWorkspaceAppSystem (wrong app id): %v", err)
 	}
@@ -227,7 +227,7 @@ func TestWorkspaceStore_Postgres_GetByWorkspaceAppSystem(t *testing.T) {
 		t.Errorf("GetByWorkspaceAppSystem for the right workspace but wrong app id = %+v; want nil", missing)
 	}
 
-	missing, err = slackstore.FromStores(stores).Workspaces.GetByWorkspaceAppSystem(ctx, "T0NOPE0001", defaultAppID("T0NOPE0001"))
+	missing, err = slackstore.FromStores(stores).Connections.GetByWorkspaceAppSystem(ctx, "T0NOPE0001", defaultAppID("T0NOPE0001"))
 	if err != nil {
 		t.Fatalf("GetByWorkspaceAppSystem (unknown): %v", err)
 	}

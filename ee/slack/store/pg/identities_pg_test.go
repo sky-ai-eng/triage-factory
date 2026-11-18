@@ -12,7 +12,7 @@ import (
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 )
 
-// seedWorkspaceRow inserts a minimal org_slack_workspaces row for
+// seedWorkspaceRow inserts a minimal org_slack_connections row for
 // workspaceID via the admin pool. user_slack_identities carries no FK to
 // this table (workspace_id alone is no longer unique there once a
 // workspace can host several apps), so this is purely a realistic fixture,
@@ -25,9 +25,12 @@ func seedWorkspaceRow(t *testing.T, h *pgtest.Harness, workspaceID string) {
 	orgID, _, _ := pgtest.SeedOrgWithUser(t, h, "slack-ident-org-"+workspaceID)
 	apiAppID := "A0" + workspaceID
 	pgtest.MustExec(t, h.AdminDB, `
-		INSERT INTO org_slack_workspaces (workspace_id, api_app_id, org_id, transport, bot_token_ref)
-		VALUES ($1, $2, $3, 'socket', $4)
-	`, workspaceID, apiAppID, orgID, "slack_ws_"+workspaceID+"_"+apiAppID+"_bot_token")
+		INSERT INTO org_slack_connections (
+			workspace_id, api_app_id, org_id, source, active, transport, bot_token_ref, app_token_ref
+		)
+		VALUES ($1, $2, $3, 'org', true, 'socket', $4, $5)
+	`, workspaceID, apiAppID, orgID,
+		"slack_ws_"+workspaceID+"_"+apiAppID+"_bot_token", "slack_ws_"+workspaceID+"_"+apiAppID+"_app_token")
 }
 
 // TestSlackIdentityStore_Postgres_LookupSystem_NoRow: a sender never

@@ -19,11 +19,13 @@ import (
 	"sync"
 	"testing"
 
+	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
+	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
@@ -126,6 +128,14 @@ func (f *fakeSlackServer) stageBotsInfoOK(botID, appID string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.botsInfo[botID] = map[string]any{"ok": true, "bot": map[string]any{"id": botID, "app_id": appID}}
+}
+
+// stageBotName names the bot behind token in its bots.info response, which
+// must already be staged (stageConnectOK).
+func (f *fakeSlackServer) stageBotName(token, name string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.botsInfo[botIDForToken(token)]["bot"].(map[string]any)["name"] = name
 }
 
 // stageBotsInfoFail stages a failing bots.info response for botID.
@@ -772,5 +782,97 @@ func TestHandleManifest_BadTransport_400(t *testing.T) {
 	r.hdl.handleManifest(rec, r.req(http.MethodGet, "/api/slack/manifest?transport=carrier-pigeon", owner, orgID, "", nil))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+}
+
+// ---------- one active connection per workspace ----------
+
+// connectAs posts a connect for bot token token (and app token xapp-<token>)
+// as owner of orgID.
+func (r *slackWorkspaceRig) connectAs(owner, orgID, token string) *httptest.ResponseRecorder {
+	r.t.Helper()
+	rec := httptest.NewRecorder()
+	r.hdl.handleConnect(rec, r.req(http.MethodPost, "/api/slack/workspaces", owner, orgID, "",
+		map[string]string{"bot_token": token, "app_token": "xapp-" + token}))
+	return rec
+}
+
+// TestHandleConnect_FirstConnectionLandsActive: the first connection in a
+// workspace is the org's own app, active, named for its bot; reconnecting it
+// (a rotation) keeps it active and takes the bot's current name.
+func TestHandleConnect_FirstConnectionLandsActive(t *testing.T) {
+	r := newSlackWorkspaceRig(t, "https://tf.example")
+	orgID, owner, _ := pgtest.SeedOrgWithUser(t, r.h, "slack-first-active")
+	r.fake.stageConnectOK("xoxb-first", "T0FIRST01", "Acme", "U0BOT", "A0FIRST001", "")
+	r.fake.stageBotName("xoxb-first", "triage-bot")
+
+	rec := r.connectAs(owner, orgID, "xoxb-first")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("connect status = %d, want 201 (body=%s)", rec.Code, rec.Body.String())
+	}
+	view := decodeBody[workspaceView](t, rec)
+	if view.Source != slackstore.SourceOrg || !view.Active || view.AppName != "triage-bot" {
+		t.Errorf("connect response = %+v; want source org, active, app_name triage-bot", view)
+	}
+
+	r.fake.stageBotName("xoxb-first", "triage-bot (renamed)")
+	rec = r.connectAs(owner, orgID, "xoxb-first")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reconnect status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	view = decodeBody[workspaceView](t, rec)
+	if !view.Active || view.AppName != "triage-bot (renamed)" {
+		t.Errorf("reconnect response = %+v; want still active, with the new app_name", view)
+	}
+	stored, err := slackstore.FromStores(r.stores).Connections.GetByWorkspaceAppSystem(r.t.Context(), "T0FIRST01", "A0FIRST001")
+	if err != nil || stored == nil {
+		t.Fatalf("read the connection: %v (%v)", stored, err)
+	}
+	if !stored.Active || stored.AppName != "triage-bot (renamed)" {
+		t.Errorf("stored connection = %+v; want active, app_name triage-bot (renamed)", stored)
+	}
+}
+
+// TestHandleConnect_SecondAppInWorkspace_409: a different app connected into
+// a workspace where the org already has an active connection is refused, and
+// nothing is written: no row, no secret, no audit entry.
+func TestHandleConnect_SecondAppInWorkspace_409(t *testing.T) {
+	r := newSlackWorkspaceRig(t, "https://tf.example")
+	orgID, owner, _ := pgtest.SeedOrgWithUser(t, r.h, "slack-second-app")
+	r.fake.stageConnectOK("xoxb-one", "T0SECOND1", "Acme", "U0BOTONE", "A0SECOND01", "")
+	r.fake.stageConnectOK("xoxb-two", "T0SECOND1", "Acme", "U0BOTTWO", "A0SECOND02", "")
+
+	if rec := r.connectAs(owner, orgID, "xoxb-one"); rec.Code != http.StatusCreated {
+		t.Fatalf("first connect status = %d, want 201 (body=%s)", rec.Code, rec.Body.String())
+	}
+	auditBefore := len(r.auditRows(orgID))
+
+	rec := r.connectAs(owner, orgID, "xoxb-two")
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("second app status = %d, want 409 (body=%s)", rec.Code, rec.Body.String())
+	}
+	errs := decodeBody[struct {
+		Errors []httpx.ErrorItem `json:"errors"`
+	}](t, rec)
+	if len(errs.Errors) != 1 || errs.Errors[0].Reason != httpx.ReasonConflict ||
+		errs.Errors[0].Message != "This Slack workspace already has an active connection. Disconnect it before connecting another app." {
+		t.Errorf("409 body = %+v; want the one CONFLICT naming the active connection", errs)
+	}
+
+	conns := slackstore.FromStores(r.stores).Connections
+	if got, err := conns.GetByWorkspaceAppSystem(r.t.Context(), "T0SECOND1", "A0SECOND02"); err != nil || got != nil {
+		t.Errorf("refused app's row = %+v (%v); want none", got, err)
+	}
+	for _, key := range integrations.SlackConnectionKeysFor("T0SECOND1", "A0SECOND02").All() {
+		if v := r.secretValue(orgID, key); v != "" {
+			t.Errorf("secret %s = %q after the refusal; want none", key, v)
+		}
+	}
+	if got := len(r.auditRows(orgID)); got != auditBefore {
+		t.Errorf("audit rows = %d after the refusal; want %d", got, auditBefore)
+	}
+	active, err := conns.ActiveForWorkspaceSystem(r.t.Context(), orgID, "T0SECOND1")
+	if err != nil || active == nil || active.APIAppID != "A0SECOND01" {
+		t.Errorf("active connection = %+v (%v); want A0SECOND01 untouched", active, err)
 	}
 }

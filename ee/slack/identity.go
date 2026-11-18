@@ -75,7 +75,7 @@ func NewIdentityResolver(stores db.Stores) *IdentityResolver {
 // slow or failing users.info round-trip can't touch the webhook response.
 // Concurrent duplicate resolutions for the same sender are harmless — every
 // store write here is an idempotent upsert.
-func (r *IdentityResolver) resolveSender(ctx context.Context, ws slackstore.Workspace, slackUserID string) {
+func (r *IdentityResolver) resolveSender(ctx context.Context, ws slackstore.Connection, slackUserID string) {
 	if slackUserID == "" {
 		return
 	}
@@ -96,7 +96,7 @@ func (r *IdentityResolver) resolveSender(ctx context.Context, ws slackstore.Work
 		}
 	}
 
-	keys := integrations.SlackWorkspaceKeysFor(ws.WorkspaceID, ws.APIAppID)
+	keys := integrations.SlackConnectionKeysFor(ws.WorkspaceID, ws.APIAppID)
 	botToken, err := r.secrets.GetSystem(ctx, ws.OrgID, keys.BotToken)
 	if err != nil {
 		// Transient: no write, so the next mention retries.
@@ -152,7 +152,7 @@ func (r *IdentityResolver) resolveSender(ctx context.Context, ws slackstore.Work
 // up and definitively did not resolve. Shared by every non-match branch in
 // resolveSender above (bot/deleted/no-email, zero matches, ambiguous
 // matches) so the write + failure-log shape stays in one place.
-func (r *IdentityResolver) markUnresolved(ctx context.Context, ws slackstore.Workspace, slackUserID, displayName string) {
+func (r *IdentityResolver) markUnresolved(ctx context.Context, ws slackstore.Connection, slackUserID, displayName string) {
 	if err := r.identities.MarkAttemptSystem(ctx, ws.WorkspaceID, slackUserID, displayName); err != nil {
 		slackLog.Warn("identity: mark attempt failed", "workspace", ws.WorkspaceID, "slack_user", slackUserID, "error", err)
 	}

@@ -46,13 +46,13 @@ func newRemovalRig(t *testing.T) *removalRig {
 	stats, metrics := newTestStats()
 	published := &[]domain.Event{}
 	p := &ingestPipeline{
-		tx:         r.stores.Tx,
-		workspaces: bundle.Workspaces,
-		secrets:    r.stores.Secrets,
-		deliveries: bundle.Deliveries,
-		channels:   bundle.Channels,
-		publish:    func(_ context.Context, evt domain.Event) { *published = append(*published, evt) },
-		stats:      stats,
+		tx:          r.stores.Tx,
+		connections: bundle.Connections,
+		secrets:     r.stores.Secrets,
+		deliveries:  bundle.Deliveries,
+		channels:    bundle.Channels,
+		publish:     func(_ context.Context, evt domain.Event) { *published = append(*published, evt) },
+		stats:       stats,
 	}
 	return &removalRig{
 		slackWorkspaceRig: r,
@@ -83,21 +83,21 @@ func (r *removalRig) connect(workspaceID, botToken, transport string) {
 	}
 }
 
-func (r *removalRig) row(workspaceID string) *slackstore.Workspace {
+func (r *removalRig) row(workspaceID string) *slackstore.Connection {
 	r.t.Helper()
-	ws, err := slackstore.FromStores(r.stores).Workspaces.GetByWorkspaceAppSystem(r.t.Context(), workspaceID, removalTestApp)
+	ws, err := slackstore.FromStores(r.stores).Connections.GetByWorkspaceAppSystem(r.t.Context(), workspaceID, removalTestApp)
 	if err != nil {
 		r.t.Fatalf("read workspace %s: %v", workspaceID, err)
 	}
 	return ws
 }
 
-// secretValues reads workspaceID's three secrets, in SlackWorkspaceKeysFor's
+// secretValues reads workspaceID's three secrets, in SlackConnectionKeysFor's
 // order (bot token, signing secret, app token).
 func (r *removalRig) secretValues(workspaceID string) []string {
 	r.t.Helper()
 	var out []string
-	for _, key := range integrations.SlackWorkspaceKeysFor(workspaceID, removalTestApp).All() {
+	for _, key := range integrations.SlackConnectionKeysFor(workspaceID, removalTestApp).All() {
 		v, err := r.stores.Secrets.GetSystem(r.t.Context(), r.orgID, key)
 		if err != nil {
 			r.t.Fatalf("read secret %s: %v", key, err)
@@ -349,12 +349,12 @@ func TestAppRemoval_Socket_DisconnectsAndAcks(t *testing.T) {
 	}
 }
 
-type failingDeleteWorkspaces struct {
-	slackstore.WorkspaceStore
+type failingDeleteConnections struct {
+	slackstore.ConnectionStore
 	err error
 }
 
-func (f failingDeleteWorkspaces) DeleteSystem(context.Context, string, string, string, time.Time) (bool, error) {
+func (f failingDeleteConnections) DeleteSystem(context.Context, string, string, string, time.Time) (bool, error) {
 	return false, f.err
 }
 
@@ -364,7 +364,7 @@ func TestAppRemoval_Socket_FailedDeleteNotAcked(t *testing.T) {
 	r := newRemovalRig(t)
 	r.connect("T0REMOVE1", "xoxb-remove1", transportSocket)
 	before := r.secretValues("T0REMOVE1")
-	r.pipeline.workspaces = failingDeleteWorkspaces{WorkspaceStore: r.pipeline.workspaces, err: errors.New("boom")}
+	r.pipeline.connections = failingDeleteConnections{ConnectionStore: r.pipeline.connections, err: errors.New("boom")}
 
 	c := &appConnection{appID: removalTestApp, orgID: r.orgID, sightings: map[string]*sightingView{}}
 	env := socketEnvelope{

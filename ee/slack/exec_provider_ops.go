@@ -111,14 +111,14 @@ func slackOpAuthorizeChannel(ctx context.Context, stores db.Stores, info agentho
 }
 
 // slackOpResolveWorkspace resolves which (workspace, app) IDENTITY to act as for
-// a channel — the non-secret half of the old resolveWorkspaceAndToken. Channel
-// registry unknown → error. If this conversation's task is a slack:message naming this
-// SAME channel, that message's (workspace_id, api_app_id) is authoritative;
-// otherwise every connected workspace matching the channel's WorkspaceID is
-// listed: exactly one → use it; more than one → refuse rather than guess.
-// Both channel ids resolve to registry rows and compare as rows, so a message
-// recorded before Slack moved its channel to a new id still names the channel
-// the verb acts on.
+// a channel: the org's active connection in the channel's workspace. Channel
+// registry unknown, or no active connection there → error. If this
+// conversation's task is a slack:message naming this SAME channel, that
+// message's workspace is the one, which a shared channel needs: it is in more
+// than one workspace, and the registry row names only the last one a sighting
+// came through. Both channel ids resolve to registry rows and compare as rows,
+// so a message recorded before Slack moved its channel to a new id still names
+// the channel the verb acts on.
 func slackOpResolveWorkspace(ctx context.Context, stores db.Stores, info agenthost.ConversationInfo, args json.RawMessage) (any, error) {
 	var a slackChannelArg
 	if err := json.Unmarshal(args, &a); err != nil {
@@ -150,49 +150,38 @@ func slackOpResolveWorkspace(ctx context.Context, stores db.Stores, info agentho
 		}
 	}
 
-	workspaces, err := orgWorkspaces(ctx, stores, info.OrgID)
+	conn, err := bundle.Connections.ActiveForWorkspaceSystem(ctx, info.OrgID, channel.WorkspaceID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("slack: resolve the active connection for workspace %s: %w", channel.WorkspaceID, err)
 	}
-	var matches []slackstore.Workspace
-	for _, ws := range workspaces {
-		if ws.WorkspaceID == channel.WorkspaceID {
-			matches = append(matches, ws)
-		}
+	if conn == nil {
+		return nil, fmt.Errorf("slack: no active connection for workspace %s (channel %s)", channel.WorkspaceID, a.Channel)
 	}
-	switch len(matches) {
-	case 0:
-		return nil, fmt.Errorf("slack: no connected app for workspace %s (channel %s)", channel.WorkspaceID, a.Channel)
-	case 1:
-		return slackWorkspaceIdentity{WorkspaceID: matches[0].WorkspaceID, APIAppID: matches[0].APIAppID}, nil
-	default:
-		return nil, fmt.Errorf(
-			"slack: workspace %s has %d connected apps in this org; cannot determine which bot identity to act as for channel %s",
-			channel.WorkspaceID, len(matches), a.Channel)
-	}
+	return slackWorkspaceIdentity{WorkspaceID: conn.WorkspaceID, APIAppID: conn.APIAppID}, nil
 }
 
 // slackOpResolveWorkspaceForDownload resolves which (workspace, app) IDENTITY to
 // speak as for `download`, which carries no channel: prefer this conversation's own
-// message-task metadata, else the org's sole connected workspace (refuse on
-// zero or ambiguous). This picks an identity ONLY; the file's real channel
-// membership is authorized separately (slackOpAuthorizeFileChannels).
+// message-task metadata, else the active connection of the org's sole workspace
+// with one (refuse on zero or ambiguous). This picks an identity ONLY; the
+// file's real channel membership is authorized separately
+// (slackOpAuthorizeFileChannels).
 func slackOpResolveWorkspaceForDownload(ctx context.Context, stores db.Stores, info agenthost.ConversationInfo, _ json.RawMessage) (any, error) {
 	if ws, _, ok, err := workspaceFromConversationTaskMetadata(ctx, stores, info); err != nil {
 		return nil, err
 	} else if ok {
 		return slackWorkspaceIdentity{WorkspaceID: ws.WorkspaceID, APIAppID: ws.APIAppID}, nil
 	}
-	workspaces, err := orgWorkspaces(ctx, stores, info.OrgID)
+	active, err := orgActiveConnections(ctx, stores, info.OrgID)
 	if err != nil {
 		return nil, err
 	}
-	if len(workspaces) != 1 {
+	if len(active) != 1 {
 		return nil, fmt.Errorf(
-			"slack: cannot determine which connected workspace to download from (this conversation has no Slack thread context and the org has %d connected workspaces)",
-			len(workspaces))
+			"slack: cannot determine which connected workspace to download from (this conversation has no Slack thread context and the org has %d workspaces with an active connection)",
+			len(active))
 	}
-	return slackWorkspaceIdentity{WorkspaceID: workspaces[0].WorkspaceID, APIAppID: workspaces[0].APIAppID}, nil
+	return slackWorkspaceIdentity{WorkspaceID: active[0].WorkspaceID, APIAppID: active[0].APIAppID}, nil
 }
 
 // slackOpAuthorizeFileChannels is download's authorization gate, run after
@@ -263,7 +252,7 @@ func slackOpRecordThreadRoot(ctx context.Context, stores db.Stores, info agentho
 		return nil, nil
 	}
 	entityID := thread.EntityID
-	ws, err := bundle.Workspaces.GetByWorkspaceAppSystem(ctx, a.WorkspaceID, a.APIAppID)
+	ws, err := bundle.Connections.GetByWorkspaceAppSystem(ctx, a.WorkspaceID, a.APIAppID)
 	if err != nil {
 		slackLog.Warn("record thread root: resolve workspace for permalink failed", "workspace", a.WorkspaceID, "entity", entityID, "error", err)
 		return nil, nil
@@ -277,69 +266,66 @@ func slackOpRecordThreadRoot(ctx context.Context, stores db.Stores, info agentho
 
 // workspaceFromConversationTaskMetadata resolves the conversation's own Slack context — its task,
 // if a slack:message task, and that message's event metadata — via
-// Conversations.GetSystem → Task → PrimaryEventID → Events.GetMetadataSystem. Every
+// Conversations.GetSystem → Task → PrimaryEventID → Events.GetMetadataSystem, and
+// answers with the org's active connection in the message's workspace (not the
+// app the message arrived through, which may since have been switched out). Every
 // store call propagates its error; only a genuine "not found" maps to (ok=false,
 // nil), so a masked failure never silently falls through to the org-wide
 // fallback and replies as the wrong bot identity.
-func workspaceFromConversationTaskMetadata(ctx context.Context, stores db.Stores, info agenthost.ConversationInfo) (ws slackstore.Workspace, channel string, ok bool, err error) {
+func workspaceFromConversationTaskMetadata(ctx context.Context, stores db.Stores, info agenthost.ConversationInfo) (ws slackstore.Connection, channel string, ok bool, err error) {
 	conv, err := stores.Conversations.GetSystem(ctx, info.OrgID, info.ConversationID)
 	if err != nil {
-		return slackstore.Workspace{}, "", false, fmt.Errorf("slack: load conversation: %w", err)
+		return slackstore.Connection{}, "", false, fmt.Errorf("slack: load conversation: %w", err)
 	}
 	if conv == nil || conv.TaskID == "" {
-		return slackstore.Workspace{}, "", false, nil
+		return slackstore.Connection{}, "", false, nil
 	}
 	task, err := stores.Tasks.GetSystem(ctx, info.OrgID, conv.TaskID)
 	if err != nil {
-		return slackstore.Workspace{}, "", false, fmt.Errorf("slack: load task: %w", err)
+		return slackstore.Connection{}, "", false, fmt.Errorf("slack: load task: %w", err)
 	}
 	if task == nil || task.EventType != domain.EventSlackMessage || task.PrimaryEventID == "" {
-		return slackstore.Workspace{}, "", false, nil
+		return slackstore.Connection{}, "", false, nil
 	}
 	metaJSON, err := stores.Events.GetMetadataSystem(ctx, info.OrgID, task.PrimaryEventID)
 	if err != nil {
-		return slackstore.Workspace{}, "", false, fmt.Errorf("slack: load event metadata: %w", err)
+		return slackstore.Connection{}, "", false, fmt.Errorf("slack: load event metadata: %w", err)
 	}
 	if metaJSON == "" {
-		return slackstore.Workspace{}, "", false, nil
+		return slackstore.Connection{}, "", false, nil
 	}
 	var meta SlackMessageMetadata
 	if jsonErr := json.Unmarshal([]byte(metaJSON), &meta); jsonErr != nil {
-		return slackstore.Workspace{}, "", false, fmt.Errorf("slack: parse event metadata: %w", jsonErr)
+		return slackstore.Connection{}, "", false, fmt.Errorf("slack: parse event metadata: %w", jsonErr)
 	}
 	if meta.WorkspaceID == "" {
-		return slackstore.Workspace{}, "", false, nil
+		return slackstore.Connection{}, "", false, nil
 	}
 	bundle := slackstore.FromStores(stores)
 	if bundle == nil {
-		return slackstore.Workspace{}, "", false, fmt.Errorf("slack: not available")
+		return slackstore.Connection{}, "", false, fmt.Errorf("slack: not available")
 	}
-	row, err := bundle.Workspaces.GetByWorkspaceAppSystem(ctx, meta.WorkspaceID, meta.APIAppID)
+	row, err := bundle.Connections.ActiveForWorkspaceSystem(ctx, info.OrgID, meta.WorkspaceID)
 	if err != nil {
-		return slackstore.Workspace{}, "", false, fmt.Errorf("slack: resolve workspace from event metadata: %w", err)
+		return slackstore.Connection{}, "", false, fmt.Errorf("slack: resolve the active connection from event metadata: %w", err)
 	}
 	if row == nil {
-		return slackstore.Workspace{}, "", false, nil
+		return slackstore.Connection{}, "", false, nil
 	}
 	return *row, meta.Channel, true, nil
 }
 
-// orgWorkspaces lists orgID's connected Slack workspaces via the admin-pool
-// ListAllSystem (exec ops run with no request-JWT claims), filtered to orgID.
-func orgWorkspaces(ctx context.Context, stores db.Stores, orgID string) ([]slackstore.Workspace, error) {
+// orgActiveConnections lists orgID's active Slack connections, one per
+// workspace that has one, via the admin-pool ListForOrgSystem (exec ops run
+// with no request-JWT claims).
+func orgActiveConnections(ctx context.Context, stores db.Stores, orgID string) ([]slackstore.Connection, error) {
 	bundle := slackstore.FromStores(stores)
 	if bundle == nil {
 		return nil, fmt.Errorf("slack: not available")
 	}
-	all, err := bundle.Workspaces.ListAllSystem(ctx)
+	all, err := bundle.Connections.ListForOrgSystem(ctx, orgID)
 	if err != nil {
-		return nil, fmt.Errorf("slack: list workspaces: %w", err)
+		return nil, fmt.Errorf("slack: list connections: %w", err)
 	}
-	var out []slackstore.Workspace
-	for _, ws := range all {
-		if ws.OrgID == orgID {
-			out = append(out, ws)
-		}
-	}
-	return out, nil
+	return activeConnections(all), nil
 }
