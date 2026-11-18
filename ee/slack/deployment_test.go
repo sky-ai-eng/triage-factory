@@ -118,11 +118,14 @@ func TestDeploymentAppFromEnv_Invalid(t *testing.T) {
 		name                           string
 		appID, signingSecret, appToken string
 		wantInError                    string
+		// notInError tells the two transport cases apart: each message
+		// names both variables.
+		notInError string
 	}{
-		{"both transport secrets", testDeployAppID, testDeploySigningSecret, testDeployAppToken, "not both"},
-		{"neither transport secret", testDeployAppID, "", "", envSlackSigningSecret},
-		{"app id without A prefix", "1234.5678", testDeploySigningSecret, "", "not the client ID"},
-		{"app token without xapp-", testDeployAppID, "", "xoxb-1-not-an-app-token", "xapp-"},
+		{"both transport secrets", testDeployAppID, testDeploySigningSecret, testDeployAppToken, "not both", ""},
+		{"neither transport secret", testDeployAppID, "", "", envSlackSigningSecret, "not both"},
+		{"app id without A prefix", "1234.5678", testDeploySigningSecret, "", "not the client ID", ""},
+		{"app token without xapp-", testDeployAppID, "", "xoxb-1-not-an-app-token", "xapp-", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -138,6 +141,9 @@ func TestDeploymentAppFromEnv_Invalid(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tc.wantInError) {
 				t.Errorf("error %q does not contain %q", err, tc.wantInError)
+			}
+			if tc.notInError != "" && strings.Contains(err.Error(), tc.notInError) {
+				t.Errorf("error %q contains %q", err, tc.notInError)
 			}
 		})
 	}

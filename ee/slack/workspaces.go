@@ -37,8 +37,8 @@ type workspacesHandler struct {
 	// constructs a zero-value handler) — toWorkspaceView is nil-safe.
 	sockets *socketManager
 	// deployment is the deployment's own Slack app, the zero app when there
-	// is none. Connect refuses its bot token: a pasted-token connection is an
-	// org's own app, and the deployment app is installed through OAuth.
+	// is none. Connect refuses its bot token, because a pasted-token
+	// connection is always an org's own app.
 	deployment deploymentApp
 }
 
