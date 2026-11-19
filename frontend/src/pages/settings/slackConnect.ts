@@ -203,6 +203,13 @@ export interface SlackInstallReturn {
   error: string | null
 }
 
+// hasSlackInstallReturn says whether search carries an outcome of the install
+// ceremony, for a container that has to show the card that reads it.
+export function hasSlackInstallReturn(search: string): boolean {
+  const q = new URLSearchParams(search)
+  return SLACK_RETURN_PARAMS.some((k) => q.has(k))
+}
+
 export function readSlackInstallReturn(search: string): SlackInstallReturn {
   const q = new URLSearchParams(search)
   const result = q.get('slack')

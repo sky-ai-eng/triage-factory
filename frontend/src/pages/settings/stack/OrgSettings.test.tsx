@@ -2,7 +2,7 @@
 // Install alone, an action section with no footer, until "Use a personal API
 // key instead" turns it into the key form; Cancel folds it back. Connected and
 // rebinding render as they always have.
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import OrgSettings from './OrgSettings'
@@ -16,6 +16,16 @@ vi.mock('../../setup/steps', async (importOriginal) => {
     ...actual,
     loadOrg: async () => loadMocks.org,
     loadGitHubAppInstall: async () => ({}),
+  }
+})
+
+// Slack is the one entitled feature. The Linear tests render local mode, where
+// the Slack and SSO sections never show.
+vi.mock('../../../hooks/useEntitlements', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../hooks/useEntitlements')>()
+  return {
+    ...actual,
+    useEntitlements: () => ({ has: (f: string) => f === actual.FeatureSlack, loaded: true }),
   }
 })
 
@@ -125,5 +135,30 @@ describe('OrgSettings — Linear connection', () => {
     expect(screen.getByRole('button', { name: 'Replace key' })).toBeDisabled()
     expect(screen.queryByRole('button', { name: 'Install Triage Factory' })).not.toBeInTheDocument()
     expect(keyLink()).not.toBeInTheDocument()
+  })
+})
+
+// The Slack card reads what Slack's install reported on the URL, and a folded
+// section does not mount it, so a return from Slack opens the section.
+describe('OrgSettings — Slack', () => {
+  afterEach(() => {
+    window.history.replaceState(null, '', '/')
+  })
+
+  it('opens the Slack section when the page is a return from Slack', async () => {
+    window.history.replaceState(null, '', '/org?tab=settings&slack_error=denied')
+    render(<OrgSettings orgId="org-1" isLocal={false} />)
+
+    const section = await screen.findByRole('button', { name: /^Slack/ })
+    expect(section).toHaveAttribute('aria-expanded', 'true')
+    expect(await screen.findByText('The install was cancelled in Slack.')).toBeInTheDocument()
+  })
+
+  it('leaves the Slack section folded otherwise', async () => {
+    window.history.replaceState(null, '', '/org?tab=settings')
+    render(<OrgSettings orgId="org-1" isLocal={false} />)
+
+    const section = await screen.findByRole('button', { name: /^Slack/ })
+    expect(section).toHaveAttribute('aria-expanded', 'false')
   })
 })

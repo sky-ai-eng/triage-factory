@@ -472,6 +472,34 @@ describe('SlackWorkspacesCard switch preview', () => {
     expect(fingerprints).toEqual(['fp-1', 'fp-2'])
   })
 
+  it('stays open while the switch is in flight, so its warnings still show', async () => {
+    let finish!: (body: unknown) => void
+    const activation = new Promise((resolve) => {
+      finish = resolve
+    })
+    stubApi({
+      connections: [ownApp, stagedDeployment],
+      routes: {
+        [`GET ${PREVIEW}`]: { body: preview() },
+        [`POST ${ACTIVATE}`]: { body: activation },
+      },
+    })
+    renderCard()
+    const dialog = await openPreview()
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Switch' }))
+    await within(dialog).findByRole('button', { name: 'Switching…' })
+    fireEvent.keyDown(window, { key: 'Escape' })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    expect(screen.getByRole('dialog', { name: 'Switch apps' })).toBeInTheDocument()
+
+    finish({
+      connection: { ...stagedDeployment, active: true },
+      warnings: [{ channel_id: 'C4', reason: 'invite_required' }],
+    })
+    expect(await screen.findByRole('dialog', { name: 'Switched' })).toBeInTheDocument()
+  })
+
   it('lists the channels the new bot did not join, then closes on Done', async () => {
     stubApi({
       connections: [ownApp, stagedDeployment],

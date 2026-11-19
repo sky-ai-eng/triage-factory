@@ -212,9 +212,14 @@ export default function SlackWorkspacesCard({
     reread()
   }
 
+  // Scrolled once the form has expanded, so the form itself is brought into
+  // view rather than the folded controls above it.
   const openOwnForm = () => {
     setFormOpen(true)
-    formRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' })
+    setTimeout(
+      () => formRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' }),
+      COLLAPSE_MS,
+    )
   }
 
   // The page the install ceremony comes back to.
@@ -377,7 +382,9 @@ function ConnectArea({
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
           <a href={slackInstallStartURL(orgId, returnTo)} className={primaryButtonClass}>
             {/* The label takes its color on a span: the global link color is
-                unlayered CSS, which outranks a utility class on the <a>. */}
+                unlayered CSS, which outranks a utility class on the <a>.
+                TODO(TFAC-1490): the span goes once the global link color is
+                layered below utilities, and the <a> carries text-warm-ink. */}
             <span className="text-warm-ink">Add to Slack</span>
           </a>
           <button

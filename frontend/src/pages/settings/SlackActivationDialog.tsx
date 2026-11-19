@@ -169,15 +169,21 @@ function ActivationDialog({
       }
       confirmDisabled={phase.kind !== 'ready' || blocked || submitting}
       onConfirm={() => void confirm()}
-      onCancel={onClose}
+      // Once activate is sent the switch happens whether or not the dialog
+      // stays, so it stays: closing it would drop the channels the new bot
+      // did not join.
+      onCancel={submitting ? undefined : onClose}
       width={480}
     >
-      <div className="space-y-4">
-        {refusal && (
-          <p role="alert" className="text-ui leading-snug text-alarm">
-            {refusal}
-          </p>
-        )}
+      {refusal && (
+        <p role="alert" className="mb-4 text-ui leading-snug text-alarm">
+          {refusal}
+        </p>
+      )}
+      {/* The reading scrolls within the dialog, which is centered in a fixed
+          frame that does not scroll: a preview taller than the window would
+          otherwise put Cancel and Confirm out of reach. */}
+      <div className="max-h-[50vh] space-y-4 overflow-y-auto pr-1">
         {phase.kind === 'loading' && <p className="text-ui text-ink-3">Reading what changes…</p>}
         {phase.kind === 'failed' && (
           <p role="alert" className="text-ui leading-snug text-alarm">
@@ -186,6 +192,16 @@ function ActivationDialog({
         )}
         {preview && <PreviewReading preview={preview} />}
       </div>
+      {/* Outside the scrolling reading, beside the Confirm they disable. */}
+      {preview && blocked && (
+        <ul aria-label="Blockers" className="mt-4 space-y-1.5">
+          {preview.blockers.map((b) => (
+            <li key={b.code} className="text-ui leading-snug text-alarm">
+              {slackBlockerText(b)}
+            </li>
+          ))}
+        </ul>
+      )}
     </Dialog>
   )
 }
@@ -207,16 +223,6 @@ function PreviewReading({ preview }: { preview: SlackActivationPreview }) {
           {preview.notes.map((n) => (
             <li key={n.code} className="text-reported leading-snug text-ink-3">
               {n.message}
-            </li>
-          ))}
-        </ul>
-      )}
-
-      {preview.blockers.length > 0 && (
-        <ul aria-label="Blockers" className="space-y-1.5">
-          {preview.blockers.map((b) => (
-            <li key={b.code} className="text-ui leading-snug text-alarm">
-              {slackBlockerText(b)}
             </li>
           ))}
         </ul>
