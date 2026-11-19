@@ -716,12 +716,11 @@ func TestSocketManager_EntitlementLapseMidConnection_KeepsTheConnection(t *testi
 	default:
 	}
 
-	// Several reconcile passes at the fast tick; a pass that took the
-	// connection down would close conn, and the redial would show here.
-	select {
-	case <-fake.conns:
-		t.Fatal("the connection redialed after the lapse; want the first one kept")
-	case <-time.After(150 * time.Millisecond):
+	// Several reconcile passes at the fast tick. A pass that dropped the app
+	// would stop its connection and start none.
+	time.Sleep(150 * time.Millisecond)
+	if status, ok := rig.mgr.StatusFor(socketTestAppID); !ok || status.State != stateOpen {
+		t.Fatalf("status after the lapse = %+v, ok=%v; want the connection kept open", status, ok)
 	}
 
 	payload := eventCallbackPayload(socketTestWorkspace, socketTestAppID, "Ev-lapsed-1", mentionInner("C1", "U1", "1.0"))

@@ -203,11 +203,10 @@ type desiredApp struct {
 // installs the app, so a bad TF_SLACK_APP_TOKEN shows in the logs at boot,
 // and it stays up when every org's connection through it is gone. Its rows
 // have no transport, so the loop over rows skips them.
-// Ingest drops the deliveries of an inactive connection and of an org without
-// the slack entitlement, but not Slack reporting the app removed
-// (handleAppRemoved), and that report reaches TF only through the app's
-// socket: closed, it would leave a removed app's row and its dead bot token
-// in place for the org to come back to when it renews. An app belongs to one
+// An inactive connection and an unlicensed org keep their app's socket
+// because Slack reports the app's removal only through it: with the socket
+// closed, a removal is lost, and the removed app's row and dead bot token stay
+// for the org to come back to. An app belongs to one
 // org, so every row sharing an api_app_id carries the same org_id, and the
 // org and app-token secret ref are well-defined regardless of which matching
 // row supplies them.
