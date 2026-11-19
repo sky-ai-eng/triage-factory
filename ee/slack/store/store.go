@@ -97,7 +97,9 @@ const (
 // columns); on an org connection Transport is set, and the ref its transport
 // needs is too (the source-shape CHECK). AppName is the Slack app's bot name,
 // for display, "" when bots.info gave none. RegisteredByUserID is "" when the
-// registering user was later removed (ON DELETE SET NULL).
+// registering user was later removed (ON DELETE SET NULL). ConnectedAt is when
+// the row's credential was last written, by a connect, an install or a token
+// rotation; Activate leaves it, and UpdatedAt moves on any write.
 type Connection struct {
 	WorkspaceID        string
 	APIAppID           string
@@ -114,6 +116,7 @@ type Connection struct {
 	AppTokenRef        string
 	RegisteredByUserID string
 	CreatedAt          time.Time
+	ConnectedAt        time.Time
 	UpdatedAt          time.Time
 }
 
@@ -136,8 +139,9 @@ var ErrNoSuchConnection = errors.New("slackstore: no such connection")
 // a per-request read.
 type ConnectionStore interface {
 	// Upsert writes c's credential and display columns for its
-	// (WorkspaceID, APIAppID, OrgID) triple and returns the row it persisted:
-	// an existing same-org row for that (workspace, app) pair is updated in
+	// (WorkspaceID, APIAppID, OrgID) triple, with connected_at now, and
+	// returns the row it persisted: an existing same-org row for that
+	// (workspace, app) pair is updated in
 	// place, keeping the Active and Source it has (a token rotation never
 	// changes which connection acts); a wholly new (workspace_id, api_app_id)
 	// pair is inserted with c's Active and Source. A (workspace_id,
@@ -179,11 +183,13 @@ type ConnectionStore interface {
 	Activate(ctx context.Context, orgID, workspaceID, apiAppID string) (Connection, error)
 
 	// DeleteSystem removes orgID's (workspaceID, apiAppID) row on the admin
-	// pool, and only while its updated_at still equals updatedAt, reporting
-	// whether it did. For system code acting on a row it read: ingest, when
-	// Slack reports the app removed from the workspace. A connect or a
-	// disconnect landing after that read changes the row, and it is left.
-	DeleteSystem(ctx context.Context, orgID, workspaceID, apiAppID string, updatedAt time.Time) (deleted bool, err error)
+	// pool, and only while its connected_at still equals connectedAt,
+	// reporting whether it did. For system code acting on a row it read:
+	// ingest, when Slack reports the app removed from the workspace. A
+	// connect or a disconnect landing after that read changes or removes the
+	// credential, and the row is left; an activation does neither, and the
+	// row is deleted.
+	DeleteSystem(ctx context.Context, orgID, workspaceID, apiAppID string, connectedAt time.Time) (deleted bool, err error)
 
 	// ListAllSystem returns every connection across every org, active or
 	// not, on the admin pool (bypasses RLS). System-code-only — see the type

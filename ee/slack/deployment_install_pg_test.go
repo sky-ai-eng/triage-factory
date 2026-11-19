@@ -594,7 +594,7 @@ func TestInstallCallback_NewWorkspace(t *testing.T) {
 		RegisteredByUserID: owner,
 	}
 	got := *c
-	got.CreatedAt, got.UpdatedAt = time.Time{}, time.Time{}
+	got.CreatedAt, got.ConnectedAt, got.UpdatedAt = time.Time{}, time.Time{}, time.Time{}
 	if got != want {
 		t.Errorf("connection = %+v\nwant %+v", got, want)
 	}

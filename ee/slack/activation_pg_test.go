@@ -8,6 +8,7 @@ import (
 	"slices"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
@@ -637,6 +638,36 @@ func TestActivate_Concurrent(t *testing.T) {
 	}
 	if n := r.activeCount(); n != 1 {
 		t.Errorf("active connections = %d; want 1", n)
+	}
+}
+
+// TestActivate_RemovalDeliveredAfterTheSwitch: Slack's removal of the old
+// app, generated after its connect and before the switch but delivered after
+// the switch, still disconnects the old connection. The switch wrote the row,
+// but no token, so it is not a reconnect the removal predates.
+func TestActivate_RemovalDeliveredAfterTheSwitch(t *testing.T) {
+	r := newActivationRig(t)
+	if _, err := r.h.AdminDB.Exec(`
+		UPDATE org_slack_connections SET connected_at = now() - interval '1 hour' WHERE org_id = $1
+	`, r.orgID); err != nil {
+		t.Fatalf("backdate the connects: %v", err)
+	}
+	removedAt := time.Now().Add(-30 * time.Minute)
+	r.activateOK(switchAppB)
+
+	payload := eventCallbackPayload(switchWorkspace, switchAppA, "Ev-removal-late", appUninstalledInner)
+	payload["event_time"] = removedAt.Unix()
+	if rec := r.postSigned(switchWorkspace, payload); rec.Code != http.StatusOK {
+		t.Fatalf("removal status = %d (body=%s)", rec.Code, rec.Body.String())
+	}
+	if got := r.outcomes(); got[outcomeDisconnected] != 1 {
+		t.Errorf("outcomes = %v; want one %q", got, outcomeDisconnected)
+	}
+	if old, err := slackstore.FromStores(r.stores).Connections.GetByWorkspaceAppSystem(r.t.Context(), switchWorkspace, switchAppA); err != nil || old != nil {
+		t.Errorf("old connection after its removal = %+v (%v); want deleted", old, err)
+	}
+	if got := r.activeApp(); got != switchAppB {
+		t.Errorf("active app = %q; want %s kept", got, switchAppB)
 	}
 }
 

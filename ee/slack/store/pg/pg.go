@@ -63,7 +63,7 @@ const connectionColumns = `
 	workspace_id, api_app_id, org_id::text, source, active, workspace_name, app_name,
 	COALESCE(enterprise_id, ''), COALESCE(transport, ''), bot_user_id, bot_token_ref,
 	COALESCE(signing_secret_ref, ''), COALESCE(app_token_ref, ''),
-	COALESCE(registered_by_user_id::text, ''), created_at, updated_at
+	COALESCE(registered_by_user_id::text, ''), created_at, connected_at, updated_at
 `
 
 func scanConnection(sc rowScanner) (slackstore.Connection, error) {
@@ -72,7 +72,7 @@ func scanConnection(sc rowScanner) (slackstore.Connection, error) {
 		&c.WorkspaceID, &c.APIAppID, &c.OrgID, &c.Source, &c.Active, &c.WorkspaceName, &c.AppName,
 		&c.EnterpriseID, &c.Transport, &c.BotUserID, &c.BotTokenRef,
 		&c.SigningSecretRef, &c.AppTokenRef,
-		&c.RegisteredByUserID, &c.CreatedAt, &c.UpdatedAt,
+		&c.RegisteredByUserID, &c.CreatedAt, &c.ConnectedAt, &c.UpdatedAt,
 	); err != nil {
 		return slackstore.Connection{}, err
 	}
@@ -116,7 +116,8 @@ func (s *connectionStore) Upsert(ctx context.Context, c slackstore.Connection) (
 			bot_token_ref = $9,
 			signing_secret_ref = NULLIF($10, ''),
 			app_token_ref = NULLIF($11, ''),
-			registered_by_user_id = NULLIF($12, '')::uuid
+			registered_by_user_id = NULLIF($12, '')::uuid,
+			connected_at = now()
 		WHERE workspace_id = $1 AND api_app_id = $2 AND org_id = $3
 		RETURNING `+connectionColumns,
 		c.WorkspaceID, c.APIAppID, c.OrgID, c.WorkspaceName, c.AppName, c.EnterpriseID, c.Transport,
@@ -278,15 +279,16 @@ func isOneActiveViolation(err error) bool {
 	return errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == oneActiveIndex
 }
 
-// DeleteSystem's updated_at condition holds against a concurrent connect: the
-// connect's UPDATE holds the row's lock, and once it commits Postgres
-// re-checks the condition against the row it wrote, whose updated_at the
-// trigger moved.
-func (s *connectionStore) DeleteSystem(ctx context.Context, orgID, workspaceID, apiAppID string, updatedAt time.Time) (bool, error) {
+// DeleteSystem's connected_at condition holds against a concurrent connect:
+// the connect's UPDATE holds the row's lock, and once it commits Postgres
+// re-checks the condition against the row it wrote, whose connected_at the
+// connect moved. A concurrent Activate holds the lock the same way and leaves
+// connected_at, so the delete goes ahead once it commits.
+func (s *connectionStore) DeleteSystem(ctx context.Context, orgID, workspaceID, apiAppID string, connectedAt time.Time) (bool, error) {
 	res, err := s.admin.ExecContext(ctx, `
 		DELETE FROM org_slack_connections
-		WHERE workspace_id = $1 AND api_app_id = $2 AND org_id = $3 AND updated_at = $4
-	`, workspaceID, apiAppID, orgID, updatedAt)
+		WHERE workspace_id = $1 AND api_app_id = $2 AND org_id = $3 AND connected_at = $4
+	`, workspaceID, apiAppID, orgID, connectedAt)
 	if err != nil {
 		return false, fmt.Errorf("delete org_slack_connections (system): %w", err)
 	}
