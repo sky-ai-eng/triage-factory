@@ -847,10 +847,11 @@ export default function OrgSettings({
           404s an unlicensed org, so the FE hides the surface rather than
           presenting a dead flow — same gating shape as SSO below. An action
           section (no Save footer): the card owns its own connect/disconnect
-          controls and list fetch. */}
+          controls and list fetch. canManage is unconditional because this
+          whole group renders only for an org admin. */}
       {orgId && !isLocal && slackEnt && (
         <SettingsSection title="Slack" summary="Connect a workspace">
-          <SlackWorkspacesCard orgId={orgId} />
+          <SlackWorkspacesCard orgId={orgId} canManage />
         </SettingsSection>
       )}
 

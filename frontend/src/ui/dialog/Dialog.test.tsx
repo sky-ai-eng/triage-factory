@@ -101,6 +101,34 @@ describe('Dialog', () => {
     })
   })
 
+  it('confirmDisabled shows the verb but neither a press nor Enter fires it', () => {
+    const onConfirm = vi.fn()
+    const { rerender } = render(
+      <Dialog
+        open
+        confirmDisabled
+        title="Switch apps"
+        confirmLabel="Switch"
+        onConfirm={onConfirm}
+      />,
+    )
+
+    const go = screen.getByRole('button', { name: 'Switch' })
+    expect(go).toBeDisabled()
+    // A disabled control cannot take focus, so the landing is Cancel.
+    expect(screen.getByRole('button', { name: 'Cancel' })).toHaveFocus()
+    fireEvent.click(go)
+    fireEvent.keyDown(window, { key: 'Enter' })
+    expect(onConfirm).not.toHaveBeenCalled()
+
+    // Becoming pressable does not move focus off where it landed.
+    rerender(<Dialog open title="Switch apps" confirmLabel="Switch" onConfirm={onConfirm} />)
+    expect(go).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Cancel' })).toHaveFocus()
+    fireEvent.keyDown(window, { key: 'Enter' })
+    expect(onConfirm).toHaveBeenCalledTimes(1)
+  })
+
   it('renders nothing at all when closed', () => {
     render(<Dialog open={false} title="Delete platform?" />)
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()

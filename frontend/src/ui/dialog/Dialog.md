@@ -38,7 +38,10 @@ destructive verb reached from a reading takes the gesture every other
 irreversible verb in this system takes rather than being the one place a click
 suffices; it implies the destructive keyboard rules below whatever `kind` says.
 `noConfirm` is a reading with nothing to decide — Cancel, labelled `Close`, is
-the one control.
+the one control. `confirmDisabled` keeps the verb on screen but unpressable,
+with Enter unbound, for a reading that names what stands in the way of it; a
+dialog that opens disabled lands focus on Cancel and leaves it there when the
+verb becomes pressable.
 
 A reading is still one decision. A dialog that needs a text field, or a second
 question, is still a settings surface wearing a dialog's clothes.
