@@ -81,7 +81,9 @@ func TestCompose_DeploymentCommitSignerIsControlOnly(t *testing.T) {
 // install, the Events API receiver and the Socket Mode connection, and never
 // to the executor. Compose forwards only the names it lists, so a name missing
 // from control is a value set in .env that the binary never sees. The names
-// are spelled out because core cannot import ee/slack, which reads them.
+// are spelled out because core cannot import ee/slack, which reads them;
+// ee/slack's TestDeploymentAppEnvNamesForwardedByCompose ties them to its
+// constants.
 func TestCompose_DeploymentSlackAppIsControlOnly(t *testing.T) {
 	env := composeServiceEnv(t)
 	control, executor := env["control"], env["executor"]
@@ -103,6 +105,13 @@ func TestCompose_DeploymentSlackAppIsControlOnly(t *testing.T) {
 			if _, forwards := keys[name]; forwards != (service == "control") {
 				t.Errorf("service %s forwards %s = %v; only the control service may, and it must", service, name, forwards)
 			}
+		}
+	}
+	// A value that interpolates another name forwards nothing set under this
+	// one.
+	for _, name := range names {
+		if got, want := control[name], "${"+name+":-}"; got != want {
+			t.Errorf("control sets %s = %q; want %q", name, got, want)
 		}
 	}
 }

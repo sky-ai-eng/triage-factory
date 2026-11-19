@@ -1,17 +1,15 @@
 # Deployment Slack app
 
-By default an organization connects Slack by creating a Slack app of its own
-and pasting its credentials into **Organization → Settings → Slack**. A
-**deployment Slack app** is one app you register once: an organization admin
-presses **Add to Slack**, approves on Slack, and has nothing to create or
-paste.
+A **deployment Slack app** is one Slack app you register once for the whole
+deployment. With it configured, **Organization → Settings → Slack** offers
+**Add to Slack**: an organization admin approves on Slack and has nothing to
+create or paste. Without it, each organization creates a Slack app of its own
+and pastes its credentials there.
 
-- **An organization can still connect its own app.** **Use your own Slack app
-  instead** stays under Add to Slack, and a workspace can hold both
-  connections, one active at a time. The organization switches a workspace
-  between them in Settings, without reinstalling either.
-- **Leaving the variables unset changes nothing.** Organizations keep
-  connecting their own apps.
+- **An organization can still use its own app.** **Use your own Slack app
+  instead** sits under Add to Slack. A workspace can hold both connections,
+  one active at a time, and the organization switches between them in Settings
+  without reinstalling either.
 - **Multi mode only.** Local mode ignores these variables.
 
 ## Choose a transport
@@ -34,6 +32,10 @@ returns to `<TF_PUBLIC_URL>/api/slack/install/callback`, and Slack requires
 redirect URLs to use HTTPS. With Socket Mode that URL has to be reachable by
 the admin's browser, not by Slack.
 
+With the Events API, the control host's clock must be within five minutes of
+the real time. Triage Factory refuses a delivery whose timestamp is further
+from its own clock, and logs nothing for it.
+
 ## 1. Create the app
 
 1. Download the manifest for your transport and replace each
@@ -49,12 +51,14 @@ the admin's browser, not by Slack.
 organization's bot token once and never refreshes it, and Slack says that with
 token rotation "it expires every 12 hours". Slack also says "Token rotation may
 not be turned off once it's turned on", so an app created with it can't be
-fixed: create a new app and point the variables at it. The install refuses an
-app with rotation on.
+fixed: create a new app, point the variables at it, and delete the old app in
+Slack, which otherwise keeps sending its events to Triage Factory. The install
+refuses an app with rotation on.
 
 The manifests come from the code and are regenerated whenever the scopes or
 events change. After an upgrade, compare your app's manifest under **App
-Manifest** with the new file.
+Manifest** with the new file. A new scope reaches a workspace only when its
+organization presses **Add to Slack** again.
 
 ## 2. One workspace or several
 
@@ -67,7 +71,8 @@ Manifest** with the new file.
 
 ## 3. Configure `control` and restart
 
-All five values are on the app's **Basic Information** page.
+All five values are on the app's **Basic Information** page. The variables
+are listed in [`.env.example`](../../../../.env.example).
 
 | Variable                  | Value                                                        | Secret |
 | ------------------------- | ------------------------------------------------------------ | ------ |
@@ -87,10 +92,12 @@ TF_SLACK_SIGNING_SECRET=<signing secret>   # Events API
 ```
 
 Set the first three and **exactly one** of the signing secret and the app
-token; which one you set is the transport. Anything else is logged at boot and
-the deployment runs without a Slack app. Each secret can be a mounted file via
-`<NAME>_FILE` ([Deployment secrets](../secrets.md)). Only `control` needs
-these.
+token; which one you set is the transport. A Socket Mode app shows a Signing
+Secret too: leave `TF_SLACK_SIGNING_SECRET` unset for it, or Triage Factory
+waits for Events API deliveries that never come. Any other partial set is
+logged at boot and the deployment runs without a Slack app. Each secret can be
+a mounted file via `<NAME>_FILE` ([Deployment secrets](../secrets.md)). Only
+`control` needs these.
 
 ```sh
 docker compose up -d
@@ -99,8 +106,8 @@ docker compose up -d
 **Events API:** Slack checked the request URL when you created the app, before
 Triage Factory had the signing secret, so that check failed. Now that it has
 restarted, open **Event Subscriptions** in the app's settings and have Slack
-verify the request URL again. If it fails again, look for the signing-secret
-line under [Troubleshooting](#troubleshooting).
+verify the request URL again. If it fails again, see **Wrong signing secret**
+under [Troubleshooting](#troubleshooting).
 
 ## 4. Check it took
 
@@ -155,7 +162,7 @@ deployment app and each customer connecting its own.
 
 ## Troubleshooting
 
-Each of these is a line in `docker compose logs control`.
+Each of these is a line in `docker compose logs control`, except where noted.
 
 - **Malformed configuration** — at boot: `read the deployment Slack app from
   the environment failed; the deployment runs without one`, with an error
@@ -176,18 +183,32 @@ Each of these is a line in `docker compose logs control`.
   an older manifest; update its manifest from the current file.
 - **Token rotation on** — `slack install: the deployment's Slack app has token
   rotation on`. Create a new app from the manifest, which leaves rotation off,
-  and set the variables to it.
+  set the variables to it, and delete the old app.
 - **Public URL not HTTPS** — the first time an organization's Settings asks
   for the app: `the deployment Slack app is configured but the deployment's
   public URL is not HTTPS, so no org can install it`. Set `TF_PUBLIC_URL` to
   an `https://` URL.
-- **Wrong signing secret** (Events API) — `slack: a delivery to the deployment
-  Slack app's Events API endpoint is not signed with TF_SLACK_SIGNING_SECRET`.
-  Triage Factory answers such deliveries 401 and logs at most one line a
-  minute, with `mismatches` counting the deliveries since the last line. A
-  single line can be a forged request; lines that keep coming while Slack
-  delivers mean the secret is wrong. Set `TF_SLACK_SIGNING_SECRET` to the
-  **Signing Secret** on the app's Basic Information page and restart.
+- **Add to Slack ends on a Slack error page about the redirect URI** —
+  nothing is logged, because Slack never sends the admin back. The app's
+  redirect URL must be exactly `<TF_PUBLIC_URL>/api/slack/install/callback`:
+  check `redirect_urls` under **App Manifest**, and that the placeholder was
+  replaced.
+- **Wrong signing secret** (Events API) — Triage Factory answers each such
+  delivery 401 and counts it in `tf_slack_webhook_signature_mismatches_total`,
+  under `names_app="deployment"`, or `"none"` for Slack's request URL check.
+  That counter rising while the app gets no events through means the secret is
+  wrong; a forged request also counts, so a few and then nothing is not this.
+  Each control pod also logs at most one warning a minute: `slack: a delivery
+  to the deployment Slack app's Events API endpoint is not signed with
+  TF_SLACK_SIGNING_SECRET`, with `mismatches` counting the deliveries since
+  its last one. Set `TF_SLACK_SIGNING_SECRET` to the **Signing Secret** on the
+  app's Basic Information page and restart.
+- **Another app sends to the endpoint** (Events API) — counted under
+  `names_app="other"`, and logged as `slack: a delivery naming another Slack
+  app reached the deployment Slack app's Events API endpoint`, with that app's
+  id as `delivery_app_id`. That app's request URL is
+  `<TF_PUBLIC_URL>/api/webhooks/slack`, usually an app you replaced: change
+  its request URL or delete it.
 
 Slack expects an answer to each delivery "within three seconds". When more
 than 95% of deliveries fail within 60 minutes, it turns off the app's event

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -121,9 +122,11 @@ type webhookHandler struct {
 	// deployment is the deployment's own Slack app, the zero app when there
 	// is none.
 	deployment deploymentApp
-	// mismatches limits how often the deployment endpoint logs a delivery
-	// signed with another secret.
-	mismatches mismatchReport
+	// mismatches and otherAppMismatches limit how often the deployment
+	// endpoint logs a delivery signed with another secret: one naming the
+	// deployment's app or none, and one naming another app.
+	mismatches         mismatchReport
+	otherAppMismatches mismatchReport
 }
 
 // handleWebhook serves POST /api/webhooks/slack/{org_id}, for an org's own
@@ -217,14 +220,7 @@ func (h *webhookHandler) handleDeploymentWebhook(w http.ResponseWriter, r *http.
 	switch checkSlackSignature(h.deployment.SigningSecret, body, r.Header.Get("X-Slack-Request-Timestamp"), r.Header.Get("X-Slack-Signature")) {
 	case signatureValid:
 	case signatureMismatch:
-		// A wrong TF_SLACK_SIGNING_SECRET fails every delivery here and
-		// nowhere else, so this line is the only sign of it the operator gets
-		// before Slack turns the app's event delivery off.
-		if log, count := h.mismatches.record(time.Now()); log {
-			slackLog.Error("slack: a delivery to the deployment Slack app's Events API endpoint is not signed with "+envSlackSigningSecret+
-				"; if Slack's deliveries all fail this way, set it to the Signing Secret on the app's Basic Information page",
-				"app_id", h.deployment.AppID, "mismatches", count)
-		}
+		h.reportSignatureMismatch(r.Context(), body)
 		httpx.WriteUnauth(w)
 		return
 	default:
@@ -344,15 +340,16 @@ func validSlackSignature(secret string, body []byte, timestampHeader, sigHeader 
 type signatureCheck int
 
 const (
-	signatureValid signatureCheck = iota
 	// signatureMalformed is a request Slack would not send: a header missing
 	// or unparseable, a digest that is not SHA-256's length, or a timestamp
-	// outside the replay window.
-	signatureMalformed
+	// outside the replay window. It is the zero value, so a check left unset
+	// refuses.
+	signatureMalformed signatureCheck = iota
 	// signatureMismatch is a fresh, well-formed signature that secret does
 	// not produce. Every delivery Slack sends looks like this when the
 	// configured secret is not the app's, and so does a forgery.
 	signatureMismatch
+	signatureValid
 )
 
 func checkSlackSignature(secret string, body []byte, timestampHeader, sigHeader string) signatureCheck {
@@ -389,6 +386,56 @@ func checkSlackSignature(secret string, body []byte, timestampHeader, sigHeader 
 		return signatureMismatch
 	}
 	return signatureValid
+}
+
+// The values of slack.webhook.signature.mismatches' names_app attribute: the
+// app a mismatched delivery's unverified body names.
+const (
+	mismatchNamesDeploymentApp = "deployment"
+	mismatchNamesOtherApp      = "other"
+	mismatchNamesNoApp         = "none"
+)
+
+// slackAppIDPattern is the shape of a Slack App ID, bounded so an unverified
+// body cannot put a long string in the log.
+var slackAppIDPattern = regexp.MustCompile(`^A[A-Z0-9]{2,31}$`)
+
+// reportSignatureMismatch counts, and logs at a limited rate, a delivery to
+// the deployment endpoint that TF_SLACK_SIGNING_SECRET did not sign. A wrong
+// secret fails every delivery here and nowhere else, before Slack turns the
+// app's event delivery off. So does another app whose request URL points
+// here, which is why the app the body names is reported: it is unverified,
+// so it tells the operator where to look and nothing acts on it. The lines
+// are warnings, not errors, because anyone can send a request that lands
+// here.
+func (h *webhookHandler) reportSignatureMismatch(ctx context.Context, body []byte) {
+	var named struct {
+		APIAppID string `json:"api_app_id"`
+	}
+	_ = json.Unmarshal(body, &named)
+	names := mismatchNamesNoApp
+	switch {
+	case named.APIAppID == "":
+	case named.APIAppID == h.deployment.AppID:
+		names = mismatchNamesDeploymentApp
+	case slackAppIDPattern.MatchString(named.APIAppID):
+		names = mismatchNamesOtherApp
+	}
+	h.stats.recordSignatureMismatch(ctx, h.deployment.AppID, names)
+
+	if names == mismatchNamesOtherApp {
+		if log, count := h.otherAppMismatches.record(time.Now()); log {
+			slackLog.Warn("slack: a delivery naming another Slack app reached the deployment Slack app's Events API endpoint; "+
+				"if these keep coming, that app's request URL points here: change it or delete the app",
+				"app_id", h.deployment.AppID, "delivery_app_id", named.APIAppID, "mismatches", count)
+		}
+		return
+	}
+	if log, count := h.mismatches.record(time.Now()); log {
+		slackLog.Warn("slack: a delivery to the deployment Slack app's Events API endpoint is not signed with "+envSlackSigningSecret+
+			"; if Slack's deliveries all fail this way, set it to the Signing Secret on the app's Basic Information page",
+			"app_id", h.deployment.AppID, "mismatches", count)
+	}
 }
 
 // signatureMismatchLogInterval is the least time between two logged
