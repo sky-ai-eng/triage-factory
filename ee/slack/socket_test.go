@@ -15,6 +15,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
+	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -238,6 +239,7 @@ func newSocketTestRig(t *testing.T, rows ...*slackstore.Connection) *socketTestR
 	channels := newFakeChannelRegistryFor(entities)
 	pipeline := &ingestPipeline{
 		connections: wsStore,
+		secrets:     secrets,
 		deliveries:  newFakeDeliveries(),
 		channels:    channels,
 		publish:     func(_ context.Context, evt domain.Event) { *published = append(*published, evt) },
@@ -412,7 +414,10 @@ func TestDesiredApps_InactiveConnectionKeepsItsSocket(t *testing.T) {
 	}
 }
 
-func TestDesiredApps_UnentitledOrg_Excluded(t *testing.T) {
+// TestDesiredApps_UnlicensedOrg_Included: an org without the slack
+// entitlement keeps its app's socket, which is how Slack's report of the
+// app's removal reaches TF.
+func TestDesiredApps_UnlicensedOrg_Included(t *testing.T) {
 	rig := newSocketTestRig(t, socketTestRow(socketTestOrgID))
 	entitlements.RegisterProvider(entitlements.Static()) // override: nothing licensed
 
@@ -420,8 +425,8 @@ func TestDesiredApps_UnentitledOrg_Excluded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("desiredApps: %v", err)
 	}
-	if len(desired) != 0 {
-		t.Fatalf("desiredApps = %v; want empty for an unentitled org", desired)
+	if d, ok := desired[socketTestAppID]; len(desired) != 1 || !ok || d.orgID != socketTestOrgID || !d.tokenRefs[socketTestAppRef] {
+		t.Fatalf("desiredApps = %v; want the unlicensed org's app, dialed with its app token", desired)
 	}
 }
 
@@ -695,17 +700,28 @@ func TestSocketManager_UnconnectedWorkspace_SightingRecordedNoPublish(t *testing
 	t.Fatal("timed out waiting for the unconnected-workspace sighting to be recorded")
 }
 
-func TestSocketManager_EntitlementLapseMidConnection_EnvelopeDropped(t *testing.T) {
+// TestSocketManager_EntitlementLapseMidConnection_KeepsTheConnection: a
+// licence lapsing under an open connection leaves it open across reconcile
+// passes, and the lapsed org's mention is acked and dropped.
+func TestSocketManager_EntitlementLapseMidConnection_KeepsTheConnection(t *testing.T) {
 	withFastSocketTimings(t)
 	fake := newFakeSlackSocket(t)
 	rig := newSocketTestRig(t, socketTestRow(socketTestOrgID))
 	runManager(t, rig.mgr)
 
 	conn := fake.nextConn(t)
-
-	// Flip entitlement off WITHOUT reconciling (simulates the race window
-	// before the next tick tears the connection down).
 	entitlements.RegisterProvider(entitlements.Static())
+	select {
+	case rig.configChanged <- struct{}{}:
+	default:
+	}
+
+	// Several reconcile passes at the fast tick. A pass that dropped the app
+	// would stop its connection and start none.
+	time.Sleep(150 * time.Millisecond)
+	if status, ok := rig.mgr.StatusFor(socketTestAppID); !ok || status.State != stateOpen {
+		t.Fatalf("status after the lapse = %+v, ok=%v; want the connection kept open", status, ok)
+	}
 
 	payload := eventCallbackPayload(socketTestWorkspace, socketTestAppID, "Ev-lapsed-1", mentionInner("C1", "U1", "1.0"))
 	sendEventsAPI(t, conn, "Env-lapsed", payload)
@@ -713,6 +729,49 @@ func TestSocketManager_EntitlementLapseMidConnection_EnvelopeDropped(t *testing.
 
 	if len(*rig.published) != 0 {
 		t.Fatalf("published %d events for a lapsed org; want 0", len(*rig.published))
+	}
+}
+
+// TestSocketManager_UnlicensedOrg_AppliesAppRemoval: the reconciler opens a
+// connection for an org without the slack entitlement. A mention through it
+// is acked and produces nothing; Slack reporting the app uninstalled is acked
+// and removes the workspace's row and its secrets.
+func TestSocketManager_UnlicensedOrg_AppliesAppRemoval(t *testing.T) {
+	withFastSocketTimings(t)
+	// Only the start's pass reconciles: a tick after the removal deletes the
+	// row would take the connection down before its ack is written.
+	socketReconcileInterval = 10 * time.Second
+	fake := newFakeSlackSocket(t)
+	rig := newSocketTestRig(t, socketTestRow(socketTestOrgID))
+	keys := integrations.SlackConnectionKeysFor(socketTestWorkspace, socketTestAppID)
+	rig.secrets.values[socketTestOrgID+"/"+keys.BotToken] = "xoxb-socket-test"
+	entitlements.RegisterProvider(entitlements.Static())
+	runManager(t, rig.mgr)
+
+	conn := fake.nextConn(t)
+
+	mention := eventCallbackPayload(socketTestWorkspace, socketTestAppID, "Ev-unlicensed-mention", mentionInner("C1", "U1", "1.0"))
+	sendEventsAPI(t, conn, "Env-mention", mention)
+	expectAck(t, conn, "Env-mention")
+	if len(*rig.published) != 0 {
+		t.Fatalf("published %d events for an unlicensed org; want 0", len(*rig.published))
+	}
+
+	removal := eventCallbackPayload(socketTestWorkspace, socketTestAppID, "Ev-unlicensed-removal", map[string]any{"type": "app_uninstalled"})
+	removal["event_time"] = time.Now().Unix()
+	sendEventsAPI(t, conn, "Env-removal", removal)
+	expectAck(t, conn, "Env-removal")
+
+	if ws, _ := rig.wsStore.GetByWorkspaceAppSystem(t.Context(), socketTestWorkspace, socketTestAppID); ws != nil {
+		t.Errorf("row after the removal = %+v; want deleted", ws)
+	}
+	for _, key := range keys.All() {
+		if v, _ := rig.secrets.GetSystem(t.Context(), socketTestOrgID, key); v != "" {
+			t.Errorf("secret %s after the removal = %q; want deleted", key, v)
+		}
+	}
+	if len(*rig.published) != 0 {
+		t.Errorf("published %d events; want 0", len(*rig.published))
 	}
 }
 
