@@ -656,11 +656,11 @@ func TestHandleConnect_RotatingToken_422(t *testing.T) {
 	}
 }
 
-// TestHandleConnect_TokenShape_422: a bot token or app-level token of the
-// wrong shape, and a missing bot token, are refused by field before any call
-// to Slack, every fault in one response. Slack is staged to accept each
+// TestHandleConnect_TokenShape: a bot token or app-level token of the wrong
+// shape (422), and a missing bot token (400), are refused by field before any
+// call to Slack, every fault in one response. Slack is staged to accept each
 // token, so a refusal can only come from the shape check.
-func TestHandleConnect_TokenShape_422(t *testing.T) {
+func TestHandleConnect_TokenShape(t *testing.T) {
 	const (
 		userToken     = "xoxp-1-user"
 		botToken      = "xoxb-1-bot"
@@ -670,15 +670,18 @@ func TestHandleConnect_TokenShape_422(t *testing.T) {
 	type fault struct{ reason, field, mentions string }
 	botFault := fault{httpx.ReasonInvalidField, "bot_token", "Bot User OAuth Token"}
 	appFault := fault{httpx.ReasonInvalidField, "app_token", "App-Level Tokens"}
+	missingBot := fault{httpx.ReasonMissingField, "bot_token", "bot_token is required"}
 	for _, tc := range []struct {
-		name string
-		body map[string]string
-		want []fault
+		name   string
+		body   map[string]string
+		status int
+		want   []fault
 	}{
-		{"user token as bot token", map[string]string{"bot_token": userToken, "app_token": appToken}, []fault{botFault}},
-		{"signing secret as app token", map[string]string{"bot_token": botToken, "app_token": signingSecret}, []fault{appFault}},
-		{"both wrong", map[string]string{"bot_token": userToken, "app_token": signingSecret}, []fault{botFault, appFault}},
-		{"no bot token", map[string]string{"app_token": appToken}, []fault{{httpx.ReasonMissingField, "bot_token", "bot_token is required"}}},
+		{"user token as bot token", map[string]string{"bot_token": userToken, "app_token": appToken}, http.StatusUnprocessableEntity, []fault{botFault}},
+		{"signing secret as app token", map[string]string{"bot_token": botToken, "app_token": signingSecret}, http.StatusUnprocessableEntity, []fault{appFault}},
+		{"both wrong", map[string]string{"bot_token": userToken, "app_token": signingSecret}, http.StatusUnprocessableEntity, []fault{botFault, appFault}},
+		{"no bot token", map[string]string{"app_token": appToken}, http.StatusBadRequest, []fault{missingBot}},
+		{"no bot token, wrong app token", map[string]string{"app_token": signingSecret}, http.StatusBadRequest, []fault{missingBot, appFault}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newSlackWorkspaceRig(t, "https://tf.example")
@@ -689,8 +692,8 @@ func TestHandleConnect_TokenShape_422(t *testing.T) {
 
 			rec := httptest.NewRecorder()
 			r.hdl.handleConnect(rec, r.importReq(owner, orgID, tc.body))
-			if rec.Code != http.StatusUnprocessableEntity {
-				t.Fatalf("status = %d, want 422 (body=%s)", rec.Code, rec.Body.String())
+			if rec.Code != tc.status {
+				t.Fatalf("status = %d, want %d (body=%s)", rec.Code, tc.status, rec.Body.String())
 			}
 			errs := decodeBody[struct {
 				Errors []httpx.ErrorItem `json:"errors"`
