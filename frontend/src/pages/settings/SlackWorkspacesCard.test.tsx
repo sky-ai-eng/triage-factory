@@ -380,7 +380,9 @@ describe('SlackWorkspacesCard returning from Slack', () => {
     renderCard()
 
     expect(await screen.findByRole('dialog', { name: 'Switch apps' })).toBeInTheDocument()
-    expect(fetchMock).toHaveBeenCalledWith(PREVIEW, expect.anything())
+    // The preview can be requested after the dialog is in the DOM, which is
+    // all findByRole waits for.
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(PREVIEW, expect.anything()))
     expect(window.location.search).toBe('?tab=settings')
   })
 })
@@ -521,7 +523,9 @@ describe('SlackWorkspacesCard switch preview', () => {
     expect(within(done).getByText('#secret')).toBeInTheDocument()
     expect(within(done).getByText(/Invite the new bot to it in Slack/)).toBeInTheDocument()
 
-    expect(within(done).getByRole('button', { name: 'Done' })).toHaveFocus()
+    // Focus can land after the dialog is in the DOM, which is all findByRole
+    // waits for.
+    await waitFor(() => expect(within(done).getByRole('button', { name: 'Done' })).toHaveFocus())
 
     fireEvent.click(within(done).getByRole('button', { name: 'Done' }))
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
