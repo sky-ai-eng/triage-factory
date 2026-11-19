@@ -57,6 +57,36 @@ describe('SlackWorkspacesCard', () => {
     expect(fetchMock).toHaveBeenCalledWith(LIST, expect.objectContaining({ method: 'POST' }))
   })
 
+  it('refuses the expiring bot token of an app with token rotation on before calling', async () => {
+    // An org with no connections shows the connect form open.
+    const fetchMock = vi.fn(() =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        ...jsonBody({ items: [], next_page_token: '', total_count: 0 }),
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SlackWorkspacesCard orgId="org-empty" />)
+
+    const botToken = await screen.findByPlaceholderText('xoxb-…')
+    const connect = screen.getByRole('button', { name: 'Connect workspace' })
+
+    fireEvent.change(botToken, { target: { value: 'xoxe.xoxb-1-rotating' } })
+    fireEvent.click(connect)
+    expect(await screen.findByRole('alert')).toHaveTextContent('token rotation')
+
+    // An app configuration token also starts "xoxe." but is not a bot token.
+    fireEvent.change(botToken, { target: { value: 'xoxe.xoxp-1-config' } })
+    fireEvent.click(connect)
+    expect(await screen.findByRole('alert')).toHaveTextContent("doesn't look like a bot token")
+
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      '/api/orgs/org-empty/slack/connections/import',
+      expect.anything(),
+    )
+  })
+
   it('disconnects a connection under the org’s path', async () => {
     vi.spyOn(window, 'confirm').mockReturnValue(true)
     const fetchMock = stubConnections()
