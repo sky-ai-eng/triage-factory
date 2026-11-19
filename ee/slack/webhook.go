@@ -236,6 +236,9 @@ func (h *webhookHandler) handleDeploymentWebhook(w http.ResponseWriter, r *http.
 		httpx.WriteUnauth(w)
 		return
 	default:
+		// TODO(TFAC-1491): a stale timestamp here is uncounted, so a clock
+		// more than five minutes off refuses every delivery to the deployment
+		// app with no metric or alert until Slack turns its events off.
 		httpx.WriteUnauth(w)
 		return
 	}
