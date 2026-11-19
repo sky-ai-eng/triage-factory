@@ -79,12 +79,15 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
   useEffect(() => {
     teamRef.current = team
   }, [team])
-  const teamSeeded = useRef(false)
+  // State rather than a ref because Save waits on it: the render that first
+  // sees the teams loaded commits before this effect picks the team, and a
+  // Save pressed in it would send no team instead of the default.
+  const [teamSeeded, setTeamSeeded] = useState(false)
   useEffect(() => {
-    if (teamSeeded.current || !teamsLoaded) return
-    teamSeeded.current = true
+    if (teamSeeded || !teamsLoaded) return
+    setTeamSeeded(true)
     setTeam(pickerDefault(teams, lastActingTeamId))
-  }, [teamsLoaded, teams, lastActingTeamId])
+  }, [teamSeeded, teamsLoaded, teams, lastActingTeamId])
 
   // Keep refs for component lifecycle and polling so retry timers don't
   // continue firing after unmount.
@@ -388,7 +391,7 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
           <button
             type="button"
             onClick={handleSave}
-            disabled={selectionCount === 0 || saving || !teamsLoaded}
+            disabled={selectionCount === 0 || saving || !teamSeeded}
             className="bg-warm hover:bg-warm/90 disabled:opacity-40 text-warm-ink font-medium rounded-xl px-5 py-2 text-body transition-colors"
           >
             {saving ? 'Saving…' : 'Save'}
