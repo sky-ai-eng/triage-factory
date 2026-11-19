@@ -83,12 +83,14 @@ type installHandler struct {
 	client   *http.Client
 	app      deploymentApp
 	ceremony installCeremony
+	// stats counts how each callback ends; nil-safe.
+	stats *ingestStats
 }
 
 // available reports whether the ceremony's routes exist: in multi mode, behind
 // an HTTPS public URL, because Slack refuses a redirect URL that is not HTTPS.
 func (h *installHandler) available() bool {
-	return runmode.Current() != runmode.ModeLocal && strings.HasPrefix(h.ceremony.PublicURL(), "https://")
+	return runmode.Current() != runmode.ModeLocal && installablePublicURL(h.ceremony.PublicURL())
 }
 
 func (h *installHandler) callbackURL() string {
@@ -230,18 +232,18 @@ func (h *installHandler) handleCallback(w http.ResponseWriter, r *http.Request) 
 	// land on the session's active org.
 	sessionOrg := httpx.OrgIDFrom(ctx)
 	if cookieErr != nil {
-		h.fail(w, r, sessionOrg, "", "state")
+		h.refuse(w, r, sessionOrg, "", "state", installState)
 		return
 	}
 	st, err := h.ceremony.ParseConnectState(cookie.Value)
 	if err != nil {
 		slackLog.Warn("slack install: state cookie refused", "error", err)
-		h.fail(w, r, sessionOrg, "", "state")
+		h.refuse(w, r, sessionOrg, "", "state", installState)
 		return
 	}
 	query := r.URL.Query()
 	if st.CSRF == "" || query.Get("state") != st.CSRF || st.UserID != userID {
-		h.fail(w, r, sessionOrg, "", "state")
+		h.refuse(w, r, sessionOrg, "", "state", installState)
 		return
 	}
 
@@ -250,11 +252,11 @@ func (h *installHandler) handleCallback(w http.ResponseWriter, r *http.Request) 
 	orgID, returnTo := st.OrgID, st.ReturnTo
 	isAdmin, err := h.az.UserIsOrgAdmin(ctx, userID, orgID)
 	if err != nil {
-		httpx.InternalError(w, "slack", err)
+		h.internalError(w, r, err)
 		return
 	}
 	if !isAdmin || !entitlements.For(orgID).Has(entitlements.FeatureSlack) {
-		h.fail(w, r, orgID, returnTo, "state")
+		h.refuse(w, r, orgID, returnTo, "state", installState)
 		return
 	}
 	// The cookie's org is the one this writes into, so "Require SSO" is asked
@@ -262,57 +264,57 @@ func (h *installHandler) handleCallback(w http.ResponseWriter, r *http.Request) 
 	// the session's active org.
 	barred, err := h.ceremony.SSOBarred(ctx, orgID)
 	if err != nil {
-		httpx.InternalError(w, "slack", err)
+		h.internalError(w, r, err)
 		return
 	}
 	if barred {
-		h.fail(w, r, orgID, returnTo, "sso_required")
+		h.refuse(w, r, orgID, returnTo, "sso_required", installSSORequired)
 		return
 	}
 
 	if slackErr := query.Get("error"); slackErr != "" {
 		slackLog.Warn("slack install: Slack answered with an error", "org", orgID, "slack_error", slackErr)
 		// Only access_denied is the person declining.
-		code := "install_failed"
 		if slackErr == "access_denied" {
-			code = "denied"
+			h.refuse(w, r, orgID, returnTo, "denied", installDenied)
+			return
 		}
-		h.fail(w, r, orgID, returnTo, code)
+		h.refuse(w, r, orgID, returnTo, "install_failed", installSlackError)
 		return
 	}
 	code := query.Get("code")
 	if code == "" {
-		h.fail(w, r, orgID, returnTo, "install_failed")
+		h.refuse(w, r, orgID, returnTo, "install_failed", installNoCode)
 		return
 	}
 	if !h.app.Configured() {
-		h.fail(w, r, orgID, returnTo, "no_app")
+		h.refuse(w, r, orgID, returnTo, "no_app", installNoApp)
 		return
 	}
 
 	inst, err := slackOAuthV2Access(ctx, h.client, slackCaller{orgID: orgID}, h.app.ClientID, h.app.ClientSecret, code, h.callbackURL())
 	if err != nil {
 		slackLog.Warn("slack install: code exchange failed", "org", orgID, "error", err)
-		h.fail(w, r, orgID, returnTo, "install_failed")
+		h.refuse(w, r, orgID, returnTo, "install_failed", installExchangeFailed)
 		return
 	}
 	if inst.AppID != h.app.AppID {
 		slackLog.Error("slack install: Slack installed a different app than the deployment's; the configured client id and secret belong to another app",
 			"org", orgID, "app_id", inst.AppID, "deployment_app_id", h.app.AppID)
-		h.fail(w, r, orgID, returnTo, "install_failed")
+		h.refuse(w, r, orgID, returnTo, "install_failed", installWrongApp)
 		return
 	}
 	// One org-wide install spans many workspaces, and every connection is
 	// keyed by one.
 	if inst.IsEnterpriseInstall {
 		slackLog.Warn("slack install: Slack answered with an Enterprise Grid org-wide install; refusing", "org", orgID, "enterprise", inst.EnterpriseID)
-		h.fail(w, r, orgID, returnTo, "enterprise_install")
+		h.refuse(w, r, orgID, returnTo, "enterprise_install", installEnterpriseInstall)
 		return
 	}
 	if missing := missingBotScopes(inst.Scope); inst.TokenType != "bot" || len(missing) > 0 {
 		slackLog.Error("slack install: the install lacks a bot token with every scope the deployment app needs",
 			"org", orgID, "token_type", inst.TokenType, "missing_scopes", strings.Join(missing, ","))
-		h.fail(w, r, orgID, returnTo, "install_failed")
+		h.refuse(w, r, orgID, returnTo, "install_failed", installMissingScopes)
 		return
 	}
 	// TF stores a bot token once and never refreshes it, so a token that
@@ -321,12 +323,12 @@ func (h *installHandler) handleCallback(w http.ResponseWriter, r *http.Request) 
 		slackLog.Error("slack install: the deployment's Slack app has token rotation on, so its bot tokens expire and TF does not refresh them; "+
 			"Slack does not allow turning token rotation off, so create a new Slack app without it and set the TF_SLACK_* variables to that app",
 			"org", orgID, "app_id", inst.AppID)
-		h.fail(w, r, orgID, returnTo, "install_failed")
+		h.refuse(w, r, orgID, returnTo, "install_failed", installTokenRotation)
 		return
 	}
 	if inst.TeamID == "" {
 		slackLog.Error("slack install: Slack answered a workspace install with no workspace", "org", orgID)
-		h.fail(w, r, orgID, returnTo, "install_failed")
+		h.refuse(w, r, orgID, returnTo, "install_failed", installNoWorkspace)
 		return
 	}
 
@@ -334,22 +336,36 @@ func (h *installHandler) handleCallback(w http.ResponseWriter, r *http.Request) 
 	if errors.Is(err, errWorkspaceTaken) {
 		slackLog.Warn("slack install: another org holds the deployment app's install in this workspace; refusing",
 			"org", orgID, "workspace", inst.TeamID)
-		h.fail(w, r, orgID, returnTo, "workspace_taken")
+		h.refuse(w, r, orgID, returnTo, "workspace_taken", installWorkspaceTaken)
 		return
 	}
 	if err != nil {
-		httpx.InternalError(w, "slack", err)
+		h.internalError(w, r, err)
 		return
 	}
 	notifyConfigChanged(orgID)
 	slackLog.Info("slack install: stored the deployment app's connection",
 		"org", orgID, "user", userID, "workspace", conn.WorkspaceID, "app", conn.APIAppID, "active", conn.Active)
 
-	result := "staged"
+	result, outcome := "staged", installStaged
 	if conn.Active {
-		result = "installed"
+		result, outcome = "installed", installInstalled
 	}
+	h.stats.recordInstall(ctx, outcome)
 	h.redirect(w, r, orgID, returnTo, url.Values{"slack": {result}, "slack_workspace": {conn.WorkspaceID}})
+}
+
+// refuse ends the callback with the slack_error code, counting it as outcome,
+// one of the install* values in stats.go.
+func (h *installHandler) refuse(w http.ResponseWriter, r *http.Request, orgID, returnTo, code, outcome string) {
+	h.stats.recordInstall(r.Context(), outcome)
+	h.fail(w, r, orgID, returnTo, code)
+}
+
+// internalError ends the callback with a 500, counted as installError.
+func (h *installHandler) internalError(w http.ResponseWriter, r *http.Request, err error) {
+	h.stats.recordInstall(r.Context(), installError)
+	httpx.InternalError(w, "slack", err)
 }
 
 // missingBotScopes returns the entries of slackBotScopes that granted, Slack's

@@ -112,12 +112,25 @@ type lifecycleAdapter struct {
 	client    *http.Client
 	publicURL func() string
 	bus       func() *eventbus.Bus
+	// stats counts the events dropped with the backlog full; nil-safe.
+	stats *ingestStats
 }
 
 // newLifecycleAdapter constructs the adapter. Called from install(); run
 // itself does not fire until api.OnReady's hook does.
 func newLifecycleAdapter(stores db.Stores, client *http.Client, publicURL func() string, bus func() *eventbus.Bus) *lifecycleAdapter {
 	return &lifecycleAdapter{stores: stores, client: client, publicURL: publicURL, bus: bus}
+}
+
+// enqueue hands evt to the dispatch loop without blocking the bus, dropping
+// and counting it when the backlog is full.
+func (a *lifecycleAdapter) enqueue(ctx context.Context, ch chan<- domain.Event, evt domain.Event) {
+	select {
+	case ch <- evt:
+	default:
+		slackLog.Warn("slack lifecycle: dispatch backlog full, dropping event", "event_type", evt.EventType)
+		a.stats.recordLifecycleDropped(ctx, evt.EventType)
+	}
 }
 
 // run is the function api.OnReady hands to StartExtensionWorkers. It
@@ -138,13 +151,7 @@ func (a *lifecycleAdapter) run(ctx context.Context) {
 	unsubscribe := bus.Subscribe(eventbus.Subscriber{
 		Name:   "slack-lifecycle",
 		Filter: []string{"system:conversation:", "system:routing:"},
-		Handle: func(evt domain.Event) {
-			select {
-			case ch <- evt:
-			default:
-				slackLog.Warn("slack lifecycle: dispatch backlog full, dropping event", "event_type", evt.EventType)
-			}
-		},
+		Handle: func(evt domain.Event) { a.enqueue(ctx, ch, evt) },
 	})
 
 	conversations := map[string]*conversationEntry{}

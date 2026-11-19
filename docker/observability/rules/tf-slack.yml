@@ -1,6 +1,11 @@
-# Alerting rule for Slack ingest (Enterprise Edition). Severity and delivery
-# follow tf-connections.yml; the first-sample form is explained in
-# tf-runs.yml.
+# Alerting rules for Slack (Enterprise Edition). Severity and delivery follow
+# tf-connections.yml; the first-sample form is explained in tf-runs.yml.
+#
+# An org's own Slack app is the org's to fix, so as with every upstream, its
+# failures do not page: they show on the dashboard. The rules that name an app
+# fire for any app because Slack itself is the one dropping or retrying its
+# events. The rest are about what the operator owns: the deployment Slack app
+# (TF_SLACK_*) and TF's own handling of Slack events.
 
 groups:
   - name: tf-slack
@@ -27,3 +32,206 @@ groups:
             Slack disables the app's event subscription, so check that control
             answers at the public URL quickly. Over Socket Mode, TF acknowledged
             envelopes late. Each retry is also a WARN line in control's log.
+
+      # Deliveries to the deployment app's Events API endpoint that its signing
+      # secret did not sign, and none that it did. A wrong
+      # TF_SLACK_SIGNING_SECRET fails every delivery this way, Slack's request
+      # URL check included (names_app="none"). names_app="other" is another
+      # app still pointed at the endpoint, which is not the secret's fault and
+      # is left out. Anyone can send a request that counts here, which the
+      # verified-delivery condition rules out while Slack is delivering; in a
+      # quiet window a single forged request can still fire it. A warning: the
+      # cause can be outside TF.
+      - alert: SlackSigningSecretMismatch
+        expr: |
+          (
+            sum by (app_id) (increase(tf_slack_webhook_signature_mismatches_total{names_app!="other"}[15m])) > 0
+            or
+            sum by (app_id) (
+              tf_slack_webhook_signature_mismatches_total{names_app!="other"}
+              unless last_over_time(tf_slack_webhook_signature_mismatches_total{names_app!="other"}[15m] offset 15m)
+            ) > 0
+          )
+          unless on (app_id)
+          sum by (app_id) (increase(tf_slack_ingest_events_total[15m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Deliveries to the deployment Slack app are not signed with TF_SLACK_SIGNING_SECRET"
+          description: >-
+            In the last 15 minutes, deliveries for app {{ $labels.app_id }}
+            reached /api/webhooks/slack signed with another secret, and none
+            verified. If TF_SLACK_SIGNING_SECRET is not the Signing Secret on
+            the app's Basic Information page, every delivery fails, and Slack
+            turns the app's event subscriptions off once more than 95% of them
+            fail within an hour. A forged request also counts, so check the
+            secret before changing it. Each control pod logs a WARN line for
+            these, at most one a minute.
+
+      # Slack sent app_rate_limited: the app went past the Events API's
+      # 30,000 events per workspace per hour, and Slack drops the deliveries
+      # past it rather than retrying them. Any app, for the reason
+      # SlackDeliveriesRetried is: the loss is Slack's, and the org cannot
+      # see it. A warning.
+      - alert: SlackAppRateLimited
+        expr: |
+          sum by (app_id) (increase(tf_slack_app_rate_limited_total[15m])) > 0
+          or
+          sum by (app_id) (
+            tf_slack_app_rate_limited_total
+            unless last_over_time(tf_slack_app_rate_limited_total[15m] offset 15m)
+          ) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Slack is dropping event deliveries to app {{ $labels.app_id }}"
+          description: >-
+            Slack told TF in the last 15 minutes that app {{ $labels.app_id }}
+            went past the Events API's limit of 30,000 events per workspace
+            per hour. Slack drops the deliveries past it without retrying, so
+            mentions and replies in that time may never reach TF. Every event
+            the app subscribes to counts, including the channel messages TF
+            reads only to find replies in its threads. Each notice is also a
+            WARN line in control's log.
+
+      # The deployment app's Socket Mode connection has not been open for 10
+      # minutes. Slack closes a connection every few hours and TF reconnects
+      # within seconds, which the 10 minutes ride out. The connection runs on
+      # the pod holding the background brain, so one pod reports it. Critical:
+      # every org on the deployment app receives no Slack events until it is
+      # back, and auth_failed is the operator's to fix.
+      - alert: SlackDeploymentSocketDown
+        expr: max by (app_id) (tf_slack_socket_connections{deployment_app="true", state!="open"}) == 1
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The deployment Slack app's Socket Mode connection has been down for 10 minutes"
+          description: >-
+            The Socket Mode connection of app {{ $labels.app_id }} has not been
+            open for 10 minutes, so no org connected through the deployment
+            Slack app receives Slack events. Read its state with
+            tf_slack_socket_connections{app_id="{{ $labels.app_id }}"}.
+            auth_failed means Slack rejected TF_SLACK_APP_TOKEN: generate an
+            app-level token with connections:write on the app's Basic
+            Information page, set it, and restart control. backing_off or
+            dialing means TF cannot keep a connection to Slack: check that
+            control can reach Slack, and Slack's status page.
+
+      # A control pod read TF_SLACK_* and cannot offer Add to Slack. Each pod
+      # reports the configuration it read, so a pod set up differently from
+      # the others shows on its own. Critical: only the operator can fix it,
+      # and through that pod the orgs already connected through the app get
+      # no events.
+      - alert: SlackDeploymentAppUnusable
+        expr: min by (reason) (tf_slack_deployment_app_up) == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The deployment Slack app is set up but cannot be used ({{ $labels.reason }})"
+          description: >-
+            At least one control pod has TF_SLACK_* set and cannot use the
+            deployment Slack app. misconfigured: the variables are short of a
+            complete set, so the pod runs without the app; its boot line "read
+            the deployment Slack app from the environment failed" names each
+            problem. insecure_public_url: TF_PUBLIC_URL is not an https URL,
+            and Slack refuses a redirect URL that is not, so no org can install
+            the app.
+
+      # An org's Add to Slack ended in a refusal that only the operator can
+      # fix: the app is not TF_SLACK_APP_ID, lacks a scope the manifest asks
+      # for, or has token rotation on. The hour keeps one refusal visible; a
+      # person who hit it may not try again soon. A warning: orgs can still
+      # connect their own apps.
+      - alert: SlackDeploymentAppInstallRefused
+        expr: |
+          sum by (outcome) (increase(tf_slack_install_attempts_total{outcome=~"wrong_app|missing_scopes|token_rotation"}[1h])) > 0
+          or
+          sum by (outcome) (
+            tf_slack_install_attempts_total{outcome=~"wrong_app|missing_scopes|token_rotation"}
+            unless last_over_time(tf_slack_install_attempts_total{outcome=~"wrong_app|missing_scopes|token_rotation"}[1h] offset 1h)
+          ) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Installs of the deployment Slack app are failing ({{ $labels.outcome }})"
+          description: >-
+            In the last hour an org's Add to Slack failed with
+            {{ $labels.outcome }}, which only the operator can fix. wrong_app:
+            Slack installed an app other than TF_SLACK_APP_ID, so
+            TF_SLACK_CLIENT_ID and TF_SLACK_CLIENT_SECRET belong to another
+            app. missing_scopes: the app lacks scopes its manifest file asks
+            for; update the app's manifest from the file. token_rotation: the
+            app has token rotation on, which Slack does not let anyone turn
+            off; create a new app from the manifest, set the variables to it,
+            and delete the old app. Each is also an ERROR line in control's
+            log.
+
+      # Slack answered 429 to conversations.history or conversations.replies
+      # with one of the deployment app's bot tokens. Slack limits those two
+      # methods to one call a minute for an app distributed outside its
+      # Marketplace, which is what this catches; an app under the ordinary
+      # limit of 50 a minute rarely reaches it. The app id comes from the
+      # credential label, bot:<workspace>:<app>, and the join keeps the rule to
+      # the deployment's app. A warning: thread reads slow down and fail, and
+      # nothing else does.
+      - alert: SlackDeploymentAppThrottled
+        expr: |
+          (
+            sum by (app_id) (
+              label_replace(
+                increase(tf_upstream_rate_limit_refused_total{upstream="slack", bucket=~"conversations[.](history|replies)"}[1h]),
+                "app_id", "$1", "credential", "bot:[^:]+:(.+)"
+              )
+            ) > 0
+            or
+            sum by (app_id) (
+              label_replace(
+                tf_upstream_rate_limit_refused_total{upstream="slack", bucket=~"conversations[.](history|replies)"}
+                unless last_over_time(tf_upstream_rate_limit_refused_total{upstream="slack", bucket=~"conversations[.](history|replies)"}[1h] offset 1h),
+                "app_id", "$1", "credential", "bot:[^:]+:(.+)"
+              )
+            ) > 0
+          )
+          and on (app_id)
+          max by (app_id) (tf_slack_deployment_app_up)
+        labels:
+          severity: warning
+        annotations:
+          summary: "Slack is refusing the deployment Slack app's thread reads"
+          description: >-
+            In the last hour Slack answered 429 to conversations.history or
+            conversations.replies calls made with app {{ $labels.app_id }}'s
+            bot tokens. Slack limits those two methods to one call a minute for
+            an app distributed outside its Marketplace, and TF reads threads
+            with them, so agents and run titles read threads slowly or not at
+            all. Read the Rate limits section of the deployment Slack app's
+            page. sum by (org_id, bucket)
+            (increase(tf_upstream_rate_limit_refused_total{upstream="slack"}[1h]))
+            shows the orgs affected.
+
+      # The lifecycle adapter's backlog was full, and it dropped events. Each
+      # was a status line, reaction or reply in a Slack thread that was never
+      # made. The adapter runs on the pod holding the background brain, and a
+      # full backlog means its dispatch loop has fallen behind. A warning.
+      - alert: SlackLifecycleEventsDropped
+        expr: |
+          sum (increase(tf_slack_lifecycle_dropped_total[15m])) > 0
+          or
+          sum (
+            tf_slack_lifecycle_dropped_total
+            unless last_over_time(tf_slack_lifecycle_dropped_total[15m] offset 15m)
+          ) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "TF dropped Slack status updates"
+          description: >-
+            In the last 15 minutes the Slack lifecycle adapter on the pod
+            holding the background brain dropped events because its backlog
+            was full, so status lines, reactions or replies in Slack threads
+            were never made. Its dispatch loop has fallen behind; check that
+            pod's Slack requests (tf_upstream_requests_total{upstream="slack"})
+            and its database. Each drop is also a WARN line, "slack lifecycle:
+            dispatch backlog full".
