@@ -7,8 +7,8 @@
 // Connections are per-app, not per-workspace: Slack load-balances an app's
 // envelopes across up to 10 open sockets regardless of which workspace(s)
 // installed it, so the desired state is "one connection per api_app_id that
-// has >=1 socket-transport row in an entitled org", plus the deployment's own
-// app when it uses Socket Mode — see desiredApps.
+// has >=1 socket-transport row", plus the deployment's own app when it uses
+// Socket Mode — see desiredApps.
 package slack
 
 import (
@@ -20,7 +20,6 @@ import (
 
 	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
-	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -142,8 +141,8 @@ func newSocketManager(stores db.Stores, pipeline *ingestPipeline, client *http.C
 // StatusFor returns the live status of appID's socket connection, if the
 // manager currently has one running (started by a reconcile pass, not yet
 // torn down by a later one). ok=false covers every "no connection" case
-// alike — webhook-only app, unentitled org, not yet reconciled — the
-// connection reads treat them identically (omit the field).
+// alike — webhook-only app, not yet reconciled — the connection reads treat
+// them identically (omit the field).
 func (m *socketManager) StatusFor(appID string) (connStatus, bool) {
 	m.mu.Lock()
 	conn, ok := m.conns[appID]
@@ -198,20 +197,22 @@ type desiredApp struct {
 }
 
 // desiredApps computes the full desired connection set: every api_app_id
-// with at least one transport=socket row in an entitled org, active or not,
+// with at least one transport=socket row, active or not and licensed or not,
 // and the deployment's own app when it is configured for Socket Mode. The
-// deployment app's connection depends on no row and no org's entitlement: it
-// connects before any org installs the app, so a bad TF_SLACK_APP_TOKEN shows
-// in the logs at boot, and it stays up when every org's connection through it
-// is gone. Its rows have no transport, so the loop over rows skips them.
-// Ingest drops an inactive connection's deliveries, but not Slack reporting
-// the app removed (handleAppRemoved), and that report reaches TF only through
-// the app's socket. app->one-org
-// (TFAC-533) means every row sharing an api_app_id carries the same org_id,
-// so entitlement and the app-token secret ref are well-defined regardless
-// of which matching row supplies them — "credentials come off any of its
-// rows, same secret set" (see the ticket's architecture note). A nil Slack
-// store bundle (extension not linked) and the Postgres-only store's
+// deployment app's connection depends on no row: it connects before any org
+// installs the app, so a bad TF_SLACK_APP_TOKEN shows in the logs at boot,
+// and it stays up when every org's connection through it is gone. Its rows
+// have no transport, so the loop over rows skips them.
+// Ingest drops the deliveries of an inactive connection and of an org without
+// the slack entitlement, but not Slack reporting the app removed
+// (handleAppRemoved), and that report reaches TF only through the app's
+// socket: closed, it would leave a removed app's row and its dead bot token
+// in place for the org to come back to when it renews. An app belongs to one
+// org, so every row sharing an api_app_id carries the same org_id, and the
+// org and app-token secret ref are well-defined regardless of which matching
+// row supplies them.
+//
+// A nil Slack store bundle (extension not linked) and the Postgres-only store's
 // ErrNotApplicableInLocal both yield an empty desired set with a nil error —
 // run() already gates the reconciler out of local mode entirely, so this is
 // a defensive backstop, not a path exercised in production; the point is a
@@ -233,9 +234,6 @@ func (m *socketManager) desiredApps(ctx context.Context) (map[string]desiredApp,
 	desired := make(map[string]desiredApp)
 	for _, row := range rows {
 		if row.Transport != transportSocket {
-			continue
-		}
-		if !entitlements.For(row.OrgID).Has(entitlements.FeatureSlack) {
 			continue
 		}
 		if row.AppTokenRef == "" {

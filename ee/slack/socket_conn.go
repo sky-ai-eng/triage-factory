@@ -476,8 +476,6 @@ func (c *appConnection) processEventsAPIEnvelope(ctx context.Context, stores db.
 			"app", c.appID, "workspace_org", ws.OrgID, "connection_org", c.orgID)
 		return true
 	}
-	// An org that lost the entitlement mid-connection is dropped here until
-	// the reconciler takes the whole connection down within a tick.
 	if err := pipeline.deliverForConnection(ctx, *ws, payload, inner); err != nil {
 		slackLog.Error("slack socket mode: pipeline error", "app", c.appID, "error", err)
 		return false

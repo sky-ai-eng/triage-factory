@@ -121,9 +121,10 @@ func (f *fakeConnectionStore) AppBoundToOtherOrgSystem(context.Context, string, 
 	return false, nil
 }
 
-// fakeSecretStore is a minimal db.SecretStore fake — only GetSystem is
-// exercised by the webhook handler. mu guards values for the socket tests,
-// which delete a secret while a connection goroutine may read it.
+// fakeSecretStore is a minimal db.SecretStore fake: GetSystem for the
+// webhook handler and the socket's dial, and DeleteSystemIfValue for an app
+// removal. mu guards values for the socket tests, which delete a secret while
+// a connection goroutine may read it.
 type fakeSecretStore struct {
 	mu     sync.Mutex
 	values map[string]string // orgID + "/" + key -> value
@@ -148,8 +149,14 @@ func (f *fakeSecretStore) GetSystem(_ context.Context, orgID, key string) (strin
 func (f *fakeSecretStore) PutSystemIfValue(context.Context, string, string, string, string, string) (bool, error) {
 	return false, nil
 }
-func (f *fakeSecretStore) DeleteSystemIfValue(context.Context, string, string, string) (bool, error) {
-	return false, nil
+func (f *fakeSecretStore) DeleteSystemIfValue(_ context.Context, orgID, key, value string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if v, ok := f.values[orgID+"/"+key]; !ok || v != value {
+		return false, nil
+	}
+	delete(f.values, orgID+"/"+key)
+	return true, nil
 }
 func (f *fakeSecretStore) Delete(context.Context, string, string) (bool, error) { return false, nil }
 func (f *fakeSecretStore) PutUser(context.Context, string, string, string, string, string) error {
