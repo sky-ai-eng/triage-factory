@@ -50,7 +50,7 @@ const (
 	OK          Class = "ok"
 	RateLimited Class = "rate_limited" // the upstream asked us to wait
 	Transient   Class = "transient"    // 5xx, 408, a transport failure, or a non-JSON 403
-	Auth        Class = "auth"         // 401, a JSON 403 that is not a rate limit, or Slack refusing the token in a 200
+	Auth        Class = "auth"         // the upstream would not accept the credential
 	Rejected    Class = "rejected"     // any other 4xx: the request itself is wrong
 )
 

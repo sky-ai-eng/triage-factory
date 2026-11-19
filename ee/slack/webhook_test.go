@@ -262,7 +262,7 @@ func newWebhookRig(t *testing.T, signingSecretRef string, licensed bool) *webhoo
 
 // sign computes a valid X-Slack-Signature for (secret, timestamp, body) per
 // Slack's documented v0 scheme — independently reconstructed here (not by
-// calling validSlackSignature) so the test actually exercises the wire
+// calling checkSlackSignature) so the test actually exercises the wire
 // format the handler expects.
 func sign(secret, timestamp string, body []byte) string {
 	mac := hmac.New(sha256.New, []byte(secret))
@@ -449,8 +449,9 @@ func TestHandleWebhook_StaleTimestamp_401(t *testing.T) {
 
 // TestHandleWebhook_SignatureVerdictsCounted: every delivery that names a
 // connected workspace and app is counted by its signature verdict, under the
-// connection's app, and a delivery naming none, or one to a connection with no
-// signing secret, is not.
+// connection's app, or as no_secret when the connection's signing secret
+// cannot be read; a delivery naming none, or one to a connection with no
+// signing secret, is not counted.
 func TestHandleWebhook_SignatureVerdictsCounted(t *testing.T) {
 	r := newWebhookRig(t, webhookTestSigningRef, true)
 	body := []byte(`{"type":"url_verification","team_id":"` + webhookTestWorkspaceID + `","api_app_id":"` + webhookTestAppID + `","challenge":"abc123"}`)
@@ -472,6 +473,14 @@ func TestHandleWebhook_SignatureVerdictsCounted(t *testing.T) {
 		t.Errorf("org deliveries by app = %v; want {%s: 4}", got, webhookTestAppID)
 	}
 
+	unreadable := newWebhookRig(t, "slack_ws_T0WEBHOOK1_A0WEBHOOK1_unstored", true)
+	if rec := postSlackWebhook(t, unreadable.h, webhookTestOrgID, body, fresh, sign(webhookTestSecret, fresh, body)); rec.Code != http.StatusUnauthorized {
+		t.Errorf("status with the signing secret unreadable = %d; want 401", rec.Code)
+	}
+	if got := sumByAttr(t, unreadable.metrics, "slack.webhook.org.deliveries", "signature"); !maps.Equal(got, map[string]int64{orgDeliveryNoSecret: 1}) {
+		t.Errorf("org deliveries with the signing secret unreadable = %v; want {%s: 1}", got, orgDeliveryNoSecret)
+	}
+
 	socket := newWebhookRig(t, "", true)
 	postSlackWebhook(t, socket.h, webhookTestOrgID, body, fresh, sign(webhookTestSecret, fresh, body))
 	if got := sumByAttr(t, socket.metrics, "slack.webhook.org.deliveries", "signature"); len(got) != 0 {
@@ -480,7 +489,7 @@ func TestHandleWebhook_SignatureVerdictsCounted(t *testing.T) {
 }
 
 func TestHandleWebhook_GoldenSignature_ValidatesCorrectly(t *testing.T) {
-	// Independently-computed HMAC vector (not via validSlackSignature) —
+	// Independently-computed HMAC vector (not via checkSlackSignature) —
 	// pins the exact base-string construction ("v0:" + timestamp + ":" +
 	// body) the handler must use.
 	secret := "8f742231b10e8888abcd99yyyzzz85a"
@@ -493,11 +502,11 @@ func TestHandleWebhook_GoldenSignature_ValidatesCorrectly(t *testing.T) {
 		t.Fatalf("sign() = %q; want %q (helper/vector mismatch)", got, want)
 	}
 	freshTS := strconv.FormatInt(time.Now().Unix(), 10)
-	if !validSlackSignature(secret, body, freshTS, sign(secret, freshTS, body)) {
-		t.Error("validSlackSignature rejected a freshly-signed request")
+	if checkSlackSignature(secret, body, freshTS, sign(secret, freshTS, body)) != signatureValid {
+		t.Error("checkSlackSignature rejected a freshly-signed request")
 	}
-	if validSlackSignature(secret, body, timestamp, want) {
-		t.Error("validSlackSignature accepted a signature over a long-stale timestamp")
+	if checkSlackSignature(secret, body, timestamp, want) == signatureValid {
+		t.Error("checkSlackSignature accepted a signature over a long-stale timestamp")
 	}
 }
 

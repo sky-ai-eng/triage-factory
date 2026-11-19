@@ -2,6 +2,7 @@ package slack
 
 import (
 	"context"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -495,6 +496,9 @@ func TestInstallCallback_NoLongerAllowed(t *testing.T) {
 		t.Errorf("code exchanges = %d; want none", len(r.fake.oauthRequests))
 	}
 	r.assertNothingStored(orgID, "T0DEMOTE1")
+	if got := r.installOutcomes(); !maps.Equal(got, map[string]int64{installSSORequired: 1, installState: 2}) {
+		t.Errorf("install outcomes = %v; want {sso_required: 1, state: 2}", got)
+	}
 }
 
 // TestInstallCallback_SlackAnswers: what Slack sends back, short of a usable

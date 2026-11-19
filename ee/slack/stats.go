@@ -45,10 +45,10 @@ const (
 // ingestStats owns the Slack ingest metric instruments — the message-volume
 // observability the message.* subscriptions made necessary (mentions were
 // inherently low-volume; the channel firehose is not). One instance is
-// shared by the pipeline and both transports (install.go); counters are
-// keyed by api_app_id, the same per-app grain as the Socket Mode connection,
-// because the app is the unit an operator acts on (its manifest, its rate
-// limit, its subscription Slack would disable).
+// shared by the pipeline and both transports (install.go); the delivery
+// counters are keyed by api_app_id, the same per-app grain as the Socket Mode
+// connection, because the app is the unit an operator acts on (its manifest,
+// its rate limit, its subscription Slack would disable).
 //
 // Nil-safe on every method, like the pipeline's other optional
 // collaborators (identity, channels, ...): tests that construct
@@ -99,13 +99,13 @@ func newIngestStats(mp metric.MeterProvider) *ingestStats {
 	}
 
 	orgDeliveries, err := meter.Int64Counter("slack.webhook.org.deliveries",
-		metric.WithDescription("Deliveries to an org's Events API endpoint that name a workspace and app connected to that org, by app and by the signature check's verdict (verified, mismatch, stale, malformed). One app's refusals are its configuration; most apps' at once are the deployment's: a proxy changing request bodies or headers, or a clock more than five minutes off."))
+		metric.WithDescription("Deliveries to an org's Events API endpoint that name a workspace and app connected to that org, by app and by verdict: the signature check's (verified, mismatch, stale, malformed), or no_secret when the connection's signing secret could not be read. One app's refusals are its configuration; most apps' at once are the deployment's: its secret store, a proxy changing request bodies or headers, or a clock more than five minutes off."))
 	if err != nil {
 		slackLog.Warn("org deliveries counter setup failed", "error", err)
 	}
 
 	installs, err := meter.Int64Counter("slack.install.attempts",
-		metric.WithDescription("Ends of the deployment Slack app's install ceremony, by outcome: installed or staged, or why it stored nothing."))
+		metric.WithDescription("Ends of the deployment Slack app's install callback for a signed-in person, by outcome: installed or staged, or why it stored nothing. A request with no session is refused before anything is counted."))
 	if err != nil {
 		slackLog.Warn("install attempts counter setup failed", "error", err)
 	}
@@ -172,21 +172,29 @@ func (s *ingestStats) recordSignatureMismatch(ctx context.Context, appID, namesA
 	))
 }
 
-// recordOrgDelivery counts one delivery to an org's Events API endpoint whose
-// signature was checked against the connection's signing secret. appID is the
-// connection's app.
-func (s *ingestStats) recordOrgDelivery(ctx context.Context, appID string, check signatureCheck) {
+// orgDeliveryNoSecret is the verdict on slack.webhook.org.deliveries for a
+// delivery whose connection's signing secret could not be read, so its
+// signature was never checked.
+const orgDeliveryNoSecret = "no_secret"
+
+// recordOrgDelivery counts one delivery to an org's Events API endpoint that
+// named a connection with a signing secret. appID is the connection's app, and
+// verdict a signatureCheck's label or orgDeliveryNoSecret.
+func (s *ingestStats) recordOrgDelivery(ctx context.Context, appID, verdict string) {
 	if s == nil {
 		return
 	}
 	s.orgDeliveries.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("app_id", appID),
-		attribute.String("signature", check.label()),
+		attribute.String("signature", verdict),
 	))
 }
 
 // The outcomes of slack.install.attempts, one per way the deployment app's
-// install callback ends. installed and staged stored a connection. The rest
+// install callback ends for a signed-in person. A request with no session is
+// not counted, because anyone can send one and the count would then say
+// nothing about the people installing. installed and staged stored a
+// connection. The rest
 // stored nothing; their names follow the slack_error codes the callback
 // redirects with, with install_failed split by its cause, because the causes
 // an operator fixes (wrong_app, missing_scopes, token_rotation) are what the

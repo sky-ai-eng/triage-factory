@@ -6448,7 +6448,7 @@
         "type": "prometheus",
         "uid": "tf-prometheus"
       },
-      "description": "Deliveries to /api/webhooks/slack/{org_id} that name a workspace and app connected to that org (tf_slack_webhook_org_deliveries_total), by the signature check's verdict. Slack's own deliveries verify. One app's refusals are its org's signing secret; most apps' at once are this deployment's, which SlackDeliveriesRefusedFleetWide alerts on: stale is control's clock more than five minutes off, and mismatch or malformed is something in front of control changing the body or dropping Slack's headers. Break it down by app with sum by (app_id, signature).",
+      "description": "Deliveries to /api/webhooks/slack/{org_id} that name a workspace and app connected to that org (tf_slack_webhook_org_deliveries_total), by the signature check's verdict. Slack's own deliveries verify. One app's refusals are its org's signing secret; most apps' at once are this deployment's, which SlackDeliveriesRefusedFleetWide alerts on: stale is control's clock more than five minutes off, and mismatch or malformed is something in front of control changing the body or dropping Slack's headers. no_secret is control unable to read the orgs' signing secrets. Break it down by app with sum by (app_id, signature).",
       "fieldConfig": {
         "defaults": {
           "color": {

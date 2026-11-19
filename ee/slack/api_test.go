@@ -561,10 +561,10 @@ func TestDoSlackJSON_LargePageDecodes(t *testing.T) {
 	}
 }
 
-// TestDoSlackJSON_TokenRefusalCountedAsAuth pins that an HTTP 200 whose body
-// refuses the token counts as an auth failure, and that any other answer
+// TestDoSlackRequest_TokenRefusalCountedAsAuth pins that an HTTP 200 whose
+// body refuses the token counts as an auth failure, and that any other answer
 // keeps the class its status gives it.
-func TestDoSlackJSON_TokenRefusalCountedAsAuth(t *testing.T) {
+func TestDoSlackRequest_TokenRefusalCountedAsAuth(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		body string

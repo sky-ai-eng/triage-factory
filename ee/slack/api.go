@@ -289,11 +289,10 @@ func slackOpenConnection(ctx context.Context, client *http.Client, caller slackC
 
 // slackAuthErrorCodes is the set of Web API error codes that mean the token
 // itself is bad (revoked, wrong scope, disabled workspace) rather than a
-// transient upstream issue. Every attempt answered with one is counted as
-// an auth failure (slackRefusesCredential), and apps.connections.open
-// returns one as a slackAuthError, because retrying on the normal backoff
-// schedule would just hammer Slack with a token that will never succeed.
-// Sourced from Slack's documented auth-related error codes.
+// transient upstream issue: a request answered with one failed on its
+// credential, though Slack's status says 200, and retrying it on the normal
+// backoff schedule would just hammer Slack with a token that will never
+// succeed. Sourced from Slack's documented auth-related error codes.
 var slackAuthErrorCodes = map[string]bool{
 	"invalid_auth":     true,
 	"not_authed":       true,

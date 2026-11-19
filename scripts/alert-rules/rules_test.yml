@@ -772,7 +772,7 @@ tests:
         severity: critical
       exp_annotations:
         summary: 'Most orgs'' Slack deliveries are failing the signature check'
-        description: '66.67% of the orgs'' own Events API apps had more than half of their deliveries in the last 15 minutes refused at the signature check, sustained for 10 minutes. Slack turns an app''s event subscriptions off once more than 95% of its deliveries fail within an hour. Many apps at once points at this deployment, not at one org''s signing secret. Break it down with sum by (signature) (rate(tf_slack_webhook_org_deliveries_total[15m])): stale means control''s clock is more than five minutes off; mismatch or malformed means something in front of control changes the request body or drops Slack''s X-Slack-Signature and X-Slack-Request-Timestamp headers.'
+        description: '66.67% of the orgs'' own Events API apps had more than half of their deliveries in the last 15 minutes refused at the signature check, sustained for 10 minutes. Slack turns an app''s event subscriptions off once more than 95% of its deliveries fail within an hour. Many apps at once points at this deployment, not at one org''s signing secret. Break it down with sum by (signature) (rate(tf_slack_webhook_org_deliveries_total[15m])): stale means control''s clock is more than five minutes off; mismatch or malformed means something in front of control changes the request body or drops Slack''s X-Slack-Signature and X-Slack-Request-Timestamp headers; no_secret means control cannot read the orgs'' signing secrets, so check TF_SECRET_ENCRYPTION_KEY and the database.'
 - name: SlackDeliveriesRefusedFleetWide does not count an app whose deliveries mostly verify
   interval: 1m
   input_series:

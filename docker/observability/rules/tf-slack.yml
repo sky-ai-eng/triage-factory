@@ -144,8 +144,9 @@ groups:
       # last 15 minutes did not verify. One app's refusals are its org's
       # signing secret, pasted wrong. Most apps' at once are this
       # deployment's: a proxy in front of control that changes request
-      # bodies (mismatch) or drops headers (malformed), or a host clock more
-      # than five minutes off (stale). Critical: Slack turns an app's event
+      # bodies (mismatch) or drops headers (malformed), a host clock more
+      # than five minutes off (stale), or a secret store control cannot read
+      # the signing secrets from (no_secret). Critical: Slack turns an app's event
       # subscriptions off once more than 95% of its deliveries fail within an
       # hour, and each org's admin then has to turn them back on in Slack.
       #
@@ -185,7 +186,9 @@ groups:
             stale means control's clock is more than five minutes off;
             mismatch or malformed means something in front of control changes
             the request body or drops Slack's X-Slack-Signature and
-            X-Slack-Request-Timestamp headers.
+            X-Slack-Request-Timestamp headers; no_secret means control cannot
+            read the orgs' signing secrets, so check TF_SECRET_ENCRYPTION_KEY
+            and the database.
 
       # The deployment app's Socket Mode connection has not been open for 10
       # minutes. Slack closes a connection every few hours and TF reconnects

@@ -301,9 +301,9 @@ the limit allows: raise `TF_CLAIM_MEMORY_LIMIT_MB` on the executors.
 
 Empty unless a Slack app is configured or connected. Outbound calls to Slack's
 Web API are in `tf_upstream_requests_total{upstream="slack"}` with the other
-upstreams. Slack answers a call whose token it refuses (`invalid_auth`,
-`not_authed`, `token_revoked`, `account_inactive`, `missing_scope`) with HTTP
-200, and it counts as `auth`.
+upstreams. Slack answers a call whose token, or one of its scopes, it refuses
+(`invalid_auth`, `not_authed`, `token_revoked`, `account_inactive`,
+`missing_scope`) with HTTP 200, and it counts as `auth`.
 
 | Metric | What it counts |
 | ------ | -------------- |
@@ -314,7 +314,7 @@ upstreams. Slack answers a call whose token it refuses (`invalid_auth`,
 | `tf_slack_deployment_app_up` | Whether the deployment Slack app can be used, per control pod: 1, or 0 with a `reason` (`misconfigured`, `insecure_public_url`). No series without one. |
 | `tf_slack_install_attempts_total` | Ends of the deployment Slack app's install, by `outcome`: `installed`, `staged`, or why nothing was stored. |
 | `tf_slack_webhook_signature_mismatches_total` | Deliveries to the deployment app's Events API endpoint that `TF_SLACK_SIGNING_SECRET` did not sign, by `names_app`: the app the unverified body names (`deployment`, `other`, or `none`). |
-| `tf_slack_webhook_org_deliveries_total` | Deliveries to an org's Events API endpoint that name a workspace and app connected to that org, by `app_id` and `signature`: `verified`, `mismatch`, `stale` (a timestamp more than five minutes from control's clock), or `malformed`. |
+| `tf_slack_webhook_org_deliveries_total` | Deliveries to an org's Events API endpoint that name a workspace and app connected to that org, by `app_id` and `signature`: `verified`, `mismatch`, `stale` (a timestamp more than five minutes from control's clock), `malformed`, or `no_secret` (control could not read the org's signing secret). |
 | `tf_slack_lifecycle_dropped_total` | Status lines, reactions and replies in Slack threads that were never made because the lifecycle adapter's backlog was full, by `event_type`. |
 
 ### Messages left unread
@@ -397,8 +397,7 @@ TF's own handling of Slack events. `SlackSigningSecretMismatch` counts requests
 anyone can send, so in a window with no deliveries from Slack a forged request
 can fire it.
 
-`JiraDeploymentAppQuotaLow` and `SlackDeploymentAppThrottled` are the only
-alerts on rate-limit readings. On
+`JiraDeploymentAppQuotaLow` is the only alert on rate-limit readings. On
 Atlassian's default tier, every org that connects Jira through the deployment's
 app shares one hourly quota, and once it runs out, people's Jira actions from
 the board (claim, done, requeue) wait and then fail in all of those orgs at

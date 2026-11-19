@@ -187,20 +187,23 @@ func (h *webhookHandler) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteUnauth(w)
 		return
 	}
+	// Every delivery from here on is counted by its verdict, because one org's
+	// refusals are its own app's configuration, while most orgs' at once are
+	// this deployment's: its secret store, a proxy that changes request bodies
+	// or headers, or this host's clock.
 	secret, err := h.stores.Secrets.GetSystem(r.Context(), ws.OrgID, ws.SigningSecretRef)
 	if err != nil {
+		h.stats.recordOrgDelivery(r.Context(), ws.APIAppID, orgDeliveryNoSecret)
 		httpx.InternalError(w, "slack-webhook", err)
 		return
 	}
 	if secret == "" {
+		h.stats.recordOrgDelivery(r.Context(), ws.APIAppID, orgDeliveryNoSecret)
 		httpx.WriteUnauth(w)
 		return
 	}
-	// Counted per verdict because one org's refusals are its own app's
-	// configuration, while most orgs' at once are this deployment's: a proxy
-	// that changes request bodies or headers, or this host's clock.
 	check := checkSlackSignature(secret, body, r.Header.Get("X-Slack-Request-Timestamp"), r.Header.Get("X-Slack-Signature"))
-	h.stats.recordOrgDelivery(r.Context(), ws.APIAppID, check)
+	h.stats.recordOrgDelivery(r.Context(), ws.APIAppID, check.label())
 	if check != signatureValid {
 		httpx.WriteUnauth(w)
 		return
@@ -336,16 +339,10 @@ func ackEmpty(w http.ResponseWriter) {
 	httpx.WriteJSON(w, http.StatusOK, map[string]string{})
 }
 
-// validSlackSignature verifies X-Slack-Signature against Slack's documented
-// v0 HMAC-SHA256 scheme (HMAC(signingSecret, "v0:"+timestamp+":"+body)) and
-// enforces the 5-minute replay window on X-Slack-Request-Timestamp.
-// Constant-time comparison, mirrors validWebhookSignature's GitHub
-// analogue (internal/server/github_webhooks.go).
-func validSlackSignature(secret string, body []byte, timestampHeader, sigHeader string) bool {
-	return checkSlackSignature(secret, body, timestampHeader, sigHeader) == signatureValid
-}
-
-// signatureCheck is the outcome of checking a request's Slack signature.
+// signatureCheck is the outcome of checking a request's Slack signature
+// against Slack's documented v0 HMAC-SHA256 scheme
+// (HMAC(signingSecret, "v0:"+timestamp+":"+body)) and the 5-minute replay
+// window on X-Slack-Request-Timestamp.
 type signatureCheck int
 
 const (
@@ -364,8 +361,7 @@ const (
 	signatureValid
 )
 
-// label is the check's value for the signature attribute of
-// slack.webhook.org.deliveries.
+// label is the check's verdict on slack.webhook.org.deliveries.
 func (c signatureCheck) label() string {
 	switch c {
 	case signatureValid:
