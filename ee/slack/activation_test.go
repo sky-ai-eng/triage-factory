@@ -3,6 +3,7 @@ package slack
 import (
 	"net/http"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -99,17 +100,22 @@ func TestActivationFingerprint(t *testing.T) {
 
 // TestActivationBlockers: a token Slack refuses is token_rejected, a token
 // short a scope is missing_scopes naming it, a token with every scope has no
-// blocker, and an auth.test that meets no answer is an error rather than a
-// blocker.
+// blocker, and an auth.test that meets no answer about the token, Slack failing
+// on its own side included, is an error rather than a blocker.
 func TestActivationBlockers(t *testing.T) {
 	all := strings.Join(slackBotScopes, ",")
+	short := strings.Join(slices.DeleteFunc(slices.Clone(slackBotScopes), func(s string) bool { return s == "files:write" }), ",")
 	withFakeSlackAPI(t, func(w http.ResponseWriter, r *http.Request) {
 		switch bearerToken(r) {
 		case "xoxb-rejected":
 			writeSlackFakeJSON(w, map[string]any{"ok": false, "error": "invalid_auth"})
+		case "xoxb-expired":
+			writeSlackFakeJSON(w, map[string]any{"ok": false, "error": "token_expired"})
 		case "xoxb-short":
-			w.Header().Set("X-OAuth-Scopes", strings.Replace(all, ",files:write", "", 1))
+			w.Header().Set("X-OAuth-Scopes", short)
 			writeSlackFakeJSON(w, map[string]any{"ok": true, "team_id": "T1", "bot_id": "B1"})
+		case "xoxb-slack-failing":
+			writeSlackFakeJSON(w, map[string]any{"ok": false, "error": "internal_error"})
 		case "xoxb-down":
 			w.WriteHeader(http.StatusServiceUnavailable)
 		default:
@@ -123,6 +129,7 @@ func TestActivationBlockers(t *testing.T) {
 	for token, want := range map[string][]activationBlocker{
 		"xoxb-ok":       nil,
 		"xoxb-rejected": {{Code: blockerTokenRejected}},
+		"xoxb-expired":  {{Code: blockerTokenRejected}},
 		"xoxb-short":    {{Code: blockerMissingScopes, Scopes: []string{"files:write"}}},
 	} {
 		got, err := h.activationBlockers(t.Context(), "org", target, token)
@@ -134,7 +141,9 @@ func TestActivationBlockers(t *testing.T) {
 			t.Errorf("%s: blockers = %+v; want %+v", token, got, want)
 		}
 	}
-	if _, err := h.activationBlockers(t.Context(), "org", target, "xoxb-down"); err == nil {
-		t.Error("xoxb-down: err = nil; want Slack unreachable")
+	for _, token := range []string{"xoxb-slack-failing", "xoxb-down"} {
+		if got, err := h.activationBlockers(t.Context(), "org", target, token); err == nil {
+			t.Errorf("%s: blockers = %+v, err = nil; want Slack unreachable", token, got)
+		}
 	}
 }

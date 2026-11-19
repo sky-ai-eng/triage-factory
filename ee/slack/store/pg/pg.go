@@ -139,8 +139,7 @@ func (s *connectionStore) Upsert(ctx context.Context, c slackstore.Connection) (
 		c.WorkspaceID, c.APIAppID, c.OrgID, c.Source, c.Active, c.WorkspaceName, c.AppName, c.EnterpriseID,
 		c.Transport, c.BotUserID, c.BotTokenRef, c.SigningSecretRef, c.AppTokenRef, c.RegisteredByUserID))
 	if err != nil {
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == oneActiveIndex {
+		if isOneActiveViolation(err) {
 			return slackstore.Connection{}, slackstore.ErrActiveConnectionExists
 		}
 		return slackstore.Connection{}, fmt.Errorf("insert org_slack_connections: %w", err)
@@ -266,11 +265,17 @@ func (s *connectionStore) Activate(ctx context.Context, orgID, workspaceID, apiA
 // activateError maps a violation of the one-active index to
 // slackstore.ErrActiveConnectionExists and wraps anything else.
 func activateError(what string, err error) error {
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == oneActiveIndex {
+	if isOneActiveViolation(err) {
 		return slackstore.ErrActiveConnectionExists
 	}
 	return fmt.Errorf("%s: %w", what, err)
+}
+
+// isOneActiveViolation reports whether err is a write refused by the
+// one-active index.
+func isOneActiveViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == oneActiveIndex
 }
 
 // DeleteSystem's updated_at condition holds against a concurrent connect: the

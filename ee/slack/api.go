@@ -49,10 +49,11 @@ type authTestResult struct {
 	Scopes string
 }
 
-// slackRejectedError is a Slack answer refusing a call: Slack was reached and
-// said no ({"ok":false}, or an answer missing what the call exists to learn).
-// A transport failure, a non-200, or a rate limit is not one: those say nothing
-// about the credential or the request.
+// slackRejectedError is a Slack answer refusing the credential a call was made
+// with: an error code in slackAuthErrorCodes, or an answer missing what the call
+// exists to learn. A transport failure, a non-200, a rate limit, or any other
+// {"ok":false} (internal_error, service_unavailable, …) is not one: those say
+// nothing about the credential.
 type slackRejectedError struct{ method, reason string }
 
 func (e *slackRejectedError) Error() string { return "slack " + e.method + ": " + e.reason }
@@ -93,7 +94,11 @@ func slackAuthTest(ctx context.Context, client *http.Client, caller slackCaller,
 		return nil, err
 	}
 	if !out.OK {
-		return nil, &slackRejectedError{method: "auth.test", reason: nonEmpty(out.Error, "not ok")}
+		code := nonEmpty(out.Error, "not ok")
+		if slackAuthErrorCodes[code] {
+			return nil, &slackRejectedError{method: "auth.test", reason: code}
+		}
+		return nil, fmt.Errorf("slack auth.test: %s", code)
 	}
 	if out.TeamID == "" {
 		return nil, &slackRejectedError{method: "auth.test", reason: "response carried no team_id"}
@@ -238,16 +243,19 @@ func slackOpenConnection(ctx context.Context, client *http.Client, caller slackC
 	return err
 }
 
-// slackAuthErrorCodes is the set of apps.connections.open error codes that
-// mean the app token itself is bad (revoked, wrong scope, disabled
-// workspace) rather than a transient upstream issue — retrying on the
-// normal backoff schedule would just hammer Slack with a token that will
-// never succeed. Sourced from Slack's documented auth-related error codes.
+// slackAuthErrorCodes is the set of Slack error codes that mean the token
+// itself is bad (revoked, expired, wrong scope, disabled workspace) rather
+// than a transient upstream issue — for an app token at apps.connections.open,
+// where retrying on the normal backoff schedule would just hammer Slack with a
+// token that will never succeed, and for a bot token at auth.test, where it
+// is the difference between a dead token and an outage. Sourced from Slack's
+// documented auth-related error codes.
 var slackAuthErrorCodes = map[string]bool{
 	"invalid_auth":     true,
 	"not_authed":       true,
 	"account_inactive": true,
 	"token_revoked":    true,
+	"token_expired":    true,
 	"missing_scope":    true,
 }
 

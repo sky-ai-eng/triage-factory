@@ -107,7 +107,6 @@ type activationResult struct {
 
 // Refusals the activation's transaction returns, for the handler to answer.
 var (
-	errActivationTargetGone   = errors.New("slack: the connection to activate is gone")
 	errActivationTargetActive = errors.New("slack: the connection to activate is already active")
 	errActivationStale        = errors.New("slack: the activation preview is out of date")
 )
@@ -262,7 +261,7 @@ func (h *workspacesHandler) handleActivate(w http.ResponseWriter, r *http.Reques
 		own, active := connectionsInWorkspace(rows, workspaceID, apiAppID)
 		switch {
 		case own == nil:
-			return errActivationTargetGone
+			return slackstore.ErrNoSuchConnection
 		case own.Active:
 			return errActivationTargetActive
 		}
@@ -290,7 +289,7 @@ func (h *workspacesHandler) handleActivate(w http.ResponseWriter, r *http.Reques
 		return nil
 	})
 	switch {
-	case errors.Is(err, errActivationTargetGone), errors.Is(err, slackstore.ErrNoSuchConnection):
+	case errors.Is(err, slackstore.ErrNoSuchConnection):
 		httpx.NotFound(w, "connection")
 		return
 	case errors.Is(err, errActivationTargetActive):
@@ -396,7 +395,8 @@ func (h *workspacesHandler) botToken(ctx context.Context, orgID string, conn *sl
 
 // activationBlockers checks target's bot token with auth.test: Slack refusing
 // it is token_rejected, and a token granted fewer scopes than slackBotScopes is
-// missing_scopes. An error is a call that met no answer about the token.
+// missing_scopes. An error is a call that met no answer about the token, Slack
+// failing on its own side included.
 func (h *workspacesHandler) activationBlockers(ctx context.Context, orgID string, target *slackstore.Connection, token string) ([]activationBlocker, error) {
 	result, err := slackAuthTest(ctx, h.client, slackBotCaller(orgID, target.WorkspaceID, target.APIAppID), token)
 	if isSlackRejected(err) {

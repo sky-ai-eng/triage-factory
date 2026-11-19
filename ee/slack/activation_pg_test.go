@@ -30,15 +30,11 @@ const (
 // removalTestSecret: A first, which is active, then B, which lands inactive.
 type activationRig struct {
 	*removalRig
-	teamID string
 }
 
 func newActivationRig(t *testing.T) *activationRig {
 	t.Helper()
 	r := &activationRig{removalRig: newRemovalRig(t)}
-	if err := r.h.AdminDB.QueryRow(`SELECT id::text FROM teams WHERE org_id = $1`, r.orgID).Scan(&r.teamID); err != nil {
-		t.Fatalf("read the org's team: %v", err)
-	}
 	for _, app := range []struct{ token, botUser, appID, name string }{
 		{switchTokenA, "U0BOTA", switchAppA, "bot-a"},
 		{switchTokenB, "U0BOTB", switchAppB, "bot-b"},
