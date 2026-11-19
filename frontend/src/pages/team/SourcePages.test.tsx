@@ -697,8 +697,8 @@ describe('Jira source page', () => {
   it('draws the fortnight beside the board, over the projects', async () => {
     stub(SETTINGS)
     render(<JiraSource {...BODY} />)
-    // The board waits on the team's settings read; the headings around it
-    // render before that answers.
+    // Waits on the board itself: a heading can render before the data the
+    // board is drawn from has arrived.
     await waitFor(() => expect(document.querySelector('.sp-mapcol .sr-board')).not.toBeNull())
 
     expect(screen.getByText('What each status means')).toBeInTheDocument()
@@ -893,8 +893,8 @@ describe('Jira source page', () => {
       ).toBeInTheDocument(),
     )
     // The stored configuration still renders — watched keys, the board's map —
-    // because the team's config is TF's data, not Jira's. It arrives with the
-    // settings read, which can answer after the off note has rendered.
+    // because the team's config is TF's data, not Jira's. It can render after
+    // the off note does.
     await waitFor(() => expect(screen.getByText('In Progress')).toBeInTheDocument())
     expect(screen.getAllByText('PLAT').length).toBeGreaterThan(0)
 

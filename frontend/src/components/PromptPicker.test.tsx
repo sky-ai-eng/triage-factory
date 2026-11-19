@@ -246,10 +246,8 @@ describe('PromptPicker reads a page at a time, searched on the server', () => {
   })
 
   it('offers the next page, read with the same search and the token it was minted under', async () => {
-    // The unsearched read answers with nothing, so the row and its Load more
-    // can only be the searched page's: Load more pages under the search the
-    // page on screen was read with, and the searched read can land after the
-    // request for it is seen.
+    // The unsearched read answers with nothing, so the row on screen, and the
+    // Load more beside it, can only have come from the searched read.
     route({
       '/api/prompts/list': (body) =>
         body?.page_token === 'tok-1'

@@ -452,7 +452,7 @@ describe('GitHubAccessControl · deployment App', () => {
       githubAppInstalled: true,
       githubAppInstallCount: 1,
     })
-    // The reread status renders after the callbacks it drives have run.
+    // The callbacks having run is not the reread status having rendered.
     await waitFor(() =>
       expect(screen.queryByRole('button', { name: 'Disconnect @acme' })).not.toBeInTheDocument(),
     )

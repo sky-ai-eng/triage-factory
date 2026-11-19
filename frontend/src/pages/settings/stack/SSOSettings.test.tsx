@@ -386,8 +386,7 @@ describe('SSOSettings — identity provider', () => {
     fireEvent.change(picker, { target: { value: 'ping' } })
 
     await waitFor(() => expect(toasts.toast.error).toHaveBeenCalledWith('idp must be one of …'))
-    // The toast is called as the refusal lands; the picker comes back in a
-    // render that can follow it.
+    // The toast having been called is not the picker having been restored.
     await waitFor(() => {
       expect(picker).toHaveValue('google')
       expect(picker).not.toBeDisabled()

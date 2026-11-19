@@ -68,26 +68,27 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
   // selection on that row so stale errors don't linger after a retry attempt.
   const [failures, setFailures] = useState<Record<string, string>>({})
 
-  // Acting team. The Jira stock deck is single-team by
-  // construction, so the picker doubles as the read scope (which team's
-  // backlog to triage) AND the claim team. teamRef keeps fetchStock's
-  // identity stable (it's a polling-recursion + WS dep). Renders only at
-  // ≥2 teams; below that team='' and the server resolves the sole team.
-  const { teams, lastActingTeamId, loaded: teamsLoaded } = useTeams()
+  // Acting team. The Jira stock deck is single-team by construction, so the
+  // team is both the read scope (which team's backlog to triage) and the claim
+  // team, and the picker for it renders only at ≥2 teams. teamRef keeps
+  // fetchStock's identity stable, since fetchStock schedules itself again
+  // while the deck is still polling.
+  const {
+    teams,
+    lastActingTeamId,
+    loaded: teamsLoaded,
+    error: teamsError,
+    refresh: refreshTeams,
+  } = useTeams()
   const [team, setTeam] = useState('')
   const teamRef = useRef('')
   useEffect(() => {
     teamRef.current = team
   }, [team])
   // State rather than a ref because Save waits on it: the render that first
-  // sees the teams loaded commits before this effect picks the team, and a
+  // sees the teams loaded commits before the seed below picks the team, and a
   // Save pressed in it would send no team instead of the default.
   const [teamSeeded, setTeamSeeded] = useState(false)
-  useEffect(() => {
-    if (teamSeeded || !teamsLoaded) return
-    setTeamSeeded(true)
-    setTeam(pickerDefault(teams, lastActingTeamId))
-  }, [teamSeeded, teamsLoaded, teams, lastActingTeamId])
 
   // Keep refs for component lifecycle and polling so retry timers don't
   // continue firing after unmount.
@@ -151,9 +152,29 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
     }
   }, [])
 
+  // The deck is read once the team is picked, and for that team, so what it
+  // lists is the backlog Save claims into. An unscoped read lets the server
+  // pick the team from the caller's live last-acting team, which this page's
+  // cached copy can disagree with. The ref is set here, as onTeamChange sets
+  // it, so the read below sees it.
   useEffect(() => {
+    if (teamSeeded || !teamsLoaded) return
+    const seeded = pickerDefault(teams, lastActingTeamId)
+    setTeamSeeded(true)
+    setTeam(seeded)
+    teamRef.current = seeded
+    setError('')
+    setPolling(true)
     fetchStock()
-  }, [fetchStock])
+  }, [teamSeeded, teamsLoaded, teams, lastActingTeamId, fetchStock])
+
+  // With no teams there is no team to read the deck for, so their failure is
+  // the deck's, and Retry reads them again.
+  useEffect(() => {
+    if (teamSeeded || teamsLoaded || !teamsError) return
+    setError(teamsError)
+    setPolling(false)
+  }, [teamSeeded, teamsLoaded, teamsError])
 
   // Switching teams reloads the deck for the new team's Jira backlog.
   // Update the ref synchronously so the immediate fetchStock sees it.
@@ -320,7 +341,8 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
                 setPolling(true)
                 setAssigned(null)
                 setAvailable(null)
-                fetchStock()
+                if (teamSeeded) fetchStock()
+                else void refreshTeams()
               }}
               className="flex items-center gap-1.5 text-ui font-medium text-warm hover:text-warm/80 transition-colors"
             >

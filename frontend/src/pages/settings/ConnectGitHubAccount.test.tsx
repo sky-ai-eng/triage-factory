@@ -63,8 +63,7 @@ describe('ConnectGitHubAccount · a refused start', () => {
         'This organization is pointed at https://ghe.example.com.',
       )
     })
-    // The toast is called as the refusal lands; the inline copy is a render
-    // that can follow it.
+    // The toast having been called is not the inline copy having rendered.
     expect(
       await screen.findByText('This organization is pointed at https://ghe.example.com.'),
     ).toBeInTheDocument()

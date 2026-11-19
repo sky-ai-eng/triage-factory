@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { useLayoutEffect, useRef } from 'react'
 import { render, screen, act, waitFor } from '@testing-library/react'
 import { useConversationDetail } from './useConversationDetail'
 import { TelemetryRail } from '../components/runstation/StationInstruments'
@@ -894,6 +895,41 @@ function TaskProbe() {
 describe('useConversationDetail task refresh', () => {
   beforeEach(() => {
     dispatch = null
+  })
+
+  it('refreshes the task on a push that lands right after the conversation commits', async () => {
+    // A socket frame can arrive after React commits the loaded conversation
+    // and before that commit's passive effects run. The probe sends one from a
+    // layout effect, which runs in that window.
+    function PushOnLoad() {
+      const { conversation } = useConversationDetail(CONVERSATION_ID)
+      const pushed = useRef(false)
+      useLayoutEffect(() => {
+        if (!conversation || pushed.current) return
+        pushed.current = true
+        dispatch?.({ type: 'task_updated', data: {} })
+      }, [conversation])
+      return null
+    }
+    const fetchMock = vi.fn((url: string) => {
+      const path = url.split('?')[0]
+      const body: unknown =
+        path === '/api/tasks/t1'
+          ? ({ id: 't1', memory_pending: false } as Task)
+          : path.endsWith('/messages')
+            ? { items: [], next_page_token: '' }
+            : conversation({ task_id: 't1', status: 'open' })
+      return Promise.resolve({ ok: true, status: 200, ...jsonBody(body) })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<PushOnLoad />)
+
+    // The load's read, then the push's.
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.filter(([u]) => u.split('?')[0] === '/api/tasks/t1'),
+      ).toHaveLength(2),
+    )
   })
 
   it('keeps the newest task read when pushes answer out of order', async () => {

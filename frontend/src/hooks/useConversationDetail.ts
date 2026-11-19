@@ -123,9 +123,9 @@ export function useConversationDetail(conversationID: string | undefined): Conve
   // down and rebuild it on every streamed row (foldMessageUsage writes
   // `conversation` per stamped message), and on a busy conversation the 5s tick
   // would never come due. Written in the commit itself, in a layout effect: a
-  // passive one runs in a later task, and a tick or a socket frame that lands
-  // between the two would read the previous conversation (a push arriving just
-  // after the load would find no task to refresh).
+  // passive one can run in a later task, and a tick or a socket frame that
+  // lands between the two would read the previous conversation (a push
+  // arriving just after the load would find no task to refresh).
   const conversationRef = useRef<Conversation | null>(null)
   const messagesRef = useRef<Message[]>([])
 

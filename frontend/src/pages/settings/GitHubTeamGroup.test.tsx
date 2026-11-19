@@ -137,7 +137,7 @@ describe('GitHubTeamGroup', () => {
     render(<Harness onLoaded={onLoaded} />)
 
     await waitFor(() => expect(onLoaded).toHaveBeenCalledWith([PLATFORM]))
-    // The seed and the rows are two reads, and either can answer first.
+    // The rows can render after onLoaded has been called.
     await waitFor(() => expect(rowNames()).toEqual(['acme/web', 'acme/platform', 'acme/gone']))
     // A mapping GitHub no longer lists says so, from the row's own flag.
     const gone = screen.getAllByRole('checkbox')[2]

@@ -380,8 +380,8 @@ describe('SlackWorkspacesCard returning from Slack', () => {
     renderCard()
 
     expect(await screen.findByRole('dialog', { name: 'Switch apps' })).toBeInTheDocument()
-    // The dialog's own effect reads the preview, and that effect can run after
-    // findByRole has already seen the dialog.
+    // The preview can be requested after the dialog is in the DOM, which is
+    // all findByRole waits for.
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(PREVIEW, expect.anything()))
     expect(window.location.search).toBe('?tab=settings')
   })
@@ -523,9 +523,8 @@ describe('SlackWorkspacesCard switch preview', () => {
     expect(within(done).getByText('#secret')).toBeInTheDocument()
     expect(within(done).getByText(/Invite the new bot to it in Slack/)).toBeInTheDocument()
 
-    // The dialog renders when the activation's fetch resolves, outside act, so
-    // React runs the focus trap's effect on its scheduler after the DOM is
-    // already there for findByRole to see.
+    // Focus can land after the dialog is in the DOM, which is all findByRole
+    // waits for.
     await waitFor(() => expect(within(done).getByRole('button', { name: 'Done' })).toHaveFocus())
 
     fireEvent.click(within(done).getByRole('button', { name: 'Done' }))
