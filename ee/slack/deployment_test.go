@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -314,5 +315,31 @@ func TestHandleDeploymentApp_NotFound(t *testing.T) {
 				t.Errorf("body = %s; want reason NOT_FOUND", rec.Body.String())
 			}
 		})
+	}
+}
+
+// TestDeploymentAppEnvNamesForwardedByCompose: the bundled compose file
+// forwards every variable deploymentAppFromEnv reads, under the constant's
+// own name, and the _FILE form of each secret. Compose passes a container only
+// the names it lists, so a renamed constant the file does not follow is a
+// value set in .env that TF never sees. internal/app's compose test checks
+// which service the lines are under.
+func TestDeploymentAppEnvNamesForwardedByCompose(t *testing.T) {
+	raw, err := os.ReadFile("../../docker-compose.yml")
+	if err != nil {
+		t.Fatalf("read docker-compose.yml: %v", err)
+	}
+	lines := map[string]bool{}
+	for _, line := range strings.Split(string(raw), "\n") {
+		lines[strings.TrimSpace(line)] = true
+	}
+	names := []string{envSlackAppID, envSlackClientID, envSlackClientSecret, envSlackSigningSecret, envSlackAppToken}
+	for _, secret := range []string{envSlackClientSecret, envSlackSigningSecret, envSlackAppToken} {
+		names = append(names, secret+"_FILE")
+	}
+	for _, name := range names {
+		if want := name + ": ${" + name + ":-}"; !lines[want] {
+			t.Errorf("docker-compose.yml has no line %q", want)
+		}
 	}
 }

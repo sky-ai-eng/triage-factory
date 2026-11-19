@@ -634,6 +634,19 @@ services:
       TF_LINEAR_CLIENT_ID: ${TF_LINEAR_CLIENT_ID:-}
       TF_LINEAR_CLIENT_SECRET: ${TF_LINEAR_CLIENT_SECRET:-}
       TF_LINEAR_CLIENT_SECRET_FILE: ${TF_LINEAR_CLIENT_SECRET_FILE:-}
+      # Deployment Slack app for one-click Add to Slack (optional; set the
+      # first three and exactly one of the signing secret and the app token).
+      # Control-only: control serves the install, the receiver and the Socket
+      # Mode connection. Each secret can also be a mounted file via <NAME>_FILE.
+      # See docs/users/self-hosting/deployment-integrations/deployment-slack-app.md.
+      TF_SLACK_APP_ID: ${TF_SLACK_APP_ID:-}
+      TF_SLACK_CLIENT_ID: ${TF_SLACK_CLIENT_ID:-}
+      TF_SLACK_CLIENT_SECRET: ${TF_SLACK_CLIENT_SECRET:-}
+      TF_SLACK_CLIENT_SECRET_FILE: ${TF_SLACK_CLIENT_SECRET_FILE:-}
+      TF_SLACK_SIGNING_SECRET: ${TF_SLACK_SIGNING_SECRET:-}
+      TF_SLACK_SIGNING_SECRET_FILE: ${TF_SLACK_SIGNING_SECRET_FILE:-}
+      TF_SLACK_APP_TOKEN: ${TF_SLACK_APP_TOKEN:-}
+      TF_SLACK_APP_TOKEN_FILE: ${TF_SLACK_APP_TOKEN_FILE:-}
       # Deployment GitHub App — one App key serving every organization that
       # has no credential of its own (optional; set all four or none). Control-
       # only, like the Atlassian pair: control serves the bind ceremony and the

@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+
 	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -85,6 +87,7 @@ type deploymentIngestRig struct {
 	reads      *countingConnections
 	published  *[]domain.Event
 	deliveries *fakeDeliveries
+	metrics    *sdkmetric.ManualReader
 }
 
 // newDeploymentIngestRig builds the rig over rows, with the slack feature
@@ -101,7 +104,7 @@ func newDeploymentIngestRig(t *testing.T, rows ...*slackstore.Connection) *deplo
 	}
 	published := &[]domain.Event{}
 	deliveries := newFakeDeliveries()
-	stats, _ := newTestStats()
+	stats, metrics := newTestStats()
 	pipeline := &ingestPipeline{
 		connections: reads,
 		deliveries:  deliveries,
@@ -118,6 +121,7 @@ func newDeploymentIngestRig(t *testing.T, rows ...*slackstore.Connection) *deplo
 		reads:      reads,
 		published:  published,
 		deliveries: deliveries,
+		metrics:    metrics,
 	}
 }
 
@@ -307,6 +311,188 @@ func TestDeploymentWebhook_Unverified_401NoStoreRead(t *testing.T) {
 				t.Errorf("published %d events; want 0", len(*r.published))
 			}
 		})
+	}
+}
+
+// TestDeploymentWebhook_SignatureMismatch_LoggedOnce: a fresh, well-formed
+// signature made with another secret, which is what every delivery looks like
+// when TF_SLACK_SIGNING_SECRET is not the app's, is counted each time and
+// logs one warning naming the variable; a second mismatch straight after logs
+// nothing more. A delivery naming the deployment's app and one naming no app
+// (Slack's url_verification) are the same case.
+func TestDeploymentWebhook_SignatureMismatch_LoggedOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		body      map[string]any
+		wantNames string
+	}{
+		{"names the deployment app", eventCallbackPayload(deployTestWorkspace, deployTestAppID, "Ev-1", mentionInner("C1", "U1", "1.0")), mismatchNamesDeploymentApp},
+		{"names no app", map[string]any{"type": "url_verification", "challenge": "c"}, mismatchNamesNoApp},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logs := captureSlackLog(t)
+			r := newDeploymentIngestRig(t, deploymentRow(deployTestOrgID, deployTestWorkspace, true))
+			body := mustJSON(t, tc.body)
+
+			for range 2 {
+				ts := nowTimestamp()
+				if rec := postDeploymentWebhook(t, r.webhook, body, ts, sign("another-apps-secret", ts, body)); rec.Code != http.StatusUnauthorized {
+					t.Fatalf("status = %d, want 401", rec.Code)
+				}
+			}
+
+			out := logs.String()
+			if n := strings.Count(out, "not signed with TF_SLACK_SIGNING_SECRET"); n != 1 {
+				t.Fatalf("logged %d mismatch lines, want 1:\n%s", n, out)
+			}
+			for _, want := range []string{"level=WARN", "app_id=" + deployTestAppID, "mismatches=1"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("log lacks %q:\n%s", want, out)
+				}
+			}
+			if got := sumByAttr(t, r.metrics, "slack.webhook.signature.mismatches", "names_app"); got[tc.wantNames] != 2 || len(got) != 1 {
+				t.Errorf("signature mismatches by names_app = %v, want {%s: 2}", got, tc.wantNames)
+			}
+		})
+	}
+}
+
+// TestDeploymentWebhook_SignatureMismatch_OtherApp: a mismatched delivery
+// naming another app logs that app instead of blaming the signing secret, so
+// an app left pointing at the endpoint is not read as a wrong secret.
+func TestDeploymentWebhook_SignatureMismatch_OtherApp(t *testing.T) {
+	logs := captureSlackLog(t)
+	r := newDeploymentIngestRig(t, deploymentRow(deployTestOrgID, deployTestWorkspace, true))
+	body := mustJSON(t, eventCallbackPayload(deployTestWorkspace, "A0OLDAPP01", "Ev-1", mentionInner("C1", "U1", "1.0")))
+	ts := nowTimestamp()
+	if rec := postDeploymentWebhook(t, r.webhook, body, ts, sign("old-apps-secret", ts, body)); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+
+	out := logs.String()
+	if strings.Contains(out, "TF_SLACK_SIGNING_SECRET") {
+		t.Errorf("blamed the signing secret for another app's delivery:\n%s", out)
+	}
+	if n := strings.Count(out, "a delivery naming another Slack app"); n != 1 || !strings.Contains(out, "delivery_app_id=A0OLDAPP01") {
+		t.Errorf("want one other-app line naming A0OLDAPP01:\n%s", out)
+	}
+	if got := sumByAttr(t, r.metrics, "slack.webhook.signature.mismatches", "names_app"); got[mismatchNamesOtherApp] != 1 || len(got) != 1 {
+		t.Errorf("signature mismatches by names_app = %v, want {other: 1}", got)
+	}
+}
+
+// TestDeploymentWebhook_SignatureMismatch_MalformedAppID: an api_app_id that
+// is not an App ID's shape is treated as naming no app, so the unverified
+// value never reaches the log.
+func TestDeploymentWebhook_SignatureMismatch_MalformedAppID(t *testing.T) {
+	logs := captureSlackLog(t)
+	r := newDeploymentIngestRig(t, deploymentRow(deployTestOrgID, deployTestWorkspace, true))
+	junk := strings.Repeat("A", 200)
+	body := mustJSON(t, eventCallbackPayload(deployTestWorkspace, junk, "Ev-1", mentionInner("C1", "U1", "1.0")))
+	ts := nowTimestamp()
+	if rec := postDeploymentWebhook(t, r.webhook, body, ts, sign("another-apps-secret", ts, body)); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+	if out := logs.String(); strings.Contains(out, junk) || strings.Contains(out, "another Slack app") {
+		t.Errorf("logged the malformed app id as another app:\n%s", out)
+	}
+	if got := sumByAttr(t, r.metrics, "slack.webhook.signature.mismatches", "names_app"); got[mismatchNamesNoApp] != 1 || len(got) != 1 {
+		t.Errorf("signature mismatches by names_app = %v, want {none: 1}", got)
+	}
+}
+
+// TestDeploymentWebhook_UnsignedOrMalformed_NotLogged: a request Slack would
+// not send (unsigned, stale, or with a digest that is not SHA-256's) is a 401
+// and logs nothing, so a scanner hitting the endpoint does not read as a wrong
+// signing secret. Neither does a delivery that verifies.
+func TestDeploymentWebhook_UnsignedOrMalformed_NotLogged(t *testing.T) {
+	logs := captureSlackLog(t)
+	r := newDeploymentIngestRig(t, deploymentRow(deployTestOrgID, deployTestWorkspace, true))
+	body := mustJSON(t, map[string]any{"type": "url_verification", "challenge": "c"})
+	stale := strconv.FormatInt(time.Now().Add(-10*time.Minute).Unix(), 10)
+
+	for _, tc := range []struct{ name, timestamp, sig string }{
+		{"unsigned", "", ""},
+		{"no timestamp", "", sign(deployTestSecret, nowTimestamp(), body)},
+		{"stale", stale, sign("another-apps-secret", stale, body)},
+		{"short digest", nowTimestamp(), "v0=00"},
+		{"not hex", nowTimestamp(), "v0=zz"},
+		{"no v0 prefix", nowTimestamp(), "v1=" + hex.EncodeToString(make([]byte, 32))},
+	} {
+		if rec := postDeploymentWebhook(t, r.webhook, body, tc.timestamp, tc.sig); rec.Code != http.StatusUnauthorized {
+			t.Errorf("%s: status = %d, want 401", tc.name, rec.Code)
+		}
+	}
+	if rec := postSignedDeployment(t, r.webhook, map[string]any{"type": "url_verification", "challenge": "c"}); rec.Code != http.StatusOK {
+		t.Errorf("signed: status = %d, want 200", rec.Code)
+	}
+	if out := logs.String(); strings.Contains(out, "TF_SLACK_SIGNING_SECRET") {
+		t.Errorf("logged a signing-secret line for a request that was not a mismatch:\n%s", out)
+	}
+	if got := sumByAttr(t, r.metrics, "slack.webhook.signature.mismatches", "names_app"); len(got) != 0 {
+		t.Errorf("signature mismatches = %v, want none", got)
+	}
+}
+
+// TestCheckSlackSignature_Outcomes: only a fresh, well-formed SHA-256 digest
+// that the secret does not produce is a mismatch.
+func TestCheckSlackSignature_Outcomes(t *testing.T) {
+	body := []byte(`{"type":"event_callback"}`)
+	fresh := nowTimestamp()
+	stale := strconv.FormatInt(time.Now().Add(-10*time.Minute).Unix(), 10)
+	for _, tc := range []struct {
+		name, timestamp, sig string
+		want                 signatureCheck
+	}{
+		{"valid", fresh, sign(deployTestSecret, fresh, body), signatureValid},
+		{"another secret", fresh, sign("another-apps-secret", fresh, body), signatureMismatch},
+		{"zero digest", fresh, "v0=" + hex.EncodeToString(make([]byte, 32)), signatureMismatch},
+		{"stale but right secret", stale, sign(deployTestSecret, stale, body), signatureMalformed},
+		{"stale and another secret", stale, sign("another-apps-secret", stale, body), signatureMalformed},
+		{"no timestamp", "", sign(deployTestSecret, fresh, body), signatureMalformed},
+		{"timestamp not a number", "soon", sign(deployTestSecret, fresh, body), signatureMalformed},
+		{"no signature", fresh, "", signatureMalformed},
+		{"no v0 prefix", fresh, strings.Replace(sign(deployTestSecret, fresh, body), "v0=", "v1=", 1), signatureMalformed},
+		{"not hex", fresh, "v0=zz", signatureMalformed},
+		{"short digest", fresh, "v0=00", signatureMalformed},
+	} {
+		if got := checkSlackSignature(deployTestSecret, body, tc.timestamp, tc.sig); got != tc.want {
+			t.Errorf("%s: checkSlackSignature = %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestSignatureCheck_ZeroValueRefuses: a signatureCheck nothing assigned is
+// not a pass.
+func TestSignatureCheck_ZeroValueRefuses(t *testing.T) {
+	var unset signatureCheck
+	if unset == signatureValid {
+		t.Fatal("the zero signatureCheck is signatureValid; an unset check must refuse")
+	}
+}
+
+// TestMismatchReport_FirstThenOnceAnInterval: the first mismatch is logged,
+// later ones inside the interval are counted but not logged, and the next one
+// past the interval is logged with the count of all since the last line.
+func TestMismatchReport_FirstThenOnceAnInterval(t *testing.T) {
+	var m mismatchReport
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for _, step := range []struct {
+		at        time.Duration
+		wantLog   bool
+		wantCount int
+	}{
+		{0, true, 1},
+		{10 * time.Second, false, 0},
+		{59 * time.Second, false, 0},
+		{61 * time.Second, true, 3},
+		{62 * time.Second, false, 0},
+		{3 * time.Minute, true, 2},
+	} {
+		log, count := m.record(t0.Add(step.at))
+		if log != step.wantLog || count != step.wantCount {
+			t.Errorf("record at +%s = (%v, %d), want (%v, %d)", step.at, log, count, step.wantLog, step.wantCount)
+		}
 	}
 }
 

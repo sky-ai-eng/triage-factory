@@ -54,9 +54,10 @@ const (
 // collaborators (identity, channels, ...): tests that construct
 // ingestPipeline directly without stats simply record nothing.
 type ingestStats struct {
-	events      metric.Int64Counter
-	retries     metric.Int64Counter
-	rateLimited metric.Int64Counter
+	events              metric.Int64Counter
+	retries             metric.Int64Counter
+	rateLimited         metric.Int64Counter
+	signatureMismatches metric.Int64Counter
 }
 
 // newIngestStats builds the instrument set against mp — production passes
@@ -84,7 +85,13 @@ func newIngestStats(mp metric.MeterProvider) *ingestStats {
 		slackLog.Warn("app rate limited counter setup failed", "error", err)
 	}
 
-	return &ingestStats{events: events, retries: retries, rateLimited: rateLimited}
+	signatureMismatches, err := meter.Int64Counter("slack.webhook.signature.mismatches",
+		metric.WithDescription("Deliveries to the deployment Slack app's Events API endpoint with a fresh, well-formed signature that TF_SLACK_SIGNING_SECRET does not produce, by the app the unverified body names (deployment, other, or none). A wrong signing secret fails every delivery this way; so does a forged request."))
+	if err != nil {
+		slackLog.Warn("signature mismatches counter setup failed", "error", err)
+	}
+
+	return &ingestStats{events: events, retries: retries, rateLimited: rateLimited, signatureMismatches: signatureMismatches}
 }
 
 // recordIngest counts one delivery's pipeline outcome — exactly one call
@@ -117,5 +124,18 @@ func (s *ingestStats) recordRateLimited(ctx context.Context, appID string) {
 	}
 	s.rateLimited.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("app_id", appID),
+	))
+}
+
+// recordSignatureMismatch counts one delivery to the deployment endpoint that
+// the deployment app's signing secret did not sign. namesApp is one of the
+// mismatchNames* values.
+func (s *ingestStats) recordSignatureMismatch(ctx context.Context, appID, namesApp string) {
+	if s == nil {
+		return
+	}
+	s.signatureMismatches.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("app_id", appID),
+		attribute.String("names_app", namesApp),
 	))
 }

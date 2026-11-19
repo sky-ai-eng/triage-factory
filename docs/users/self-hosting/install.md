@@ -95,6 +95,7 @@ anything, though; it only adds items `.env` is missing.
 - A signer for those organizations' commits: [Deployment commit signer](deployment-integrations/deployment-commit-signer.md).
 - One-click Jira Cloud connect: [Deployment Jira app](deployment-integrations/deployment-jira-app.md).
 - One-click Linear install: [Deployment Linear app](deployment-integrations/deployment-linear-app.md).
+- One-click Add to Slack: [Deployment Slack app](deployment-integrations/deployment-slack-app.md).
 - SAML sign-in: [SSO](sso.md).
 - Bedrock through a customer IAM role: [Bedrock role mode](bedrock-role-mode.md).
 - Behind a load balancer or CDN: set `TF_TRUSTED_PROXY_CIDR` ([Client IP & trusted proxies](networking.md)).
