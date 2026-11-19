@@ -217,7 +217,8 @@ func (e *Engine) compactWarm(ctx context.Context, params Params, spent *spend) e
 	// same tool_choice (absent), same model, same effort — over the same
 	// transcript plus the one request row. The only cache invalidation in
 	// the whole compaction process is the commit below.
-	completion, err := e.streamWithRetry(ctx, params.OrgID, client, e.buildRequest(params, provider, rows, callMaxTokens(params, provider)))
+	req := e.buildRequest(params, provider, rows, callMaxTokens(params, provider))
+	completion, err := e.streamWithRetry(ctx, params.OrgID, client, req)
 	if release != nil {
 		release()
 	}
@@ -254,7 +255,7 @@ func (e *Engine) compactWarm(ctx context.Context, params Params, spent *spend) e
 	// Success: the reply is a genuine transcript event — persist it like any
 	// assistant turn (usage, cost, duration), then flip it inactive with the
 	// span it summarized.
-	replyRow, err := e.persistAssistant(ctx, params, completion, e.msSince(callStarted))
+	replyRow, err := e.persistAssistant(ctx, params, completion, toolsFingerprint(req.Tools), e.msSince(callStarted))
 	if err != nil {
 		return err
 	}

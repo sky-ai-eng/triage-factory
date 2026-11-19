@@ -21,25 +21,23 @@ const metaToolsFingerprint = "tools_fingerprint"
 // listed in is free, and with each definition whole, so a changed name,
 // description, or input schema is a different set.
 func canonicalTools(tools []schemas.ChatTool) ([]byte, error) {
-	sorted := append([]schemas.ChatTool(nil), tools...)
-	sort.SliceStable(sorted, func(i, j int) bool { return toolName(sorted[i]) < toolName(sorted[j]) })
-	return json.Marshal(sorted)
-}
-
-func toolName(t schemas.ChatTool) string {
-	if t.Function != nil {
-		return t.Function.Name
+	name := func(t schemas.ChatTool) string {
+		if t.Function != nil {
+			return t.Function.Name
+		}
+		return ""
 	}
-	return ""
+	sorted := append([]schemas.ChatTool(nil), tools...)
+	sort.SliceStable(sorted, func(i, j int) bool { return name(sorted[i]) < name(sorted[j]) })
+	return json.Marshal(sorted)
 }
 
 // toolsFingerprint identifies the set of tools a request carries. Two
 // requests with the same fingerprint offer the model the same tools as far as
 // a replayed thinking block is concerned.
 //
-// It returns "" for a list it cannot render. No row is ever recorded under
-// "", and reasoningBoundTo matches nothing against it, so the failure costs a
-// conversation its earlier reasoning and never sends a block the API refuses.
+// It returns "" for a list it cannot render. No row is recorded under "", and
+// no recorded fingerprint equals it.
 func toolsFingerprint(tools []schemas.ChatTool) string {
 	b, err := canonicalTools(tools)
 	if err != nil {
@@ -76,7 +74,7 @@ func recordedToolsFingerprint(row domain.Message) string {
 // claim that offers a different set, changes them under every block a parked
 // conversation holds.
 //
-// The cut is the last row whose reasoning was produced under other tools:
+// The cut is the last row that carries reasoning and records other tools:
 // that row and every row before it go out without reasoning, and every row
 // after it keeps its own. Cutting everything before it, and not only the rows
 // that differ, keeps what is replayed one unbroken run of the blocks the
@@ -85,9 +83,12 @@ func recordedToolsFingerprint(row domain.Message) string {
 // its first time under them back: the rows between were produced without
 // them.
 //
-// A row that records no fingerprint counts as produced under other tools. A
-// wrong removal costs the model reasoning it would have reread, and a wrong
-// replay fails every later call the conversation makes.
+// A row that records no fingerprint keeps its reasoning unless a later row
+// puts it behind the cut. Such a row comes from a binary that records none,
+// and that binary replays every block a conversation holds. A block this one
+// left out and that one sent back would sit in front of the blocks produced
+// in between, which are bound to the history without it, and every call that
+// binary made on the conversation would be refused.
 //
 // The cut is derived from the rows on every request and stored nowhere, so
 // every request of an engagement, and of every later one under the same
@@ -98,7 +99,7 @@ func reasoningBoundTo(rows []domain.Message, fingerprint string) []domain.Messag
 		if len(r.Reasoning) == 0 {
 			continue
 		}
-		if fingerprint != "" && recordedToolsFingerprint(r) == fingerprint {
+		if recorded := recordedToolsFingerprint(r); recorded == "" || recorded == fingerprint {
 			continue
 		}
 		if key := assemblyKey(r); !found || key > cut {

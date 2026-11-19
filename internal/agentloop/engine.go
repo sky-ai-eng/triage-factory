@@ -591,7 +591,8 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 			escalatedMaxTokens = 0
 		}
 		callStarted := e.now()
-		completion, err := e.streamWithRetry(ctx, params.OrgID, client, e.buildRequest(params, provider, rows, maxTokens))
+		req := e.buildRequest(params, provider, rows, maxTokens)
+		completion, err := e.streamWithRetry(ctx, params.OrgID, client, req)
 		if release != nil {
 			release()
 		}
@@ -652,7 +653,7 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 		if class.interrupted() {
 			stubTruncatedToolArgs(completion)
 		}
-		assistantRow, err := e.persistAssistant(ctx, params, completion, e.msSince(callStarted))
+		assistantRow, err := e.persistAssistant(ctx, params, completion, toolsFingerprint(req.Tools), e.msSince(callStarted))
 		if err != nil {
 			return e.failed(ctx, started, turn, fmt.Errorf("persist assistant message: %w", err))
 		}

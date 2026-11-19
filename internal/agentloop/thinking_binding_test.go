@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -144,7 +145,12 @@ func contextOf(req inference.Request) (bindingContext, []schemas.ChatMessage, er
 		}
 		encoded[i] = string(b)
 	}
-	toolsJSON, err := canonicalTools(req.Tools)
+	// The API binds the tools as a name-sorted set, so their order is free.
+	// Rendered here and not by canonicalTools, so a fault in what the
+	// fingerprint covers shows up as a block this provider reports.
+	tools := append([]schemas.ChatTool(nil), req.Tools...)
+	sort.SliceStable(tools, func(i, j int) bool { return toolName(tools[i]) < toolName(tools[j]) })
+	toolsJSON, err := json.Marshal(tools)
 	if err != nil {
 		return bindingContext{}, nil, err
 	}
@@ -155,6 +161,13 @@ func contextOf(req inference.Request) (bindingContext, []schemas.ChatMessage, er
 		tools:    string(toolsJSON),
 		messages: encoded,
 	}, msgs, nil
+}
+
+func toolName(t schemas.ChatTool) string {
+	if t.Function != nil {
+		return t.Function.Name
+	}
+	return ""
 }
 
 func clip(s string) string {
@@ -399,8 +412,8 @@ func TestThinkingBinding_AResumeUnderToolsTheConversationHeldBefore(t *testing.T
 	p.assertBound(t)
 }
 
-// A row written before rows recorded their tools says nothing about which
-// tools produced its reasoning, so no request may replay it.
+// A row that records no tools fingerprint is one a binary that records none
+// wrote, and that binary replays its reasoning, so this one does too.
 func TestThinkingBinding_AResumeOverRowsThatRecordNoTools(t *testing.T) {
 	tr := newMemTranscript(pendingUser("go"))
 	p := newBindingProvider(
@@ -409,21 +422,52 @@ func TestThinkingBinding_AResumeOverRowsThatRecordNoTools(t *testing.T) {
 		thinking(scriptedTurn{text: "done again"}),
 	)
 	runEngagement(t, tr, p, newScriptedToolHost(), fableParams())
-	tr.mu.Lock()
-	for i := range tr.rows {
-		delete(tr.rows[i].Metadata, metaToolsFingerprint)
-	}
-	tr.mu.Unlock()
+	tr.forgetToolsFingerprints()
 	_, _ = tr.Insert(context.Background(), "org", &domain.Message{
 		ConversationID: "conv", Role: "user", Content: "one more thing", Delivered: boolPtr(false),
 	})
 	runEngagement(t, tr, p, newScriptedToolHost(), fableParams())
-	for call, want := range []int{0, 0, 1} {
+	for call, want := range []int{0, 1, 2} {
 		if got := replayedBlocks(t, p.requests[call]); got != want {
 			t.Errorf("call %d replays %d blocks, want %d", call+1, got, want)
 		}
 	}
 	p.assertBound(t)
+}
+
+// A row that records no fingerprint goes out without its reasoning once a
+// later row puts it behind the cut.
+func TestThinkingBinding_AToolChangeAfterRowsThatRecordNoTools(t *testing.T) {
+	tr := newMemTranscript(pendingUser("go"))
+	p := newBindingProvider(
+		thinking(scriptedTurn{text: "first"}),
+		thinking(scriptedTurn{text: "second"}),
+		thinking(scriptedTurn{text: "third"}),
+	)
+	runEngagement(t, tr, p, newScriptedToolHost(), fableParams())
+	tr.forgetToolsFingerprints()
+	for _, params := range []Params{fableParams(), otherToolsParams()} {
+		_, _ = tr.Insert(context.Background(), "org", &domain.Message{
+			ConversationID: "conv", Role: "user", Content: "next", Delivered: boolPtr(false),
+		})
+		runEngagement(t, tr, p, newScriptedToolHost(), params)
+	}
+	for call, want := range []int{0, 1, 0} {
+		if got := replayedBlocks(t, p.requests[call]); got != want {
+			t.Errorf("call %d replays %d blocks, want %d", call+1, got, want)
+		}
+	}
+	p.assertBound(t)
+}
+
+// forgetToolsFingerprints leaves every row as a binary that records no
+// fingerprint would have written it.
+func (t *memTranscript) forgetToolsFingerprints() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for i := range t.rows {
+		delete(t.rows[i].Metadata, metaToolsFingerprint)
+	}
 }
 
 func TestToolsFingerprint(t *testing.T) {
