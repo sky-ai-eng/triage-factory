@@ -33,6 +33,7 @@ const (
 type removalRig struct {
 	*slackWorkspaceRig
 	orgID, owner string
+	teamID       string
 	pipeline     *ingestPipeline
 	webhook      *webhookHandler
 	metrics      *sdkmetric.ManualReader
@@ -42,7 +43,7 @@ type removalRig struct {
 func newRemovalRig(t *testing.T) *removalRig {
 	t.Helper()
 	r := newSlackWorkspaceRig(t, "https://tf.example")
-	orgID, owner, _ := pgtest.SeedOrgWithUser(t, r.h, "slack-removal")
+	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "slack-removal")
 	bundle := slackstore.FromStores(r.stores)
 	stats, metrics := newTestStats()
 	published := &[]domain.Event{}
@@ -59,6 +60,7 @@ func newRemovalRig(t *testing.T) *removalRig {
 		slackWorkspaceRig: r,
 		orgID:             orgID,
 		owner:             owner,
+		teamID:            teamID,
 		pipeline:          p,
 		webhook:           &webhookHandler{stores: r.stores, pipeline: p, stats: stats},
 		metrics:           metrics,
@@ -255,7 +257,7 @@ func TestAppRemoval_Webhook_PredatesTheConnection_KeepsTheWorkspace(t *testing.T
 }
 
 // TestAppRemoval_ReconnectedAfterTheRead_KeepsTheWorkspace: a connect landing
-// between the receiver's read and the delete moves updated_at, so the
+// between the receiver's read and the delete moves connected_at, so the
 // reconnected row and the secrets it wrote stay.
 func TestAppRemoval_ReconnectedAfterTheRead_KeepsTheWorkspace(t *testing.T) {
 	r := newRemovalRig(t)
@@ -264,8 +266,8 @@ func TestAppRemoval_ReconnectedAfterTheRead_KeepsTheWorkspace(t *testing.T) {
 
 	r.connect("T0REMOVE1", "xoxb-reinstalled", transportEventsAPI)
 	current := r.row("T0REMOVE1")
-	if current == nil || current.UpdatedAt.Equal(stale.UpdatedAt) {
-		t.Fatalf("reconnect did not move updated_at: before %v, after %+v", stale.UpdatedAt, current)
+	if current == nil || current.ConnectedAt.Equal(stale.ConnectedAt) {
+		t.Fatalf("reconnect did not move connected_at: before %v, after %+v", stale.ConnectedAt, current)
 	}
 	before := r.secretValues("T0REMOVE1")
 

@@ -97,7 +97,9 @@ const (
 // columns); on an org connection Transport is set, and the ref its transport
 // needs is too (the source-shape CHECK). AppName is the Slack app's bot name,
 // for display, "" when bots.info gave none. RegisteredByUserID is "" when the
-// registering user was later removed (ON DELETE SET NULL).
+// registering user was later removed (ON DELETE SET NULL). ConnectedAt is when
+// the row's credential was last written, by a connect, an install or a token
+// rotation; Activate leaves it, and UpdatedAt moves on any write.
 type Connection struct {
 	WorkspaceID        string
 	APIAppID           string
@@ -114,12 +116,17 @@ type Connection struct {
 	AppTokenRef        string
 	RegisteredByUserID string
 	CreatedAt          time.Time
+	ConnectedAt        time.Time
 	UpdatedAt          time.Time
 }
 
-// ErrActiveConnectionExists is Upsert's error for an insert that would make a
-// second active connection in one (org, workspace).
+// ErrActiveConnectionExists is Upsert's and Activate's error for a write that
+// would make a second active connection in one (org, workspace).
 var ErrActiveConnectionExists = errors.New("slackstore: the workspace already has an active connection in this org")
+
+// ErrNoSuchConnection is Activate's error when the org has no connection of
+// the app in the workspace.
+var ErrNoSuchConnection = errors.New("slackstore: no such connection")
 
 // ConnectionStore owns the org_slack_connections table. Postgres-only; the
 // SQLite impl is a stub returning db.ErrNotApplicableInLocal (SSO posture:
@@ -132,8 +139,9 @@ var ErrActiveConnectionExists = errors.New("slackstore: the workspace already ha
 // a per-request read.
 type ConnectionStore interface {
 	// Upsert writes c's credential and display columns for its
-	// (WorkspaceID, APIAppID, OrgID) triple and returns the row it persisted:
-	// an existing same-org row for that (workspace, app) pair is updated in
+	// (WorkspaceID, APIAppID, OrgID) triple, with connected_at now, and
+	// returns the row it persisted: an existing same-org row for that
+	// (workspace, app) pair is updated in
 	// place, keeping the Active and Source it has (a token rotation never
 	// changes which connection acts); a wholly new (workspace_id, api_app_id)
 	// pair is inserted with c's Active and Source. A (workspace_id,
@@ -156,12 +164,32 @@ type ConnectionStore interface {
 	Get(ctx context.Context, orgID, workspaceID, apiAppID string) (*Connection, error)
 	Delete(ctx context.Context, orgID, workspaceID, apiAppID string) error
 
+	// LockWorkspace returns orgID's connections in workspaceID, ordered by app
+	// id, and locks each (FOR UPDATE) until the caller's transaction ends, on
+	// the app pool. A second caller blocks until the first commits and then
+	// reads the rows as the first left them, so a decision made from what this
+	// returns holds until the caller's own write commits. Outside a
+	// transaction the locks end with the statement and serialize nothing.
+	LockWorkspace(ctx context.Context, orgID, workspaceID string) ([]Connection, error)
+
+	// Activate makes orgID's connection of apiAppID the workspace's active
+	// one, on the app pool: the workspace's current active connection, if any,
+	// is set inactive first, then the target active, and the target's row is
+	// returned as written. A target the org does not have is
+	// ErrNoSuchConnection. A concurrent write that made another connection
+	// active is ErrActiveConnectionExists. The two statements must commit
+	// together, so a caller runs Activate inside its transaction, or Activate
+	// opens one of its own.
+	Activate(ctx context.Context, orgID, workspaceID, apiAppID string) (Connection, error)
+
 	// DeleteSystem removes orgID's (workspaceID, apiAppID) row on the admin
-	// pool, and only while its updated_at still equals updatedAt, reporting
-	// whether it did. For system code acting on a row it read: ingest, when
-	// Slack reports the app removed from the workspace. A connect or a
-	// disconnect landing after that read changes the row, and it is left.
-	DeleteSystem(ctx context.Context, orgID, workspaceID, apiAppID string, updatedAt time.Time) (deleted bool, err error)
+	// pool, and only while its connected_at still equals connectedAt,
+	// reporting whether it did. For system code acting on a row it read:
+	// ingest, when Slack reports the app removed from the workspace. A
+	// connect or a disconnect landing after that read changes or removes the
+	// credential, and the row is left; an activation does neither, and the
+	// row is deleted.
+	DeleteSystem(ctx context.Context, orgID, workspaceID, apiAppID string, connectedAt time.Time) (deleted bool, err error)
 
 	// ListAllSystem returns every connection across every org, active or
 	// not, on the admin pool (bypasses RLS). System-code-only — see the type
@@ -397,6 +425,13 @@ type ChannelRegistryStore interface {
 	// ListForOrg is the app-pool, member-RLS-gated read — the discovery/
 	// claim UX's "channels we know of" list.
 	ListForOrg(ctx context.Context, orgID string) ([]Channel, error)
+
+	// ListWatchedInWorkspaceSystem returns orgID's registry rows in
+	// workspaceID that at least one team watches (a team_slack_channels row),
+	// ordered by name, then Slack channel id, then row id, on the admin pool:
+	// the tracking rows' RLS admits only a team's members, and the answer is
+	// every team's.
+	ListWatchedInWorkspaceSystem(ctx context.Context, orgID, workspaceID string) ([]Channel, error)
 
 	// FindOrCreateThreadSystem returns the entity of the thread rooted at
 	// threadTS in the channel channelID names, creating one (kind, title,

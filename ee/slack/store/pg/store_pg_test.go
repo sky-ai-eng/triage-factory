@@ -328,9 +328,10 @@ func TestConnectionStore_Postgres_Delete(t *testing.T) {
 }
 
 // TestConnectionStore_Postgres_DeleteSystem: DeleteSystem removes the row only
-// while its updated_at is the one the caller read, and reports a miss —
-// whether an Upsert moved updated_at, the row is another org's, or there is no
-// row — as false with the row left as it was.
+// while its connected_at is the one the caller read, and reports a miss —
+// whether an Upsert moved connected_at, the row is another org's, or there is
+// no row — as false with the row left as it was. An Activate after the read
+// moves updated_at and not connected_at, so the row is still deleted.
 func TestConnectionStore_Postgres_DeleteSystem(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -354,19 +355,19 @@ func TestConnectionStore_Postgres_DeleteSystem(t *testing.T) {
 			return upsertActiveConnection(ctx, tx, ws)
 		})
 	}
-	deleteSystem := func(org, workspaceID string, updatedAt time.Time) bool {
+	deleteSystem := func(org, workspaceID string, connectedAt time.Time) bool {
 		t.Helper()
-		deleted, err := conns.DeleteSystem(ctx, org, workspaceID, defaultAppID(workspaceID), updatedAt)
+		deleted, err := conns.DeleteSystem(ctx, org, workspaceID, defaultAppID(workspaceID), connectedAt)
 		if err != nil {
 			t.Fatalf("DeleteSystem(%s): %v", workspaceID, err)
 		}
 		return deleted
 	}
 
-	t.Run("matching updated_at deletes", func(t *testing.T) {
+	t.Run("matching connected_at deletes", func(t *testing.T) {
 		upsert(testWorkspace(orgID, "T0DELSYS1"))
 		ws := read("T0DELSYS1")
-		if !deleteSystem(orgID, "T0DELSYS1", ws.UpdatedAt) {
+		if !deleteSystem(orgID, "T0DELSYS1", ws.ConnectedAt) {
 			t.Fatal("DeleteSystem = false; want true for the row as read")
 		}
 		if got := read("T0DELSYS1"); got != nil {
@@ -374,26 +375,47 @@ func TestConnectionStore_Postgres_DeleteSystem(t *testing.T) {
 		}
 	})
 
-	t.Run("moved updated_at keeps the row", func(t *testing.T) {
+	t.Run("moved connected_at keeps the row", func(t *testing.T) {
 		upsert(testWorkspace(orgID, "T0DELSYS2"))
 		stale := read("T0DELSYS2")
-		upsert(testWorkspace(orgID, "T0DELSYS2")) // a reconnect: the trigger moves updated_at
+		upsert(testWorkspace(orgID, "T0DELSYS2")) // a reconnect: Upsert moves connected_at
 		current := read("T0DELSYS2")
-		if !current.UpdatedAt.After(stale.UpdatedAt) {
-			t.Fatalf("updated_at after the second Upsert = %v; want after %v", current.UpdatedAt, stale.UpdatedAt)
+		if !current.ConnectedAt.After(stale.ConnectedAt) {
+			t.Fatalf("connected_at after the second Upsert = %v; want after %v", current.ConnectedAt, stale.ConnectedAt)
 		}
-		if deleteSystem(orgID, "T0DELSYS2", stale.UpdatedAt) {
-			t.Fatal("DeleteSystem = true for a row whose updated_at moved; want false")
+		if deleteSystem(orgID, "T0DELSYS2", stale.ConnectedAt) {
+			t.Fatal("DeleteSystem = true for a row whose connected_at moved; want false")
 		}
 		if got := read("T0DELSYS2"); got == nil || !got.UpdatedAt.Equal(current.UpdatedAt) {
 			t.Errorf("row after a stale DeleteSystem = %+v; want it unchanged", got)
 		}
 	})
 
+	t.Run("an activation after the read still deletes", func(t *testing.T) {
+		inactive := testWorkspace(orgID, "T0DELSYS4")
+		inactive.Active = false
+		mustWithUser(t, stores, ctx, orgID, userID, func(tx db.TxStores) error {
+			_, e := slackstore.FromTx(tx).Connections.Upsert(ctx, inactive)
+			return e
+		})
+		stale := read("T0DELSYS4")
+		mustWithUser(t, stores, ctx, orgID, userID, func(tx db.TxStores) error {
+			_, e := slackstore.FromTx(tx).Connections.Activate(ctx, orgID, "T0DELSYS4", defaultAppID("T0DELSYS4"))
+			return e
+		})
+		activated := read("T0DELSYS4")
+		if !activated.Active || !activated.UpdatedAt.After(stale.UpdatedAt) || !activated.ConnectedAt.Equal(stale.ConnectedAt) {
+			t.Fatalf("after Activate: %+v; want active, updated_at moved, connected_at %v kept", activated, stale.ConnectedAt)
+		}
+		if !deleteSystem(orgID, "T0DELSYS4", stale.ConnectedAt) {
+			t.Fatal("DeleteSystem = false after an activation; want true")
+		}
+	})
+
 	t.Run("another org's row is kept", func(t *testing.T) {
 		upsert(testWorkspace(orgID, "T0DELSYS3"))
 		ws := read("T0DELSYS3")
-		if deleteSystem(otherOrg, "T0DELSYS3", ws.UpdatedAt) {
+		if deleteSystem(otherOrg, "T0DELSYS3", ws.ConnectedAt) {
 			t.Fatal("DeleteSystem under another org = true; want false")
 		}
 		if read("T0DELSYS3") == nil {

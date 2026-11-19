@@ -343,6 +343,10 @@ func (f *fakeChannelRegistry) ListForOrg(context.Context, string) ([]slackstore.
 	return nil, nil
 }
 
+func (f *fakeChannelRegistry) ListWatchedInWorkspaceSystem(context.Context, string, string) ([]slackstore.Channel, error) {
+	return nil, nil
+}
+
 // FindOrCreateThreadSystem finds or creates the thread on the channel's row
 // in the linked fakeEntities, displayed under the id the row carries.
 func (f *fakeChannelRegistry) FindOrCreateThreadSystem(_ context.Context, orgID, channelID, threadTS, kind, title, url string) (slackstore.Thread, error) {

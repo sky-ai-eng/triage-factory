@@ -524,12 +524,14 @@ func (p *ingestPipeline) handleAppRemoved(ctx context.Context, ws slackstore.Con
 	// The receiver reads the row per delivery, so a retry of a removal that
 	// failed, or was acked late, reads the row an admin has connected again
 	// since. Slack generated the removal before that connection; it is not
-	// about the token the row holds now. event_time is whole seconds, so a
-	// connect in the event's own second counts as before it.
-	if !ev.EventTime.IsZero() && ws.UpdatedAt.Unix() > ev.EventTime.Unix() {
+	// about the token the row holds now. A switch of which connection is
+	// active writes the row but no token, so it is not a connection here.
+	// event_time is whole seconds, so a connect in the event's own second
+	// counts as before it.
+	if !ev.EventTime.IsZero() && ws.ConnectedAt.Unix() > ev.EventTime.Unix() {
 		slackLog.Info("slack app removal predates the workspace's current connection; kept it",
 			"org_id", ws.OrgID, "workspace", ws.WorkspaceID, "app", ws.APIAppID, "event_type", ev.Type,
-			"event_time", ev.EventTime, "connected_at", ws.UpdatedAt)
+			"event_time", ev.EventTime, "connected_at", ws.ConnectedAt)
 		return dropReconnected, nil
 	}
 
@@ -543,14 +545,14 @@ func (p *ingestPipeline) handleAppRemoved(ctx context.Context, ws slackstore.Con
 		values[i] = v
 	}
 
-	deleted, err := p.connections.DeleteSystem(ctx, ws.OrgID, ws.WorkspaceID, ws.APIAppID, ws.UpdatedAt)
+	deleted, err := p.connections.DeleteSystem(ctx, ws.OrgID, ws.WorkspaceID, ws.APIAppID, ws.ConnectedAt)
 	if err != nil {
 		return outcomeError, fmt.Errorf("delete removed slack workspace: %w", err)
 	}
 	if !deleted {
 		// A connect, a disconnect, or a concurrent removal (Slack sends
-		// tokens_revoked beside app_uninstalled) changed the row after the
-		// receiver read it.
+		// tokens_revoked beside app_uninstalled) changed or removed the
+		// credential after the receiver read the row.
 		slackLog.Info("slack app removal: the workspace's row changed since the delivery read it; left it",
 			"org_id", ws.OrgID, "workspace", ws.WorkspaceID, "app", ws.APIAppID, "event_type", ev.Type)
 		return dropRowChanged, nil

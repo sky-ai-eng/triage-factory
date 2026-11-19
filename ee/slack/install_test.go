@@ -55,6 +55,8 @@ func TestRoutes_OldPathsAreGone(t *testing.T) {
 		{http.MethodPost, "/api/orgs/" + org + "/slack/connections/list"},
 		{http.MethodGet, "/api/orgs/" + org + "/slack/connections/T1/A1"},
 		{http.MethodDelete, "/api/orgs/" + org + "/slack/connections/T1/A1"},
+		{http.MethodGet, "/api/orgs/" + org + "/slack/connections/T1/A1/activation-preview"},
+		{http.MethodPost, "/api/orgs/" + org + "/slack/connections/T1/A1/activate"},
 		{http.MethodGet, "/api/slack/deployment-app"},
 		{http.MethodGet, "/api/orgs/" + org + "/slack/install/start"},
 		{http.MethodGet, "/api/slack/install/callback"},

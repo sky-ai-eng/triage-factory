@@ -44,6 +44,45 @@ type authTestResult struct {
 	UserID       string
 	BotID        string
 	EnterpriseID string
+	// Scopes is the response's X-OAuth-Scopes header: the scopes granted to
+	// the token, comma-separated, "" when Slack sent none.
+	Scopes string
+}
+
+// slackRejectedError is a Slack answer refusing a call for a reason of the
+// caller's: any {"ok":false} outside slackTransientErrorCodes, or an answer
+// missing what the call exists to learn. A transport failure, a non-200, a
+// rate limit, or a transient code is not one: those say nothing about the
+// credential, and the same call may succeed later.
+type slackRejectedError struct{ method, reason string }
+
+func (e *slackRejectedError) Error() string { return "slack " + e.method + ": " + e.reason }
+
+// isSlackRejected reports whether err wraps a slackRejectedError.
+func isSlackRejected(err error) bool {
+	var rejected *slackRejectedError
+	return errors.As(err, &rejected)
+}
+
+// slackTransientErrorCodes are the {"ok":false} codes in which Slack reports a
+// failure on its own side, or a pause it lifts by itself. Sourced from the
+// error codes Slack documents for every Web API method.
+var slackTransientErrorCodes = map[string]bool{
+	"internal_error":      true,
+	"fatal_error":         true,
+	"service_unavailable": true,
+	"request_timeout":     true,
+	"ratelimited":         true,
+	"team_added_to_org":   true,
+}
+
+// slackRefusal is the error for method's {"ok":false} answer carrying code: a
+// slackRejectedError, unless code is one of slackTransientErrorCodes.
+func slackRefusal(method, code string) error {
+	if slackTransientErrorCodes[code] {
+		return fmt.Errorf("slack %s: %s", method, code)
+	}
+	return &slackRejectedError{method: method, reason: code}
 }
 
 // slackAuthTest validates botToken against Slack's auth.test and returns
@@ -71,17 +110,18 @@ func slackAuthTest(ctx context.Context, client *http.Client, caller slackCaller,
 		BotID        string `json:"bot_id"`
 		EnterpriseID string `json:"enterprise_id"`
 	}
-	if err := doSlackJSON(ctx, client, caller, req, &out); err != nil {
+	header, err := doSlackJSONHeader(ctx, client, caller, req, &out)
+	if err != nil {
 		return nil, err
 	}
 	if !out.OK {
-		return nil, fmt.Errorf("slack auth.test: %s", nonEmpty(out.Error, "not ok"))
+		return nil, slackRefusal("auth.test", nonEmpty(out.Error, "not ok"))
 	}
 	if out.TeamID == "" {
-		return nil, fmt.Errorf("slack auth.test: response carried no team_id")
+		return nil, &slackRejectedError{method: "auth.test", reason: "response carried no team_id"}
 	}
 	if out.BotID == "" {
-		return nil, fmt.Errorf("slack auth.test: response carried no bot_id")
+		return nil, &slackRejectedError{method: "auth.test", reason: "response carried no bot_id"}
 	}
 	return &authTestResult{
 		TeamID:       out.TeamID,
@@ -89,6 +129,7 @@ func slackAuthTest(ctx context.Context, client *http.Client, caller slackCaller,
 		UserID:       out.UserID,
 		BotID:        out.BotID,
 		EnterpriseID: out.EnterpriseID,
+		Scopes:       header.Get("X-OAuth-Scopes"),
 	}, nil
 }
 
@@ -296,7 +337,7 @@ func slackConnectionsOpen(ctx context.Context, client *http.Client, caller slack
 		if slackAuthErrorCodes[out.Error] {
 			return "", &slackAuthError{code: nonEmpty(out.Error, "not ok")}
 		}
-		return "", fmt.Errorf("slack apps.connections.open: %s", nonEmpty(out.Error, "not ok"))
+		return "", slackRefusal("apps.connections.open", nonEmpty(out.Error, "not ok"))
 	}
 	if out.URL == "" {
 		return "", fmt.Errorf("slack apps.connections.open: response carried no url")
@@ -489,41 +530,49 @@ func slackAppCaller(orgID, apiAppID string) slackCaller {
 // Nothing else is retried: a 5xx or a transport failure returns on the
 // attempt that met it.
 func doSlackJSON(ctx context.Context, client *http.Client, caller slackCaller, req *http.Request, out any) error {
+	_, err := doSlackJSONHeader(ctx, client, caller, req, out)
+	return err
+}
+
+// doSlackJSONHeader is doSlackJSON that also answers the headers of the
+// response it decoded, for a method whose answer is partly a header (auth.test's
+// X-OAuth-Scopes).
+func doSlackJSONHeader(ctx context.Context, client *http.Client, caller slackCaller, req *http.Request, out any) (http.Header, error) {
 	method := path.Base(req.URL.Path)
 	resp, body, err := doSlackCall(ctx, client, caller, method, req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	if resp.StatusCode == http.StatusTooManyRequests {
 		wait := slackRetryAfter(resp.Header)
 		if wait > slackRetryAfterCap {
-			return &slackRateLimitError{retryAfter: wait}
+			return nil, &slackRateLimitError{retryAfter: wait}
 		}
 		upstream.RecordRetry(ctx, upstream.Slack, caller.orgID, upstream.RateLimited)
 		if err := slackWait(ctx, caller.orgID, wait); err != nil {
-			return err
+			return nil, err
 		}
 		retryReq, err := cloneSlackRequest(ctx, req)
 		if err != nil {
-			return fmt.Errorf("slack api: rebuild request for retry: %w", err)
+			return nil, fmt.Errorf("slack api: rebuild request for retry: %w", err)
 		}
 		resp, body, err = doSlackCall(ctx, client, caller, method, retryReq)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if resp.StatusCode == http.StatusTooManyRequests {
-			return &slackRateLimitError{retryAfter: slackRetryAfter(resp.Header)}
+			return nil, &slackRateLimitError{retryAfter: slackRetryAfter(resp.Header)}
 		}
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("slack api: http %d: %s", resp.StatusCode, upstream.Excerpt(body))
+		return nil, fmt.Errorf("slack api: http %d: %s", resp.StatusCode, upstream.Excerpt(body))
 	}
 	if err := json.Unmarshal(body, out); err != nil {
-		return fmt.Errorf("slack api: decode response: %w", err)
+		return nil, fmt.Errorf("slack api: decode response: %w", err)
 	}
-	return nil
+	return resp.Header, nil
 }
 
 // doSlackCall makes one attempt at a Web API method (doSlackRequest) and

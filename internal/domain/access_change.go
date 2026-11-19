@@ -73,6 +73,13 @@ const (
 	AccessActionAPITokenRevoked = "api_token_revoked"
 )
 
+// AccessActionSlackConnectionActivated is a Slack workspace switched from one
+// connected app to another. Declared in core for the SSO actions' reason: its
+// write-point is in ee/slack and the viewer is here. It is its own action rather
+// than a credential_set, because no credential was bound: both apps were already
+// connected, and what changed is which one acts for the workspace.
+const AccessActionSlackConnectionActivated = "slack_connection_activated"
+
 // SSO policy action discriminators. Declared here, in core, even though every
 // write-point lives in ee/sso — the same split as EventSlackMessage: an
 // out-of-core surface produces the rows, but core's audit viewer must render
@@ -197,7 +204,8 @@ const (
 // filter category, or nil for "" / an unrecognized category (the caller treats
 // nil as "no filter — every action"). Membership covers every org/team
 // grant / role-change / revoke / ownership-transfer plus the invite lifecycle
-// that precedes a grant; credential covers binds and removals alike. Keeping the
+// that precedes a grant; credential covers binds and removals alike, and a Slack
+// workspace switching which of its connected apps acts. Keeping the
 // grouping here, next to the action constants, means a newly-added action is
 // classified in exactly one place.
 func AccessActionsInCategory(category string) []string {
@@ -218,6 +226,7 @@ func AccessActionsInCategory(category string) []string {
 		return []string{
 			AccessActionCredentialSet, AccessActionCredentialRemoved,
 			AccessActionAPITokenCreated, AccessActionAPITokenRevoked,
+			AccessActionSlackConnectionActivated,
 		}
 	case AccessCategoryPolicy:
 		return []string{
@@ -290,6 +299,31 @@ func AccessDetailSlackWorkspace(name, workspaceID, apiAppID string) string {
 		Name:        name,
 		WorkspaceID: workspaceID,
 		APIAppID:    apiAppID,
+	})
+	return string(b)
+}
+
+// AccessDetailSlackConnectionActivated builds the payload for a Slack workspace
+// switched from one connected app to another: the workspace, by name and id, and
+// the app it left and the app it moved to, each by id and by the bot name the
+// connection showed. fromAppID is "" when the workspace had no active
+// connection. The names are captured because the rows they come from may be
+// gone when the log is read.
+func AccessDetailSlackConnectionActivated(workspaceName, workspaceID, fromAppID, fromAppName, toAppID, toAppName string) string {
+	b, _ := json.Marshal(struct {
+		Name        string `json:"name,omitempty"`
+		WorkspaceID string `json:"workspace_id"`
+		FromAppID   string `json:"from_api_app_id,omitempty"`
+		FromAppName string `json:"from_app_name,omitempty"`
+		ToAppID     string `json:"to_api_app_id"`
+		ToAppName   string `json:"to_app_name,omitempty"`
+	}{
+		Name:        workspaceName,
+		WorkspaceID: workspaceID,
+		FromAppID:   fromAppID,
+		FromAppName: fromAppName,
+		ToAppID:     toAppID,
+		ToAppName:   toAppName,
 	})
 	return string(b)
 }

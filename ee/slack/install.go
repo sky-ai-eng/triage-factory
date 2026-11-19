@@ -111,16 +111,6 @@ func install(api server.ExtensionAPI) {
 	sockets.stats = stats
 	sockets.deployment = deployment
 
-	h := &workspacesHandler{
-		tx:         api.Tx(),
-		az:         api.Authz(),
-		client:     slackHTTPClient,
-		publicURL:  api.PublicURL,
-		sockets:    sockets,
-		deployment: deployment,
-	}
-	dh := &deploymentAppHandler{app: deployment, publicURL: api.PublicURL}
-	ih := &installHandler{tx: api.Tx(), az: api.Authz(), client: slackHTTPClient, app: deployment, ceremony: api}
 	ch := &channelsHandler{
 		tx:         api.Tx(),
 		stores:     stores,
@@ -128,6 +118,18 @@ func install(api server.ExtensionAPI) {
 		client:     slackHTTPClient,
 		candidates: ttlcache.New[slackCandidateSet](slackCandidatesTTL),
 	}
+	h := &workspacesHandler{
+		tx:         api.Tx(),
+		az:         api.Authz(),
+		client:     slackHTTPClient,
+		publicURL:  api.PublicURL,
+		sockets:    sockets,
+		deployment: deployment,
+		stores:     stores,
+		channels:   ch,
+	}
+	dh := &deploymentAppHandler{app: deployment, publicURL: api.PublicURL}
+	ih := &installHandler{tx: api.Tx(), az: api.Authz(), client: slackHTTPClient, app: deployment, ceremony: api}
 	wh := &webhookHandler{stores: stores, pipeline: pipeline, stats: stats, deployment: deployment}
 	mountRoutes(api, h, dh, ih, ch, wh)
 
@@ -169,6 +171,8 @@ func mountRoutes(api routeMounter, h *workspacesHandler, dh *deploymentAppHandle
 	api.APIMutating("POST /api/orgs/{org_id}/slack/connections/list", h.handleList)
 	api.API("GET /api/orgs/{org_id}/slack/connections/{workspace_id}/{api_app_id}", h.handleGet)
 	api.APIMutating("DELETE /api/orgs/{org_id}/slack/connections/{workspace_id}/{api_app_id}", h.handleDelete)
+	api.API("GET /api/orgs/{org_id}/slack/connections/{workspace_id}/{api_app_id}/activation-preview", h.handleActivationPreview)
+	api.APIMutating("POST /api/orgs/{org_id}/slack/connections/{workspace_id}/{api_app_id}/activate", h.handleActivate)
 
 	api.API("GET /api/slack/deployment-app", dh.handleGet)
 

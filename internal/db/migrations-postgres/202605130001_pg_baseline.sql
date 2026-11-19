@@ -5706,6 +5706,12 @@ REVOKE ALL ON public.seat_claims FROM anon, authenticated, service_role;
 -- active: outbound calls use it, and deliveries for the others are dropped.
 -- org_slack_connections_one_active is that rule.
 --
+-- connected_at is when the row's credential was last written: the first
+-- connect, and every connect, install or token rotation after it. Switching
+-- which connection is active leaves it as it was, and updated_at moves on any
+-- write. A removal Slack reports is about the token it revoked, so the removal
+-- handling compares its event time with connected_at, never updated_at.
+--
 -- The *_ref columns are org_secrets key names
 -- (internal/integrations.SlackConnectionKeysFor), never credential values.
 -- Postgres-only; the SQLite store is a stub returning ErrNotApplicableInLocal.
@@ -5726,6 +5732,7 @@ CREATE TABLE public.org_slack_connections (
     app_token_ref text,
     registered_by_user_id uuid REFERENCES public.users(id) ON DELETE SET NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
+    connected_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (workspace_id, api_app_id),
     -- A deployment row holding a transport or the app's secrets would be a

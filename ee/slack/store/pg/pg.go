@@ -63,7 +63,7 @@ const connectionColumns = `
 	workspace_id, api_app_id, org_id::text, source, active, workspace_name, app_name,
 	COALESCE(enterprise_id, ''), COALESCE(transport, ''), bot_user_id, bot_token_ref,
 	COALESCE(signing_secret_ref, ''), COALESCE(app_token_ref, ''),
-	COALESCE(registered_by_user_id::text, ''), created_at, updated_at
+	COALESCE(registered_by_user_id::text, ''), created_at, connected_at, updated_at
 `
 
 func scanConnection(sc rowScanner) (slackstore.Connection, error) {
@@ -72,7 +72,7 @@ func scanConnection(sc rowScanner) (slackstore.Connection, error) {
 		&c.WorkspaceID, &c.APIAppID, &c.OrgID, &c.Source, &c.Active, &c.WorkspaceName, &c.AppName,
 		&c.EnterpriseID, &c.Transport, &c.BotUserID, &c.BotTokenRef,
 		&c.SigningSecretRef, &c.AppTokenRef,
-		&c.RegisteredByUserID, &c.CreatedAt, &c.UpdatedAt,
+		&c.RegisteredByUserID, &c.CreatedAt, &c.ConnectedAt, &c.UpdatedAt,
 	); err != nil {
 		return slackstore.Connection{}, err
 	}
@@ -116,7 +116,8 @@ func (s *connectionStore) Upsert(ctx context.Context, c slackstore.Connection) (
 			bot_token_ref = $9,
 			signing_secret_ref = NULLIF($10, ''),
 			app_token_ref = NULLIF($11, ''),
-			registered_by_user_id = NULLIF($12, '')::uuid
+			registered_by_user_id = NULLIF($12, '')::uuid,
+			connected_at = now()
 		WHERE workspace_id = $1 AND api_app_id = $2 AND org_id = $3
 		RETURNING `+connectionColumns,
 		c.WorkspaceID, c.APIAppID, c.OrgID, c.WorkspaceName, c.AppName, c.EnterpriseID, c.Transport,
@@ -139,8 +140,7 @@ func (s *connectionStore) Upsert(ctx context.Context, c slackstore.Connection) (
 		c.WorkspaceID, c.APIAppID, c.OrgID, c.Source, c.Active, c.WorkspaceName, c.AppName, c.EnterpriseID,
 		c.Transport, c.BotUserID, c.BotTokenRef, c.SigningSecretRef, c.AppTokenRef, c.RegisteredByUserID))
 	if err != nil {
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == oneActiveIndex {
+		if isOneActiveViolation(err) {
 			return slackstore.Connection{}, slackstore.ErrActiveConnectionExists
 		}
 		return slackstore.Connection{}, fmt.Errorf("insert org_slack_connections: %w", err)
@@ -214,15 +214,81 @@ func (s *connectionStore) Delete(ctx context.Context, orgID, workspaceID, apiApp
 	return nil
 }
 
-// DeleteSystem's updated_at condition holds against a concurrent connect: the
-// connect's UPDATE holds the row's lock, and once it commits Postgres
-// re-checks the condition against the row it wrote, whose updated_at the
-// trigger moved.
-func (s *connectionStore) DeleteSystem(ctx context.Context, orgID, workspaceID, apiAppID string, updatedAt time.Time) (bool, error) {
+// LockWorkspace orders by app id so two callers take the rows' locks in the
+// same order and cannot deadlock on them.
+func (s *connectionStore) LockWorkspace(ctx context.Context, orgID, workspaceID string) ([]slackstore.Connection, error) {
+	rows, err := s.app.QueryContext(ctx, `
+		SELECT `+connectionColumns+`
+		FROM org_slack_connections
+		WHERE org_id = $1 AND workspace_id = $2
+		ORDER BY api_app_id ASC
+		FOR UPDATE
+	`, orgID, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("lock org_slack_connections: %w", err)
+	}
+	return scanConnections(rows)
+}
+
+// Activate is two statements, not one: the one-active index is checked as
+// each row is written, and within one statement Postgres does not promise
+// which of two updated rows it writes first, so setting the target active
+// before the current one is cleared would trip the index.
+func (s *connectionStore) Activate(ctx context.Context, orgID, workspaceID, apiAppID string) (slackstore.Connection, error) {
+	var got slackstore.Connection
+	err := inTx(ctx, s.app, func(q db.Execer) error {
+		if _, err := q.ExecContext(ctx, `
+			UPDATE org_slack_connections SET active = false
+			WHERE org_id = $1 AND workspace_id = $2 AND active AND api_app_id <> $3
+		`, orgID, workspaceID, apiAppID); err != nil {
+			return activateError("deactivate org_slack_connections", err)
+		}
+		var err error
+		got, err = scanConnection(q.QueryRowContext(ctx, `
+			UPDATE org_slack_connections SET active = true
+			WHERE org_id = $1 AND workspace_id = $2 AND api_app_id = $3
+			RETURNING `+connectionColumns,
+			orgID, workspaceID, apiAppID))
+		if errors.Is(err, sql.ErrNoRows) {
+			return slackstore.ErrNoSuchConnection
+		}
+		if err != nil {
+			return activateError("activate org_slack_connections", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return slackstore.Connection{}, err
+	}
+	return got, nil
+}
+
+// activateError maps a violation of the one-active index to
+// slackstore.ErrActiveConnectionExists and wraps anything else.
+func activateError(what string, err error) error {
+	if isOneActiveViolation(err) {
+		return slackstore.ErrActiveConnectionExists
+	}
+	return fmt.Errorf("%s: %w", what, err)
+}
+
+// isOneActiveViolation reports whether err is a write refused by the
+// one-active index.
+func isOneActiveViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == oneActiveIndex
+}
+
+// DeleteSystem's connected_at condition holds against a concurrent connect:
+// the connect's UPDATE holds the row's lock, and once it commits Postgres
+// re-checks the condition against the row it wrote, whose connected_at the
+// connect moved. A concurrent Activate holds the lock the same way and leaves
+// connected_at, so the delete goes ahead once it commits.
+func (s *connectionStore) DeleteSystem(ctx context.Context, orgID, workspaceID, apiAppID string, connectedAt time.Time) (bool, error) {
 	res, err := s.admin.ExecContext(ctx, `
 		DELETE FROM org_slack_connections
-		WHERE workspace_id = $1 AND api_app_id = $2 AND org_id = $3 AND updated_at = $4
-	`, workspaceID, apiAppID, orgID, updatedAt)
+		WHERE workspace_id = $1 AND api_app_id = $2 AND org_id = $3 AND connected_at = $4
+	`, workspaceID, apiAppID, orgID, connectedAt)
 	if err != nil {
 		return false, fmt.Errorf("delete org_slack_connections (system): %w", err)
 	}

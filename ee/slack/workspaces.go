@@ -18,10 +18,10 @@ import (
 )
 
 // workspacesHandler serves /api/orgs/{org_id}/slack/connections/* and
-// /api/orgs/{org_id}/slack/manifest — the org-admin connect/disconnect
-// lifecycle of an org's Slack connections plus the member-visible reads. Every
-// route is addressed by the org in its path and gated per request (see
-// memberGate): a local-mode 404, the caller's standing in that org, and the
+// /api/orgs/{org_id}/slack/manifest — the org-admin connect, switch, and
+// disconnect lifecycle of an org's Slack connections plus the member-visible
+// reads. Every route is addressed by the org in its path and gated per request
+// (see memberGate): a local-mode 404, the caller's standing in that org, and the
 // `slack` entitlement. The local-mode 404 is narrower than SSO's runmode gate
 // (which exists because SSO structurally can't work without GoTrue); ours
 // exists because the Slack store is Postgres-only, so a local request that got
@@ -41,6 +41,14 @@ type workspacesHandler struct {
 	// is none. Connect refuses its bot token, because a pasted-token
 	// connection is always an org's own app.
 	deployment deploymentApp
+	// stores is the admin-pool aggregate the switch reads through: a
+	// connection's bot token, and every team's watched channels, which the
+	// tracking rows' RLS hides from an admin outside the team.
+	stores db.Stores
+	// channels enumerates a workspace's channels with one connection's bot
+	// token, joins channels, and holds the org's cached channel candidates,
+	// for the switch (activation.go).
+	channels *channelsHandler
 }
 
 type workspaceView struct {
@@ -260,12 +268,11 @@ func refFor(has bool, ref string) string {
 // naming the owning org (the app-single-org invariant).
 var errAppBoundToOtherOrg = errors.New("slack app already connected to a different org")
 
-// errWorkspaceHasActiveConnection is the connect handler's refusal of a new
-// app in a workspace where the org already has an active connection.
-var errWorkspaceHasActiveConnection = errors.New("slack workspace already has an active connection")
-
 // handleConnect connects an org's own Slack app from the tokens an org admin
-// pasted.
+// pasted. In a workspace where the org already has an active connection of
+// another app, the new connection is stored inactive: the first step of a
+// switch, which activate completes. Connecting an app the workspace already
+// has keeps that connection's active flag.
 //
 // POST /api/orgs/{org_id}/slack/connections/import  body: {bot_token, signing_secret?, app_token?, transport?}
 func (h *workspacesHandler) handleConnect(w http.ResponseWriter, r *http.Request) {
@@ -385,7 +392,7 @@ func (h *workspacesHandler) handleConnect(w http.ResponseWriter, r *http.Request
 	}
 
 	var persisted slackstore.Connection
-	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	write := func(tx db.TxStores) error {
 		bundle := slackstore.FromTx(tx)
 		// LockApp MUST run before the AppBoundToOtherOrgSystem check below
 		// — on its own, that check-then-Upsert sequence is a race: two
@@ -413,15 +420,13 @@ func (h *workspacesHandler) handleConnect(w http.ResponseWriter, r *http.Request
 			return e
 		}
 		own, active := connectionsInWorkspace(conns, result.TeamID, apiAppID)
-		if own == nil && active != nil {
-			return errWorkspaceHasActiveConnection
-		}
 		// Upsert reads Active only when it inserts: a row this app already
 		// has keeps its own. It inserts for an own row too when a disconnect
 		// deleted that row after this read, and then the row was the active
-		// one. A concurrent connect of another app into the workspace, which
-		// this read cannot see, is refused by the one-active index
-		// (slackstore.ErrActiveConnectionExists).
+		// one. A concurrent write making another app active in the workspace,
+		// which this read cannot see, is refused by the one-active index
+		// (slackstore.ErrActiveConnectionExists), and the second pass below
+		// stores this one inactive.
 		ws.Active = active == nil || active == own
 
 		if err := tx.Secrets.Put(r.Context(), orgID, keys.BotToken, botToken, "Slack bot token"); err != nil {
@@ -454,7 +459,15 @@ func (h *workspacesHandler) handleConnect(w http.ResponseWriter, r *http.Request
 			return fmt.Errorf("audit slack connect: %w", err)
 		}
 		return nil
-	}); err != nil {
+	}
+	err = h.tx.WithTx(r.Context(), orgID, userID, write)
+	if errors.Is(err, slackstore.ErrActiveConnectionExists) {
+		// Another app became the workspace's active connection after this
+		// transaction read the workspace. Its commit is visible now, so a
+		// second pass stores this one inactive.
+		err = h.tx.WithTx(r.Context(), orgID, userID, write)
+	}
+	if err != nil {
 		if errors.Is(err, errAppBoundToOtherOrg) {
 			// Deliberately generic: the caller may learn "already
 			// connected", never which org holds it (the app-single-org
@@ -462,13 +475,12 @@ func (h *workspacesHandler) handleConnect(w http.ResponseWriter, r *http.Request
 			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this app is already connected"})
 			return
 		}
-		if errors.Is(err, errWorkspaceHasActiveConnection) || errors.Is(err, slackstore.ErrActiveConnectionExists) {
-			// TODO(TFAC-1445): connecting a second app into a workspace with an
-			// active connection should leave the new connection inactive,
-			// once a connection can be activated; until then it is refused.
+		if errors.Is(err, slackstore.ErrActiveConnectionExists) {
+			// The second pass met yet another change to which app is
+			// active; nothing was stored.
 			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
 				Reason:  httpx.ReasonConflict,
-				Message: "This Slack workspace already has an active connection. Disconnect it before connecting another app.",
+				Message: "This Slack workspace's active connection changed while connecting; try again.",
 			})
 			return
 		}
@@ -535,10 +547,8 @@ func (h *workspacesHandler) handleDelete(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	workspaceID := r.PathValue("workspace_id")
-	apiAppID := r.PathValue("api_app_id")
-	if workspaceID == "" || apiAppID == "" {
-		httpx.NotFound(w, "connection")
+	workspaceID, apiAppID, ok := connectionFromPath(w, r)
+	if !ok {
 		return
 	}
 

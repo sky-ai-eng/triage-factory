@@ -81,12 +81,18 @@ func (f *fakeConnectionStore) Get(context.Context, string, string, string) (*sla
 	return nil, nil
 }
 func (f *fakeConnectionStore) Delete(context.Context, string, string, string) error { return nil }
-func (f *fakeConnectionStore) DeleteSystem(_ context.Context, orgID, workspaceID, apiAppID string, updatedAt time.Time) (bool, error) {
+func (f *fakeConnectionStore) LockWorkspace(context.Context, string, string) ([]slackstore.Connection, error) {
+	return nil, nil
+}
+func (f *fakeConnectionStore) Activate(_ context.Context, _, _, _ string) (slackstore.Connection, error) {
+	return slackstore.Connection{}, slackstore.ErrNoSuchConnection
+}
+func (f *fakeConnectionStore) DeleteSystem(_ context.Context, orgID, workspaceID, apiAppID string, connectedAt time.Time) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	key := workspaceID + "/" + apiAppID
 	row, ok := f.byWorkspaceApp[key]
-	if !ok || row.OrgID != orgID || !row.UpdatedAt.Equal(updatedAt) {
+	if !ok || row.OrgID != orgID || !row.ConnectedAt.Equal(connectedAt) {
 		return false, nil
 	}
 	delete(f.byWorkspaceApp, key)
