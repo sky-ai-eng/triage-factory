@@ -59,8 +59,8 @@ type workspaceView struct {
 	CreatedAt          time.Time `json:"created_at"`
 	UpdatedAt          time.Time `json:"updated_at"`
 	// Connection is the app's live Socket Mode status, when one exists —
-	// omitted for a webhook-only app, an unentitled org, or before the
-	// reconciler's first pass. Rows sharing an app report the same
+	// omitted for a webhook-only app or before the reconciler's first pass.
+	// Rows sharing an app report the same
 	// connection (socket_conn.go's connections are per-app, not per-row).
 	Connection *connectionView `json:"connection,omitempty"`
 }
