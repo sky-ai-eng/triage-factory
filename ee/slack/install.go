@@ -106,10 +106,12 @@ func install(api server.ExtensionAPI) {
 		slackLog.Error("read the deployment Slack app from the environment failed; the deployment runs without one", "error", err)
 		deployment = deploymentApp{}
 	}
+	registerDeploymentAppGauge(otel.GetMeterProvider(), deployment, err != nil, api.PublicURL)
 
 	sockets := newSocketManager(stores, pipeline, slackHTTPClient, socketConfigChanged)
 	sockets.stats = stats
 	sockets.deployment = deployment
+	registerSocketGauge(otel.GetMeterProvider(), sockets)
 
 	ch := &channelsHandler{
 		tx:         api.Tx(),
@@ -129,7 +131,7 @@ func install(api server.ExtensionAPI) {
 		channels:   ch,
 	}
 	dh := &deploymentAppHandler{app: deployment, publicURL: api.PublicURL}
-	ih := &installHandler{tx: api.Tx(), az: api.Authz(), client: slackHTTPClient, app: deployment, ceremony: api}
+	ih := &installHandler{tx: api.Tx(), az: api.Authz(), client: slackHTTPClient, app: deployment, ceremony: api, stats: stats}
 	wh := &webhookHandler{stores: stores, pipeline: pipeline, stats: stats, deployment: deployment}
 	mountRoutes(api, h, dh, ih, ch, wh)
 
@@ -146,6 +148,7 @@ func install(api server.ExtensionAPI) {
 	// and OnReady hooks are the seam that fires after it does (see
 	// lifecycle.go's package doc).
 	lifecycle := newLifecycleAdapter(stores, slackHTTPClient, api.PublicURL, api.Bus)
+	lifecycle.stats = stats
 	api.OnReady(lifecycle.run)
 
 	api.OnReady(sockets.run)

@@ -2,6 +2,7 @@ package slack
 
 import (
 	"context"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -9,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 
 	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
@@ -26,6 +29,7 @@ type installRig struct {
 	*slackWorkspaceRig
 	ceremony *fakeCeremony
 	install  *installHandler
+	metrics  *sdkmetric.ManualReader
 }
 
 // newInstallRig is the workspace rig plus the install handler, with the
@@ -35,6 +39,7 @@ func newInstallRig(t *testing.T) *installRig {
 	t.Helper()
 	base := newSlackWorkspaceRig(t, "https://tf.example")
 	c := newFakeCeremony("https://tf.example")
+	stats, metrics := newTestStats()
 	r := &installRig{
 		slackWorkspaceRig: base,
 		ceremony:          c,
@@ -44,7 +49,9 @@ func newInstallRig(t *testing.T) *installRig {
 			client:   slackHTTPClient,
 			app:      testDeploymentApp(),
 			ceremony: c,
+			stats:    stats,
 		},
+		metrics: metrics,
 	}
 	t.Cleanup(func() {
 		if base.fake.revokeHits != 0 {
@@ -52,6 +59,12 @@ func newInstallRig(t *testing.T) *installRig {
 		}
 	})
 	return r
+}
+
+// installOutcomes is slack.install.attempts so far, by outcome.
+func (r *installRig) installOutcomes() map[string]int64 {
+	r.t.Helper()
+	return sumByAttr(r.t, r.metrics, "slack.install.attempts", "outcome")
 }
 
 type ctxOpt func(context.Context) context.Context
@@ -436,6 +449,9 @@ func TestInstallCallback_StateRefusals(t *testing.T) {
 		t.Errorf("code exchanges = %d; want none", len(r.fake.oauthRequests))
 	}
 	r.assertNothingStored(orgID, "T0STATE01")
+	if got := r.installOutcomes(); got[installState] != 7 || len(got) != 1 {
+		t.Errorf("install outcomes = %v; want {state: 7}", got)
+	}
 }
 
 // TestInstallCallback_NoLongerAllowed: an admin demoted since the start, and
@@ -480,6 +496,9 @@ func TestInstallCallback_NoLongerAllowed(t *testing.T) {
 		t.Errorf("code exchanges = %d; want none", len(r.fake.oauthRequests))
 	}
 	r.assertNothingStored(orgID, "T0DEMOTE1")
+	if got := r.installOutcomes(); !maps.Equal(got, map[string]int64{installSSORequired: 1, installState: 2}) {
+		t.Errorf("install outcomes = %v; want {sso_required: 1, state: 2}", got)
+	}
 }
 
 // TestInstallCallback_SlackAnswers: what Slack sends back, short of a usable
@@ -514,22 +533,25 @@ func TestInstallCallback_SlackAnswers(t *testing.T) {
 		name  string
 		query url.Values
 		want  string
+		// outcome is what slack.install.attempts counts it as.
+		outcome string
 		// exchanged is whether the code reached oauth.v2.access.
 		exchanged bool
 	}{
-		{"declined", url.Values{"error": {"access_denied"}}, "denied", false},
-		{"other Slack error", url.Values{"error": {"invalid_scope"}}, "install_failed", false},
-		{"no code", url.Values{}, "install_failed", false},
-		{"failed exchange", url.Values{"code": {"unstaged"}}, "install_failed", true},
-		{"another app", url.Values{"code": {"wrong-app"}}, "install_failed", true},
-		{"missing scope", url.Values{"code": {"no-scope"}}, "install_failed", true},
-		{"user token", url.Values{"code": {"user-token"}}, "install_failed", true},
-		{"org-wide install", url.Values{"code": {"grid"}}, "enterprise_install", true},
-		{"no workspace", url.Values{"code": {"no-team"}}, "install_failed", true},
-		{"token rotation", url.Values{"code": {"rotation"}}, "install_failed", true},
+		{"declined", url.Values{"error": {"access_denied"}}, "denied", installDenied, false},
+		{"other Slack error", url.Values{"error": {"invalid_scope"}}, "install_failed", installSlackError, false},
+		{"no code", url.Values{}, "install_failed", installNoCode, false},
+		{"failed exchange", url.Values{"code": {"unstaged"}}, "install_failed", installExchangeFailed, true},
+		{"another app", url.Values{"code": {"wrong-app"}}, "install_failed", installWrongApp, true},
+		{"missing scope", url.Values{"code": {"no-scope"}}, "install_failed", installMissingScopes, true},
+		{"user token", url.Values{"code": {"user-token"}}, "install_failed", installMissingScopes, true},
+		{"org-wide install", url.Values{"code": {"grid"}}, "enterprise_install", installEnterpriseInstall, true},
+		{"no workspace", url.Values{"code": {"no-team"}}, "install_failed", installNoWorkspace, true},
+		{"token rotation", url.Values{"code": {"rotation"}}, "install_failed", installTokenRotation, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			before := len(r.fake.oauthRequests)
+			outcomesBefore := r.installOutcomes()
 			cookie, csrf := r.issue(orgID, owner, "")
 			tc.query.Set("state", csrf)
 			rec := r.callback(owner, orgID, cookie, tc.query)
@@ -537,6 +559,9 @@ func TestInstallCallback_SlackAnswers(t *testing.T) {
 			assertCookieCleared(t, rec)
 			if got := len(r.fake.oauthRequests) - before; (got == 1) != tc.exchanged {
 				t.Errorf("code exchanges = %d; want exchanged %v", got, tc.exchanged)
+			}
+			if got := r.installOutcomes()[tc.outcome] - outcomesBefore[tc.outcome]; got != 1 {
+				t.Errorf("install outcome %s counted %d times; want 1", tc.outcome, got)
 			}
 		})
 	}
@@ -576,6 +601,9 @@ func TestInstallCallback_NewWorkspace(t *testing.T) {
 	rec := r.callback(owner, orgID, cookie.Value, url.Values{"code": {"code-new"}, "state": {redirectQuery(t, start).Get("state")}})
 	assertRedirect(t, rec, "/orgs/"+orgID+"/settings/slack", url.Values{"slack": {"installed"}, "slack_workspace": {"T0NEW0001"}})
 	assertCookieCleared(t, rec)
+	if got := r.installOutcomes(); got[installInstalled] != 1 || len(got) != 1 {
+		t.Errorf("install outcomes = %v; want {installed: 1}", got)
+	}
 
 	ex := r.fake.oauthRequests[0]
 	if !ex.BasicAuth || ex.ClientID != "111.222" || ex.ClientSecret != "client-secret" ||
@@ -634,6 +662,9 @@ func TestInstallCallback_StagedBesideOwnApp(t *testing.T) {
 
 	rec := r.installAs(owner, orgID, "code-staged")
 	assertRedirect(t, rec, settingsPath(orgID), url.Values{"slack": {"staged"}, "slack_workspace": {"T0STAGED1"}})
+	if got := r.installOutcomes(); got[installStaged] != 1 || len(got) != 1 {
+		t.Errorf("install outcomes = %v; want {staged: 1}", got)
+	}
 
 	dep := r.deploymentRow("T0STAGED1")
 	if dep == nil || dep.Active || dep.Source != slackstore.SourceDeployment {
@@ -721,6 +752,9 @@ func TestInstallCallback_WorkspaceTaken(t *testing.T) {
 	r.stageInstall("code-second", "T0TAKEN01", "Acme", "xoxb-second", "triage-bot")
 	rec := r.installAs(owner, orgID, "code-second")
 	assertRedirect(t, rec, settingsPath(orgID), failure("workspace_taken"))
+	if got := r.installOutcomes(); got[installInstalled] != 1 || got[installWorkspaceTaken] != 1 || len(got) != 2 {
+		t.Errorf("install outcomes = %v; want {installed: 1, workspace_taken: 1}", got)
+	}
 
 	if after := r.deploymentRow("T0TAKEN01"); after == nil || *after != *before {
 		t.Errorf("holder's connection = %+v; want unchanged %+v", after, before)

@@ -136,7 +136,9 @@ says:
   your deployment, confirm with Slack.
 
 Triage Factory reads a thread's history with those two methods, so an app
-under the reduced limits answers slowly in long threads.
+under the reduced limits answers slowly in long threads. With the bundled
+Prometheus, `SlackDeploymentAppThrottled` fires when Slack refuses the
+deployment app's calls to them.
 
 ## Slack's terms for a commercial service
 
@@ -161,6 +163,13 @@ deployment app and each customer connecting its own.
   presses **Add to Slack** again and the install completes.
 
 ## Troubleshooting
+
+With the bundled Prometheus, the deployment app's problems also raise
+[alerts](../monitoring.md#alerts): `SlackDeploymentAppUnusable` for a
+malformed configuration or a public URL that is not HTTPS,
+`SlackDeploymentSocketDown` for a Socket Mode connection that stays down,
+`SlackDeploymentAppInstallRefused` for an install refused for the app's own
+settings, and `SlackSigningSecretMismatch` for a wrong signing secret.
 
 Each of these is a line in `docker compose logs control`, except where noted.
 

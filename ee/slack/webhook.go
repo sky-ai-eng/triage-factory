@@ -187,12 +187,24 @@ func (h *webhookHandler) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteUnauth(w)
 		return
 	}
+	// Every delivery from here on is counted by its verdict, because one org's
+	// refusals are its own app's configuration, while most orgs' at once are
+	// this deployment's: its secret store, a proxy that changes request bodies
+	// or headers, or this host's clock.
 	secret, err := h.stores.Secrets.GetSystem(r.Context(), ws.OrgID, ws.SigningSecretRef)
 	if err != nil {
+		h.stats.recordOrgDelivery(r.Context(), ws.APIAppID, orgDeliveryNoSecret)
 		httpx.InternalError(w, "slack-webhook", err)
 		return
 	}
-	if secret == "" || !validSlackSignature(secret, body, r.Header.Get("X-Slack-Request-Timestamp"), r.Header.Get("X-Slack-Signature")) {
+	if secret == "" {
+		h.stats.recordOrgDelivery(r.Context(), ws.APIAppID, orgDeliveryNoSecret)
+		httpx.WriteUnauth(w)
+		return
+	}
+	check := checkSlackSignature(secret, body, r.Header.Get("X-Slack-Request-Timestamp"), r.Header.Get("X-Slack-Signature"))
+	h.stats.recordOrgDelivery(r.Context(), ws.APIAppID, check.label())
+	if check != signatureValid {
 		httpx.WriteUnauth(w)
 		return
 	}
@@ -224,6 +236,9 @@ func (h *webhookHandler) handleDeploymentWebhook(w http.ResponseWriter, r *http.
 		httpx.WriteUnauth(w)
 		return
 	default:
+		// TODO(TFAC-1491): a stale timestamp here is uncounted, so a clock
+		// more than five minutes off refuses every delivery to the deployment
+		// app with no metric or alert until Slack turns its events off.
 		httpx.WriteUnauth(w)
 		return
 	}
@@ -327,30 +342,41 @@ func ackEmpty(w http.ResponseWriter) {
 	httpx.WriteJSON(w, http.StatusOK, map[string]string{})
 }
 
-// validSlackSignature verifies X-Slack-Signature against Slack's documented
-// v0 HMAC-SHA256 scheme (HMAC(signingSecret, "v0:"+timestamp+":"+body)) and
-// enforces the 5-minute replay window on X-Slack-Request-Timestamp.
-// Constant-time comparison, mirrors validWebhookSignature's GitHub
-// analogue (internal/server/github_webhooks.go).
-func validSlackSignature(secret string, body []byte, timestampHeader, sigHeader string) bool {
-	return checkSlackSignature(secret, body, timestampHeader, sigHeader) == signatureValid
-}
-
-// signatureCheck is the outcome of checking a request's Slack signature.
+// signatureCheck is the outcome of checking a request's Slack signature
+// against Slack's documented v0 HMAC-SHA256 scheme
+// (HMAC(signingSecret, "v0:"+timestamp+":"+body)) and the 5-minute replay
+// window on X-Slack-Request-Timestamp.
 type signatureCheck int
 
 const (
 	// signatureMalformed is a request Slack would not send: a header missing
-	// or unparseable, a digest that is not SHA-256's length, or a timestamp
-	// outside the replay window. It is the zero value, so a check left unset
-	// refuses.
+	// or unparseable, or a digest that is not SHA-256's length. It is the
+	// zero value, so a check left unset refuses.
 	signatureMalformed signatureCheck = iota
+	// signatureStale is a timestamp outside the replay window. Every
+	// delivery from Slack looks like this when this host's clock is off by
+	// more than the window, and so does a replay.
+	signatureStale
 	// signatureMismatch is a fresh, well-formed signature that secret does
 	// not produce. Every delivery Slack sends looks like this when the
 	// configured secret is not the app's, and so does a forgery.
 	signatureMismatch
 	signatureValid
 )
+
+// label is the check's verdict on slack.webhook.org.deliveries.
+func (c signatureCheck) label() string {
+	switch c {
+	case signatureValid:
+		return "verified"
+	case signatureMismatch:
+		return "mismatch"
+	case signatureStale:
+		return "stale"
+	default:
+		return "malformed"
+	}
+}
 
 func checkSlackSignature(secret string, body []byte, timestampHeader, sigHeader string) signatureCheck {
 	if timestampHeader == "" || sigHeader == "" {
@@ -365,7 +391,7 @@ func checkSlackSignature(secret string, body []byte, timestampHeader, sigHeader 
 		age = -age
 	}
 	if age > slackReplayWindow {
-		return signatureMalformed
+		return signatureStale
 	}
 
 	const prefix = "v0="

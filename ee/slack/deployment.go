@@ -140,6 +140,12 @@ func deploymentAppFromEnv() (deploymentApp, error) {
 	return d, nil
 }
 
+// installablePublicURL reports whether the deployment app can be installed
+// behind publicURL: Slack refuses a redirect URL that is not HTTPS.
+func installablePublicURL(publicURL string) bool {
+	return strings.HasPrefix(publicURL, "https://")
+}
+
 // deploymentAppHandler serves GET /api/slack/deployment-app.
 type deploymentAppHandler struct {
 	app       deploymentApp
@@ -165,7 +171,7 @@ func (h *deploymentAppHandler) handleGet(w http.ResponseWriter, r *http.Request)
 		httpx.NotFound(w, "deployment Slack app")
 		return
 	}
-	if !strings.HasPrefix(h.publicURL(), "https://") {
+	if !installablePublicURL(h.publicURL()) {
 		h.insecureURLLogged.Do(func() {
 			slackLog.Error("the deployment Slack app is configured but the deployment's public URL is not HTTPS, so no org can install it; set TF_PUBLIC_URL to an https:// URL",
 				"app_id", h.app.AppID)
