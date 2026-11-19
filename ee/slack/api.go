@@ -287,11 +287,13 @@ func slackOpenConnection(ctx context.Context, client *http.Client, caller slackC
 	return err
 }
 
-// slackAuthErrorCodes is the set of apps.connections.open error codes that
-// mean the app token itself is bad (revoked, wrong scope, disabled
-// workspace) rather than a transient upstream issue — retrying on the
-// normal backoff schedule would just hammer Slack with a token that will
-// never succeed. Sourced from Slack's documented auth-related error codes.
+// slackAuthErrorCodes is the set of Web API error codes that mean the token
+// itself is bad (revoked, wrong scope, disabled workspace) rather than a
+// transient upstream issue. Every attempt answered with one is counted as
+// an auth failure (slackRefusesCredential), and apps.connections.open
+// returns one as a slackAuthError, because retrying on the normal backoff
+// schedule would just hammer Slack with a token that will never succeed.
+// Sourced from Slack's documented auth-related error codes.
 var slackAuthErrorCodes = map[string]bool{
 	"invalid_auth":     true,
 	"not_authed":       true,
@@ -616,11 +618,31 @@ func doSlackRequest(ctx context.Context, client *http.Client, orgID string, req 
 		recordSlackTransport(ctx, orgID, err)
 		return nil, nil, fmt.Errorf("slack api: read response: %w", err)
 	}
-	upstream.Record(ctx, upstream.Slack, orgID, upstream.ClassifyResponse(resp.StatusCode, resp.Header, body))
+	class := upstream.ClassifyResponse(resp.StatusCode, resp.Header, body)
+	if class == upstream.OK && slackRefusesCredential(body) {
+		class = upstream.Auth
+	}
+	upstream.Record(ctx, upstream.Slack, orgID, class)
 	if len(body) > slackMaxResponseBody {
 		return nil, nil, fmt.Errorf("slack api: response exceeds %d bytes", slackMaxResponseBody)
 	}
 	return resp, body, nil
+}
+
+// slackRefusesCredential reports whether body is a Web API answer refusing
+// the request's token. Slack answers a bad token with HTTP 200 and
+// {"ok":false,"error":"invalid_auth"}, so classed by its status alone the
+// attempt would count as OK and no org's revoked token would show as auth.
+// A body that is not the {ok,...} shape refuses nothing.
+func slackRefusesCredential(body []byte) bool {
+	var out struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return false
+	}
+	return !out.OK && slackAuthErrorCodes[out.Error]
 }
 
 // recordSlackTransport counts a transport failure against orgID, unless ctx

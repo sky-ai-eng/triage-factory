@@ -561,6 +561,41 @@ func TestDoSlackJSON_LargePageDecodes(t *testing.T) {
 	}
 }
 
+// TestDoSlackJSON_TokenRefusalCountedAsAuth pins that an HTTP 200 whose body
+// refuses the token counts as an auth failure, and that any other answer
+// keeps the class its status gives it.
+func TestDoSlackJSON_TokenRefusalCountedAsAuth(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want upstream.Class
+	}{
+		{"invalid_auth", `{"ok":false,"error":"invalid_auth"}`, upstream.Auth},
+		{"token_revoked", `{"ok":false,"error":"token_revoked"}`, upstream.Auth},
+		{"missing_scope", `{"ok":false,"error":"missing_scope","needed":"chat:write"}`, upstream.Auth},
+		{"another refusal", `{"ok":false,"error":"channel_not_found"}`, upstream.OK},
+		{"success", `{"ok":true}`, upstream.OK},
+		{"not the ok shape", `OK - 1234`, upstream.OK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := withFakeSlackAPI(t, func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(tc.body))
+			})
+			ctx, tally := upstream.WithTally(context.Background())
+			resp, _, err := doSlackRequest(ctx, srv.Client(), "org-1", newSlackTestRequest(t, ctx))
+			if err != nil {
+				t.Fatalf("doSlackRequest: %v", err)
+			}
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d; want 200", resp.StatusCode)
+			}
+			if got := tally.Count(tc.want); got != 1 || tally.Attempts() != 1 {
+				t.Errorf("tally: %d attempts, %d %s; want 1 attempt, counted %s", tally.Attempts(), got, tc.want, tc.want)
+			}
+		})
+	}
+}
+
 // TestDoSlackJSON_CanceledContext_NotCounted pins that a request abandoned
 // because its caller's ctx ended is not recorded as an upstream outcome.
 func TestDoSlackJSON_CanceledContext_NotCounted(t *testing.T) {

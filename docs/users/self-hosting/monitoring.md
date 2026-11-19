@@ -301,7 +301,9 @@ the limit allows: raise `TF_CLAIM_MEMORY_LIMIT_MB` on the executors.
 
 Empty unless a Slack app is configured or connected. Outbound calls to Slack's
 Web API are in `tf_upstream_requests_total{upstream="slack"}` with the other
-upstreams.
+upstreams. Slack answers a call whose token it refuses (`invalid_auth`,
+`not_authed`, `token_revoked`, `account_inactive`, `missing_scope`) with HTTP
+200, and it counts as `auth`.
 
 | Metric | What it counts |
 | ------ | -------------- |
