@@ -954,14 +954,19 @@ func wholeSeconds(d time.Duration) int {
 // not part of it, so the loop's one-shot escalation after a truncated turn
 // costs nothing, while tool_choice (which does invalidate) stays absent on
 // both.
+//
+// The rows go out with the reasoning produced under other tools removed (see
+// reasoningBoundTo). Both callers get the same removal, so it is part of the
+// shared prefix and not a difference between them.
 func (e *Engine) buildRequest(params Params, provider schemas.ModelProvider, rows []domain.Message, maxTokens int) inference.Request {
+	tools := e.toolSchemas(params)
 	return inference.Request{
 		Provider:       provider,
 		Model:          params.Model,
 		SystemPrompt:   params.SystemPrompt,
 		SystemAddendum: params.SystemAddendum,
-		Rows:           rows,
-		Tools:          e.toolSchemas(params),
+		Rows:           reasoningBoundTo(rows, toolsFingerprint(tools)),
+		Tools:          tools,
 		Effort:         params.Effort,
 		MaxTokens:      maxTokens,
 	}

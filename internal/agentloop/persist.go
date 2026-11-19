@@ -32,6 +32,10 @@ func (e *Engine) persistAssistant(ctx context.Context, params Params, completion
 	if unreplayableTurn(row) {
 		row.WindowState = domain.MessageWindowInactive
 	}
+	// Every reply this writes answers a request buildRequest built, whose
+	// tools are a function of params alone, so this is the fingerprint of the
+	// tools that request carried.
+	recordToolsFingerprint(&row, toolsFingerprint(e.toolSchemas(params)))
 	// Wall time from request to complete message, retries included — the
 	// same request-to-row span the SDK parser stamps. A call that measured 0
 	// stores 0.
