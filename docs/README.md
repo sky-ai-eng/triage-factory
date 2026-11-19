@@ -20,6 +20,7 @@ operation of the product.
   [GitHub App](users/self-hosting/deployment-integrations/deployment-github-app.md),
   [Jira (Atlassian) app](users/self-hosting/deployment-integrations/deployment-jira-app.md),
   [Linear app](users/self-hosting/deployment-integrations/deployment-linear-app.md),
+  [Slack app](users/self-hosting/deployment-integrations/deployment-slack-app.md),
   [commit signer](users/self-hosting/deployment-integrations/deployment-commit-signer.md)
 - [SSO](users/self-hosting/sso.md) and [Bedrock role mode](users/self-hosting/bedrock-role-mode.md)
 - Operating: [monitoring](users/self-hosting/monitoring.md),

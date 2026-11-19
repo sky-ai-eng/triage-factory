@@ -76,6 +76,37 @@ func TestCompose_DeploymentCommitSignerIsControlOnly(t *testing.T) {
 	}
 }
 
+// TestCompose_DeploymentSlackAppIsControlOnly pins where the bundled stack
+// sends the deployment Slack app: to the control service, which serves the
+// install, the Events API receiver and the Socket Mode connection, and never
+// to the executor. Compose forwards only the names it lists, so a name missing
+// from control is a value set in .env that the binary never sees. The names
+// are spelled out because core cannot import ee/slack, which reads them.
+func TestCompose_DeploymentSlackAppIsControlOnly(t *testing.T) {
+	env := composeServiceEnv(t)
+	control, executor := env["control"], env["executor"]
+	if len(control) == 0 || len(executor) == 0 {
+		t.Fatalf("found no environment for the control (%d keys) or executor (%d keys) service; the compose parse is wrong", len(control), len(executor))
+	}
+	names := []string{
+		"TF_SLACK_APP_ID",
+		"TF_SLACK_CLIENT_ID",
+		"TF_SLACK_CLIENT_SECRET",
+		"TF_SLACK_CLIENT_SECRET_FILE",
+		"TF_SLACK_SIGNING_SECRET",
+		"TF_SLACK_SIGNING_SECRET_FILE",
+		"TF_SLACK_APP_TOKEN",
+		"TF_SLACK_APP_TOKEN_FILE",
+	}
+	for service, keys := range env {
+		for _, name := range names {
+			if _, forwards := keys[name]; forwards != (service == "control") {
+				t.Errorf("service %s forwards %s = %v; only the control service may, and it must", service, name, forwards)
+			}
+		}
+	}
+}
+
 // TestCompose_ObjectStorePairsPerRole pins which object-store key pair the
 // bundled stack hands each TF service. The binary reads the same names on
 // every role, so this file is the whole of the scoping: control gets the

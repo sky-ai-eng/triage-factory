@@ -1,0 +1,52 @@
+{
+  "display_information": {
+    "name": "Triage Factory",
+    "description": "Mention @Triage Factory in Slack to hand work to an AI agent.",
+    "long_description": "Triage Factory connects to Slack so your team can hand work to an AI agent directly.\n\nHow it works\n• Mention @Triage Factory in a channel your TF team tracks.\n• An agent picks it up. It reads the thread, any files shared in it, and the repositories your team works in, then does what your team has set it up to do: fix a bug, open a pull request, review code, update a ticket, or answer a question.\n• While the agent works, the thread shows a live status line. When it finishes, it replies in the thread with what it did and a link to the full run.\n• Replies in the same thread go to the same agent, so you can correct or extend the request without mentioning the bot again.\n• If a run fails, the bot posts a short note in the thread with a link to the details.\n• Agents started by GitHub, Jira, or Linear activity can also post updates to channels your team tracks.\n\nWhat it reads\nThe bot responds only to @mentions and to replies in threads it is already working in. It ignores everything else in the channel. A team admin decides which channels it works in, under Team Settings → Slack. It joins public channels on its own. Private channels need an /invite.",
+    "background_color": "#d15700"
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "Triage Factory",
+      "always_online": true
+    }
+  },
+  "oauth_config": {
+    "redirect_urls": [
+      "https://YOUR-TF-PUBLIC-URL/api/slack/install/callback"
+    ],
+    "scopes": {
+      "bot": [
+        "app_mentions:read",
+        "chat:write",
+        "reactions:write",
+        "users:read",
+        "users:read.email",
+        "channels:history",
+        "groups:history",
+        "channels:read",
+        "groups:read",
+        "channels:join",
+        "files:read",
+        "files:write",
+        "links:read",
+        "links:write"
+      ]
+    }
+  },
+  "settings": {
+    "event_subscriptions": {
+      "request_url": "https://YOUR-TF-PUBLIC-URL/api/webhooks/slack",
+      "bot_events": [
+        "app_mention",
+        "message.channels",
+        "message.groups",
+        "channel_id_changed",
+        "app_uninstalled",
+        "tokens_revoked"
+      ]
+    },
+    "org_deploy_enabled": false,
+    "token_rotation_enabled": false
+  }
+}
