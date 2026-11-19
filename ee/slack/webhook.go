@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
@@ -120,6 +121,9 @@ type webhookHandler struct {
 	// deployment is the deployment's own Slack app, the zero app when there
 	// is none.
 	deployment deploymentApp
+	// mismatches limits how often the deployment endpoint logs a delivery
+	// signed with another secret.
+	mismatches mismatchReport
 }
 
 // handleWebhook serves POST /api/webhooks/slack/{org_id}, for an org's own
@@ -210,7 +214,20 @@ func (h *webhookHandler) handleDeploymentWebhook(w http.ResponseWriter, r *http.
 	if !ok {
 		return
 	}
-	if !validSlackSignature(h.deployment.SigningSecret, body, r.Header.Get("X-Slack-Request-Timestamp"), r.Header.Get("X-Slack-Signature")) {
+	switch checkSlackSignature(h.deployment.SigningSecret, body, r.Header.Get("X-Slack-Request-Timestamp"), r.Header.Get("X-Slack-Signature")) {
+	case signatureValid:
+	case signatureMismatch:
+		// A wrong TF_SLACK_SIGNING_SECRET fails every delivery here and
+		// nowhere else, so this line is the only sign of it the operator gets
+		// before Slack turns the app's event delivery off.
+		if log, count := h.mismatches.record(time.Now()); log {
+			slackLog.Error("slack: a delivery to the deployment Slack app's Events API endpoint is not signed with "+envSlackSigningSecret+
+				"; if Slack's deliveries all fail this way, set it to the Signing Secret on the app's Basic Information page",
+				"app_id", h.deployment.AppID, "mismatches", count)
+		}
+		httpx.WriteUnauth(w)
+		return
+	default:
 		httpx.WriteUnauth(w)
 		return
 	}
@@ -320,28 +337,47 @@ func ackEmpty(w http.ResponseWriter) {
 // Constant-time comparison, mirrors validWebhookSignature's GitHub
 // analogue (internal/server/github_webhooks.go).
 func validSlackSignature(secret string, body []byte, timestampHeader, sigHeader string) bool {
+	return checkSlackSignature(secret, body, timestampHeader, sigHeader) == signatureValid
+}
+
+// signatureCheck is the outcome of checking a request's Slack signature.
+type signatureCheck int
+
+const (
+	signatureValid signatureCheck = iota
+	// signatureMalformed is a request Slack would not send: a header missing
+	// or unparseable, a digest that is not SHA-256's length, or a timestamp
+	// outside the replay window.
+	signatureMalformed
+	// signatureMismatch is a fresh, well-formed signature that secret does
+	// not produce. Every delivery Slack sends looks like this when the
+	// configured secret is not the app's, and so does a forgery.
+	signatureMismatch
+)
+
+func checkSlackSignature(secret string, body []byte, timestampHeader, sigHeader string) signatureCheck {
 	if timestampHeader == "" || sigHeader == "" {
-		return false
+		return signatureMalformed
 	}
 	ts, err := strconv.ParseInt(timestampHeader, 10, 64)
 	if err != nil {
-		return false
+		return signatureMalformed
 	}
 	age := time.Since(time.Unix(ts, 0))
 	if age < 0 {
 		age = -age
 	}
 	if age > slackReplayWindow {
-		return false
+		return signatureMalformed
 	}
 
 	const prefix = "v0="
 	if !strings.HasPrefix(sigHeader, prefix) {
-		return false
+		return signatureMalformed
 	}
 	want, err := hex.DecodeString(strings.TrimPrefix(sigHeader, prefix))
-	if err != nil {
-		return false
+	if err != nil || len(want) != sha256.Size {
+		return signatureMalformed
 	}
 
 	mac := hmac.New(sha256.New, []byte(secret))
@@ -349,5 +385,37 @@ func validSlackSignature(secret string, body []byte, timestampHeader, sigHeader 
 	mac.Write([]byte(timestampHeader))
 	mac.Write([]byte(":"))
 	mac.Write(body)
-	return hmac.Equal(want, mac.Sum(nil))
+	if !hmac.Equal(want, mac.Sum(nil)) {
+		return signatureMismatch
+	}
+	return signatureValid
+}
+
+// signatureMismatchLogInterval is the least time between two logged
+// signature mismatches.
+const signatureMismatchLogInterval = time.Minute
+
+// mismatchReport decides which signature mismatches the deployment endpoint
+// logs: the first, then at most one an interval, each line counting the
+// mismatches since the one before. The endpoint answers anyone, and a forger
+// can produce a mismatch as readily as a wrong secret can, so a line per
+// request would let any caller write the log. The zero value is ready to use.
+type mismatchReport struct {
+	mu       sync.Mutex
+	logged   time.Time
+	unlogged int
+}
+
+// record counts a mismatch at now. It reports whether to log it and, if so,
+// how many mismatches the line covers, this one included.
+func (m *mismatchReport) record(now time.Time) (log bool, count int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.unlogged++
+	if !m.logged.IsZero() && now.Sub(m.logged) < signatureMismatchLogInterval {
+		return false, 0
+	}
+	count = m.unlogged
+	m.logged, m.unlogged = now, 0
+	return true, count
 }

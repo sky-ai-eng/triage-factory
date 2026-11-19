@@ -99,7 +99,8 @@ docker compose up -d
 **Events API:** Slack checked the request URL when you created the app, before
 Triage Factory had the signing secret, so that check failed. Now that it has
 restarted, open **Event Subscriptions** in the app's settings and have Slack
-verify the request URL again.
+verify the request URL again. If it fails again, look for the signing-secret
+line under [Troubleshooting](#troubleshooting).
 
 ## 4. Check it took
 
@@ -180,9 +181,15 @@ Each of these is a line in `docker compose logs control`.
   for the app: `the deployment Slack app is configured but the deployment's
   public URL is not HTTPS, so no org can install it`. Set `TF_PUBLIC_URL` to
   an `https://` URL.
+- **Wrong signing secret** (Events API) — `slack: a delivery to the deployment
+  Slack app's Events API endpoint is not signed with TF_SLACK_SIGNING_SECRET`.
+  Triage Factory answers such deliveries 401 and logs at most one line a
+  minute, with `mismatches` counting the deliveries since the last line. A
+  single line can be a forged request; lines that keep coming while Slack
+  delivers mean the secret is wrong. Set `TF_SLACK_SIGNING_SECRET` to the
+  **Signing Secret** on the app's Basic Information page and restart.
 
-With the Events API, a wrong `TF_SLACK_SIGNING_SECRET` logs nothing: Triage
-Factory answers each delivery 401. Slack expects an answer "within three
-seconds", and when more than 95% of deliveries fail within 60 minutes it turns
-off the app's event subscriptions and emails the app's owner. Fix the cause,
-then re-enable them in the app's settings on Slack.
+Slack expects an answer to each delivery "within three seconds". When more
+than 95% of deliveries fail within 60 minutes, it turns off the app's event
+subscriptions and emails the app's owner. Fix the cause, then re-enable them
+in the app's settings on Slack.
