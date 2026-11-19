@@ -417,10 +417,14 @@ function TransportChip({ transport }: { transport: 'socket' | 'events_api' }) {
   )
 }
 
-// credentialShapeError catches the two credential mix-ups that otherwise fail
-// deep in Slack's API with an opaque message. Returns a user-facing hint that
-// names the Slack page to copy from, or null when the shapes look right.
+// credentialShapeError catches the credential mix-ups that otherwise fail deep
+// in Slack's API with an opaque message, and the expiring bot token of an app
+// with token rotation on, which the server refuses. Returns a user-facing hint, or
+// null when the shapes look right.
 function credentialShapeError(botToken: string, appToken: string): string | null {
+  if (botToken.startsWith('xoxe.xoxb-')) {
+    return 'This bot token expires, because your Slack app has token rotation turned on. Slack doesn’t allow turning it off, so create a new app from the copied manifest and use its Bot User OAuth Token.'
+  }
   if (!botToken.startsWith('xoxb-')) {
     return "That doesn't look like a bot token. Copy the Bot User OAuth Token (starts “xoxb-”) from your Slack app's OAuth & Permissions page."
   }
@@ -476,8 +480,8 @@ function ConnectFlow({
 
   const connect = async () => {
     if (!canSubmit) return
-    // Catch the two credential mix-ups locally, with a message that names the
-    // page to copy from — otherwise they fail deep in Slack's API with an
+    // Catch a token of the wrong shape locally, with a message that says what
+    // to copy instead: a mix-up otherwise fails deep in Slack's API with an
     // opaque error (a bot token pasted from App Credentials, an app-level
     // token that isn't one). Slack still has the final say on a well-shaped
     // token.

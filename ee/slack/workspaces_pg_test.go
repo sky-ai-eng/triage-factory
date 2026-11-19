@@ -620,6 +620,42 @@ func TestHandleConnect_DeploymentAppToken_422(t *testing.T) {
 	}
 }
 
+// TestHandleConnect_RotatingToken_422: the expiring bot token of an app with
+// token rotation on is refused before any call to Slack, and nothing is
+// stored.
+func TestHandleConnect_RotatingToken_422(t *testing.T) {
+	r := newSlackWorkspaceRig(t, "https://tf.example")
+	orgID, owner, _ := pgtest.SeedOrgWithUser(t, r.h, "slack-rotating")
+	const token = "xoxe.xoxb-1-rotating"
+	r.fake.stageConnectOK(token, "T0ROTATE1", "Acme", "U0BOTROT", "A0ROTATE01", "")
+
+	rec := httptest.NewRecorder()
+	r.hdl.handleConnect(rec, r.importReq(owner, orgID, map[string]string{"bot_token": token, "signing_secret": "shh"}))
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422 (body=%s)", rec.Code, rec.Body.String())
+	}
+	errs := decodeBody[struct {
+		Errors []httpx.ErrorItem `json:"errors"`
+	}](t, rec).Errors
+	if len(errs) != 1 || errs[0].Reason != httpx.ReasonInvalidField || errs[0].Field != "bot_token" ||
+		!strings.Contains(errs[0].Message, "token rotation") {
+		t.Fatalf("errors = %+v; want one INVALID_FIELD on bot_token naming token rotation", errs)
+	}
+	if r.fake.authTestHits != 0 || r.fake.botsInfoHits != 0 {
+		t.Errorf("auth.test called %d times, bots.info %d; want neither", r.fake.authTestHits, r.fake.botsInfoHits)
+	}
+
+	if got := r.listConnections(owner, orgID); len(got) != 0 {
+		t.Errorf("connections after the refusal = %+v; want none", got)
+	}
+	if got := r.secretValue(orgID, "slack_ws_T0ROTATE1_A0ROTATE01_bot_token"); got != "" {
+		t.Errorf("bot token stored = %q; want none", got)
+	}
+	if rows := r.auditRows(orgID); len(rows) != 0 {
+		t.Errorf("audit rows after the refusal = %+v; want none", rows)
+	}
+}
+
 // ---------- app-single-org invariant + two-apps-one-workspace ----------
 
 // TestHandleConnect_AppBoundToOtherOrg_SameWorkspace_409Generic: org B

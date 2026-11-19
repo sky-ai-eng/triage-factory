@@ -138,6 +138,17 @@ func TestSlackOAuthV2Access(t *testing.T) {
 		"team": nil, "enterprise": map[string]any{"id": "E0GRID"}, "is_enterprise_install": true,
 	}
 	fake.oauthAccess["tokenless"] = map[string]any{"ok": true, "app_id": "A0DEPLOY01"}
+	fake.oauthAccess["refresh"] = map[string]any{
+		"ok": true, "app_id": "A0DEPLOY01", "access_token": "xoxb-1", "token_type": "bot",
+		"refresh_token": "xoxe-1-refresh",
+	}
+	fake.oauthAccess["expiry"] = map[string]any{
+		"ok": true, "app_id": "A0DEPLOY01", "access_token": "xoxb-1", "token_type": "bot",
+		"expires_in": 43200,
+	}
+	fake.oauthAccess["prefix"] = map[string]any{
+		"ok": true, "app_id": "A0DEPLOY01", "access_token": "xoxe.xoxb-1", "token_type": "bot",
+	}
 
 	got, err := slackOAuthV2Access(t.Context(), slackHTTPClient, slackCaller{orgID: "org"}, "111.222", "s3cret", "good", "https://tf.example/api/slack/install/callback")
 	if err != nil {
@@ -172,6 +183,18 @@ func TestSlackOAuthV2Access(t *testing.T) {
 	}
 	if _, err := slackOAuthV2Access(t.Context(), slackHTTPClient, slackCaller{}, "id", "secret", "tokenless", "u"); err == nil {
 		t.Error("an ok answer with no access_token was accepted")
+	}
+
+	// Either field alone, or a rotating bot token, marks an app with token
+	// rotation on.
+	for _, code := range []string{"refresh", "expiry", "prefix"} {
+		got, err := slackOAuthV2Access(t.Context(), slackHTTPClient, slackCaller{}, "id", "secret", code, "u")
+		if err != nil {
+			t.Fatalf("%s exchange: %v", code, err)
+		}
+		if !got.TokenRotation {
+			t.Errorf("%s: TokenRotation = false, want true", code)
+		}
 	}
 }
 

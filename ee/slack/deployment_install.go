@@ -42,6 +42,7 @@ import (
 //	no_app              the deployment has no Slack app
 //	install_failed      the code exchange failed, or Slack's answer is not an
 //	                    install of the deployment's app with every scope it needs
+//	                    and a bot token that does not expire
 //	enterprise_install  Slack answered with an Enterprise Grid org-wide install
 //	workspace_taken     another org holds the app's install in the workspace
 //
@@ -198,7 +199,8 @@ func (h *installHandler) handleStart(w http.ResponseWriter, r *http.Request) {
 
 // handleCallback completes the ceremony: it proves the cookie, the caller and
 // the consent, exchanges the code, checks that Slack installed the deployment's
-// app with every scope it needs, and stores the connection.
+// app with every scope it needs and a bot token that does not expire, and
+// stores the connection.
 //
 // The caller must be the admin who started it, signed in with a session. An
 // API token is refused: this path names no org for the token's sealed org to
@@ -313,9 +315,15 @@ func (h *installHandler) handleCallback(w http.ResponseWriter, r *http.Request) 
 		h.fail(w, r, orgID, returnTo, "install_failed")
 		return
 	}
-	// TODO(TFAC-1487): an app with token rotation on answers with a bot token
-	// that expires in 12 hours and a refresh_token, which is dropped here, so
-	// the stored connection stops working; the install should be refused.
+	// TF stores a bot token once and never refreshes it, so a token that
+	// expires in 12 hours would leave a connection that stops working.
+	if inst.TokenRotation {
+		slackLog.Error("slack install: the deployment's Slack app has token rotation on, so its bot tokens expire and TF does not refresh them; "+
+			"Slack does not allow turning token rotation off, so create a new Slack app without it and set the TF_SLACK_* variables to that app",
+			"org", orgID, "app_id", inst.AppID)
+		h.fail(w, r, orgID, returnTo, "install_failed")
+		return
+	}
 	if inst.TeamID == "" {
 		slackLog.Error("slack install: Slack answered a workspace install with no workspace", "org", orgID)
 		h.fail(w, r, orgID, returnTo, "install_failed")

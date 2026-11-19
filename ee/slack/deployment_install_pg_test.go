@@ -504,6 +504,11 @@ func TestInstallCallback_SlackAnswers(t *testing.T) {
 		m["is_enterprise_install"] = true
 	})
 	stage("no-team", func(m map[string]any) { m["team"] = nil })
+	stage("rotation", func(m map[string]any) {
+		m["access_token"] = "xoxe.xoxb-rotation"
+		m["refresh_token"] = "xoxe-1-rotation"
+		m["expires_in"] = 43200
+	})
 
 	for _, tc := range []struct {
 		name  string
@@ -521,6 +526,7 @@ func TestInstallCallback_SlackAnswers(t *testing.T) {
 		{"user token", url.Values{"code": {"user-token"}}, "install_failed", true},
 		{"org-wide install", url.Values{"code": {"grid"}}, "enterprise_install", true},
 		{"no workspace", url.Values{"code": {"no-team"}}, "install_failed", true},
+		{"token rotation", url.Values{"code": {"rotation"}}, "install_failed", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			before := len(r.fake.oauthRequests)
