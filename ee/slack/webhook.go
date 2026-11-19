@@ -192,7 +192,16 @@ func (h *webhookHandler) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		httpx.InternalError(w, "slack-webhook", err)
 		return
 	}
-	if secret == "" || !validSlackSignature(secret, body, r.Header.Get("X-Slack-Request-Timestamp"), r.Header.Get("X-Slack-Signature")) {
+	if secret == "" {
+		httpx.WriteUnauth(w)
+		return
+	}
+	// Counted per verdict because one org's refusals are its own app's
+	// configuration, while most orgs' at once are this deployment's: a proxy
+	// that changes request bodies or headers, or this host's clock.
+	check := checkSlackSignature(secret, body, r.Header.Get("X-Slack-Request-Timestamp"), r.Header.Get("X-Slack-Signature"))
+	h.stats.recordOrgDelivery(r.Context(), ws.APIAppID, check)
+	if check != signatureValid {
 		httpx.WriteUnauth(w)
 		return
 	}
@@ -341,16 +350,34 @@ type signatureCheck int
 
 const (
 	// signatureMalformed is a request Slack would not send: a header missing
-	// or unparseable, a digest that is not SHA-256's length, or a timestamp
-	// outside the replay window. It is the zero value, so a check left unset
-	// refuses.
+	// or unparseable, or a digest that is not SHA-256's length. It is the
+	// zero value, so a check left unset refuses.
 	signatureMalformed signatureCheck = iota
+	// signatureStale is a timestamp outside the replay window. Every
+	// delivery from Slack looks like this when this host's clock is off by
+	// more than the window, and so does a replay.
+	signatureStale
 	// signatureMismatch is a fresh, well-formed signature that secret does
 	// not produce. Every delivery Slack sends looks like this when the
 	// configured secret is not the app's, and so does a forgery.
 	signatureMismatch
 	signatureValid
 )
+
+// label is the check's value for the signature attribute of
+// slack.webhook.org.deliveries.
+func (c signatureCheck) label() string {
+	switch c {
+	case signatureValid:
+		return "verified"
+	case signatureMismatch:
+		return "mismatch"
+	case signatureStale:
+		return "stale"
+	default:
+		return "malformed"
+	}
+}
 
 func checkSlackSignature(secret string, body []byte, timestampHeader, sigHeader string) signatureCheck {
 	if timestampHeader == "" || sigHeader == "" {
@@ -365,7 +392,7 @@ func checkSlackSignature(secret string, body []byte, timestampHeader, sigHeader 
 		age = -age
 	}
 	if age > slackReplayWindow {
-		return signatureMalformed
+		return signatureStale
 	}
 
 	const prefix = "v0="

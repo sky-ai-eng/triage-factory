@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -443,6 +444,38 @@ func TestHandleWebhook_StaleTimestamp_401(t *testing.T) {
 	rec := postSlackWebhook(t, r.h, webhookTestOrgID, body, staleTS, sign(webhookTestSecret, staleTS, body))
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401 (timestamp outside the 5-minute replay window)", rec.Code)
+	}
+}
+
+// TestHandleWebhook_SignatureVerdictsCounted: every delivery that names a
+// connected workspace and app is counted by its signature verdict, under the
+// connection's app, and a delivery naming none, or one to a connection with no
+// signing secret, is not.
+func TestHandleWebhook_SignatureVerdictsCounted(t *testing.T) {
+	r := newWebhookRig(t, webhookTestSigningRef, true)
+	body := []byte(`{"type":"url_verification","team_id":"` + webhookTestWorkspaceID + `","api_app_id":"` + webhookTestAppID + `","challenge":"abc123"}`)
+	fresh := nowTimestamp()
+	stale := strconv.FormatInt(time.Now().Add(-10*time.Minute).Unix(), 10)
+
+	postSlackWebhook(t, r.h, webhookTestOrgID, body, fresh, sign(webhookTestSecret, fresh, body))
+	postSlackWebhook(t, r.h, webhookTestOrgID, body, fresh, sign("another-apps-secret", fresh, body))
+	postSlackWebhook(t, r.h, webhookTestOrgID, body, stale, sign(webhookTestSecret, stale, body))
+	postSlackWebhook(t, r.h, webhookTestOrgID, body, fresh, "")
+	unknown := []byte(`{"type":"url_verification","team_id":"T0NOBODY","api_app_id":"` + webhookTestAppID + `","challenge":"abc123"}`)
+	postSlackWebhook(t, r.h, webhookTestOrgID, unknown, fresh, sign(webhookTestSecret, fresh, unknown))
+
+	want := map[string]int64{"verified": 1, "mismatch": 1, "stale": 1, "malformed": 1}
+	if got := sumByAttr(t, r.metrics, "slack.webhook.org.deliveries", "signature"); !maps.Equal(got, want) {
+		t.Errorf("org deliveries by signature = %v; want %v", got, want)
+	}
+	if got := sumByAttr(t, r.metrics, "slack.webhook.org.deliveries", "app_id"); !maps.Equal(got, map[string]int64{webhookTestAppID: 4}) {
+		t.Errorf("org deliveries by app = %v; want {%s: 4}", got, webhookTestAppID)
+	}
+
+	socket := newWebhookRig(t, "", true)
+	postSlackWebhook(t, socket.h, webhookTestOrgID, body, fresh, sign(webhookTestSecret, fresh, body))
+	if got := sumByAttr(t, socket.metrics, "slack.webhook.org.deliveries", "signature"); len(got) != 0 {
+		t.Errorf("org deliveries for a connection with no signing secret = %v; want none", got)
 	}
 }
 

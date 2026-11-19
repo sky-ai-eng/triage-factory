@@ -5912,7 +5912,7 @@
       },
       "id": 68,
       "panels": [],
-      "title": "Slack \u2014 the deployment app, Socket Mode, and the lifecycle adapter",
+      "title": "Slack \u2014 Socket Mode, Events API deliveries, the deployment app, and the lifecycle adapter",
       "type": "row"
     },
     {
@@ -6441,6 +6441,94 @@
         }
       ],
       "title": "Lifecycle events dropped",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tf-prometheus"
+      },
+      "description": "Deliveries to /api/webhooks/slack/{org_id} that name a workspace and app connected to that org (tf_slack_webhook_org_deliveries_total), by the signature check's verdict. Slack's own deliveries verify. One app's refusals are its org's signing secret; most apps' at once are this deployment's, which SlackDeliveriesRefusedFleetWide alerts on: stale is control's clock more than five minutes off, and mismatch or malformed is something in front of control changing the body or dropping Slack's headers. Break it down by app with sum by (app_id, signature).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisPlacement": "auto",
+            "drawStyle": "line",
+            "fillOpacity": 6,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            }
+          },
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 245
+      },
+      "id": 75,
+      "options": {
+        "legend": {
+          "calcs": [
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tf-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum by (signature) (rate(tf_slack_webhook_org_deliveries_total[$__rate_interval]))",
+          "legendFormat": "{{signature}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Deliveries to orgs' Events API endpoints, by signature",
       "type": "timeseries"
     }
   ],

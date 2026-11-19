@@ -312,6 +312,7 @@ upstreams.
 | `tf_slack_deployment_app_up` | Whether the deployment Slack app can be used, per control pod: 1, or 0 with a `reason` (`misconfigured`, `insecure_public_url`). No series without one. |
 | `tf_slack_install_attempts_total` | Ends of the deployment Slack app's install, by `outcome`: `installed`, `staged`, or why nothing was stored. |
 | `tf_slack_webhook_signature_mismatches_total` | Deliveries to the deployment app's Events API endpoint that `TF_SLACK_SIGNING_SECRET` did not sign, by `names_app`: the app the unverified body names (`deployment`, `other`, or `none`). |
+| `tf_slack_webhook_org_deliveries_total` | Deliveries to an org's Events API endpoint that name a workspace and app connected to that org, by `app_id` and `signature`: `verified`, `mismatch`, `stale` (a timestamp more than five minutes from control's clock), or `malformed`. |
 | `tf_slack_lifecycle_dropped_total` | Status lines, reactions and replies in Slack threads that were never made because the lifecycle adapter's backlog was full, by `event_type`. |
 
 ### Messages left unread
@@ -367,6 +368,8 @@ alert's description, shown beside it in Grafana, says what to check.
 | `SlackDeliveriesRetried`           | warning  | Slack retried deliveries to an app in the last 15 minutes.                                                                                              |
 | `SlackSigningSecretMismatch`       | warning  | Deliveries to the deployment Slack app's Events API endpoint were not signed with `TF_SLACK_SIGNING_SECRET`, and none verified, in the last 15 minutes. |
 | `SlackAppRateLimited`              | warning  | Slack dropped an app's event deliveries for its Events API limit in the last 15 minutes.                                                                |
+| `SlackSocketsDownFleetWide`        | critical | More than half of the orgs' own Socket Mode Slack apps have had no open connection to Slack, for 10 minutes.                                            |
+| `SlackDeliveriesRefusedFleetWide`  | critical | More than half of the orgs' own Events API Slack apps are failing the signature check on most deliveries, for 10 minutes.                               |
 | `SlackDeploymentSocketDown`        | critical | The deployment Slack app's Socket Mode connection has not been open for 10 minutes.                                                                     |
 | `SlackDeploymentAppUnusable`       | critical | A control pod has `TF_SLACK_*` set and cannot use the deployment Slack app, for 5 minutes.                                                              |
 | `SlackDeploymentAppInstallRefused` | warning  | An install of the deployment Slack app failed in the last hour for a reason only you can fix.                                                           |
@@ -380,8 +383,11 @@ dashboard's Connections row instead. `WorkspaceCheckpointsStale` assumes the
 default `TF_SNAPSHOT_INTERVAL_SEC`; with a longer interval it fires on healthy
 runs.
 
-The Slack alerts follow the same rule: an org's own Slack app is the org's to
-fix and shows on the dashboard's Slack row. `SlackDeliveriesRetried` and
+The Slack alerts follow the same rule: one org's own Slack app is the org's to
+fix and shows on the dashboard's Slack row, and `SlackSocketsDownFleetWide`
+and `SlackDeliveriesRefusedFleetWide` fire when more than half of the orgs'
+own apps fail at once, with at least two of them. Most orgs' calls to Slack's
+Web API failing is `UpstreamFailingFleetWide`. `SlackDeliveriesRetried` and
 `SlackAppRateLimited` fire for any app, because Slack is the one retrying or
 dropping its events. The rest are about what you own: the
 [deployment Slack app](deployment-integrations/deployment-slack-app.md) and

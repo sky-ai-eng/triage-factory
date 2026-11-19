@@ -1,11 +1,15 @@
 # Alerting rules for Slack (Enterprise Edition). Severity and delivery follow
 # tf-connections.yml; the first-sample form is explained in tf-runs.yml.
 #
-# An org's own Slack app is the org's to fix, so as with every upstream, its
-# failures do not page: they show on the dashboard. The rules that name an app
-# fire for any app because Slack itself is the one dropping or retrying its
-# events. The rest are about what the operator owns: the deployment Slack app
-# (TF_SLACK_*) and TF's own handling of Slack events.
+# An org's own Slack app is the org's to fix, so as with every upstream, one
+# org's failures do not page: they show on the dashboard. Most orgs' apps
+# failing at once does, because then the cause is Slack, this deployment's
+# network, or TF, and the two FleetWide rules here compare failing apps with
+# all of them the way tf-connections.yml compares orgs, needing at least two.
+# Most orgs' calls to Slack's Web API failing is UpstreamFailingFleetWide's.
+# The rules that name an app fire for any app because Slack itself is the one
+# dropping or retrying its events. The rest are about what the operator owns:
+# the deployment Slack app (TF_SLACK_*) and TF's own handling of Slack events.
 
 groups:
   - name: tf-slack
@@ -93,6 +97,95 @@ groups:
             the app subscribes to counts, including the channel messages TF
             reads only to find replies in its threads. Each notice is also a
             WARN line in control's log.
+
+      # More than half of the orgs' own Socket Mode apps cannot keep a
+      # connection to Slack, sustained for 10 minutes, with at least two of
+      # them counted. One org's app down is that org's and shows on the
+      # dashboard; most of them at once is Slack, this deployment's network,
+      # or TF.
+      #
+      # Down is dialing or backing_off. auth_failed, Slack rejecting an org's
+      # app-level token, is left out of both counts: the org fixes it, and a
+      # connection stays in it until the org does, so an app its org has
+      # abandoned would count against the fleet for good. The deployment app
+      # has SlackDeploymentSocketDown. The gauge is reported by the pod
+      # holding the background brain, so the counts are not multiplied by the
+      # number of pods.
+      - alert: SlackSocketsDownFleetWide
+        expr: |
+          (
+            count(max by (app_id) (tf_slack_socket_connections{deployment_app="false", state=~"dialing|backing_off"}))
+            /
+            count(max by (app_id) (tf_slack_socket_connections{deployment_app="false", state!="auth_failed"}))
+          ) > 0.5
+          and
+          count(max by (app_id) (tf_slack_socket_connections{deployment_app="false", state!="auth_failed"})) >= 2
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Most orgs' Socket Mode connections to Slack are down"
+          description: >-
+            {{ $value | humanizePercentage }} of the orgs' own Socket Mode apps
+            have had no open connection to Slack, sustained for 10 minutes, so
+            those orgs receive no Slack events. Many apps down at once points
+            at Slack itself or at this deployment's network, not at one org's
+            app: check that the pod holding the background brain can reach
+            slack.com and Slack's websocket hosts, and Slack's status page.
+            List them with
+            tf_slack_socket_connections{deployment_app="false", state=~"dialing|backing_off"},
+            and read that pod's WARN "slack socket mode: connection ended,
+            reconnecting" lines for the error.
+
+      # More than half of the orgs' own Events API apps are having most of
+      # their deliveries refused at the signature check, sustained for 10
+      # minutes, with at least two apps receiving deliveries. An app counts
+      # when more than half of the deliveries to its org's endpoint in the
+      # last 15 minutes did not verify. One app's refusals are its org's
+      # signing secret, pasted wrong. Most apps' at once are this
+      # deployment's: a proxy in front of control that changes request
+      # bodies (mismatch) or drops headers (malformed), or a host clock more
+      # than five minutes off (stale). Critical: Slack turns an app's event
+      # subscriptions off once more than 95% of its deliveries fail within an
+      # hour, and each org's admin then has to turn them back on in Slack.
+      #
+      # A delivery is counted only once it names a workspace and app
+      # connected to the org in its URL, so a forged one has to know all
+      # three. The deployment app's endpoint is not counted here; it has
+      # SlackSigningSecretMismatch. Each control pod counts the deliveries it
+      # served, and the sums add the pods up.
+      - alert: SlackDeliveriesRefusedFleetWide
+        expr: |
+          (
+            count(
+              (
+                sum by (app_id) (rate(tf_slack_webhook_org_deliveries_total{signature!="verified"}[15m]))
+                /
+                sum by (app_id) (rate(tf_slack_webhook_org_deliveries_total[15m]))
+              ) > 0.5
+            )
+            /
+            count(sum by (app_id) (rate(tf_slack_webhook_org_deliveries_total[15m])) > 0)
+          ) > 0.5
+          and
+          count(sum by (app_id) (rate(tf_slack_webhook_org_deliveries_total[15m])) > 0) >= 2
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Most orgs' Slack deliveries are failing the signature check"
+          description: >-
+            {{ $value | humanizePercentage }} of the orgs' own Events API apps
+            had more than half of their deliveries in the last 15 minutes
+            refused at the signature check, sustained for 10 minutes. Slack
+            turns an app's event subscriptions off once more than 95% of its
+            deliveries fail within an hour. Many apps at once points at this
+            deployment, not at one org's signing secret. Break it down with
+            sum by (signature) (rate(tf_slack_webhook_org_deliveries_total[15m])):
+            stale means control's clock is more than five minutes off;
+            mismatch or malformed means something in front of control changes
+            the request body or drops Slack's X-Slack-Signature and
+            X-Slack-Request-Timestamp headers.
 
       # The deployment app's Socket Mode connection has not been open for 10
       # minutes. Slack closes a connection every few hours and TF reconnects

@@ -705,6 +705,98 @@ tests:
   - eval_time: 30m
     alertname: SlackAppRateLimited
     exp_alerts: []
+- name: SlackSocketsDownFleetWide fires when most orgs' own apps are down, auth_failed left out
+  interval: 1m
+  input_series:
+  - series: 'tf_slack_socket_connections{app_id="A1",deployment_app="false",state="backing_off"}'
+    values: '1x20'
+  - series: 'tf_slack_socket_connections{app_id="A2",deployment_app="false",state="dialing"}'
+    values: '1x20'
+  - series: 'tf_slack_socket_connections{app_id="A3",deployment_app="false",state="open"}'
+    values: '1x20'
+  - series: 'tf_slack_socket_connections{app_id="A4",deployment_app="false",state="auth_failed"}'
+    values: '1x20'
+  alert_rule_test:
+  - eval_time: 9m
+    alertname: SlackSocketsDownFleetWide
+    exp_alerts: []
+  - eval_time: 10m
+    alertname: SlackSocketsDownFleetWide
+    exp_alerts:
+    - exp_labels:
+        severity: critical
+      exp_annotations:
+        summary: 'Most orgs'' Socket Mode connections to Slack are down'
+        description: '66.67% of the orgs'' own Socket Mode apps have had no open connection to Slack, sustained for 10 minutes, so those orgs receive no Slack events. Many apps down at once points at Slack itself or at this deployment''s network, not at one org''s app: check that the pod holding the background brain can reach slack.com and Slack''s websocket hosts, and Slack''s status page. List them with tf_slack_socket_connections{deployment_app="false", state=~"dialing|backing_off"}, and read that pod''s WARN "slack socket mode: connection ended, reconnecting" lines for the error.'
+- name: SlackSocketsDownFleetWide needs two of the orgs' own apps, and leaves out the deployment app
+  interval: 1m
+  input_series:
+  - series: 'tf_slack_socket_connections{app_id="A1",deployment_app="false",state="backing_off"}'
+    values: '1x20'
+  - series: 'tf_slack_socket_connections{app_id="A9",deployment_app="true",state="backing_off"}'
+    values: '1x20'
+  alert_rule_test:
+  - eval_time: 15m
+    alertname: SlackSocketsDownFleetWide
+    exp_alerts: []
+- name: SlackSocketsDownFleetWide does not fire for half of the apps down
+  interval: 1m
+  input_series:
+  - series: 'tf_slack_socket_connections{app_id="A1",deployment_app="false",state="backing_off"}'
+    values: '1x20'
+  - series: 'tf_slack_socket_connections{app_id="A2",deployment_app="false",state="open"}'
+    values: '1x20'
+  alert_rule_test:
+  - eval_time: 15m
+    alertname: SlackSocketsDownFleetWide
+    exp_alerts: []
+- name: SlackDeliveriesRefusedFleetWide fires when most orgs' apps fail the signature check
+  interval: 1m
+  input_series:
+  - series: 'tf_slack_webhook_org_deliveries_total{instance="control-1:9464",app_id="A1",signature="mismatch"}'
+    values: '0+3x40'
+  - series: 'tf_slack_webhook_org_deliveries_total{instance="control-2:9464",app_id="A1",signature="mismatch"}'
+    values: '0+3x40'
+  - series: 'tf_slack_webhook_org_deliveries_total{instance="control-1:9464",app_id="A2",signature="stale"}'
+    values: '0+5x40'
+  - series: 'tf_slack_webhook_org_deliveries_total{instance="control-1:9464",app_id="A3",signature="verified"}'
+    values: '0+5x40'
+  alert_rule_test:
+  - eval_time: 10m
+    alertname: SlackDeliveriesRefusedFleetWide
+    exp_alerts: []
+  - eval_time: 11m
+    alertname: SlackDeliveriesRefusedFleetWide
+    exp_alerts:
+    - exp_labels:
+        severity: critical
+      exp_annotations:
+        summary: 'Most orgs'' Slack deliveries are failing the signature check'
+        description: '66.67% of the orgs'' own Events API apps had more than half of their deliveries in the last 15 minutes refused at the signature check, sustained for 10 minutes. Slack turns an app''s event subscriptions off once more than 95% of its deliveries fail within an hour. Many apps at once points at this deployment, not at one org''s signing secret. Break it down with sum by (signature) (rate(tf_slack_webhook_org_deliveries_total[15m])): stale means control''s clock is more than five minutes off; mismatch or malformed means something in front of control changes the request body or drops Slack''s X-Slack-Signature and X-Slack-Request-Timestamp headers.'
+- name: SlackDeliveriesRefusedFleetWide does not count an app whose deliveries mostly verify
+  interval: 1m
+  input_series:
+  - series: 'tf_slack_webhook_org_deliveries_total{instance="control-1:9464",app_id="A1",signature="mismatch"}'
+    values: '0+5x40'
+  - series: 'tf_slack_webhook_org_deliveries_total{instance="control-1:9464",app_id="A2",signature="verified"}'
+    values: '0+10x40'
+  - series: 'tf_slack_webhook_org_deliveries_total{instance="control-1:9464",app_id="A2",signature="mismatch"}'
+    values: '0+1x40'
+  alert_rule_test:
+  - eval_time: 20m
+    alertname: SlackDeliveriesRefusedFleetWide
+    exp_alerts: []
+- name: SlackDeliveriesRefusedFleetWide needs two apps receiving deliveries
+  interval: 1m
+  input_series:
+  - series: 'tf_slack_webhook_org_deliveries_total{instance="control-1:9464",app_id="A1",signature="stale"}'
+    values: '0+5x40'
+  - series: 'tf_slack_webhook_org_deliveries_total{instance="control-1:9464",app_id="A2",signature="mismatch"}'
+    values: '5x40'
+  alert_rule_test:
+  - eval_time: 20m
+    alertname: SlackDeliveriesRefusedFleetWide
+    exp_alerts: []
 - name: SlackDeploymentSocketDown fires after 10 minutes not open
   interval: 1m
   input_series:

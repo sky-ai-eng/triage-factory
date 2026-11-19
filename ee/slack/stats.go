@@ -62,6 +62,7 @@ type ingestStats struct {
 	retries             metric.Int64Counter
 	rateLimited         metric.Int64Counter
 	signatureMismatches metric.Int64Counter
+	orgDeliveries       metric.Int64Counter
 	installs            metric.Int64Counter
 	lifecycleDropped    metric.Int64Counter
 }
@@ -97,6 +98,12 @@ func newIngestStats(mp metric.MeterProvider) *ingestStats {
 		slackLog.Warn("signature mismatches counter setup failed", "error", err)
 	}
 
+	orgDeliveries, err := meter.Int64Counter("slack.webhook.org.deliveries",
+		metric.WithDescription("Deliveries to an org's Events API endpoint that name a workspace and app connected to that org, by app and by the signature check's verdict (verified, mismatch, stale, malformed). One app's refusals are its configuration; most apps' at once are the deployment's: a proxy changing request bodies or headers, or a clock more than five minutes off."))
+	if err != nil {
+		slackLog.Warn("org deliveries counter setup failed", "error", err)
+	}
+
 	installs, err := meter.Int64Counter("slack.install.attempts",
 		metric.WithDescription("Ends of the deployment Slack app's install ceremony, by outcome: installed or staged, or why it stored nothing."))
 	if err != nil {
@@ -113,6 +120,7 @@ func newIngestStats(mp metric.MeterProvider) *ingestStats {
 		retries:             retries,
 		rateLimited:         rateLimited,
 		signatureMismatches: signatureMismatches,
+		orgDeliveries:       orgDeliveries,
 		installs:            installs,
 		lifecycleDropped:    lifecycleDropped,
 	}
@@ -161,6 +169,19 @@ func (s *ingestStats) recordSignatureMismatch(ctx context.Context, appID, namesA
 	s.signatureMismatches.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("app_id", appID),
 		attribute.String("names_app", namesApp),
+	))
+}
+
+// recordOrgDelivery counts one delivery to an org's Events API endpoint whose
+// signature was checked against the connection's signing secret. appID is the
+// connection's app.
+func (s *ingestStats) recordOrgDelivery(ctx context.Context, appID string, check signatureCheck) {
+	if s == nil {
+		return
+	}
+	s.orgDeliveries.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("app_id", appID),
+		attribute.String("signature", check.label()),
 	))
 }
 
