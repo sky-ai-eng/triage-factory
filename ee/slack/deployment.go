@@ -125,7 +125,7 @@ func deploymentAppFromEnv() (deploymentApp, error) {
 		problems = append(problems, fmt.Sprintf("%s must start with A: set it to the App ID from Basic Information, not the client ID (got %q)",
 			envSlackAppID, d.AppID))
 	}
-	if d.AppToken != "" && !strings.HasPrefix(d.AppToken, "xapp-") {
+	if d.AppToken != "" && !isAppLevelToken(d.AppToken) {
 		// The value is a credential, so the message never echoes it.
 		problems = append(problems, fmt.Sprintf("%s must start with xapp-: set it to an app-level token from Basic Information", envSlackAppToken))
 	}

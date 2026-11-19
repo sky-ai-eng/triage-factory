@@ -164,6 +164,19 @@ func isRotatingBotToken(token string) bool {
 	return strings.HasPrefix(token, "xoxe.xoxb-")
 }
 
+// isBotToken reports whether token has the shape of a bot token that does not
+// expire. A rotating bot token does not have it, and neither does a user
+// token, an app-level token, or a signing secret.
+func isBotToken(token string) bool {
+	return strings.HasPrefix(token, "xoxb-")
+}
+
+// isAppLevelToken reports whether token has the shape of an app-level token,
+// the credential Socket Mode opens its connection with.
+func isAppLevelToken(token string) bool {
+	return strings.HasPrefix(token, "xapp-")
+}
+
 // slackOAuthV2Access exchanges an install's authorization code for its bot
 // token. The app authenticates with HTTP Basic, which Slack recommends over
 // sending the client id and secret in the body. A Slack-level {"ok":false}

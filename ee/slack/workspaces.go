@@ -286,18 +286,28 @@ func (h *workspacesHandler) handleConnect(w http.ResponseWriter, r *http.Request
 	botToken := strings.TrimSpace(body.BotToken)
 	signingSecret := strings.TrimSpace(body.SigningSecret)
 	appToken := strings.TrimSpace(body.AppToken)
-	if botToken == "" {
-		httpx.BadRequest(w, "bot_token is required")
-		return
+	// The bot and app-level tokens' shapes are checked before any call to
+	// Slack, so a token of the wrong kind is refused by field rather than by
+	// whatever Slack answers for it. No message echoes a token. A missing bot
+	// token makes the response a 400, the status of a missing field; shape
+	// faults alone are a 422, the status of the other bot token refusals here.
+	var v httpx.Validation
+	faultStatus := http.StatusUnprocessableEntity
+	switch {
+	case botToken == "":
+		v.Missing("bot_token")
+		faultStatus = http.StatusBadRequest
+	case isRotatingBotToken(botToken):
+		// TF stores a bot token once and never refreshes it, so a token that
+		// expires in 12 hours would leave a connection that stops working.
+		v.Invalid("bot_token", "This bot token expires, because its Slack app has token rotation turned on. Triage Factory needs an app without token rotation, and Slack does not allow turning it off, so create a new app from the manifest.")
+	case !isBotToken(botToken):
+		v.Invalid("bot_token", "This is not a bot token. Copy the Bot User OAuth Token, which starts xoxb-, from your Slack app's OAuth & Permissions page.")
 	}
-	// TF stores a bot token once and never refreshes it, so a token that
-	// expires in 12 hours would leave a connection that stops working.
-	if isRotatingBotToken(botToken) {
-		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
-			Reason:  httpx.ReasonInvalidField,
-			Message: "This bot token expires, because its Slack app has token rotation turned on. Triage Factory needs an app without token rotation, and Slack does not allow turning it off, so create a new app from the manifest.",
-			Field:   "bot_token",
-		})
+	if appToken != "" && !isAppLevelToken(appToken) {
+		v.Invalid("app_token", "This is not an app-level token. Copy a token with the connections:write scope, which starts xapp-, from your Slack app's Basic Information → App-Level Tokens.")
+	}
+	if v.Flush(w, faultStatus) {
 		return
 	}
 
