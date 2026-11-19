@@ -656,6 +656,71 @@ func TestHandleConnect_RotatingToken_422(t *testing.T) {
 	}
 }
 
+// TestHandleConnect_TokenShape_422: a bot token or app-level token of the
+// wrong shape, and a missing bot token, are refused by field before any call
+// to Slack, every fault in one response. Slack is staged to accept each
+// token, so a refusal can only come from the shape check.
+func TestHandleConnect_TokenShape_422(t *testing.T) {
+	const (
+		userToken     = "xoxp-1-user"
+		botToken      = "xoxb-1-bot"
+		signingSecret = "8f14e45fceea167a5a36dedd4bea2543"
+		appToken      = "xapp-1-app"
+	)
+	type fault struct{ reason, field, mentions string }
+	botFault := fault{httpx.ReasonInvalidField, "bot_token", "Bot User OAuth Token"}
+	appFault := fault{httpx.ReasonInvalidField, "app_token", "App-Level Tokens"}
+	for _, tc := range []struct {
+		name string
+		body map[string]string
+		want []fault
+	}{
+		{"user token as bot token", map[string]string{"bot_token": userToken, "app_token": appToken}, []fault{botFault}},
+		{"signing secret as app token", map[string]string{"bot_token": botToken, "app_token": signingSecret}, []fault{appFault}},
+		{"both wrong", map[string]string{"bot_token": userToken, "app_token": signingSecret}, []fault{botFault, appFault}},
+		{"no bot token", map[string]string{"app_token": appToken}, []fault{{httpx.ReasonMissingField, "bot_token", "bot_token is required"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newSlackWorkspaceRig(t, "https://tf.example")
+			orgID, owner, _ := pgtest.SeedOrgWithUser(t, r.h, "slack-token-shape")
+			for _, tok := range []string{userToken, botToken} {
+				r.fake.stageConnectOK(tok, "T0SHAPE01", "Acme", "U0BOTSHAPE", "A0SHAPE001", "")
+			}
+
+			rec := httptest.NewRecorder()
+			r.hdl.handleConnect(rec, r.importReq(owner, orgID, tc.body))
+			if rec.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("status = %d, want 422 (body=%s)", rec.Code, rec.Body.String())
+			}
+			errs := decodeBody[struct {
+				Errors []httpx.ErrorItem `json:"errors"`
+			}](t, rec).Errors
+			if len(errs) != len(tc.want) {
+				t.Fatalf("errors = %+v; want %d", errs, len(tc.want))
+			}
+			for i, want := range tc.want {
+				if errs[i].Reason != want.reason || errs[i].Field != want.field || !strings.Contains(errs[i].Message, want.mentions) {
+					t.Errorf("errors[%d] = %+v; want %s on %s naming %q", i, errs[i], want.reason, want.field, want.mentions)
+				}
+			}
+			for _, err := range errs {
+				for _, tok := range []string{userToken, signingSecret} {
+					if strings.Contains(err.Message, tok) {
+						t.Errorf("message %q echoes a submitted credential", err.Message)
+					}
+				}
+			}
+			if r.fake.authTestHits != 0 || r.fake.botsInfoHits != 0 || r.fake.openConnHits != 0 {
+				t.Errorf("auth.test called %d times, bots.info %d, apps.connections.open %d; want none",
+					r.fake.authTestHits, r.fake.botsInfoHits, r.fake.openConnHits)
+			}
+			if got := r.listConnections(owner, orgID); len(got) != 0 {
+				t.Errorf("connections after the refusal = %+v; want none", got)
+			}
+		})
+	}
+}
+
 // ---------- app-single-org invariant + two-apps-one-workspace ----------
 
 // TestHandleConnect_AppBoundToOtherOrg_SameWorkspace_409Generic: org B
