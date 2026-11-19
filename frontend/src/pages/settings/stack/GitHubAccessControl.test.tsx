@@ -452,7 +452,10 @@ describe('GitHubAccessControl · deployment App', () => {
       githubAppInstalled: true,
       githubAppInstallCount: 1,
     })
-    expect(screen.queryByRole('button', { name: 'Disconnect @acme' })).not.toBeInTheDocument()
+    // The reread status renders after the callbacks it drives have run.
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: 'Disconnect @acme' })).not.toBeInTheDocument(),
+    )
     expect(screen.getByRole('button', { name: 'Disconnect @beta' })).toBeInTheDocument()
   })
 

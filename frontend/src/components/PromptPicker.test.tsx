@@ -246,17 +246,23 @@ describe('PromptPicker reads a page at a time, searched on the server', () => {
   })
 
   it('offers the next page, read with the same search and the token it was minted under', async () => {
+    // The unsearched read answers with nothing, so the row and its Load more
+    // can only be the searched page's: Load more pages under the search the
+    // page on screen was read with, and the searched read can land after the
+    // request for it is seen.
     route({
       '/api/prompts/list': (body) =>
         body?.page_token === 'tok-1'
           ? ok([prompt('p2', 'Second flake')])
-          : { ok: true, status: 200, ...listBody([prompt('p1', 'First flake')], 'tok-1', 2) },
+          : body?.search
+            ? { ok: true, status: 200, ...listBody([prompt('p1', 'First flake')], 'tok-1', 2) }
+            : ok([]),
     })
     renderPicker()
     fireEvent.change(screen.getByRole('combobox'), { target: { value: 'flake' } })
-    await waitFor(() => expect(calls().at(-1)?.body).toMatchObject({ search: 'flake' }))
+    await screen.findByRole('option', { name: /First flake/ })
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Load more' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Load more' }))
     expect(await screen.findByRole('option', { name: /Second flake/ })).toBeInTheDocument()
     expect(screen.getByRole('option', { name: /First flake/ })).toBeInTheDocument()
     expect(calls().at(-1)?.body).toEqual({ search: 'flake', page_size: 25, page_token: 'tok-1' })

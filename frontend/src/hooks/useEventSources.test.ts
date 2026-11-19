@@ -138,8 +138,12 @@ describe('useEventSources', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2)
 
     opened[1]([{ kind: 'jira', state: 'available', disableable: true }])
-    await waitFor(() => expect(first.result.current.stateOf('jira')).toBe('available'))
-    expect(second.result.current.stateOf('jira')).toBe('available')
+    // Each renderHook is its own root, and React renders roots in separate
+    // tasks, so one consumer showing the answer says nothing about the other.
+    await waitFor(() => {
+      expect(first.result.current.stateOf('jira')).toBe('available')
+      expect(second.result.current.stateOf('jira')).toBe('available')
+    })
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 

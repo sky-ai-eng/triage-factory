@@ -112,6 +112,9 @@ describe('the save gate — a selection nothing has verified', () => {
       expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith('/test'))).toHaveLength(2),
     )
     // Still blocked: two inconclusive attempts establish exactly as much as one.
+    // Cancel is disabled while the attempt is in flight, so the second answer
+    // has to land before it can be pressed.
+    await screen.findByRole('button', { name: /try again/i })
     await userEvent.click(screen.getByRole('button', { name: /cancel/i }))
     await expect(saved).resolves.toBe(false)
   })

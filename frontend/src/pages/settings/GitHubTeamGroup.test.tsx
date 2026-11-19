@@ -137,7 +137,8 @@ describe('GitHubTeamGroup', () => {
     render(<Harness onLoaded={onLoaded} />)
 
     await waitFor(() => expect(onLoaded).toHaveBeenCalledWith([PLATFORM]))
-    expect(rowNames()).toEqual(['acme/web', 'acme/platform', 'acme/gone'])
+    // The seed and the rows are two reads, and either can answer first.
+    await waitFor(() => expect(rowNames()).toEqual(['acme/web', 'acme/platform', 'acme/gone']))
     // A mapping GitHub no longer lists says so, from the row's own flag.
     const gone = screen.getAllByRole('checkbox')[2]
     expect(within(gone).getByText('not on GitHub')).toBeInTheDocument()

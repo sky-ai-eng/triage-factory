@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { Message, Conversation, Task, TranscriptPage, WSEvent } from '../types'
 import { apiJSON, HttpError, httpErrorMessage } from '../lib/apiClient'
 import { isActiveConversation, isPermissionTerminalStatus } from '../lib/conversationStatus'
@@ -117,12 +117,15 @@ export function useConversationDetail(conversationID: string | undefined): Conve
   // after navigation and overwrite the new conversation's state.
   const lastConversationIDRef = useRef<string | undefined>(conversationID)
 
-  // Mirrors of the two states the reconcile tick reads. That interval is
-  // created once per conversation, so it cannot close over `conversation` / `messages`
-  // directly: a dep on either would tear the timer down and rebuild it on every
-  // streamed row (foldMessageUsage writes `conversation` per stamped message), and on a busy conversation
-  // the 5s tick would never come due. Written after commit, so by the time a
-  // tick fires they hold what the view is showing.
+  // Mirrors of the two states the reconcile tick and the socket handler read.
+  // That interval is created once per conversation, so it cannot close over
+  // `conversation` / `messages` directly: a dep on either would tear the timer
+  // down and rebuild it on every streamed row (foldMessageUsage writes
+  // `conversation` per stamped message), and on a busy conversation the 5s tick
+  // would never come due. Written in the commit itself, in a layout effect: a
+  // passive one runs in a later task, and a tick or a socket frame that lands
+  // between the two would read the previous conversation (a push arriving just
+  // after the load would find no task to refresh).
   const conversationRef = useRef<Conversation | null>(null)
   const messagesRef = useRef<Message[]>([])
 
@@ -137,11 +140,11 @@ export function useConversationDetail(conversationID: string | undefined): Conve
   // reflects every conversation row observed — a conversation that settles between two ticks
   // still leaves the flag up for the tick that follows.
   const sawActiveRef = useRef(false)
-  useEffect(() => {
+  useLayoutEffect(() => {
     conversationRef.current = conversation
     if (conversation && isActiveConversation(conversation)) sawActiveRef.current = true
   }, [conversation])
-  useEffect(() => {
+  useLayoutEffect(() => {
     messagesRef.current = messages
   }, [messages])
 
