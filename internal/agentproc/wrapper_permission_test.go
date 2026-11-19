@@ -53,6 +53,7 @@ export function query({ options }) {
         disallowedTools: options.disallowedTools ?? null,
         settingSources: options.settingSources ?? null,
         settings: options.settings ?? null,
+        plugins: options.plugins ?? null,
       }
     },
     async interrupt() {},

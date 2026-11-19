@@ -68,6 +68,8 @@ func directArgv(opts RunOptions, nodeArgs []string) ([]string, error) {
 	// BINDS are the same list by construction. A caller that adds a grant and
 	// forgets the bind would hand the agent a flag pointing at a tmpfs.
 	spec.AddDirs = append(append([]string(nil), spec.AddDirs...), opts.AddDirs...)
+	// The plugins the same way: what Claude Code is given is what is bound.
+	spec.Plugins = append(append([]string(nil), spec.Plugins...), PluginPaths(opts.Plugins)...)
 	if err := localsandbox.Preflight(spec, host); err != nil {
 		return nil, err
 	}

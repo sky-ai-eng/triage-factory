@@ -137,33 +137,56 @@ type sdkTeamOptions struct {
 	permissionMode string
 	// claudeAIConnectors is RunOptions.ClaudeAIConnectors.
 	claudeAIConnectors bool
+	// localPlugins is the team's plugin list, unprepared: the spawn resolves
+	// and validates it (preparePluginsForSpawn). Always empty in multi mode,
+	// for a task with no team, and for a team that configured none.
+	localPlugins []domain.LocalPlugin
 }
+
+// errTeamSettingsUnreadable marks a spawn refused because the team's settings
+// could not be read. The text is the failure's machine prefix.
+var errTeamSettingsUnreadable = errors.New("team_settings_unreadable")
 
 // resolveSDKTeamOptions reads the team's settings once for an SDK-runtime
 // delegated conversation's spawn. Multi mode is always unattended and always
 // starts in auto, and its SDK conversations run on no operator login, so the
-// connectors stay off. Local mode honors the team's choices, falling back to
-// the schema defaults on a missing row or read failure, which leaves the
-// connectors off. Native conversations never call this helper, so neither
-// setting can affect their own permission gate.
-func (s *Spawner) resolveSDKTeamOptions(ctx context.Context, teamID string) sdkTeamOptions {
+// connectors stay off and no plugin loads. Local mode honors the team's
+// choices. A team with no settings row gets the schema defaults, which leave
+// the connectors and plugins off and the permission mode on the allowlist. A
+// task with no team has no settings to read, so it takes those defaults too.
+// Native conversations never call this helper, so neither setting can affect
+// their own permission gate.
+//
+// A settings read that fails fails the spawn (errTeamSettingsUnreadable). The
+// connectors and the permission mode would be safe to default, but an empty
+// plugin list is not: the list may name a guard the run must not start
+// without, and a read that failed cannot say it is empty.
+func (s *Spawner) resolveSDKTeamOptions(ctx context.Context, teamID string) (sdkTeamOptions, error) {
 	if runmode.Current() == runmode.ModeMulti {
-		return sdkTeamOptions{permissionMode: "auto"}
+		return sdkTeamOptions{permissionMode: "auto"}, nil
 	}
 
-	ts := domain.DefaultTeamSettingsFor(runmode.Current() == runmode.ModeMulti)
-	if s.teams != nil && teamID != "" {
-		if loaded, err := s.teams.GetSettingsSystem(ctx, teamID); err == nil {
-			ts = loaded
-		} else {
-			delegateLog.Warn("load team settings for the SDK spawn failed; using defaults", "team", teamID, "error", err)
+	ts := domain.DefaultTeamSettingsFor(false)
+	switch {
+	case teamID == "":
+		delegateLog.Info("the task has no team, so it has no team settings to read; the run loads no local plugins")
+	case s.teams == nil:
+		return sdkTeamOptions{}, fmt.Errorf("%w: read the settings of team %s: the team settings store is not wired", errTeamSettingsUnreadable, teamID)
+	default:
+		loaded, err := s.teams.GetSettingsSystem(ctx, teamID)
+		if err != nil {
+			return sdkTeamOptions{}, fmt.Errorf("%w: read the settings of team %s: %w", errTeamSettingsUnreadable, teamID, err)
 		}
+		ts = loaded
 	}
-	opts := sdkTeamOptions{claudeAIConnectors: ts.ClaudeAIConnectorsEnabled}
+	opts := sdkTeamOptions{
+		claudeAIConnectors: ts.ClaudeAIConnectorsEnabled,
+		localPlugins:       ts.LocalPlugins,
+	}
 	if ts.AutoModeEnabled {
 		opts.permissionMode = "auto"
 	}
-	return opts
+	return opts, nil
 }
 
 // pendingPermission is one in-flight browser permission prompt: the 1-buffered

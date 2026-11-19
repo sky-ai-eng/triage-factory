@@ -7,12 +7,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/tooldefs"
 )
 
@@ -59,6 +62,13 @@ import (
 //	{"type":"control","subtype":"tool_call","id":"<id>","tool_call_id":"<tool_use id>","tool_name":"...","input":{...}}
 //	{"type":"control","subtype":"tool_call_cancel","id":"<id>"}
 //	{"type":"control","subtype":"tool_started","tool_call_id":"<id>"}
+//	{"type":"control","subtype":"plugins_loaded","ok":true|false,"plugins":[{"name","version","path","required"}],"failed":[{"path","reason","required"}]}
+//
+// A plugins_loaded reports, after each system/init, which of the run's
+// RunOptions.Plugins Claude Code loaded. ok:false means a required one did
+// not: the wrapper has denied every tool call since it started, keeps
+// denying, and exits with status 3 once the line is written. Nothing answers
+// it.
 //
 // A tool_started is the SDK's PreToolUse hook: Claude Code is starting to run
 // the main thread's call tool_call_id, and the call's result is timed from
@@ -178,6 +188,15 @@ type LiveRun struct {
 	// toolBatch answers each tool_batch (RunOptions.OnToolBatch); nil
 	// answers with nothing.
 	toolBatch func() ToolBatchNotes
+
+	// plugins receives each plugins_loaded report (RunOptions.OnPluginsLoaded);
+	// nil drops them. spawnedAt is what a report's SinceSpawn counts from.
+	plugins   func(PluginsReport)
+	spawnedAt time.Time
+	// pluginFailed holds the paths of the required plugins a plugins_loaded
+	// report said did not load. Set on the reader goroutine; read by readLoop
+	// after the stream ends, where it overrides whatever else the run did.
+	pluginFailed []string
 	// batchUndos holds, by batch id, the Undo of each reply with text the
 	// wrapper has not yet said it delivered. Touched only on the reader
 	// goroutine.
@@ -271,6 +290,15 @@ func RunInteractive(ctx context.Context, opts RunOptions, sink Sink, perms Permi
 	// one-shot path, no per-tool prompts. A non-nil handler emits the
 	// flag so the wrapper routes the off-allowlist remainder to perms.
 	opts.PermissionPrompts = perms != nil
+	// The init deadline of a run with a required plugin, resolved here so a
+	// malformed TF_PLUGIN_INIT_TIMEOUT fails the spawn before anything starts.
+	if opts.PluginInitTimeout <= 0 && slices.ContainsFunc(opts.Plugins, func(p Plugin) bool { return p.Required }) {
+		timeout, terr := PluginInitTimeout()
+		if terr != nil {
+			return nil, terr
+		}
+		opts.PluginInitTimeout = timeout
+	}
 
 	// Derived ctx so Close() (and the terminal-error path) can SIGKILL
 	// the process group via cmd.Cancel without touching the caller's ctx.
@@ -309,6 +337,8 @@ func RunInteractive(ctx context.Context, opts RunOptions, sink Sink, perms Permi
 		ready:     make(chan struct{}),
 		stream:    newStreamStateFor(opts),
 		toolBatch: opts.OnToolBatch,
+		plugins:   opts.OnPluginsLoaded,
+		spawnedAt: time.Now(),
 		tfTools:   tfToolsByName(opts.TFTools),
 		tfRun:     tooldefs.Run{OrgID: opts.OrgID, ConversationID: opts.ConversationID, ClaimID: opts.ClaimID},
 		runCtx:    runCtx,
@@ -617,6 +647,17 @@ func (l *LiveRun) readLoop(runCtx context.Context, opts RunOptions, proc runProc
 	l.sessionID = stream.SessionID()
 	l.stderr = proc.Stderr()
 	switch {
+	case len(l.pluginFailed) > 0:
+		// A required plugin did not load, so the run never had the guard it
+		// was configured with. That fails it whatever else happened, a turn
+		// that finished before a re-emitted init dropped the plugin included.
+		l.termErr = fmt.Errorf("%w: %s", ErrPluginNotLoaded, strings.Join(l.pluginFailed, ", "))
+	case len(opts.Plugins) > 0 && exitCode(waitErr) == pluginExitCode:
+		// The wrapper's plugin exit status with no report read: its write
+		// fallback fired before the report line landed. The status alone is
+		// the failure.
+		l.termErr = fmt.Errorf("%w: %s (the wrapper exited with the plugin failure status before its report arrived)",
+			ErrPluginNotLoaded, strings.Join(requiredPluginPaths(opts.Plugins), ", "))
 	case streamErr != nil && result == nil:
 		l.termErr = fmt.Errorf("stream: %w", streamErr)
 	case waitErr != nil && result == nil:
@@ -724,6 +765,8 @@ func (l *LiveRun) consumeStreamInteractive(stdout io.Reader, sink Sink, stream *
 					l.handleToolCall(ctl)
 				case "tool_call_cancel":
 					l.cancelToolCall(ctl.ID)
+				case "plugins_loaded":
+					l.handlePluginsLoaded(ctl)
 				}
 				// Control lines are not sink content.
 			} else {
@@ -913,6 +956,11 @@ type controlLine struct {
 	Delivered bool
 	// ToolCallIDs are a tool_batch's calls.
 	ToolCallIDs []string
+	// OK, Plugins and Failed are a plugins_loaded report. OK is nil when the
+	// line carried no ok field, which reads as a failure.
+	OK      *bool
+	Plugins []domain.LoadedPlugin
+	Failed  []domain.PluginFailure
 	// Applied and Error are a settings_result's answer.
 	Applied bool
 	Error   string
@@ -923,19 +971,22 @@ type controlLine struct {
 // return ok=false so the caller falls back to the SDK-envelope parser.
 func parseControlLine(line []byte) (controlLine, bool) {
 	var raw struct {
-		Type        string         `json:"type"`
-		Subtype     string         `json:"subtype"`
-		ID          string         `json:"id"`
-		ToolCallID  string         `json:"tool_call_id"`
-		ToolName    string         `json:"tool_name"`
-		Input       map[string]any `json:"input"`
-		Title       string         `json:"title"`
-		DisplayName string         `json:"display_name"`
-		Description string         `json:"description"`
-		Delivered   bool           `json:"delivered"`
-		ToolCallIDs []string       `json:"tool_call_ids"`
-		Applied     bool           `json:"applied"`
-		Error       string         `json:"error"`
+		Type        string                 `json:"type"`
+		Subtype     string                 `json:"subtype"`
+		ID          string                 `json:"id"`
+		ToolCallID  string                 `json:"tool_call_id"`
+		ToolName    string                 `json:"tool_name"`
+		Input       map[string]any         `json:"input"`
+		Title       string                 `json:"title"`
+		DisplayName string                 `json:"display_name"`
+		Description string                 `json:"description"`
+		Delivered   bool                   `json:"delivered"`
+		ToolCallIDs []string               `json:"tool_call_ids"`
+		OK          *bool                  `json:"ok"`
+		Plugins     []domain.LoadedPlugin  `json:"plugins"`
+		Failed      []domain.PluginFailure `json:"failed"`
+		Applied     bool                   `json:"applied"`
+		Error       string                 `json:"error"`
 	}
 	if err := json.Unmarshal(line, &raw); err != nil {
 		return controlLine{}, false
@@ -954,9 +1005,68 @@ func parseControlLine(line []byte) (controlLine, bool) {
 		Description: raw.Description,
 		Delivered:   raw.Delivered,
 		ToolCallIDs: raw.ToolCallIDs,
+		OK:          raw.OK,
+		Plugins:     raw.Plugins,
+		Failed:      raw.Failed,
 		Applied:     raw.Applied,
 		Error:       raw.Error,
 	}, true
+}
+
+// pluginExitCode is wrapper.mjs's exit status after a required plugin did not
+// load.
+const pluginExitCode = 3
+
+// exitCode is a Wait error's process exit status, or -1 when it is not one.
+func exitCode(waitErr error) int {
+	var ee *exec.ExitError
+	if errors.As(waitErr, &ee) {
+		return ee.ExitCode()
+	}
+	return -1
+}
+
+func requiredPluginPaths(plugins []Plugin) []string {
+	var out []string
+	for _, p := range plugins {
+		if p.Required {
+			out = append(out, p.Path)
+		}
+	}
+	if len(out) == 0 {
+		out = []string{"a required plugin"}
+	}
+	return out
+}
+
+// handlePluginsLoaded takes one plugins_loaded report: it hands it to the
+// caller, and on a failure records which required plugins did not load, so
+// the run ends failed with ErrPluginNotLoaded. The wrapper exits after a
+// failure report; this does not wait for that. Runs on the reader goroutine.
+//
+// A report with no ok field reads as a failure, the safe reading of a line
+// whose writer and reader disagree.
+func (l *LiveRun) handlePluginsLoaded(ctl controlLine) {
+	report := domain.PluginsLoaded{OK: ctl.OK != nil && *ctl.OK, Plugins: ctl.Plugins, Failed: ctl.Failed}
+	if !report.OK {
+		var paths []string
+		for _, f := range report.Failed {
+			if f.Required && f.Path != "" {
+				paths = append(paths, f.Path)
+			}
+		}
+		if len(paths) == 0 {
+			paths = []string{"a required plugin"}
+		}
+		l.pluginFailed = paths
+	}
+	if l.plugins != nil {
+		var since time.Duration
+		if !l.spawnedAt.IsZero() {
+			since = time.Since(l.spawnedAt)
+		}
+		l.plugins(PluginsReport{PluginsLoaded: report, SinceSpawn: since})
+	}
 }
 
 // syncBuffer is a minimal concurrency-safe bytes buffer for capturing

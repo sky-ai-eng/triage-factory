@@ -202,6 +202,17 @@ type Spec struct {
 	// already ro, so re-binding one is a no-op that keeps the plan
 	// independent of where TF_TOOLCHAIN_ROOT happens to point.
 	ReadOnly []string
+
+	// Plugins are the run's local plugin directories, bound read-only at
+	// their real paths with a strict bind, after the masks. They are a field
+	// of their own rather than entries of ReadOnly, which binds with -try: a
+	// plugin directory that vanished would come back as an empty directory
+	// over the mask, Claude Code would load nothing from it, and a guard
+	// plugin would be gone without a failed mount to say so. Preflight
+	// requires each to exist. The spawn seam folds RunOptions.Plugins in, so
+	// the plugins Claude Code is given and the ones the namespace binds are
+	// one list.
+	Plugins []string
 }
 
 // Host is the spawn-time host context the mount plan is computed against —

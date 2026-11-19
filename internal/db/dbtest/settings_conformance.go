@@ -1514,14 +1514,23 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 	t.Run("TeamSettings_RoundTripsEveryField", func(t *testing.T) {
 		stores, ids := factory(t)
 		want := domain.TeamSettings{
-			JiraProjects:                    []string{"SKY", "ENG", "OPS"},
-			LinearTeams:                     []string{"linear-team-b", "linear-team-a"},
-			AIReprioritizeThreshold:         7,
-			AIPreferenceUpdateInterval:      30,
-			DefaultModel:                    domain.ModelOpus,
-			AutoDelegateEnabled:             true,
-			AutoModeEnabled:                 false,
-			ClaudeAIConnectorsEnabled:       true,
+			JiraProjects:               []string{"SKY", "ENG", "OPS"},
+			LinearTeams:                []string{"linear-team-b", "linear-team-a"},
+			AIReprioritizeThreshold:    7,
+			AIPreferenceUpdateInterval: 30,
+			DefaultModel:               domain.ModelOpus,
+			AutoDelegateEnabled:        true,
+			AutoModeEnabled:            false,
+			ClaudeAIConnectorsEnabled:  true,
+			LocalPlugins: []domain.LocalPlugin{
+				{
+					Path:       "/opt/plugins/guard",
+					Required:   true,
+					Env:        map[string]string{"GUARD_STATE": "{run_state_dir}state", "GUARD_MODE": "strict"},
+					GrantTools: []string{"Agent", "Skill"},
+				},
+				{Path: "/opt/plugins/notes", Env: map[string]string{}, GrantTools: []string{}},
+			},
 			PermissionAbsentGraceMS:         30000,
 			PermissionAbsentAutodenyEnabled: false,
 			MaxDailyCostUSD:                 12.50, // TFAC-482 per-team daily cap
@@ -1549,6 +1558,54 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("TeamSettings round-trip mismatch\n got: %+v\nwant: %+v", got, want)
+		}
+	})
+
+	// An unset plugin list is the empty list on every path that reads or writes
+	// the row, never null: the settings GET serializes it as-is, and a client
+	// that sees null cannot tell "none" from "hidden from a non-admin".
+	t.Run("TeamSettings_LocalPlugins_DefaultsToEmptyList", func(t *testing.T) {
+		stores, ids := factory(t)
+
+		// No row yet: the read answers with the shipped defaults.
+		got, err := stores.Teams.GetSettingsSystem(ctx, ids.TeamID)
+		if err != nil {
+			t.Fatalf("GetSettingsSystem (no row): %v", err)
+		}
+		if got.LocalPlugins == nil || len(got.LocalPlugins) != 0 {
+			t.Errorf("LocalPlugins with no settings row = %#v, want a non-nil empty list", got.LocalPlugins)
+		}
+
+		// A row materialized by a write that never names the field.
+		set, err := stores.Teams.SetJiraProjectOrder(ctx, ids.TeamID, []string{"jira-row-a"})
+		if err != nil {
+			t.Fatalf("SetJiraProjectOrder (materialize): %v", err)
+		}
+		if set.LocalPlugins == nil || len(set.LocalPlugins) != 0 {
+			t.Errorf("LocalPlugins on a row materialized by another writer = %#v, want a non-nil empty list", set.LocalPlugins)
+		}
+
+		// A save carrying a nil list stores [], and clearing a set list does too.
+		withNil := domain.DefaultTeamSettingsFor(stores.MultiMode)
+		withNil.LocalPlugins = nil
+		saved, err := stores.Teams.UpdateSettings(ctx, ids.TeamID, withNil)
+		if err != nil {
+			t.Fatalf("UpdateSettings (nil list): %v", err)
+		}
+		if saved.LocalPlugins == nil || len(saved.LocalPlugins) != 0 {
+			t.Errorf("a nil list stored as %#v, want a non-nil empty list", saved.LocalPlugins)
+		}
+		withSome := domain.DefaultTeamSettingsFor(stores.MultiMode)
+		withSome.LocalPlugins = []domain.LocalPlugin{{Path: "/opt/plugins/a"}}
+		if _, err := stores.Teams.UpdateSettings(ctx, ids.TeamID, withSome); err != nil {
+			t.Fatalf("UpdateSettings (one plugin): %v", err)
+		}
+		cleared, err := stores.Teams.UpdateSettings(ctx, ids.TeamID, withNil)
+		if err != nil {
+			t.Fatalf("UpdateSettings (cleared): %v", err)
+		}
+		if cleared.LocalPlugins == nil || len(cleared.LocalPlugins) != 0 {
+			t.Errorf("a cleared list = %#v, want a non-nil empty list", cleared.LocalPlugins)
 		}
 	})
 

@@ -76,7 +76,7 @@ func (s *teamsStore) GetSettingsSystem(ctx context.Context, teamID string) (doma
 const pgTeamSettingsColumns = `array_to_json(jira_projects)::text,
 		       ai_reprioritize_threshold, ai_preference_update_interval,
 		       default_model, auto_delegate_enabled, auto_mode_enabled,
-		       claude_ai_connectors_enabled,
+		       claude_ai_connectors_enabled, local_plugins::text,
 		       permission_absent_grace_ms, permission_absent_autodeny_enabled,
 		       max_daily_cost_usd, branch_template, review_posture,
 		       base_branch_push_policy, enabled_models, array_to_json(linear_teams)::text`
@@ -90,6 +90,7 @@ func scanTeamSettings(scan func(...any) error) (domain.TeamSettings, error) {
 		autoDelegate            bool
 		autoMode                bool
 		claudeAIConnectors      bool
+		localPluginsJSON        sql.NullString
 		permAbsentGraceMS       int
 		permAbsentAutodeny      bool
 		maxDailyCost            sql.NullFloat64
@@ -101,7 +102,7 @@ func scanTeamSettings(scan func(...any) error) (domain.TeamSettings, error) {
 	)
 	if err := scan(
 		&projectsJSON, &aiThreshold, &aiInterval,
-		&defaultModel, &autoDelegate, &autoMode, &claudeAIConnectors,
+		&defaultModel, &autoDelegate, &autoMode, &claudeAIConnectors, &localPluginsJSON,
 		&permAbsentGraceMS, &permAbsentAutodeny,
 		&maxDailyCost, &branchTemplate, &reviewPosture, &basePushPolicy,
 		&enabledModels, &linearTeamsJSON,
@@ -124,6 +125,10 @@ func scanTeamSettings(scan func(...any) error) (domain.TeamSettings, error) {
 			return domain.TeamSettings{}, fmt.Errorf("unmarshal team_settings.linear_teams: %w", err)
 		}
 	}
+	localPlugins, err := db.UnmarshalLocalPluginsColumn(localPluginsJSON, "team_settings.local_plugins")
+	if err != nil {
+		return domain.TeamSettings{}, err
+	}
 	return domain.TeamSettings{
 		JiraProjects:                    projects,
 		LinearTeams:                     linearTeams,
@@ -133,6 +138,7 @@ func scanTeamSettings(scan func(...any) error) (domain.TeamSettings, error) {
 		AutoDelegateEnabled:             autoDelegate,
 		AutoModeEnabled:                 autoMode,
 		ClaudeAIConnectorsEnabled:       claudeAIConnectors,
+		LocalPlugins:                    localPlugins,
 		PermissionAbsentGraceMS:         permAbsentGraceMS,
 		PermissionAbsentAutodenyEnabled: permAbsentAutodeny,
 		MaxDailyCostUSD:                 maxDailyCost.Float64, // NULL → 0 (no cap)
@@ -679,15 +685,19 @@ func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain
 	// jira_projects, linear_teams and max_daily_cost_usd are absent from both
 	// arms: they belong to other writers (see the interface), and an insert
 	// takes their schema defaults.
+	localPluginsJSON, err := db.MarshalLocalPluginsColumn(u.LocalPlugins)
+	if err != nil {
+		return domain.TeamSettings{}, fmt.Errorf("marshal team_settings.local_plugins: %w", err)
+	}
 	stored, err := scanTeamSettings(s.app.QueryRowContext(ctx, `
 		INSERT INTO team_settings (
 			team_id, ai_reprioritize_threshold,
 			ai_preference_update_interval, default_model, auto_delegate_enabled,
-			auto_mode_enabled, claude_ai_connectors_enabled,
+			auto_mode_enabled, claude_ai_connectors_enabled, local_plugins,
 			permission_absent_grace_ms, permission_absent_autodeny_enabled,
 			branch_template, review_posture,
 			base_branch_push_policy, enabled_models, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, $14, now())
 		ON CONFLICT (team_id) DO UPDATE SET
 			ai_reprioritize_threshold = EXCLUDED.ai_reprioritize_threshold,
 			ai_preference_update_interval = EXCLUDED.ai_preference_update_interval,
@@ -695,6 +705,7 @@ func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain
 			auto_delegate_enabled = EXCLUDED.auto_delegate_enabled,
 			auto_mode_enabled = EXCLUDED.auto_mode_enabled,
 			claude_ai_connectors_enabled = EXCLUDED.claude_ai_connectors_enabled,
+			local_plugins = EXCLUDED.local_plugins,
 			permission_absent_grace_ms = EXCLUDED.permission_absent_grace_ms,
 			permission_absent_autodeny_enabled = EXCLUDED.permission_absent_autodeny_enabled,
 			branch_template = EXCLUDED.branch_template,
@@ -705,7 +716,7 @@ func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain
 		RETURNING `+pgTeamSettingsColumns,
 		teamID, u.AIReprioritizeThreshold,
 		u.AIPreferenceUpdateInterval, u.DefaultModel, u.AutoDelegateEnabled,
-		u.AutoModeEnabled, u.ClaudeAIConnectorsEnabled,
+		u.AutoModeEnabled, u.ClaudeAIConnectorsEnabled, localPluginsJSON,
 		u.PermissionAbsentGraceMS, u.PermissionAbsentAutodenyEnabled,
 		u.BranchTemplate, u.ReviewPosture,
 		u.BaseBranchPushPolicy, db.ModelSetColumnValue(u.EnabledModels),

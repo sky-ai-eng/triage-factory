@@ -1,0 +1,5 @@
+{
+  "name": "denyplugin",
+  "version": "0.1.0",
+  "description": "Test fixture: denies any Bash command containing tf-plugin-probe-deny."
+}
