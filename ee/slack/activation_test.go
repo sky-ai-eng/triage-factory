@@ -98,11 +98,12 @@ func TestActivationFingerprint(t *testing.T) {
 	}
 }
 
-// TestActivationBlockers: a bot token Slack refuses is token_rejected, one
-// short a scope is missing_scopes naming it, and an app-level token Slack
-// refuses is app_token_rejected, beside whatever the bot token gets; tokens that
-// pass have no blocker, and a check that meets no answer about a token, Slack
-// failing on its own side included, is an error rather than a blocker.
+// TestActivationBlockers: a bot token Slack refuses, with any code but a
+// transient one, is token_rejected, one short a scope is missing_scopes naming
+// it, and an app-level token Slack refuses is app_token_rejected, beside
+// whatever the bot token gets; tokens that pass have no blocker, and a check
+// that meets no answer about a token, Slack failing on its own side or pausing
+// the workspace included, is an error rather than a blocker.
 func TestActivationBlockers(t *testing.T) {
 	all := strings.Join(slackBotScopes, ",")
 	short := strings.Join(slices.DeleteFunc(slices.Clone(slackBotScopes), func(s string) bool { return s == "files:write" }), ",")
@@ -113,6 +114,8 @@ func TestActivationBlockers(t *testing.T) {
 			switch bearerToken(r) {
 			case "xapp-revoked":
 				writeSlackFakeJSON(w, map[string]any{"ok": false, "error": "token_revoked"})
+			case "xapp-no-permission":
+				writeSlackFakeJSON(w, map[string]any{"ok": false, "error": "no_permission"})
 			case "xapp-slack-failing":
 				writeSlackFakeJSON(w, map[string]any{"ok": false, "error": "internal_error"})
 			default:
@@ -125,6 +128,10 @@ func TestActivationBlockers(t *testing.T) {
 			writeSlackFakeJSON(w, map[string]any{"ok": false, "error": "invalid_auth"})
 		case "xoxb-expired":
 			writeSlackFakeJSON(w, map[string]any{"ok": false, "error": "token_expired"})
+		case "xoxb-ekm":
+			writeSlackFakeJSON(w, map[string]any{"ok": false, "error": "ekm_access_denied"})
+		case "xoxb-migrating":
+			writeSlackFakeJSON(w, map[string]any{"ok": false, "error": "team_added_to_org"})
 		case "xoxb-short":
 			w.Header().Set("X-OAuth-Scopes", short)
 			writeSlackFakeJSON(w, map[string]any{"ok": true, "team_id": "T1", "bot_id": "B1"})
@@ -147,9 +154,11 @@ func TestActivationBlockers(t *testing.T) {
 		{targetTokens{bot: "xoxb-ok"}, nil},
 		{targetTokens{bot: "xoxb-rejected"}, []activationBlocker{{Code: blockerTokenRejected}}},
 		{targetTokens{bot: "xoxb-expired"}, []activationBlocker{{Code: blockerTokenRejected}}},
+		{targetTokens{bot: "xoxb-ekm"}, []activationBlocker{{Code: blockerTokenRejected}}},
 		{targetTokens{bot: "xoxb-short"}, []activationBlocker{{Code: blockerMissingScopes, Scopes: []string{"files:write"}}}},
 		{targetTokens{bot: "xoxb-ok", app: "xapp-ok"}, nil},
 		{targetTokens{bot: "xoxb-ok", app: "xapp-revoked"}, []activationBlocker{{Code: blockerAppTokenRejected}}},
+		{targetTokens{bot: "xoxb-ok", app: "xapp-no-permission"}, []activationBlocker{{Code: blockerAppTokenRejected}}},
 		{targetTokens{bot: "xoxb-rejected", app: "xapp-revoked"}, []activationBlocker{{Code: blockerTokenRejected}, {Code: blockerAppTokenRejected}}},
 	} {
 		got, err := h.activationBlockers(t.Context(), "org", target, tc.tokens)
@@ -163,6 +172,7 @@ func TestActivationBlockers(t *testing.T) {
 	}
 	for _, tokens := range []targetTokens{
 		{bot: "xoxb-slack-failing"},
+		{bot: "xoxb-migrating"},
 		{bot: "xoxb-down"},
 		{bot: "xoxb-ok", app: "xapp-slack-failing"},
 	} {

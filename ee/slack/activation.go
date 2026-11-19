@@ -438,7 +438,7 @@ func (h *workspacesHandler) activationBlockers(ctx context.Context, orgID string
 	if tokens.app != "" {
 		err := slackOpenConnection(ctx, h.client, slackAppCaller(orgID, target.APIAppID), tokens.app)
 		switch {
-		case isSlackAuthError(err):
+		case isSlackAuthError(err), isSlackRejected(err):
 			blockers = append(blockers, activationBlocker{Code: blockerAppTokenRejected})
 		case err != nil:
 			return nil, err

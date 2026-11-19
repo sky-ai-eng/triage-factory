@@ -49,11 +49,11 @@ type authTestResult struct {
 	Scopes string
 }
 
-// slackRejectedError is a Slack answer refusing the credential a call was made
-// with: an error code in slackAuthErrorCodes, or an answer missing what the call
-// exists to learn. A transport failure, a non-200, a rate limit, or any other
-// {"ok":false} (internal_error, service_unavailable, …) is not one: those say
-// nothing about the credential.
+// slackRejectedError is a Slack answer refusing a call for a reason of the
+// caller's: any {"ok":false} outside slackTransientErrorCodes, or an answer
+// missing what the call exists to learn. A transport failure, a non-200, a
+// rate limit, or a transient code is not one: those say nothing about the
+// credential, and the same call may succeed later.
 type slackRejectedError struct{ method, reason string }
 
 func (e *slackRejectedError) Error() string { return "slack " + e.method + ": " + e.reason }
@@ -62,6 +62,27 @@ func (e *slackRejectedError) Error() string { return "slack " + e.method + ": " 
 func isSlackRejected(err error) bool {
 	var rejected *slackRejectedError
 	return errors.As(err, &rejected)
+}
+
+// slackTransientErrorCodes are the {"ok":false} codes in which Slack reports a
+// failure on its own side, or a pause it lifts by itself. Sourced from the
+// error codes Slack documents for every Web API method.
+var slackTransientErrorCodes = map[string]bool{
+	"internal_error":      true,
+	"fatal_error":         true,
+	"service_unavailable": true,
+	"request_timeout":     true,
+	"ratelimited":         true,
+	"team_added_to_org":   true,
+}
+
+// slackRefusal is the error for method's {"ok":false} answer carrying code: a
+// slackRejectedError, unless code is one of slackTransientErrorCodes.
+func slackRefusal(method, code string) error {
+	if slackTransientErrorCodes[code] {
+		return fmt.Errorf("slack %s: %s", method, code)
+	}
+	return &slackRejectedError{method: method, reason: code}
 }
 
 // slackAuthTest validates botToken against Slack's auth.test and returns
@@ -94,11 +115,7 @@ func slackAuthTest(ctx context.Context, client *http.Client, caller slackCaller,
 		return nil, err
 	}
 	if !out.OK {
-		code := nonEmpty(out.Error, "not ok")
-		if slackAuthErrorCodes[code] {
-			return nil, &slackRejectedError{method: "auth.test", reason: code}
-		}
-		return nil, fmt.Errorf("slack auth.test: %s", code)
+		return nil, slackRefusal("auth.test", nonEmpty(out.Error, "not ok"))
 	}
 	if out.TeamID == "" {
 		return nil, &slackRejectedError{method: "auth.test", reason: "response carried no team_id"}
@@ -243,19 +260,16 @@ func slackOpenConnection(ctx context.Context, client *http.Client, caller slackC
 	return err
 }
 
-// slackAuthErrorCodes is the set of Slack error codes that mean the token
-// itself is bad (revoked, expired, wrong scope, disabled workspace) rather
-// than a transient upstream issue — for an app token at apps.connections.open,
-// where retrying on the normal backoff schedule would just hammer Slack with a
-// token that will never succeed, and for a bot token at auth.test, where it
-// is the difference between a dead token and an outage. Sourced from Slack's
-// documented auth-related error codes.
+// slackAuthErrorCodes is the set of apps.connections.open error codes that
+// mean the app token itself is bad (revoked, wrong scope, disabled
+// workspace) rather than a transient upstream issue — retrying on the
+// normal backoff schedule would just hammer Slack with a token that will
+// never succeed. Sourced from Slack's documented auth-related error codes.
 var slackAuthErrorCodes = map[string]bool{
 	"invalid_auth":     true,
 	"not_authed":       true,
 	"account_inactive": true,
 	"token_revoked":    true,
-	"token_expired":    true,
 	"missing_scope":    true,
 }
 
@@ -296,7 +310,7 @@ func slackConnectionsOpen(ctx context.Context, client *http.Client, caller slack
 		if slackAuthErrorCodes[out.Error] {
 			return "", &slackAuthError{code: nonEmpty(out.Error, "not ok")}
 		}
-		return "", fmt.Errorf("slack apps.connections.open: %s", nonEmpty(out.Error, "not ok"))
+		return "", slackRefusal("apps.connections.open", nonEmpty(out.Error, "not ok"))
 	}
 	if out.URL == "" {
 		return "", fmt.Errorf("slack apps.connections.open: response carried no url")
