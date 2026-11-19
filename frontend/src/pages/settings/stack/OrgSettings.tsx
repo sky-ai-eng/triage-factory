@@ -64,6 +64,7 @@ import LinearOAuthAppCard from '../LinearOAuthAppCard'
 import LinearSwitchDialog from '../LinearSwitchDialog'
 import { useLinearSwitchWarning } from '../linearSwitchWarning'
 import SlackWorkspacesCard from '../SlackWorkspacesCard'
+import { hasSlackInstallReturn } from '../slackConnect'
 import TeamManagementSection from '../../../components/TeamManagementSection'
 import {
   dailyCapError,
@@ -847,10 +848,17 @@ export default function OrgSettings({
           404s an unlicensed org, so the FE hides the surface rather than
           presenting a dead flow — same gating shape as SSO below. An action
           section (no Save footer): the card owns its own connect/disconnect
-          controls and list fetch. */}
+          controls and list fetch. canManage is unconditional because this
+          whole group renders only for an org admin. A return from Slack's
+          install opens the section, since the card is what reads its outcome
+          and a folded section does not mount it. */}
       {orgId && !isLocal && slackEnt && (
-        <SettingsSection title="Slack" summary="Connect a workspace">
-          <SlackWorkspacesCard orgId={orgId} />
+        <SettingsSection
+          title="Slack"
+          summary="Connect a workspace"
+          defaultExpanded={hasSlackInstallReturn(window.location.search)}
+        >
+          <SlackWorkspacesCard orgId={orgId} canManage />
         </SettingsSection>
       )}
 
