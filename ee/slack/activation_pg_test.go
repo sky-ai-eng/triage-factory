@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"slices"
 	"sync"
 	"testing"
@@ -303,6 +304,53 @@ func TestActivationPreview_SlackUnreachable(t *testing.T) {
 	rec = r.activate(r.owner, switchAppB, map[string]string{"fingerprint": "x"})
 	if rec.Code != http.StatusBadGateway {
 		t.Errorf("activate status = %d (body=%s); want 502", rec.Code, rec.Body.String())
+	}
+}
+
+// TestActivation_SocketTargetAppToken: a target that receives over Socket Mode
+// has its stored app-level token checked. Slack refusing it is
+// app_token_rejected, which blocks the activation; Slack failing on its own
+// side is a 502. A target over the Events API has no app-level token to check.
+func TestActivation_SocketTargetAppToken(t *testing.T) {
+	r := newActivationRig(t)
+	const tokenC, appTokenC, appC = "xoxb-switch-c", "xapp-switch-c", "A0SWITCHC"
+	r.fake.stageConnectOK(tokenC, switchWorkspace, "Acme", "U0BOTC", appC, "")
+	rec := httptest.NewRecorder()
+	r.hdl.handleConnect(rec, r.importReq(r.owner, r.orgID, map[string]string{"bot_token": tokenC, "app_token": appTokenC}))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("connect C over Socket Mode: status = %d (body=%s)", rec.Code, rec.Body.String())
+	}
+
+	before := r.fake.openConnCalls()
+	if p := r.previewOK(switchAppB); len(p.Blockers) != 0 {
+		t.Errorf("Events API target blockers = %+v; want none", p.Blockers)
+	}
+	if got := r.fake.openConnCalls(); got != before {
+		t.Errorf("apps.connections.open called %d times for an Events API target; want none", got-before)
+	}
+	if p := r.previewOK(appC); len(p.Blockers) != 0 {
+		t.Errorf("Socket Mode target with a working app-level token: blockers = %+v; want none", p.Blockers)
+	}
+	if got := r.fake.openConnCalls(); got != before+1 {
+		t.Errorf("apps.connections.open called %d times for the Socket Mode target; want 1", got-before)
+	}
+
+	r.fake.stageOpenConnFail(appTokenC, "token_revoked")
+	p := r.previewOK(appC)
+	if want := []activationBlocker{{Code: blockerAppTokenRejected}}; !reflect.DeepEqual(p.Blockers, want) {
+		t.Errorf("blockers = %+v; want %+v", p.Blockers, want)
+	}
+	rec = r.activate(r.owner, appC, map[string]string{"fingerprint": p.Fingerprint})
+	if rec.Code != http.StatusUnprocessableEntity || !slices.Equal(errorReasons(t, rec), []string{httpx.ReasonUpstreamRejected}) {
+		t.Errorf("activate: status = %d (body=%s); want 422 UPSTREAM_REJECTED", rec.Code, rec.Body.String())
+	}
+	if got := r.activeApp(); got != switchAppA {
+		t.Errorf("active app = %q; want %s untouched", got, switchAppA)
+	}
+
+	r.fake.stageOpenConnFail(appTokenC, "internal_error")
+	if rec := r.preview(r.owner, appC); rec.Code != http.StatusBadGateway {
+		t.Errorf("Slack failing on its own side: status = %d (body=%s); want 502", rec.Code, rec.Body.String())
 	}
 }
 

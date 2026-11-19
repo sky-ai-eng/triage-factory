@@ -303,6 +303,13 @@ func (f *fakeSlackServer) stageJoinFail(channel, code string) {
 	f.joinFail[channel] = code
 }
 
+// openConnCalls is how many apps.connections.open calls the fake has answered.
+func (f *fakeSlackServer) openConnCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.openConnHits
+}
+
 // listCalls is how many conversations.list calls the fake has answered.
 func (f *fakeSlackServer) listCalls() int {
 	f.mu.Lock()

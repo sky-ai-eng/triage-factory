@@ -98,14 +98,28 @@ func TestActivationFingerprint(t *testing.T) {
 	}
 }
 
-// TestActivationBlockers: a token Slack refuses is token_rejected, a token
-// short a scope is missing_scopes naming it, a token with every scope has no
-// blocker, and an auth.test that meets no answer about the token, Slack failing
-// on its own side included, is an error rather than a blocker.
+// TestActivationBlockers: a bot token Slack refuses is token_rejected, one
+// short a scope is missing_scopes naming it, and an app-level token Slack
+// refuses is app_token_rejected, beside whatever the bot token gets; tokens that
+// pass have no blocker, and a check that meets no answer about a token, Slack
+// failing on its own side included, is an error rather than a blocker.
 func TestActivationBlockers(t *testing.T) {
 	all := strings.Join(slackBotScopes, ",")
 	short := strings.Join(slices.DeleteFunc(slices.Clone(slackBotScopes), func(s string) bool { return s == "files:write" }), ",")
+	var openCalls int
 	withFakeSlackAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/apps.connections.open") {
+			openCalls++
+			switch bearerToken(r) {
+			case "xapp-revoked":
+				writeSlackFakeJSON(w, map[string]any{"ok": false, "error": "token_revoked"})
+			case "xapp-slack-failing":
+				writeSlackFakeJSON(w, map[string]any{"ok": false, "error": "internal_error"})
+			default:
+				writeSlackFakeJSON(w, map[string]any{"ok": true, "url": "wss://fake.slack.example/link"})
+			}
+			return
+		}
 		switch bearerToken(r) {
 		case "xoxb-rejected":
 			writeSlackFakeJSON(w, map[string]any{"ok": false, "error": "invalid_auth"})
@@ -126,24 +140,42 @@ func TestActivationBlockers(t *testing.T) {
 	h := &workspacesHandler{client: slackHTTPClient}
 	target := &slackstore.Connection{WorkspaceID: "T1", APIAppID: "A1"}
 
-	for token, want := range map[string][]activationBlocker{
-		"xoxb-ok":       nil,
-		"xoxb-rejected": {{Code: blockerTokenRejected}},
-		"xoxb-expired":  {{Code: blockerTokenRejected}},
-		"xoxb-short":    {{Code: blockerMissingScopes, Scopes: []string{"files:write"}}},
+	for _, tc := range []struct {
+		tokens targetTokens
+		want   []activationBlocker
+	}{
+		{targetTokens{bot: "xoxb-ok"}, nil},
+		{targetTokens{bot: "xoxb-rejected"}, []activationBlocker{{Code: blockerTokenRejected}}},
+		{targetTokens{bot: "xoxb-expired"}, []activationBlocker{{Code: blockerTokenRejected}}},
+		{targetTokens{bot: "xoxb-short"}, []activationBlocker{{Code: blockerMissingScopes, Scopes: []string{"files:write"}}}},
+		{targetTokens{bot: "xoxb-ok", app: "xapp-ok"}, nil},
+		{targetTokens{bot: "xoxb-ok", app: "xapp-revoked"}, []activationBlocker{{Code: blockerAppTokenRejected}}},
+		{targetTokens{bot: "xoxb-rejected", app: "xapp-revoked"}, []activationBlocker{{Code: blockerTokenRejected}, {Code: blockerAppTokenRejected}}},
 	} {
-		got, err := h.activationBlockers(t.Context(), "org", target, token)
+		got, err := h.activationBlockers(t.Context(), "org", target, tc.tokens)
 		if err != nil {
-			t.Errorf("%s: err = %v", token, err)
+			t.Errorf("%+v: err = %v", tc.tokens, err)
 			continue
 		}
-		if !reflect.DeepEqual(got, want) {
-			t.Errorf("%s: blockers = %+v; want %+v", token, got, want)
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%+v: blockers = %+v; want %+v", tc.tokens, got, tc.want)
 		}
 	}
-	for _, token := range []string{"xoxb-slack-failing", "xoxb-down"} {
-		if got, err := h.activationBlockers(t.Context(), "org", target, token); err == nil {
-			t.Errorf("%s: blockers = %+v, err = nil; want Slack unreachable", token, got)
+	for _, tokens := range []targetTokens{
+		{bot: "xoxb-slack-failing"},
+		{bot: "xoxb-down"},
+		{bot: "xoxb-ok", app: "xapp-slack-failing"},
+	} {
+		if got, err := h.activationBlockers(t.Context(), "org", target, tokens); err == nil {
+			t.Errorf("%+v: blockers = %+v, err = nil; want Slack unreachable", tokens, got)
 		}
+	}
+
+	before := openCalls
+	if _, err := h.activationBlockers(t.Context(), "org", target, targetTokens{bot: "xoxb-ok"}); err != nil {
+		t.Fatalf("bot token only: %v", err)
+	}
+	if openCalls != before {
+		t.Errorf("apps.connections.open called with no app-level token")
 	}
 }

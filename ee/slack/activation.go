@@ -45,6 +45,10 @@ const (
 	blockerTokenRejected = "token_rejected"
 	// blockerMissingScopes: the token lacks scopes the app needs.
 	blockerMissingScopes = "missing_scopes"
+	// blockerAppTokenRejected: Slack refused the app-level token an org's own
+	// Socket Mode app receives events with, so once active the workspace would
+	// receive nothing.
+	blockerAppTokenRejected = "app_token_rejected"
 )
 
 // noteHistoryRateLimit is the preview's note on switching to the deployment's
@@ -140,14 +144,14 @@ func (h *workspacesHandler) handleActivationPreview(w http.ResponseWriter, r *ht
 		httpx.InternalError(w, "slack", err)
 		return
 	}
-	token, err := h.botToken(ctx, orgID, target)
+	tokens, err := h.readTargetTokens(ctx, orgID, target)
 	if err != nil {
 		httpx.InternalError(w, "slack", err)
 		return
 	}
-	blockers, err := h.activationBlockers(ctx, orgID, target, token)
+	blockers, err := h.activationBlockers(ctx, orgID, target, tokens)
 	if err != nil {
-		writeSlackUnreachable(w, orgID, "auth.test", err)
+		writeSlackUnreachable(w, orgID, "the token check", err)
 		return
 	}
 
@@ -225,14 +229,14 @@ func (h *workspacesHandler) handleActivate(w http.ResponseWriter, r *http.Reques
 	if refuseActivationTarget(w, target) {
 		return
 	}
-	token, err := h.botToken(ctx, orgID, target)
+	tokens, err := h.readTargetTokens(ctx, orgID, target)
 	if err != nil {
 		httpx.InternalError(w, "slack", err)
 		return
 	}
-	blockers, err := h.activationBlockers(ctx, orgID, target, token)
+	blockers, err := h.activationBlockers(ctx, orgID, target, tokens)
 	if err != nil {
-		writeSlackUnreachable(w, orgID, "auth.test", err)
+		writeSlackUnreachable(w, orgID, "the token check", err)
 		return
 	}
 	if len(blockers) > 0 {
@@ -380,35 +384,67 @@ func writeSlackUnreachable(w http.ResponseWriter, orgID, what string, err error)
 	})
 }
 
-// botToken reads conn's stored bot token. A connection whose token is not
-// stored is an error: the connect writes the two together.
-func (h *workspacesHandler) botToken(ctx context.Context, orgID string, conn *slackstore.Connection) (string, error) {
-	token, err := h.stores.Secrets.GetSystem(ctx, orgID, conn.BotTokenRef)
-	if err != nil {
-		return "", fmt.Errorf("read bot token of %s/%s: %w", conn.WorkspaceID, conn.APIAppID, err)
+// targetTokens are the stored tokens an activation's checks use: the target's
+// bot token, and the app-level token of an org's own app that receives over
+// Socket Mode, "" for any other. A deployment connection receives through the
+// operator's app and its environment, which no org's activation checks.
+type targetTokens struct{ bot, app string }
+
+// readTargetTokens reads conn's tokens. A token the row names but that is not
+// stored is an error: the connect writes the row and its secrets together.
+func (h *workspacesHandler) readTargetTokens(ctx context.Context, orgID string, conn *slackstore.Connection) (targetTokens, error) {
+	read := func(ref, what string) (string, error) {
+		v, err := h.stores.Secrets.GetSystem(ctx, orgID, ref)
+		if err != nil {
+			return "", fmt.Errorf("read %s of %s/%s: %w", what, conn.WorkspaceID, conn.APIAppID, err)
+		}
+		if v == "" {
+			return "", fmt.Errorf("%s of %s/%s is not stored", what, conn.WorkspaceID, conn.APIAppID)
+		}
+		return v, nil
 	}
-	if token == "" {
-		return "", fmt.Errorf("bot token of %s/%s is not stored", conn.WorkspaceID, conn.APIAppID)
+	var t targetTokens
+	var err error
+	if t.bot, err = read(conn.BotTokenRef, "bot token"); err != nil {
+		return targetTokens{}, err
 	}
-	return token, nil
+	if conn.Source == slackstore.SourceOrg && conn.Transport == transportSocket {
+		if t.app, err = read(conn.AppTokenRef, "app-level token"); err != nil {
+			return targetTokens{}, err
+		}
+	}
+	return t, nil
 }
 
-// activationBlockers checks target's bot token with auth.test: Slack refusing
-// it is token_rejected, and a token granted fewer scopes than slackBotScopes is
-// missing_scopes. An error is a call that met no answer about the token, Slack
-// failing on its own side included.
-func (h *workspacesHandler) activationBlockers(ctx context.Context, orgID string, target *slackstore.Connection, token string) ([]activationBlocker, error) {
-	result, err := slackAuthTest(ctx, h.client, slackBotCaller(orgID, target.WorkspaceID, target.APIAppID), token)
-	if isSlackRejected(err) {
-		return []activationBlocker{{Code: blockerTokenRejected}}, nil
-	}
-	if err != nil {
+// activationBlockers checks target's tokens with Slack. auth.test refusing the
+// bot token is token_rejected, and a bot token granted fewer scopes than
+// slackBotScopes is missing_scopes. apps.connections.open refusing the
+// app-level token, when there is one, is app_token_rejected; the URL it mints
+// is never dialed and expires unused. An error is a call that met no answer
+// about a token, Slack failing on its own side included.
+func (h *workspacesHandler) activationBlockers(ctx context.Context, orgID string, target *slackstore.Connection, tokens targetTokens) ([]activationBlocker, error) {
+	var blockers []activationBlocker
+	result, err := slackAuthTest(ctx, h.client, slackBotCaller(orgID, target.WorkspaceID, target.APIAppID), tokens.bot)
+	switch {
+	case isSlackRejected(err):
+		blockers = append(blockers, activationBlocker{Code: blockerTokenRejected})
+	case err != nil:
 		return nil, err
+	default:
+		if missing := missingBotScopes(result.Scopes); len(missing) > 0 {
+			blockers = append(blockers, activationBlocker{Code: blockerMissingScopes, Scopes: missing})
+		}
 	}
-	if missing := missingBotScopes(result.Scopes); len(missing) > 0 {
-		return []activationBlocker{{Code: blockerMissingScopes, Scopes: missing}}, nil
+	if tokens.app != "" {
+		err := slackOpenConnection(ctx, h.client, slackAppCaller(orgID, target.APIAppID), tokens.app)
+		switch {
+		case isSlackAuthError(err):
+			blockers = append(blockers, activationBlocker{Code: blockerAppTokenRejected})
+		case err != nil:
+			return nil, err
+		}
 	}
-	return nil, nil
+	return blockers, nil
 }
 
 // blockerMessage is the refusal activate answers for b.
@@ -419,6 +455,9 @@ func blockerMessage(b activationBlocker) string {
 	case blockerMissingScopes:
 		return "The connection to switch to lacks the Slack scopes " + strings.Join(b.Scopes, ", ") +
 			". Reinstall its app with them before switching to it."
+	case blockerAppTokenRejected:
+		return "Slack rejected the app-level token of the connection to switch to, so it would receive no events. " +
+			"Connect its app again with a working app-level token before switching to it."
 	default:
 		return "The connection cannot be switched to."
 	}
