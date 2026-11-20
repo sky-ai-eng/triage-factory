@@ -57,6 +57,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/sky-ai-eng/triage-factory/internal/aead"
+	"github.com/sky-ai-eng/triage-factory/internal/containertest"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 )
 
@@ -132,23 +133,23 @@ var (
 // that need isolation should call h.Reset(t) at the top of the test.
 //
 // Three outcomes are distinct on purpose:
-//   - Docker is genuinely unreachable → t.Skip. Lets the SQLite suite
-//     run cleanly in CI environments without a Docker daemon.
-//   - Docker is healthy but boot failed (migration error, SQL bug,
-//     image regression, anything else) → t.Fatalf. Treating these as
-//     skips would let a real schema regression silently turn the
+//   - Docker is unreachable, or its daemon runs something other than
+//     Linux containers (Docker on Windows in Windows-container mode)
+//     → t.Skip. Lets the SQLite suite run cleanly on machines and CI
+//     runners that cannot boot the Linux Postgres image.
+//   - A Linux daemon is healthy but boot failed (migration error, SQL
+//     bug, image regression, anything else) → t.Fatalf. Treating these
+//     as skips would let a real schema regression silently turn the
 //     Postgres suite into a green-but-empty pass.
 //   - A previously healthy container no longer answers a liveness probe
 //     (OOM-killed postmaster on a loaded CI runner) → revive: boot a
 //     replacement in place, bounded by reviveBudget.
 func Shared(t *testing.T) *Harness {
 	t.Helper()
-	// Probe Docker first so unreachable-daemon failures are
-	// disambiguated from boot failures. The probe is cheap — pings the
-	// Docker socket via the testcontainers provider — and runs on
-	// every Shared() call (cheap is fine; booted guards the expensive
-	// boot itself).
-	testcontainers.SkipIfProviderIsNotHealthy(t)
+	// Probe Docker first so an unusable daemon is disambiguated from a
+	// boot failure. The probe is cheap and runs on every Shared() call
+	// (booted guards the expensive boot itself).
+	containertest.SkipUnlessLinuxDaemon(t)
 
 	sharedMu.Lock()
 	defer sharedMu.Unlock()
@@ -438,7 +439,7 @@ func (h *Harness) bringUp() error {
 // callers don't need to.
 func NewInstance(t *testing.T) (adminDB *sql.DB, adminDSN string) {
 	t.Helper()
-	testcontainers.SkipIfProviderIsNotHealthy(t)
+	containertest.SkipUnlessLinuxDaemon(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
