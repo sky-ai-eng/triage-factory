@@ -106,8 +106,11 @@ func (st *claimLeaseState) acceptedLocked(issuedAt time.Time, suspended time.Dur
 	// An acceptance issued before the one already recorded is older news: a
 	// renewal that was out across a sleep while a write's recovery took the
 	// claim back. Recording it would rewind the suspend base to before that
-	// sleep, and a later lapse would count the same sleep again.
-	if issuedAt.Before(*st.lastRenewal.Load()) {
+	// sleep, and a later lapse would count the same sleep again. A coarse
+	// clock can give both one issue time, and then the suspend reading taken
+	// beside each decides: one behind the recorded base was taken before it.
+	last := *st.lastRenewal.Load()
+	if issuedAt.Before(last) || issuedAt.Equal(last) && suspended < st.suspendBase {
 		return
 	}
 	// Published BEFORE the re-arm, so a callback dispatched in between reads

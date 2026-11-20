@@ -7,7 +7,9 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
@@ -142,9 +144,14 @@ func TestNotificationList_Audience(t *testing.T) {
 // page token is bound to the order it was minted under.
 func TestNotificationList_SortEveryKey(t *testing.T) {
 	s, _ := newNotificationsServer(t)
-	localNotification(t, s, "b")
-	localNotification(t, s, "a")
+	b := localNotification(t, s, "b")
+	a := localNotification(t, s, "a")
 	requiredCondition.Set(context.Background(), runmode.LocalDefaultOrgID, notificationTestParams{ID: "c"}, true)
+	c := notificationIDByTitle(t, s, "required c")
+	// Raised b, a, c, in that order, whatever the clock's resolution.
+	for i, id := range []string{b, a, c} {
+		dbtest.AgeNotification(t, s.db, id, time.Duration(3-i)*time.Minute)
+	}
 
 	for _, path := range []string{meNotifications + "/list", orgNotificationsList()} {
 		order := func(body map[string]any) []string {
@@ -196,6 +203,7 @@ func TestNotificationList_SortEveryKey(t *testing.T) {
 	// b resolves before a; c stays open.
 	fixableCondition.Set(context.Background(), runmode.LocalDefaultOrgID, notificationTestParams{ID: "b"}, false)
 	fixableCondition.Set(context.Background(), runmode.LocalDefaultOrgID, notificationTestParams{ID: "a"}, false)
+	dbtest.AgeNotification(t, s.db, b, time.Minute)
 	for _, path := range []string{meNotifications + "/list", orgNotificationsList()} {
 		for _, c := range []struct {
 			body map[string]any

@@ -238,6 +238,16 @@ func newPgConversationSeeder(conn *sql.DB, orgID, userID, agentID, promptID stri
 				t.Fatalf("backdate completed_at of %s: %v", conversationID, err)
 			}
 		},
+		AgeClaims: func(t *testing.T, conversationID string, d time.Duration) {
+			t.Helper()
+			agePgClaims(t, conn, conversationID, d)
+		},
+		BackdateParkedAt: func(t *testing.T, conversationID string, age time.Duration) {
+			t.Helper()
+			dbtest.MustUpdate(t, conn,
+				`UPDATE conversations SET parked_at = now() - make_interval(secs => $2) WHERE id = $1`,
+				conversationID, age.Seconds())
+		},
 		StoredShape: func(t *testing.T, conversationID string) dbtest.StoredConversationShape {
 			t.Helper()
 			var shape dbtest.StoredConversationShape

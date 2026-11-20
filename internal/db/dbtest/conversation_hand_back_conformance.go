@@ -35,12 +35,16 @@ func RunHandBackConformance(t *testing.T, mk ClaimLeaseFactory) {
 		}
 		return got
 	}
+	// mustClaim claims id and ages its stamps a second, so whatever releases
+	// the claim next is later on the clock than the episode the claim began:
+	// the budgets count a hand-back released strictly after it.
 	mustClaim := func(t *testing.T, f ClaimLeaseFixture, id string) *domain.Conversation {
 		t.Helper()
 		got := claim(t, f)
 		if got == nil || got.ID != id {
 			t.Fatalf("ClaimNextConversation = %+v, want conversation %s", got, id)
 		}
+		f.AgeClaims(t, id, time.Second)
 		return got
 	}
 	// stageClaimed stages one step and claims it. One at a time keeps the

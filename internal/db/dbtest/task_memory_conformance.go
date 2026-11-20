@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -90,6 +91,12 @@ type TaskMemorySeeder struct {
 	// role-returning read) — used only by the RecordEntityTouchSystem
 	// precedence subtest. Returns "" if no row exists for (conversationID, entityID).
 	Role func(t *testing.T, conversationID, entityID string) string
+
+	// Age moves the conversation's memory row's created_at and updated_at d
+	// earlier, as if it had been written d ago, so a subtest that orders a
+	// write after it does not depend on the clock's resolution. Only
+	// RunTaskMemoryStoreConformance needs it.
+	Age func(t *testing.T, conversationID string, d time.Duration)
 }
 
 // memoryForConversation point-reads the conversation's own memory row. It uses
@@ -352,12 +359,29 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		// renames who wrote them.
 		s, orgID, seed := mk(t)
 		conversationID, _ := seed.Conversation(t, "updated-at")
+		// createdAt is the row's created_at, which no write after the insert
+		// moves.
+		var createdAt time.Time
 		write := func(content string, source domain.MemorySource) domain.TaskMemory {
 			t.Helper()
 			mem, err := s.UpsertAgentMemory(ctx, orgID, conversationID, "", content, source)
 			if err != nil {
 				t.Fatalf("UpsertAgentMemory(%q, %s): %v", content, source, err)
 			}
+			if !createdAt.IsZero() && !mem.CreatedAt.Equal(createdAt) {
+				t.Errorf("writing %q as %s moved CreatedAt from %v to %v", content, source, createdAt, mem.CreatedAt)
+			}
+			createdAt = mem.CreatedAt
+			return mem
+		}
+		// age moves the row a minute back and reads it, so the next write
+		// that restamps updated_at moves it later whatever the clock's
+		// resolution.
+		age := func() domain.TaskMemory {
+			t.Helper()
+			seed.Age(t, conversationID, time.Minute)
+			mem := *memoryForConversation(t, ctx, s, orgID, conversationID)
+			createdAt = mem.CreatedAt
 			return mem
 		}
 
@@ -365,6 +389,7 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		if !first.UpdatedAt.Equal(first.CreatedAt) {
 			t.Errorf("insert: UpdatedAt = %v, want CreatedAt %v", first.UpdatedAt, first.CreatedAt)
 		}
+		first = age()
 		for _, source := range []domain.MemorySource{domain.MemorySourceAgent, domain.MemorySourceGenerated} {
 			if same := write("first", source); !same.UpdatedAt.Equal(first.UpdatedAt) {
 				t.Errorf("rewriting the same content as %s moved UpdatedAt from %v to %v", source, first.UpdatedAt, same.UpdatedAt)
@@ -374,12 +399,14 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		if !second.UpdatedAt.After(first.UpdatedAt) {
 			t.Errorf("new content: UpdatedAt = %v, want after %v", second.UpdatedAt, first.UpdatedAt)
 		}
+		second = age()
 		// NULL content is content too: clearing it, and filling it again, are
 		// both changes.
 		cleared := write("", domain.MemorySourceNone)
 		if !cleared.UpdatedAt.After(second.UpdatedAt) {
 			t.Errorf("cleared content: UpdatedAt = %v, want after %v", cleared.UpdatedAt, second.UpdatedAt)
 		}
+		cleared = age()
 		if again := write("", domain.MemorySourceNone); !again.UpdatedAt.Equal(cleared.UpdatedAt) {
 			t.Errorf("clearing cleared content moved UpdatedAt from %v to %v", cleared.UpdatedAt, again.UpdatedAt)
 		}
@@ -387,22 +414,19 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		if !refilled.UpdatedAt.After(cleared.UpdatedAt) {
 			t.Errorf("refilled content: UpdatedAt = %v, want after %v", refilled.UpdatedAt, cleared.UpdatedAt)
 		}
-		if !refilled.CreatedAt.Equal(first.CreatedAt) {
-			t.Errorf("CreatedAt moved from %v to %v", first.CreatedAt, refilled.CreatedAt)
-		}
 	})
 
 	t.Run("GetMemoriesForEntity_orders_by_created_at_ASC", func(t *testing.T) {
 		// Materializer reads in oldest-first order so the next agent
 		// reading prior memories sees them chronologically. Insert two
-		// conversations on the same entity and pin the slice order. Both
-		// dialects bind created_at from Go at full resolution, so the two
-		// never tie.
+		// conversations on the same entity and pin the slice order. The
+		// first is aged a minute, so the two never share a created_at.
 		s, orgID, seed := mk(t)
 		conv1, entityID := seed.Conversation(t, "order-first")
 		if _, err := s.UpsertAgentMemory(ctx, orgID, conv1, "", "first", domain.MemorySourceAgent); err != nil {
 			t.Fatalf("upsert first: %v", err)
 		}
+		seed.Age(t, conv1, time.Minute)
 		seedPrimary(t, s, orgID, conv1, entityID)
 		conv2, _ := seed.Conversation(t, "order-second")
 		// The Conversation seeder returns a fresh entity per call; the test
