@@ -1649,6 +1649,8 @@ export default function Board() {
                   >
                     {!laneSettled(lists[colId], landed[colId]) ? (
                       <LaneSkeleton cards={SKELETON_CARDS[colId]} />
+                    ) : !landed[colId] ? (
+                      <LaneError>{lists[colId].error}</LaneError>
                     ) : (
                       <ColumnContents
                         colId={colId}
@@ -1817,8 +1819,6 @@ function ColumnContents({
   onRetry: (task: Task) => void
 } & Omit<PickerProps, 'pickerReadOnly'>) {
   if (tasks.length === 0) {
-    // TODO(TFAC-1525): a lane whose read failed with nothing held reaches this
-    // branch too and says it is empty; it should show the lane's error.
     return <EmptyColumn>{narrowed ? 'No matches' : emptyLabelFor(colId)}</EmptyColumn>
   }
 
@@ -2027,4 +2027,15 @@ function LaneSkeleton({ cards }: { cards: number }) {
 
 function EmptyColumn({ children }: { children: React.ReactNode }) {
   return <p className="text-ui text-ink-3 text-center py-12">{children}</p>
+}
+
+// A lane whose read failed before any page landed has nothing to show, and its
+// empty state would tell the viewer they have no work there. A lane that has
+// landed keeps what it last read through a failed refresh instead.
+function LaneError({ children }: { children: React.ReactNode }) {
+  return (
+    <p role="alert" className="text-ui text-alarm text-center py-12">
+      {children}
+    </p>
+  )
 }

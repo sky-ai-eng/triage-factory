@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, waitFor, fireEvent, act, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import Board from './Board'
+import { HttpError } from '../lib/apiClient'
 import type { Conversation, Task, TeamBot, TeamMember } from '../types'
 
 // The board's lanes, checked against what it actually reads; the two gestures
@@ -383,6 +384,37 @@ describe('the board while it loads', () => {
     await act(async () => held[3]())
     await within(queued).findByText(FREE.title)
     expect(queued.querySelectorAll('[data-skeleton]')).toHaveLength(0)
+  })
+
+  it('says a lane could not load when its first read fails, not that it is empty', async () => {
+    const answer = api.apiList.getMockImplementation()!
+    api.apiList.mockImplementation(async (path: string, body: Record<string, unknown>) => {
+      if ((body.statuses as string[]).includes('queued')) {
+        listBodies.push(body)
+        throw new HttpError(500, '')
+      }
+      return answer(path, body)
+    })
+    renderBoard()
+    const queued = (await screen.findByLabelText('Search Queued')).closest('.bc-col') as HTMLElement
+    expect(await within(queued).findByRole('alert')).toHaveTextContent('Could not load the queue.')
+    expect(within(queued).queryByText('Queue is empty')).toBeNull()
+    expect(queued.querySelectorAll('[data-skeleton]')).toHaveLength(0)
+    // The lanes whose reads landed paint as usual.
+    await screen.findByText(HELD.title)
+  })
+
+  it('keeps the cards a lane holds when a refresh fails', async () => {
+    renderBoard()
+    const queued = (await screen.findByLabelText('Search Queued')).closest('.bc-col') as HTMLElement
+    await within(queued).findByText(FREE.title)
+
+    api.apiList.mockRejectedValue(new HttpError(500, ''))
+    await act(async () => ws.handler?.({ type: 'tasks_updated' }))
+    await waitFor(() => expect(api.apiList.mock.calls.length).toBeGreaterThanOrEqual(6))
+    await act(async () => {})
+    expect(within(queued).getByText(FREE.title)).toBeInTheDocument()
+    expect(within(queued).queryByRole('alert')).toBeNull()
   })
 })
 
