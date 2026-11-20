@@ -642,6 +642,25 @@ func handlerBlueprint(ctx context.Context, tx db.TxStores, orgID, teamID, bluepr
 	return blueprint, blueprint.TeamID != "" && teamID != "" && blueprint.TeamID != teamID, nil
 }
 
+// lockHandlerBlueprint keeps the blueprint a handler write names live until
+// the write's transaction ends (Blueprints.LockForReference). The routes
+// first read the blueprint in an earlier transaction, and a merge or a
+// reconnect can retire it after that read, so this answers
+// errBlueprintNotFound for a blueprint that is no longer live, which the
+// routes answer as they do a missing one. The write calls it right before it
+// writes, once no fault refuses the write, so the blueprint is the handler's
+// team's own, a team the caller can write, as the lock's RLS requires.
+func lockHandlerBlueprint(ctx context.Context, tx db.TxStores, orgID, blueprintID string) error {
+	blueprint, err := tx.Blueprints.LockForReference(ctx, orgID, blueprintID)
+	if err != nil {
+		return err
+	}
+	if blueprint == nil {
+		return errBlueprintNotFound
+	}
+	return nil
+}
+
 // createEventHandlerRequest is the body of POST /api/event-handlers. event_type
 // is required; every other field has a default: mode watch, priority 0.5,
 // sort order 0, no blueprint, breaker threshold 4, autonomy floor 0, and
@@ -724,11 +743,12 @@ func (eh *eventHandlersHandler) handleEventHandlerCreate(w http.ResponseWriter, 
 	// clean 422. Both reads share one tx so the blueprint's team and the
 	// acting team are read under the same claims. It only reads: the acting
 	// team is recorded as the caller's last-written one by the write itself
-	// (insertEventHandler), which a refused request never commits.
+	// (insertEventHandler), which a refused request never commits, and which
+	// reads the blueprint again under lock (lockHandlerBlueprint).
 	//
-	// TODO(TFAC-1517): the blueprint is read here and the handler is inserted
-	// in a later transaction, so a blueprint delete that commits in between
-	// leaves the new handler on the deleted blueprint.
+	// TODO(TFAC-1517): in Postgres a blueprint delete detaches the blueprint's
+	// handlers before it writes the blueprint's row, so a create that locks
+	// the row before that write still lands on the deleted blueprint.
 	if h.BlueprintID != "" {
 		var (
 			blueprint *domain.Blueprint
@@ -797,6 +817,11 @@ func (eh *eventHandlersHandler) insertEventHandler(w http.ResponseWriter, r *htt
 		if e := checkPredicateReferences(r.Context(), tx, orgID, teamID, h.EventType, h.ScopePredicateJSON, nil, found, catalogFaults); e != nil {
 			return e
 		}
+		if h.BlueprintID != "" {
+			if e := lockHandlerBlueprint(r.Context(), tx, orgID, h.BlueprintID); e != nil {
+				return e
+			}
+		}
 		stored, e = tx.EventHandlers.Create(r.Context(), orgID, teamID, h)
 		return e
 	}); err != nil {
@@ -804,6 +829,10 @@ func (eh *eventHandlersHandler) insertEventHandler(w http.ResponseWriter, r *htt
 			return
 		}
 		if writeUnprocessableError(w, err) {
+			return
+		}
+		if errors.Is(err, errBlueprintNotFound) {
+			notFound(w, "blueprint")
 			return
 		}
 		eventHandlersLog.Error("create failed", "error", err)
@@ -865,7 +894,8 @@ func (eh *eventHandlersHandler) handleEventHandlerUpdate(w http.ResponseWriter, 
 	if bad.Flush(w, http.StatusBadRequest) {
 		return
 	}
-	if updated.BlueprintID != "" && updated.BlueprintID != existing.BlueprintID {
+	attaches := updated.BlueprintID != "" && updated.BlueprintID != existing.BlueprintID
+	if attaches {
 		var crossTeam bool
 		if err := eh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 			var e error
@@ -895,11 +925,20 @@ func (eh *eventHandlersHandler) handleEventHandlerUpdate(w http.ResponseWriter, 
 		if e := checkPredicateReferences(r.Context(), tx, orgID, existing.TeamID, existing.EventType, updated.ScopePredicateJSON, existing.ScopePredicateJSON, found, catalogFaults); e != nil {
 			return e
 		}
+		if attaches {
+			if e := lockHandlerBlueprint(r.Context(), tx, orgID, updated.BlueprintID); e != nil {
+				return e
+			}
+		}
 		var e error
 		stored, e = tx.EventHandlers.Update(r.Context(), orgID, updated)
 		return e
 	}); err != nil {
 		if writeUnprocessableError(w, err) {
+			return
+		}
+		if errors.Is(err, errBlueprintNotFound) {
+			notFound(w, "blueprint")
 			return
 		}
 		// The row was loaded a moment ago, so a miss here means it was deleted

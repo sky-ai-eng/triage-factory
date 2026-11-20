@@ -116,6 +116,42 @@ func (s *blueprintStore) GetSystem(ctx context.Context, orgID string, id string)
 	return getBlueprint(ctx, s.admin, orgID, id, true)
 }
 
+// LockForReference takes FOR SHARE and not FOR KEY SHARE: a retire writes
+// deleted_at, a non-key column, and a key-share lock, which is all a
+// referencing row's foreign key check takes, lets that write through without
+// waiting.
+func (s *blueprintStore) LockForReference(ctx context.Context, orgID string, id string) (*domain.Blueprint, error) {
+	return s.lockLive(ctx, orgID, id, "FOR SHARE", "LockForReference")
+}
+
+func (s *blueprintStore) LockForRetire(ctx context.Context, orgID string, id string) (*domain.Blueprint, error) {
+	return s.lockLive(ctx, orgID, id, "FOR NO KEY UPDATE", "LockForRetire")
+}
+
+// lockLive is Get on the caller's transaction with a row lock. Under READ
+// COMMITTED a lock that waited on a concurrent write re-checks the WHERE
+// against the row that write committed, so a reference queued behind a
+// retire reads the retire's deleted_at and finds no live row.
+func (s *blueprintStore) lockLive(ctx context.Context, orgID, id, lock, method string) (*domain.Blueprint, error) {
+	// Outside a transaction the lock would be released by the statement that
+	// took it, so a caller would hold nothing while believing it held the lock.
+	tx, ok := s.app.(*sql.Tx)
+	if !ok {
+		return nil, fmt.Errorf("postgres: %s needs a transaction's stores, whose commit releases the lock", method)
+	}
+	b, err := scanBlueprintRowPG(tx.QueryRowContext(ctx, `
+		SELECT `+pgBlueprintColumns+`
+		FROM blueprints WHERE org_id = $1 AND id = $2 AND deleted_at IS NULL `+lock,
+		orgID, id).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lock blueprint: %w", err)
+	}
+	return &b, nil
+}
+
 // pgBlueprintColumns is the canonical projection of a blueprints row, in the
 // order scanBlueprintRowPG reads them. Every point read SELECTs it and every
 // single-row write RETURNs it, so the write shape cannot drift from the read

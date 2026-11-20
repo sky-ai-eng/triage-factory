@@ -41,6 +41,19 @@ func TestBlueprintStore_Postgres_Conformance(t *testing.T) {
 	})
 }
 
+// TestBlueprintStore_Postgres_LockConformance runs the blueprint lock
+// conformance suite on the production pool split, under the claims of the
+// team's admin, so the locking reads meet the RLS policies a request's do.
+func TestBlueprintStore_Postgres_LockConformance(t *testing.T) {
+	h := pgtest.Shared(t)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	dbtest.RunBlueprintLockConformance(t, func(t *testing.T) (db.Stores, string, string, string) {
+		h.Reset(t)
+		orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "blueprint-lock")
+		return stores, orgID, userID, teamID
+	})
+}
+
 // TestBlueprintStore_Postgres_RunWriteConformance runs the shared returned-row
 // suite for the blueprint_runs writes against the Postgres impl.
 func TestBlueprintStore_Postgres_RunWriteConformance(t *testing.T) {

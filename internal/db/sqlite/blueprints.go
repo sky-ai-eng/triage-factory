@@ -135,6 +135,23 @@ func (s *blueprintStore) Get(ctx context.Context, orgID string, id string) (*dom
 	return &b, nil
 }
 
+func (s *blueprintStore) LockForReference(ctx context.Context, orgID string, id string) (*domain.Blueprint, error) {
+	return s.lockLive(ctx, orgID, id, "LockForReference")
+}
+
+func (s *blueprintStore) LockForRetire(ctx context.Context, orgID string, id string) (*domain.Blueprint, error) {
+	return s.lockLive(ctx, orgID, id, "LockForRetire")
+}
+
+// lockLive is Get, refused outside a transaction: the IMMEDIATE write
+// transaction around it is what serializes the caller.
+func (s *blueprintStore) lockLive(ctx context.Context, orgID, id, method string) (*domain.Blueprint, error) {
+	if _, ok := s.q.(*sql.Tx); !ok {
+		return nil, fmt.Errorf("sqlite: %s needs a transaction's stores, whose transaction serializes the caller", method)
+	}
+	return s.Get(ctx, orgID, id)
+}
+
 func (s *blueprintStore) GetSystem(ctx context.Context, orgID string, id string) (*domain.Blueprint, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err

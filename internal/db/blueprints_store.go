@@ -366,6 +366,32 @@ type BlueprintStore interface {
 	// request-facing paths).
 	Get(ctx context.Context, orgID string, id string) (*domain.Blueprint, error)
 
+	// LockForReference reads the live blueprint id as Get does, and keeps it
+	// live until the caller's transaction ends. A write that makes a row
+	// reference the blueprint, such as an event handler naming it, calls it
+	// right before that write. A retire of the blueprint then either commits
+	// first, and this answers (nil, nil), or waits for the write to commit and
+	// sees the reference. Two references do not wait for each other.
+	//
+	// LockForRetire is the other half: a write about to retire the blueprint,
+	// such as a merge absorbing it, calls it before it checks what references
+	// the blueprint. A reference that locked first is then visible to that
+	// check, and one that comes after waits for the retire and reads the
+	// blueprint as absent.
+	//
+	// The locks belong to the transaction, so both are called on a
+	// transaction's stores (db.TxStores), and both impls refuse any other.
+	// Postgres takes row locks that conflict, FOR SHARE and FOR NO KEY UPDATE;
+	// the second is the lock the retire's own UPDATE takes, taken before the
+	// check instead of at the write. Under RLS a locking read also applies the
+	// table's UPDATE policy, so a blueprint of a team the caller cannot write
+	// reads as absent; a caller that answers that case differently reads the
+	// blueprint with Get first. SQLite takes nothing: its write transaction
+	// begins IMMEDIATE and already holds the database's write lock, so a read
+	// inside it is enough.
+	LockForReference(ctx context.Context, orgID string, id string) (*domain.Blueprint, error)
+	LockForRetire(ctx context.Context, orgID string, id string) (*domain.Blueprint, error)
+
 	// Create inserts a new blueprint (user or imported source) owned by
 	// teamID. Caller-provided ID. The Postgres impl binds teamID directly
 	// (it satisfies the team-membership RLS); the SQLite impl ignores it.
@@ -460,9 +486,11 @@ type BlueprintStore interface {
 	// unchanged since both blueprints share them (validated same-team by the
 	// caller). The host's updated_at is bumped.
 	//
-	// The caller must reject a triggered source for a clean 422. MergeInto
-	// itself does not touch event_handlers — the source carrying no trigger is
-	// a precondition, not something this method enforces or repairs.
+	// The caller must reject a triggered source for a clean 422, checking
+	// after LockForRetire on the source so that no handler write lands
+	// between the check and the retire. MergeInto itself does not touch
+	// event_handlers — the source carrying no trigger is a precondition, not
+	// something this method enforces or repairs.
 	//
 	// Stamps user_modified true on the host (see the stamping contract
 	// above); the source is retired, not stamped.

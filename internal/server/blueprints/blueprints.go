@@ -795,10 +795,14 @@ func (h *Handler) handleBlueprintMerge(w http.ResponseWriter, r *http.Request) {
 		// retires it, and a handler on it would be left referencing a retired
 		// blueprint. Unreachable from the canvas (you can only connect a tail
 		// into an entry no handler references), but the endpoint is
-		// third-party-callable, so it refuses here.
-		// TODO(TFAC-1511): neither this check nor the handler writes lock the
-		// source, so a handler write that overlaps the merge can leave a handler
-		// on the retired source.
+		// third-party-callable, so it refuses here. The check runs under the
+		// source's retire lock, which conflicts with the lock a handler write
+		// naming the source takes, so that write either committed before the
+		// check, which then sees it, or waits for the merge and finds the
+		// source gone.
+		if source, e = tx.Blueprints.LockForRetire(r.Context(), orgID, req.SourceBlueprintID); e != nil || source == nil {
+			return e
+		}
 		triggers, e := tx.EventHandlers.ListForBlueprint(r.Context(), orgID, req.SourceBlueprintID)
 		if e != nil {
 			return e
@@ -1069,10 +1073,11 @@ func (h *Handler) handleBlueprintReconnect(w http.ResponseWriter, r *http.Reques
 		}
 		// No event handler may reference the target, as for a merge's source:
 		// the absorb retires it, and a handler on it would be left referencing a
-		// retired blueprint.
-		// TODO(TFAC-1511): neither this check nor the handler writes lock the
-		// target, so a handler write that overlaps the reconnect can leave a
-		// handler on the retired target.
+		// retired blueprint. The check runs under the target's retire lock, as
+		// the merge's does.
+		if target, e = tx.Blueprints.LockForRetire(r.Context(), orgID, req.TargetBlueprintID); e != nil || target == nil {
+			return e
+		}
 		triggers, e := tx.EventHandlers.ListForBlueprint(r.Context(), orgID, req.TargetBlueprintID)
 		if e != nil {
 			return e

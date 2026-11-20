@@ -32,6 +32,14 @@ func TestBlueprintStore_SQLite_Conformance(t *testing.T) {
 	})
 }
 
+// TestBlueprintStore_SQLite_LockConformance runs the blueprint lock
+// conformance suite: the IMMEDIATE write transaction is the lock SQLite takes.
+func TestBlueprintStore_SQLite_LockConformance(t *testing.T) {
+	dbtest.RunBlueprintLockConformance(t, func(t *testing.T) (db.Stores, string, string, string) {
+		return sqlitestore.New(openSQLiteForTest(t)), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID
+	})
+}
+
 // TestBlueprintStore_SQLite_RunWriteConformance runs the shared returned-row
 // suite for the blueprint_runs writes against the SQLite impl.
 func TestBlueprintStore_SQLite_RunWriteConformance(t *testing.T) {
