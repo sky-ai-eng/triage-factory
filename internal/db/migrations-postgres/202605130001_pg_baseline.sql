@@ -3931,6 +3931,11 @@ CREATE TABLE public.blueprint_runs (
     -- The event instance that auto-fired this run; NULL for manual. The
     -- blueprint_run is the firing unit, so the replay fence lives here.
     triggering_event_id uuid,
+    -- The predicate of the trigger that fired this run, as the text of the
+    -- trigger's scope_predicate_json at the firing; '' when it had none, and
+    -- for manual runs. The trigger's breaker counts a run only while the
+    -- trigger's predicate still reads as this text.
+    scope_predicate_json text DEFAULT ''::text NOT NULL,
     -- The bot that executes this run, frozen at mint and inherited by every step
     -- conversation, so attribution survives a later task-claim change. Nullable:
     -- no org agent at mint, or the agent row was deleted (ON DELETE SET NULL).

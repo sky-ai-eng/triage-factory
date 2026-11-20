@@ -254,6 +254,23 @@ func pgSequenceScaffold(t *testing.T, h *pgtest.Harness) (db.BlueprintStore, dbt
 			}
 			return idx
 		},
+		SetTriggerPredicate: func(t *testing.T, triggerID, predicate string) string {
+			t.Helper()
+			var stored string
+			if err := h.AdminDB.QueryRow(`UPDATE event_handlers SET scope_predicate_json = NULLIF($1, '')::jsonb WHERE id = $2
+				RETURNING COALESCE(scope_predicate_json::text, '')`, predicate, triggerID).Scan(&stored); err != nil {
+				t.Fatalf("set the trigger's predicate: %v", err)
+			}
+			return stored
+		},
+		RunPredicate: func(t *testing.T, blueprintRunID string) string {
+			t.Helper()
+			var got string
+			if err := h.AdminDB.QueryRow(`SELECT scope_predicate_json FROM blueprint_runs WHERE id = $1`, blueprintRunID).Scan(&got); err != nil {
+				t.Fatalf("read scope_predicate_json: %v", err)
+			}
+			return got
+		},
 		BackdateRunStartedAt: func(t *testing.T, blueprintRunID string, age time.Duration) {
 			t.Helper()
 			if _, err := h.AdminDB.Exec(

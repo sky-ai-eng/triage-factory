@@ -952,18 +952,19 @@ func firingTeamArchived(ctx context.Context, q queryer, teamID string) (bool, er
 // insertFiringRun writes the blueprint_runs row for a firing on the given
 // transaction, fenced on the event arm and plain on the manual one, and
 // reports through inserted whether a row landed. Split out so the two arms'
-// only difference — the fence and the creator column the
-// blueprint_runs_creator_matches_trigger_type CHECK pairs with trigger_type —
-// reads as the two statements it is.
+// differences — the fence, the creator column the
+// blueprint_runs_creator_matches_trigger_type CHECK pairs with trigger_type,
+// and the trigger's predicate, which only the event arm records — read as
+// the two statements they are.
 func insertFiringRun(ctx context.Context, q queryer, br domain.BlueprintRun, teamID, stepPlan string, event bool, inserted *bool) error {
 	var res sql.Result
 	var err error
 	if event {
 		res, err = q.ExecContext(ctx, `
-			INSERT INTO blueprint_runs (id, team_id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id, actor_agent_id, status, step_plan, worktree_path, creator_user_id, started_at)
-			VALUES (?, ?, ?, ?, 'event', ?, ?, ?, ?, ?, ?, NULL, CURRENT_TIMESTAMP)
+			INSERT INTO blueprint_runs (id, team_id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id, scope_predicate_json, actor_agent_id, status, step_plan, worktree_path, creator_user_id, started_at)
+			VALUES (?, ?, ?, ?, 'event', ?, ?, ?, ?, ?, ?, ?, NULL, CURRENT_TIMESTAMP)
 			ON CONFLICT (triggering_event_id, trigger_id) WHERE triggering_event_id IS NOT NULL DO NOTHING
-		`, br.ID, nullIfEmpty(teamID), br.BlueprintID, br.TaskID, br.TriggerID, br.TriggeringEventID,
+		`, br.ID, nullIfEmpty(teamID), br.BlueprintID, br.TaskID, br.TriggerID, br.TriggeringEventID, br.ScopePredicateJSON,
 			nullIfEmpty(br.ActorAgentID), br.Status, stepPlan, br.WorktreePath)
 	} else {
 		res, err = q.ExecContext(ctx, `

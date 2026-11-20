@@ -1958,12 +1958,28 @@ func reassignClaimToUser(ctx context.Context, q queryer, orgID, taskID, fromUser
 
 // --- Breaker ---
 
+// breakerRunOfHandlerSQL joins a blueprint_runs row to the trigger whose
+// breaker it counts toward: the trigger fired it, of the blueprint the
+// trigger runs now, under the predicate the trigger holds now. The run
+// records jsonb's text of the trigger's predicate, the empty string for
+// none, so the trigger's column is read as text the same way and its NULL is
+// read as the empty string.
+func breakerRunOfHandlerSQL(run, handler string) string {
+	return handler + `.org_id = ` + run + `.org_id
+		AND ` + handler + `.id = ` + run + `.trigger_id
+		AND ` + handler + `.blueprint_id = ` + run + `.blueprint_id
+		AND ` + run + `.scope_predicate_json = COALESCE(` + handler + `.scope_predicate_json::text, '')`
+}
+
 // breakerFailureSQL is a run, over the caller's aliases for a blueprint_runs
 // row and its task, that counts toward its trigger's breaker: event-fired,
 // failed or aborted, and with no run on the same entity that resets the
-// breaker started at or after it — a completed run of the same trigger and
-// blueprint, or a completed run a person started, of any blueprint. Its
-// SQLite twin is the same predicate without the org on the joins.
+// breaker started at or after it — a completed run of the same trigger,
+// blueprint and predicate, or a completed run a person started, of any
+// blueprint. The caller joins the run to its trigger with
+// breakerRunOfHandlerSQL, so the run's own blueprint and predicate are the
+// trigger's current ones. Its SQLite twin is the same predicate without the
+// org on the joins.
 func breakerFailureSQL(run, task string) string {
 	return run + `.trigger_type = 'event'
 		AND ` + run + `.status IN ('failed', 'aborted')
@@ -1974,7 +1990,8 @@ func breakerFailureSQL(run, task string) string {
 			  AND okt.entity_id = ` + task + `.entity_id
 			  AND ok.status = 'completed'
 			  AND (ok.trigger_type = 'manual'
-			       OR (ok.trigger_id = ` + run + `.trigger_id AND ok.blueprint_id = ` + run + `.blueprint_id))
+			       OR (ok.trigger_id = ` + run + `.trigger_id AND ok.blueprint_id = ` + run + `.blueprint_id
+			           AND ok.scope_predicate_json = ` + run + `.scope_predicate_json))
 			  AND ok.started_at >= ` + run + `.started_at)`
 }
 
@@ -1987,7 +2004,7 @@ func (s *taskStore) BreakerStreakSystem(ctx context.Context, orgID, entityID, tr
 		         WHERE c.org_id = br.org_id AND c.blueprint_run_id = br.id
 		         ORDER BY c.started_at DESC, c.id DESC LIMIT 1)
 		FROM blueprint_runs br
-		JOIN event_handlers h ON h.org_id = br.org_id AND h.id = br.trigger_id AND h.blueprint_id = br.blueprint_id
+		JOIN event_handlers h ON `+breakerRunOfHandlerSQL("br", "h")+`
 		JOIN tasks t ON t.id = br.task_id AND t.org_id = br.org_id
 		WHERE br.org_id = $1 AND t.entity_id = $2 AND h.id = $3
 		  AND `+breakerFailureSQL("br", "t")+`
@@ -2008,7 +2025,7 @@ func (s *taskStore) ListTrippedBreakersSystem(ctx context.Context, orgID string)
 	rows, err := s.admin.QueryContext(ctx, `
 		SELECT h.id::text, t.entity_id::text
 		FROM event_handlers h
-		JOIN blueprint_runs br ON br.org_id = h.org_id AND br.trigger_id = h.id AND br.blueprint_id = h.blueprint_id
+		JOIN blueprint_runs br ON `+breakerRunOfHandlerSQL("br", "h")+`
 		JOIN tasks t ON t.id = br.task_id AND t.org_id = br.org_id
 		JOIN entities e ON e.id = t.entity_id AND e.org_id = t.org_id AND e.state = 'active'
 		WHERE h.org_id = $1 AND h.mode = 'automate' AND h.deleted_at IS NULL

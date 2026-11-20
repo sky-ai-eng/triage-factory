@@ -25,13 +25,21 @@ type BreakerSeeder struct {
 	// TaskOnEntity stages another task on an entity Task created.
 	TaskOnEntity func(t *testing.T, entityID string) (taskID string)
 	// EventRun stages a blueprint run of blueprintID on taskID that triggerID
-	// fired, with one step conversation. Returns the conversation's id.
+	// fired under the predicate it holds now, as a firing records it, with
+	// one step conversation. Returns the conversation's id.
 	EventRun func(t *testing.T, taskID, triggerID, blueprintID, status string, startedAt time.Time) (conversationID string)
+	// EventRunUnder is EventRun for a run that recorded predicate ("" for
+	// none) whatever the trigger holds now: a firing that read the trigger
+	// before an edit and committed after it.
+	EventRunUnder func(t *testing.T, taskID, triggerID, blueprintID, predicate, status string, startedAt time.Time) (conversationID string)
 	// ManualRun stages a blueprint run of blueprintID on taskID that a person
 	// started, with one step conversation. Returns the conversation's id.
 	ManualRun func(t *testing.T, taskID, blueprintID, status string, startedAt time.Time) (conversationID string)
 	// SetTrigger writes the handler's mode and breaker_threshold.
 	SetTrigger func(t *testing.T, triggerID, mode string, threshold int)
+	// SetPredicate writes the handler's scope predicate, "" for none, as the
+	// PATCH route stores it.
+	SetPredicate func(t *testing.T, triggerID, predicate string)
 	// DeleteTrigger soft-deletes the trigger, as the delete route does.
 	DeleteTrigger func(t *testing.T, triggerID string)
 	// CloseEntity sets the entity's state to closed.
@@ -41,6 +49,13 @@ type BreakerSeeder struct {
 // BreakerFactory hands the suite a fresh database per subtest: the list read
 // is org-wide and must see only what the subtest staged.
 type BreakerFactory func(t *testing.T) (tasks db.TaskStore, orgID string, seed BreakerSeeder)
+
+// Two predicates on the CI-failed event every seeded trigger is on, in the
+// canonical form the API stores.
+const (
+	breakerPredicateA = `{"author_id_in":["583231"]}`
+	breakerPredicateB = `{"author_id_in":["583231","9001"]}`
+)
 
 // RunBreakerConformance is the shared suite for TaskStore's breaker reads,
 // BreakerStreakSystem and ListTrippedBreakersSystem.
@@ -167,11 +182,15 @@ func RunBreakerConformance(t *testing.T, mk BreakerFactory) {
 		}
 	})
 
-	// Another trigger on the same blueprint has a breaker of its own.
+	// Another trigger on the same blueprint has a breaker of its own, even
+	// one on the same event under the same predicate: the trigger stays in
+	// the key.
 	t.Run("Another_trigger's_runs_of_the_blueprint_do_not_count", func(t *testing.T) {
 		tasks, orgID, seed := mk(t)
 		triggerID, blueprintID := seed.Trigger(t, 2)
 		otherTriggerID := seed.TriggerOn(t, blueprintID, 2)
+		seed.SetPredicate(t, triggerID, breakerPredicateA)
+		seed.SetPredicate(t, otherTriggerID, breakerPredicateA)
 		entityID, taskID := seed.Task(t)
 		seed.EventRun(t, taskID, otherTriggerID, blueprintID, "failed", at(0))
 		seed.EventRun(t, taskID, otherTriggerID, blueprintID, "failed", at(1))
@@ -207,6 +226,100 @@ func RunBreakerConformance(t *testing.T, mk BreakerFactory) {
 		seed.EventRun(t, taskID, triggerID, blueprintID, "failed", at(2))
 		if got := streak(t, tasks, orgID, entityID, triggerID); got.Failures != 1 {
 			t.Errorf("streak = %+v, want the one failure of the trigger's current blueprint", got)
+		}
+		if got := tripped(t, tasks, orgID); len(got) != 0 {
+			t.Errorf("tripped = %+v, want none", got)
+		}
+	})
+
+	// A trigger whose predicate changes starts its streak again, as one
+	// retargeted onto another blueprint does: its runs under the predicate it
+	// left do not count.
+	t.Run("Counts_only_runs_under_the_trigger's_current_predicate", func(t *testing.T) {
+		tasks, orgID, seed := mk(t)
+		triggerID, blueprintID := seed.Trigger(t, 2)
+		entityID, taskID := seed.Task(t)
+		seed.EventRun(t, taskID, triggerID, blueprintID, "failed", at(0))
+		seed.EventRun(t, taskID, triggerID, blueprintID, "failed", at(1))
+		if got := tripped(t, tasks, orgID); len(got) != 1 {
+			t.Fatalf("tripped before the edit = %+v, want the one breaker", got)
+		}
+
+		seed.SetPredicate(t, triggerID, breakerPredicateA)
+		if got := streak(t, tasks, orgID, entityID, triggerID); got != (domain.BreakerStreak{}) {
+			t.Errorf("streak after the edit = %+v, want none: both failures were under no predicate", got)
+		}
+		if got := tripped(t, tasks, orgID); len(got) != 0 {
+			t.Errorf("tripped after the edit = %+v, want none", got)
+		}
+
+		first := seed.EventRun(t, taskID, triggerID, blueprintID, "failed", at(2))
+		if got := streak(t, tasks, orgID, entityID, triggerID); got.Failures != 1 || got.LastConversationID != first {
+			t.Errorf("streak = %+v, want the one failure under the new predicate, %s", got, first)
+		}
+		seed.EventRun(t, taskID, triggerID, blueprintID, "failed", at(3))
+		if got := tripped(t, tasks, orgID); !slices.Equal(got, []domain.TrippedBreaker{{TriggerID: triggerID, EntityID: entityID}}) {
+			t.Errorf("tripped = %+v, want the trigger on %s under its new predicate", got, entityID)
+		}
+
+		// Changed again, from one predicate to another.
+		seed.SetPredicate(t, triggerID, breakerPredicateB)
+		if got := streak(t, tasks, orgID, entityID, triggerID); got != (domain.BreakerStreak{}) {
+			t.Errorf("streak after the second edit = %+v, want none", got)
+		}
+	})
+
+	// Predicates are compared as stored, so an edit undone counts the runs
+	// under the predicate it returns to, as retargeting a trigger back onto
+	// a blueprint counts its runs of that blueprint.
+	t.Run("A_predicate_edited_back_counts_its_runs_again", func(t *testing.T) {
+		tasks, orgID, seed := mk(t)
+		triggerID, blueprintID := seed.Trigger(t, 2)
+		seed.SetPredicate(t, triggerID, breakerPredicateA)
+		entityID, taskID := seed.Task(t)
+		seed.EventRun(t, taskID, triggerID, blueprintID, "failed", at(0))
+		last := seed.EventRun(t, taskID, triggerID, blueprintID, "failed", at(1))
+		seed.SetPredicate(t, triggerID, breakerPredicateB)
+		seed.SetPredicate(t, triggerID, breakerPredicateA)
+		if got := streak(t, tasks, orgID, entityID, triggerID); got.Failures != 2 || got.LastConversationID != last {
+			t.Errorf("streak = %+v, want both failures under the predicate the trigger holds again, ending at %s", got, last)
+		}
+		if got := tripped(t, tasks, orgID); len(got) != 1 {
+			t.Errorf("tripped = %+v, want the one breaker", got)
+		}
+	})
+
+	// A firing that read the trigger before an edit and committed after it
+	// records the predicate it read. Completed, it says nothing about the
+	// predicate the trigger holds now.
+	t.Run("A_completed_run_under_another_predicate_does_not_reset_it", func(t *testing.T) {
+		tasks, orgID, seed := mk(t)
+		triggerID, blueprintID := seed.Trigger(t, 3)
+		seed.SetPredicate(t, triggerID, breakerPredicateA)
+		entityID, taskID := seed.Task(t)
+		otherTaskID := seed.TaskOnEntity(t, entityID)
+		seed.EventRun(t, taskID, triggerID, blueprintID, "failed", at(0))
+		seed.EventRunUnder(t, otherTaskID, triggerID, blueprintID, "", "completed", at(1))
+		seed.EventRunUnder(t, otherTaskID, triggerID, blueprintID, breakerPredicateB, "completed", at(2))
+		if got := streak(t, tasks, orgID, entityID, triggerID); got.Failures != 1 {
+			t.Errorf("streak = %+v, want the failure under the current predicate: the completed runs were under others", got)
+		}
+		seed.EventRun(t, otherTaskID, triggerID, blueprintID, "completed", at(3))
+		if got := streak(t, tasks, orgID, entityID, triggerID); got != (domain.BreakerStreak{}) {
+			t.Errorf("streak after a completed run under the current predicate = %+v, want none", got)
+		}
+	})
+
+	t.Run("A_person's_completed_run_resets_it_under_any_predicate", func(t *testing.T) {
+		tasks, orgID, seed := mk(t)
+		triggerID, blueprintID := seed.Trigger(t, 2)
+		seed.SetPredicate(t, triggerID, breakerPredicateA)
+		entityID, taskID := seed.Task(t)
+		seed.EventRun(t, taskID, triggerID, blueprintID, "failed", at(0))
+		seed.EventRun(t, taskID, triggerID, blueprintID, "failed", at(1))
+		seed.ManualRun(t, taskID, blueprintID, "completed", at(2))
+		if got := streak(t, tasks, orgID, entityID, triggerID); got != (domain.BreakerStreak{}) {
+			t.Errorf("streak after a person's completed run = %+v, want none", got)
 		}
 		if got := tripped(t, tasks, orgID); len(got) != 0 {
 			t.Errorf("tripped = %+v, want none", got)
@@ -268,6 +381,9 @@ func RunBreakerConformance(t *testing.T, mk BreakerFactory) {
 			}},
 			{"trigger_deleted", func(t *testing.T, seed BreakerSeeder, triggerID, _, _, _ string) {
 				seed.DeleteTrigger(t, triggerID)
+			}},
+			{"predicate_changed", func(t *testing.T, seed BreakerSeeder, triggerID, _, _, _ string) {
+				seed.SetPredicate(t, triggerID, breakerPredicateA)
 			}},
 			{"entity_closed", func(t *testing.T, seed BreakerSeeder, _, _, entityID, _ string) {
 				seed.CloseEntity(t, entityID)

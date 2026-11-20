@@ -60,7 +60,7 @@ The resume helper built for SKY-141 is **reused by the open-run resume path** (w
 
 Manual runs = human is in the loop and takes responsibility. Auto runs = system must enforce safety rails. This distinction is threaded through via `agent_runs.trigger_source` (`'manual' | 'auto'`, added in SKY-147).
 
-The circuit breaker counts only runs an event handler fired (`blueprint_runs.trigger_type = 'event'`), per entity and handler. A person's completed run on the entity **does** reset it (success is success, regardless of origin), but a person's failed run is ignored. When implementing any counter/breaker logic, always filter on `trigger_type`.
+The circuit breaker counts only runs an event handler fired (`blueprint_runs.trigger_type = 'event'`), per entity and handler, and only the handler's runs of its current blueprint under its current predicate (`blueprint_runs.scope_predicate_json`, the handler's predicate as it stood when it fired the run). Editing a handler's predicate or retargeting it starts its count over; editing it back counts the earlier runs again. A person's completed run on the entity **does** reset it (success is success, regardless of origin), but a person's failed run is ignored. When implementing any counter/breaker logic, always filter on `trigger_type`.
 
 ### 6. "Only two acceptable reasons to stop"
 
@@ -102,7 +102,7 @@ A task can also come back. When another event resolved a task (CI passing closes
 Two consequences if you're the agent working the run:
 
 - **Your conversation can grow mid-run.** A run isn't a snapshot of one triggering event: more same-task events (a new Slack follow-up in the thread, a re-fired CI failure) can arrive as injected user messages while you're working. Treat a later injection as the current intent.
-- **Absorbed means absorbed.** There's no separate compensation path for a folded-in event. If the run fails, that event fails with it, and the per-(entity, handler) breaker owns repeated failure uniformly — the same posture as the original triggering event.
+- **Absorbed means absorbed.** There's no separate compensation path for a folded-in event. If the run fails, that event fails with it, and the per-(entity, handler, predicate, blueprint) breaker owns repeated failure uniformly — the same posture as the original triggering event.
 
 This replaced the old per-event-type `Additive` boolean (now deleted): absorption is one universal, task-scoped rule rather than a flag each new event type had to opt into, which also makes cross-task absorption (folding a follow-up into an _unrelated_ task's run) structurally impossible. Same task ⇒ same owning team, so no principal-boundary guard is needed. The gate lives in `internal/routing`'s `tryAutoDelegate` (`delegation.go`).
 

@@ -115,6 +115,9 @@ func stubDelegateRun(database *sql.DB, task domain.Task, opts delegate.DelegateO
 		TriggerType:       domain.BlueprintTriggerType(opts.TriggerType),
 		TriggerID:         opts.TriggerID,
 		TriggeringEventID: opts.TriggeringEventID,
+		// Mirror production, which records the trigger's predicate on the
+		// event path alone.
+		ScopePredicateJSON: opts.ScopePredicateJSON,
 		// Mirror production: freeze the caller-resolved actor onto the
 		// blueprint_run so a router test can assert it matches the task claim.
 		ActorAgentID: opts.ActorAgentID,
@@ -411,6 +414,33 @@ func TestFiringWorker_HandlerLeftAutomate(t *testing.T) {
 		t.Fatalf("expected 1 firing row, got %d", len(rows))
 	}
 	requireSkipped(t, rows[0], domain.PendingFiringSkipTriggerDisabled)
+}
+
+// TestFiringWorker_RecordsTheTriggersPredicateAtTheFiring: a firing queued
+// before its trigger's predicate changed records the predicate the trigger
+// holds when the worker fires it, as it runs the blueprint the trigger runs
+// then. The breaker the worker checks before firing is the one the run then
+// counts toward, and the worker does not match the event again, so the run
+// counts under the new predicate even when its event would not match it.
+func TestFiringWorker_RecordsTheTriggersPredicateAtTheFiring(t *testing.T) {
+	database := newTestDB(t)
+	entityID, taskID, triggerID, eventID := setupDrainScenario(t, database)
+	enqueueFiring(t, database, entityID, taskID, triggerID, eventID)
+	const edited = `{"author_id_in":["583231"]}`
+	if _, err := database.Exec(`UPDATE event_handlers SET scope_predicate_json = ? WHERE id = ?`, edited, triggerID); err != nil {
+		t.Fatalf("edit the trigger's predicate: %v", err)
+	}
+	drainOnce(t, drainRouter(database, sqlitestore.New(database).PendingFirings, &stubDelegator{db: database}))
+
+	f := firingsFor(t, database, entityID)[0]
+	requireFired(t, f)
+	var recorded string
+	if err := database.QueryRow(`SELECT scope_predicate_json FROM blueprint_runs WHERE id = ?`, *f.FiredBlueprintRunID).Scan(&recorded); err != nil {
+		t.Fatalf("read the run's predicate: %v", err)
+	}
+	if recorded != edited {
+		t.Errorf("run's recorded predicate = %q, want the trigger's at the firing, %q", recorded, edited)
+	}
 }
 
 // TestFiringWorker_BreakerTripped: a breaker at its threshold declines the
