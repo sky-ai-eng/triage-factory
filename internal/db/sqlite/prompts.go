@@ -121,6 +121,12 @@ func scanPromptRowSQLite(scanFn func(dst ...any) error) (domain.Prompt, error) {
 // GetSystem omits the deleted_at filter so soft-deleted prompts still resolve
 // for in-flight runs and past-run timelines (mirrors the admin-pool variant in
 // Postgres).
+// GetLiveSystem is Get: SQLite has one connection, so the admin read and the
+// request read are the same read.
+func (s *promptStore) GetLiveSystem(ctx context.Context, orgID string, id string) (*domain.Prompt, error) {
+	return s.Get(ctx, orgID, id)
+}
+
 func (s *promptStore) GetSystem(ctx context.Context, orgID string, id string) (*domain.Prompt, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err

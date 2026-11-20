@@ -642,6 +642,29 @@ func handlerBlueprint(ctx context.Context, tx db.TxStores, orgID, teamID, bluepr
 	return blueprint, blueprint.TeamID != "" && teamID != "" && blueprint.TeamID != teamID, nil
 }
 
+// holdHandlerBlueprint reads the blueprint a handler write attaches again,
+// inside the transaction that writes the handler, and holds it until that
+// transaction ends (BlueprintStore.GetForShare): errBlueprintNotFound when it
+// is no longer live. The route's first read of the blueprint can be stale by
+// the time the handler is written, and a handler written onto a deleted
+// blueprint runs its deleted steps.
+//
+// It is called only for a blueprint of the handler's own team: in Postgres
+// the lock's row-level security is the blueprints UPDATE policy, which hides
+// another team's blueprint from a caller who may only read that team, and a
+// write naming another team's blueprint is refused with
+// crossTeamBlueprintFault already.
+func holdHandlerBlueprint(ctx context.Context, tx db.TxStores, orgID, blueprintID string) error {
+	blueprint, err := tx.Blueprints.GetForShare(ctx, orgID, blueprintID)
+	if err != nil {
+		return err
+	}
+	if blueprint == nil {
+		return errBlueprintNotFound
+	}
+	return nil
+}
+
 // createEventHandlerRequest is the body of POST /api/event-handlers. event_type
 // is required; every other field has a default: mode watch, priority 0.5,
 // sort order 0, no blueprint, breaker threshold 4, autonomy floor 0, and
@@ -724,11 +747,11 @@ func (eh *eventHandlersHandler) handleEventHandlerCreate(w http.ResponseWriter, 
 	// clean 422. Both reads share one tx so the blueprint's team and the
 	// acting team are read under the same claims. It only reads: the acting
 	// team is recorded as the caller's last-written one by the write itself
-	// (insertEventHandler), which a refused request never commits.
-	//
-	// TODO(TFAC-1517): the blueprint is read here and the handler is inserted
-	// in a later transaction, so a blueprint delete that commits in between
-	// leaves the new handler on the deleted blueprint.
+	// (insertEventHandler), which a refused request never commits. The write
+	// reads the blueprint again (holdHandlerBlueprint), because a delete can
+	// commit between this read and the write, which the catalog check below
+	// keeps apart for as long as a call to Jira or Linear takes.
+	var hold string
 	if h.BlueprintID != "" {
 		var (
 			blueprint *domain.Blueprint
@@ -754,6 +777,8 @@ func (eh *eventHandlersHandler) handleEventHandlerCreate(w http.ResponseWriter, 
 		}
 		if crossTeam {
 			unproc.Add(crossTeamBlueprintFault)
+		} else {
+			hold = h.BlueprintID
 		}
 		if !writes.name {
 			h.Name = blueprint.Name
@@ -774,25 +799,31 @@ func (eh *eventHandlersHandler) handleEventHandlerCreate(w http.ResponseWriter, 
 			return
 		}
 	}
-	eh.insertEventHandler(w, r, orgID, userID, teamID, h, found, catalogFaults)
+	eh.insertEventHandler(w, r, orgID, userID, teamID, h, hold, found, catalogFaults)
 }
 
 // insertEventHandler resolves the acting team and writes the composed row,
 // answering 201 with the row the INSERT returned. pickedTeam is the team the
-// caller was gated on, found is the body's 422 faults, and catalogFaults are
-// what checkPredicateCatalog found in the predicate for that team; the
-// transaction answers them with the reference check's
+// caller was gated on, hold is the blueprint the write holds until it commits
+// (holdHandlerBlueprint), or "" for none, found is the body's 422 faults, and
+// catalogFaults are what checkPredicateCatalog found in the predicate for that
+// team; the transaction answers them with the reference check's
 // (checkPredicateReferences).
 //
 // The answer is the stored row, not the composed one: the write decides
 // team_id, source and both timestamps, so the struct handed in here is not a
 // picture of what landed.
-func (eh *eventHandlersHandler) insertEventHandler(w http.ResponseWriter, r *http.Request, orgID, userID, pickedTeam string, h domain.EventHandler, found, catalogFaults []httpx.ErrorItem) {
+func (eh *eventHandlersHandler) insertEventHandler(w http.ResponseWriter, r *http.Request, orgID, userID, pickedTeam string, h domain.EventHandler, hold string, found, catalogFaults []httpx.ErrorItem) {
 	var stored domain.EventHandler
 	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		teamID, e := teamscope.ResolveActing(r.Context(), tx.Teams, tx.Users, orgID, userID, pickedTeam)
 		if e != nil {
 			return e
+		}
+		if hold != "" {
+			if e := holdHandlerBlueprint(r.Context(), tx, orgID, hold); e != nil {
+				return e
+			}
 		}
 		if e := checkPredicateReferences(r.Context(), tx, orgID, teamID, h.EventType, h.ScopePredicateJSON, nil, found, catalogFaults); e != nil {
 			return e
@@ -800,6 +831,10 @@ func (eh *eventHandlersHandler) insertEventHandler(w http.ResponseWriter, r *htt
 		stored, e = tx.EventHandlers.Create(r.Context(), orgID, teamID, h)
 		return e
 	}); err != nil {
+		if errors.Is(err, errBlueprintNotFound) {
+			notFound(w, "blueprint")
+			return
+		}
 		if teamscope.WriteIfSelectionError(w, err) {
 			return
 		}
@@ -865,6 +900,10 @@ func (eh *eventHandlersHandler) handleEventHandlerUpdate(w http.ResponseWriter, 
 	if bad.Flush(w, http.StatusBadRequest) {
 		return
 	}
+	// The write holds a blueprint the body attaches (holdHandlerBlueprint), as
+	// the create does, so one deleted after the read below answers 404 like a
+	// missing one.
+	var hold string
 	if updated.BlueprintID != "" && updated.BlueprintID != existing.BlueprintID {
 		var crossTeam bool
 		if err := eh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
@@ -881,6 +920,8 @@ func (eh *eventHandlersHandler) handleEventHandlerUpdate(w http.ResponseWriter, 
 		}
 		if crossTeam {
 			unproc.Add(crossTeamBlueprintFault)
+		} else {
+			hold = updated.BlueprintID
 		}
 	}
 	handlerRowFaults(&unproc, updated, writes)
@@ -892,6 +933,11 @@ func (eh *eventHandlersHandler) handleEventHandlerUpdate(w http.ResponseWriter, 
 	}
 	var stored domain.EventHandler
 	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		if hold != "" {
+			if e := holdHandlerBlueprint(r.Context(), tx, orgID, hold); e != nil {
+				return e
+			}
+		}
 		if e := checkPredicateReferences(r.Context(), tx, orgID, existing.TeamID, existing.EventType, updated.ScopePredicateJSON, existing.ScopePredicateJSON, found, catalogFaults); e != nil {
 			return e
 		}
@@ -899,6 +945,10 @@ func (eh *eventHandlersHandler) handleEventHandlerUpdate(w http.ResponseWriter, 
 		stored, e = tx.EventHandlers.Update(r.Context(), orgID, updated)
 		return e
 	}); err != nil {
+		if errors.Is(err, errBlueprintNotFound) {
+			notFound(w, "blueprint")
+			return
+		}
 		if writeUnprocessableError(w, err) {
 			return
 		}

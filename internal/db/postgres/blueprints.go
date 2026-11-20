@@ -116,6 +116,41 @@ func (s *blueprintStore) GetSystem(ctx context.Context, orgID string, id string)
 	return getBlueprint(ctx, s.admin, orgID, id, true)
 }
 
+func (s *blueprintStore) GetLiveSystem(ctx context.Context, orgID string, id string) (*domain.Blueprint, error) {
+	return getBlueprint(ctx, s.admin, orgID, id, false)
+}
+
+func (s *blueprintStore) GetForShare(ctx context.Context, orgID string, id string) (*domain.Blueprint, error) {
+	return s.getLocked(ctx, orgID, id, "FOR SHARE")
+}
+
+func (s *blueprintStore) GetForUpdate(ctx context.Context, orgID string, id string) (*domain.Blueprint, error) {
+	return s.getLocked(ctx, orgID, id, "FOR UPDATE")
+}
+
+// getLocked is the live point read with a row lock. Under READ COMMITTED a
+// lock that waited re-checks the WHERE against the row the other transaction
+// committed, which is what makes a retired blueprint answer as absent here.
+func (s *blueprintStore) getLocked(ctx context.Context, orgID, id, lock string) (*domain.Blueprint, error) {
+	// Outside a transaction the lock would be released by the statement that
+	// took it, so a caller would hold nothing while believing it held the row.
+	tx, ok := s.app.(*sql.Tx)
+	if !ok {
+		return nil, errors.New("postgres: a locking blueprint read needs a transaction's stores, whose commit releases the lock")
+	}
+	b, err := scanBlueprintRowPG(tx.QueryRowContext(ctx, `
+		SELECT `+pgBlueprintColumns+`
+		FROM blueprints WHERE org_id = $1 AND id = $2 AND deleted_at IS NULL
+		`+lock, orgID, id).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &b, nil
+}
+
 // pgBlueprintColumns is the canonical projection of a blueprints row, in the
 // order scanBlueprintRowPG reads them. Every point read SELECTs it and every
 // single-row write RETURNs it, so the write shape cannot drift from the read

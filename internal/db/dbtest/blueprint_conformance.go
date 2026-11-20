@@ -705,8 +705,15 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 		store, orgID, teamID, _ := factory(t)
 		ctx := context.Background()
 		bp := seedBlueprint(t, store, orgID, teamID, "Soft")
+		if got, err := store.GetLiveSystem(ctx, orgID, bp); err != nil || got == nil || got.ID != bp {
+			t.Fatalf("GetLiveSystem before soft-delete = (%v, %v); want the blueprint", got, err)
+		}
 		if err := store.Delete(ctx, orgID, bp); err != nil {
 			t.Fatalf("Delete: %v", err)
+		}
+		// GetLiveSystem hides it too: a new run must not start on it.
+		if got, err := store.GetLiveSystem(ctx, orgID, bp); err != nil || got != nil {
+			t.Fatalf("GetLiveSystem after soft-delete = (%v, %v); want (nil, nil)", got, err)
 		}
 		// Request-facing Get + List hide it.
 		if got, err := store.Get(ctx, orgID, bp); err != nil || got != nil {

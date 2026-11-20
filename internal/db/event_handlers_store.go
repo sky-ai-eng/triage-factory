@@ -157,7 +157,11 @@ type EventHandlerStore interface {
 	// the row does not hold and that blueprint is deleted, or when the row's
 	// blueprint changes between Update's read of it and its write. A blueprint
 	// the row already holds is kept even when it is deleted, so a handler left
-	// pointing at one can still be edited and moved off it.
+	// pointing at one can still be edited and moved off it. A blueprint it
+	// attaches is held until the transaction ends, as
+	// BlueprintStore.GetForShare holds one, so a delete still in flight is
+	// waited for and then refuses the attach; that needs a transaction's
+	// stores (db.TxStores).
 	//
 	// Returns the updated row, or ErrNoSuchEventHandler. The stamping decision
 	// above is exactly why the row and not h is the answer: whether
