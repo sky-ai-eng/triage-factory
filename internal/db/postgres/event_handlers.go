@@ -230,6 +230,10 @@ func (s *eventHandlerStore) Update(ctx context.Context, orgID string, h domain.E
 	// holds under READ COMMITTED: an UPDATE that waited on a concurrent
 	// detach re-checks its WHERE against the detached row, while the EXISTS
 	// still reads the snapshot the statement began with.
+	//
+	// TODO(TFAC-1517): that snapshot is also why the EXISTS passes for a
+	// blueprint whose delete is still in flight, so attaching it can leave the
+	// handler on a deleted blueprint once the delete commits.
 	attaches := h.BlueprintID != "" && h.BlueprintID != cur.BlueprintID
 	updated, err := scanUpdatedEventHandlerPG(s.app.QueryRowContext(ctx, `
 		UPDATE event_handlers

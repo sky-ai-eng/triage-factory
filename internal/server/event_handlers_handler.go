@@ -725,6 +725,10 @@ func (eh *eventHandlersHandler) handleEventHandlerCreate(w http.ResponseWriter, 
 	// acting team are read under the same claims. It only reads: the acting
 	// team is recorded as the caller's last-written one by the write itself
 	// (insertEventHandler), which a refused request never commits.
+	//
+	// TODO(TFAC-1517): the blueprint is read here and the handler is inserted
+	// in a later transaction, so a blueprint delete that commits in between
+	// leaves the new handler on the deleted blueprint.
 	if h.BlueprintID != "" {
 		var (
 			blueprint *domain.Blueprint
