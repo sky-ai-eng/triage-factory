@@ -257,7 +257,7 @@ export default function ConnectJira() {
                   if (patError) setPatError(null)
                 }}
                 aria-invalid={!!patError || undefined}
-                className={`w-full rounded-xl border bg-ground px-4 py-2.5 text-body text-ink-1 placeholder-ink-3 focus:outline-none focus:ring-2 focus:ring-warm/30 transition-colors ${
+                className={`w-full rounded-xl border bg-ground px-4 py-2.5 text-body text-ink-1 placeholder-ink-3 focus:ring-2 focus:ring-warm/30 transition-colors ${
                   patError ? 'border-alarm/50' : 'border-line-1 focus:border-warm/40'
                 }`}
               />
@@ -279,7 +279,7 @@ export default function ConnectJira() {
                   if (e.key === 'Enter') void submit()
                 }}
                 aria-invalid={!!patError || undefined}
-                className={`w-full rounded-xl border bg-ground px-4 py-2.5 text-body text-ink-1 placeholder-ink-3 focus:outline-none focus:ring-2 focus:ring-warm/30 transition-colors ${
+                className={`w-full rounded-xl border bg-ground px-4 py-2.5 text-body text-ink-1 placeholder-ink-3 focus:ring-2 focus:ring-warm/30 transition-colors ${
                   patError ? 'border-alarm/50' : 'border-line-1 focus:border-warm/40'
                 }`}
               />
@@ -305,7 +305,7 @@ export default function ConnectJira() {
                 if (e.key === 'Enter') void submit()
               }}
               aria-invalid={!!patError || undefined}
-              className={`w-full rounded-xl border bg-ground px-4 py-2.5 text-body text-ink-1 placeholder-ink-3 focus:outline-none focus:ring-2 focus:ring-warm/30 transition-colors ${
+              className={`w-full rounded-xl border bg-ground px-4 py-2.5 text-body text-ink-1 placeholder-ink-3 focus:ring-2 focus:ring-warm/30 transition-colors ${
                 patError ? 'border-alarm/50' : 'border-line-1 focus:border-warm/40'
               }`}
             />

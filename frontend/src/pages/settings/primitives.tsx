@@ -8,7 +8,7 @@
 // wizard — one chrome, no per-surface drift.
 
 export const inputClass =
-  'w-full bg-raised border border-line-1 rounded-xl px-4 py-2.5 text-body text-ink-1 placeholder-ink-3 focus:outline-none focus:ring-2 focus:ring-warm/30 focus:border-warm/40 transition-colors disabled:opacity-60 disabled:cursor-not-allowed'
+  'w-full bg-raised border border-line-1 rounded-xl px-4 py-2.5 text-body text-ink-1 placeholder-ink-3 focus:ring-2 focus:ring-warm/30 focus:border-warm/40 transition-colors disabled:opacity-60 disabled:cursor-not-allowed'
 
 // glassInputClass is the flush, frosted input used by the setup wizard (the URL
 // steps, and the field groups when composed in `bare` mode) — a translucent
@@ -16,7 +16,7 @@ export const inputClass =
 // here next to inputClass so both the settings groups and the setup flow read
 // the same field material without a cross-package import.
 export const glassInputClass =
-  'w-full rounded-2xl border border-[var(--color-line-1)] bg-[var(--color-raised)]/60 px-4 py-3 text-body text-ink-1 placeholder:text-ink-3 backdrop-blur-md outline-none transition-[border-color,background-color,box-shadow] focus:border-warm/40 focus:bg-[var(--color-raised)] focus:shadow-[0_0_0_4px_var(--color-warm-2)] disabled:opacity-60 disabled:cursor-not-allowed'
+  'w-full rounded-2xl border border-[var(--color-line-1)] bg-[var(--color-raised)]/60 px-4 py-3 text-body text-ink-1 placeholder:text-ink-3 backdrop-blur-md transition-[border-color,background-color,box-shadow] focus:border-warm/40 focus:bg-[var(--color-raised)] focus:shadow-[0_0_0_4px_var(--color-warm-2)] disabled:opacity-60 disabled:cursor-not-allowed'
 
 // Segmented toggle styling (SSH/HTTPS, the App's Personal/Org switch), with a
 // flush glass variant for the setup wizard's `bare` field groups: a glass track

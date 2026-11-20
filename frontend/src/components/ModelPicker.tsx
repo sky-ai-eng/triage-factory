@@ -144,7 +144,7 @@ export default function ModelPicker({
               disabled={!canPick}
               tabIndex={i === tabbable ? 0 : -1}
               onClick={() => onChange(row.key)}
-              className={`flex w-full flex-col gap-1 px-3 py-2.5 text-left outline-none transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-warm/50 ${
+              className={`flex w-full flex-col gap-1 px-3 py-2.5 text-left transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-warm/50 ${
                 isSelected ? 'bg-warm/[0.06]' : canPick ? 'hover:bg-tint-3' : 'opacity-60'
               }`}
             >

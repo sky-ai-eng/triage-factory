@@ -532,7 +532,7 @@ function MetadataLine({ ticket }: { ticket: StockTicket }) {
           href={ticket.parent_url}
           target="_blank"
           rel="noopener noreferrer"
-          className="hover:text-warm transition-colors"
+          className="text-inherit hover:text-warm transition-colors"
         >
           {ticket.parent_key}
         </a>

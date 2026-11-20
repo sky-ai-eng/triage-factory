@@ -320,7 +320,7 @@ export default function TaskRuleEditor({
                       setAppliesToUnowned(false) // Reset watch flag — the new event may not support it.
                     }}
                     disabled={isEdit}
-                    className="w-full px-3 py-2 rounded-lg border border-line-1 bg-raised text-body text-ink-1 focus:outline-none focus:border-warm/40 focus:ring-1 focus:ring-warm/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="w-full px-3 py-2 rounded-lg border border-line-1 bg-raised text-body text-ink-1 focus:border-warm/40 focus:ring-1 focus:ring-warm/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     <option value="">Select event type…</option>
                     {/* system: is bus-only and never routed. An unavailable
@@ -356,7 +356,7 @@ export default function TaskRuleEditor({
                     value={name}
                     onChange={(e) => setName(e.target.value)}
                     placeholder="e.g. CI failures on my PRs"
-                    className="w-full px-3 py-2 rounded-lg border border-line-1 bg-raised text-body text-ink-1 placeholder:text-ink-3 focus:outline-none focus:border-warm/40 focus:ring-1 focus:ring-warm/20 transition-colors"
+                    className="w-full px-3 py-2 rounded-lg border border-line-1 bg-raised text-body text-ink-1 placeholder:text-ink-3 focus:border-warm/40 focus:ring-1 focus:ring-warm/20 transition-colors"
                   />
                 </div>
 

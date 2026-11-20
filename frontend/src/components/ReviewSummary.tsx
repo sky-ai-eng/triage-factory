@@ -325,7 +325,7 @@ export default function ReviewSummary({
             <textarea
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
-              className="w-full min-h-[120px] text-body leading-relaxed text-ink-1 bg-raised border border-line-1 rounded-xl px-4 py-3 resize-y focus:outline-none focus:border-warm/30 focus:ring-1 focus:ring-warm/10 font-mono"
+              className="w-full min-h-[120px] text-body leading-relaxed text-ink-1 bg-raised border border-line-1 rounded-xl px-4 py-3 resize-y focus:border-warm/30 focus:ring-1 focus:ring-warm/10 font-mono"
               placeholder="Review summary..."
               autoFocus
             />

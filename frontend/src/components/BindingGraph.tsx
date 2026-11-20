@@ -1809,7 +1809,7 @@ function BindingGraphInner({
                   if (e.key === 'Enter') saveBoxName(boxMenu.blueprintId, boxNameDraft)
                 }}
                 disabled={renameGuard.pending}
-                className="flex-1 min-w-0 px-2 py-1 rounded-md border border-line-1 bg-raised text-ui text-ink-1 focus:outline-none focus:border-warm/40 focus:ring-1 focus:ring-warm/20 disabled:opacity-60 transition-colors"
+                className="flex-1 min-w-0 px-2 py-1 rounded-md border border-line-1 bg-raised text-ui text-ink-1 focus:border-warm/40 focus:ring-1 focus:ring-warm/20 disabled:opacity-60 transition-colors"
               />
               <button
                 onClick={() => saveBoxName(boxMenu.blueprintId, boxNameDraft)}

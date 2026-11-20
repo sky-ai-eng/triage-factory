@@ -66,7 +66,7 @@ export default function TeamPicker({
           className="
             flex w-full items-center justify-between gap-2 rounded-lg border border-line-1
             bg-raised px-3 py-1.5 text-left text-body text-ink-1
-            hover:bg-raised focus:border-warm focus:outline-none transition-colors
+            hover:bg-raised focus:border-warm transition-colors
           "
         >
           <span className="inline-flex items-center gap-1.5 truncate">

@@ -1509,7 +1509,7 @@ function SkillPasteImport() {
         onChange={(e) => setContent(e.target.value)}
         placeholder={'---\nname: my-skill\ndescription: …\n---\n\nInstructions…'}
         rows={5}
-        className="w-full rounded-xl border border-line-1 bg-raised px-3 py-2 font-mono text-ui text-ink-1 placeholder:text-ink-3/60 focus:outline-none focus:border-warm/40"
+        className="w-full rounded-xl border border-line-1 bg-raised px-3 py-2 font-mono text-ui text-ink-1 placeholder:text-ink-3/60 focus:border-warm/40"
       />
       <TeamPicker value={team} onChange={setTeam} className="max-w-xs" />
       <div className="flex items-center justify-between gap-4">

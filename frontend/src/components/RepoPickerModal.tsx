@@ -461,7 +461,7 @@ export default function RepoPickerModal({
             placeholder="Search repos..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="w-full bg-raised border border-line-1 rounded-xl px-4 py-2.5 text-body text-ink-1 placeholder-ink-3 focus:outline-none focus:ring-2 focus:ring-warm/30 focus:border-warm/40 transition-colors"
+            className="w-full bg-raised border border-line-1 rounded-xl px-4 py-2.5 text-body text-ink-1 placeholder-ink-3 focus:ring-2 focus:ring-warm/30 focus:border-warm/40 transition-colors"
           />
         )}
         {/* The count is renderable at all because the list is served from a
