@@ -2070,6 +2070,11 @@ type TaskMemoryPendingHarness struct {
 	// unmet debt, so which boundary is newest has to be staged rather than
 	// inferred from how fast two EndConversation calls happen to run.
 	BackdateEndedAt func(t *testing.T, conversationID string, age time.Duration)
+
+	// AgeAttempt rewrites an attempt's started_at, and its completed_at when
+	// it has one, to `age` ago, as MemoryAttemptSeeder.AgeAttempt does, so
+	// attempts made back to back have an order that cannot tie.
+	AgeAttempt func(t *testing.T, attemptID string, age time.Duration)
 }
 
 // TaskMemoryPendingFactory builds a fresh harness per subtest.
@@ -2298,7 +2303,9 @@ func RunTaskMemoryPendingConformance(t *testing.T, mk TaskMemoryPendingFactory) 
 		}
 
 		// A second attempt is what a reader should now see: the summary is
-		// the newest try, not the first one.
+		// the newest try, not the first one. The first is aged, since two
+		// attempts begun back to back can share a started_at.
+		h.AgeAttempt(t, begun.ID, time.Minute)
 		second, err := h.Stores.MemoryAttempts.BeginAttemptSystem(ctx, h.OrgID, convID)
 		if err != nil {
 			t.Fatalf("BeginAttemptSystem (second): %v", err)

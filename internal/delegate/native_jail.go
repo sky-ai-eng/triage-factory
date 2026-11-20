@@ -110,7 +110,10 @@ func (j *restartableJail) restart(ctx context.Context) error {
 // call is told why it ended.
 //
 // The call may have returned since the watchdog looked. Then nothing is in
-// flight, or the call in flight began after seen, and the jail is left alone.
+// flight, or the call in flight began at or after seen, and the jail is left
+// alone. The call the watchdog saw had run for limit by seen, so one stamped
+// with seen itself, as a coarse clock can stamp a call begun just after, is
+// another call.
 // handled is false only when a restart is what overran: a restart that is
 // itself stuck has no call to end, and stopping the engagement is all that is
 // left. stopped reports whether the jail was stopped.
@@ -120,7 +123,7 @@ func (j *restartableJail) endOverrunCall(limit time.Duration, seen time.Time) (h
 		j.mu.Unlock()
 		return false, false
 	}
-	if j.inFlight == 0 || j.inFlightSince.After(seen) {
+	if j.inFlight == 0 || !j.inFlightSince.Before(seen) {
 		j.mu.Unlock()
 		return true, false
 	}

@@ -312,26 +312,23 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		// stamp: a landed CAS advances last_polled_at alongside the snapshot,
 		// which is what the Jira gone-confirmation's staleness selection and
 		// the poll gate read.
-		s, orgID, _ := mk(t)
+		s, orgID, seed := mk(t)
 
-		if _, _, err := s.FindOrCreate(ctx, orgID, "github", "https://github.com", "owner/repo#2", "", "pr", "T", ""); err != nil {
+		seeded, _, err := s.FindOrCreate(ctx, orgID, "github", "https://github.com", "owner/repo#2", "", "pr", "T", "")
+		if err != nil {
 			t.Fatalf("seed: %v", err)
 		}
-		// Re-read so the baseline matches the backend's storage
-		// precision (Postgres timestamptz truncates to microseconds;
-		// FindOrCreate's returned struct carries Go's nanosec time
-		// and wouldn't .Equal() the round-tripped value).
+		// The baseline is a minute old, so the update's stamp is later
+		// whatever the clock's resolution. Re-read so the baseline matches
+		// the backend's storage precision (Postgres timestamptz truncates to
+		// microseconds; FindOrCreate's returned struct carries Go's nanosec
+		// time and wouldn't .Equal() the round-tripped value).
+		seed.BackdatePoll(t, seeded.ID, time.Minute)
 		baseline, err := s.GetBySource(ctx, orgID, "github", "https://github.com", "owner/repo#2")
 		if err != nil || baseline == nil || baseline.LastPolledAt == nil {
 			t.Fatalf("baseline re-read: %v", err)
 		}
 		initialPolled := baseline.LastPolledAt
-
-		// Sleep past the backend's clock resolution before the update
-		// so the new stamp lands in a later bucket — without this, a
-		// fast Postgres host can store both timestamps in the same
-		// microsecond bin and .After() returns false.
-		time.Sleep(2 * time.Millisecond)
 
 		if ok, err := s.UpdateSnapshotCASSystem(ctx, orgID, baseline.ID, `{"k":"v"}`, baseline.PollSeq); err != nil || !ok {
 			t.Fatalf("UpdateSnapshotCASSystem: ok=%v err=%v", ok, err)
@@ -458,7 +455,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 	})
 
 	t.Run("MarkPolledSystem_advances_last_polled_at_and_nothing_else", func(t *testing.T) {
-		s, orgID, _ := mk(t)
+		s, orgID, seed := mk(t)
 
 		if _, _, err := s.FindOrCreateJiraSystem(ctx, orgID, "https://jira.example.com", "SKY-POLLED", "id-SKY-POLLED", TestJiraProject, "T", ""); err != nil {
 			t.Fatalf("seed: %v", err)
@@ -466,9 +463,9 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		if ok, err := s.UpdateSnapshotCASSystem(ctx, orgID, mustEntity(t, s, ctx, orgID, "jira", "SKY-POLLED").ID, `{"status":"To Do"}`, 0); err != nil || !ok {
 			t.Fatalf("seed snapshot: ok=%v err=%v", ok, err)
 		}
-		// Re-read for a DB-precision baseline — see the
-		// UpdateSnapshotCASSystem_stamps_last_polled_at subtest above for
-		// the timestamptz-truncation rationale.
+		// A minute-old, DB-precision baseline — see the
+		// UpdateSnapshotCASSystem_stamps_last_polled_at subtest above.
+		seed.BackdatePoll(t, mustEntity(t, s, ctx, orgID, "jira", "SKY-POLLED").ID, time.Minute)
 		baseline := mustEntity(t, s, ctx, orgID, "jira", "SKY-POLLED")
 		if baseline.LastPolledAt == nil {
 			t.Fatal("baseline has no last_polled_at")
@@ -599,7 +596,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 	})
 
 	t.Run("ReactivateWithSnapshotCASSystem_flips_state_and_snapshot_in_one_guarded_write", func(t *testing.T) {
-		s, orgID, _ := mk(t)
+		s, orgID, seed := mk(t)
 
 		ent, _, err := s.FindOrCreate(ctx, orgID, "github", "https://github.com", "owner/repo#reac", "", "pr", "T", "")
 		if err != nil {
@@ -608,6 +605,9 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		if ok, err := s.UpdateSnapshotCASSystem(ctx, orgID, ent.ID, `{"state":"MERGED","merged":true}`, ent.PollSeq); err != nil || !ok {
 			t.Fatalf("seed snapshot: ok=%v err=%v", ok, err)
 		}
+		// Polled a minute ago, so the reopen's stamp is later whatever the
+		// clock's resolution.
+		seed.BackdatePoll(t, ent.ID, time.Minute)
 		before := mustEntity(t, s, ctx, orgID, "github", "owner/repo#reac")
 
 		// Active entity: the state guard declines and nothing is written —

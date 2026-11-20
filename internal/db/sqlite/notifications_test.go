@@ -28,7 +28,8 @@ func TestNotificationStore_SQLite_Conformance(t *testing.T) {
 			Stores: stores, OrgID: runmode.LocalDefaultOrgID,
 			Viewer: runmode.LocalDefaultUserID, Other: other,
 			Team: runmode.LocalDefaultTeamID, ArchivedTeam: archived,
-			As: func(t *testing.T, _ string, fn func(db.NotificationStore)) { fn(stores.Notifications) },
+			As:  func(t *testing.T, _ string, fn func(db.NotificationStore)) { fn(stores.Notifications) },
+			Age: func(t *testing.T, id string, d time.Duration) { dbtest.AgeNotification(t, conn, id, d) },
 		}
 	})
 }
