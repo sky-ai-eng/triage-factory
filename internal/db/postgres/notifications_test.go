@@ -30,7 +30,7 @@ func seedNotificationFixture(t *testing.T, claims bool) dbtest.NotificationFixtu
 	f.Age = func(t *testing.T, id string, d time.Duration) {
 		t.Helper()
 		by := d.Microseconds()
-		pgtest.MustExec(t, h.AdminDB, `
+		dbtest.MustUpdate(t, h.AdminDB, `
 			UPDATE notifications SET
 				first_seen_at = first_seen_at - $2 * interval '1 microsecond',
 				last_seen_at  = last_seen_at  - $2 * interval '1 microsecond',

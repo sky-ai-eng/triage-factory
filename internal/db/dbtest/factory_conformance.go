@@ -3,6 +3,7 @@ package dbtest
 import (
 	"context"
 	"reflect"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -65,6 +66,10 @@ type FactorySeeder struct {
 	// given moment. Bypasses any close-side-effects so tests can
 	// backdate closures into / out of the grace window.
 	CloseEntity func(t *testing.T, entityID string, closedAt time.Time)
+
+	// SetEntityCreatedAt moves an entity's created_at to at, so a subtest
+	// can hold several entities created in the same instant.
+	SetEntityCreatedAt func(t *testing.T, entityID string, at time.Time)
 
 	// SetEntityKind rewrites an entity's kind, so a subtest can hold an
 	// entity of a kind the seeder has no constructor for (a GitHub issue
@@ -562,6 +567,53 @@ func RunFactoryReadStoreConformance(t *testing.T, mk FactoryStoreFactory) {
 		}
 		if !sawPR {
 			t.Error("belt is missing the seeded pull request")
+		}
+	})
+
+	t.Run("Entities_ATieAtEitherLimitBreaksByID", func(t *testing.T) {
+		// One poll cycle can create, or close, more pull requests in one
+		// instant than a belt arm's limit holds. The id decides which of
+		// them the arm keeps, so successive reads show the same belt.
+		store, orgID, seed := mk(t)
+		createdAt := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+		var active []string
+		for i := 0; i < 5; i++ {
+			e := visible(t, seed, "tie-a-"+strconv.Itoa(i))
+			seed.SetEntityCreatedAt(t, e, createdAt)
+			active = append(active, e)
+		}
+		closedAt := time.Now().UTC().Add(-5 * time.Second).Truncate(time.Second)
+		var closed []string
+		for i := 0; i < db.FactoryClosedGraceLimit+5; i++ {
+			e := visible(t, seed, "tie-c-"+strconv.Itoa(i))
+			seed.CloseEntity(t, e, closedAt)
+			closed = append(closed, e)
+		}
+		const limit = 3
+		descending := func(ids []string, n int) []string {
+			out := slices.Clone(ids)
+			slices.Sort(out)
+			slices.Reverse(out)
+			return out[:n]
+		}
+
+		rows, err := store.Entities(context.Background(), orgID, limit, nil)
+		if err != nil {
+			t.Fatalf("Entities: %v", err)
+		}
+		var gotActive, gotClosed []string
+		for _, r := range rows {
+			if r.Entity.State == "active" {
+				gotActive = append(gotActive, r.Entity.ID)
+			} else {
+				gotClosed = append(gotClosed, r.Entity.ID)
+			}
+		}
+		if want := descending(active, limit); !slices.Equal(gotActive, want) {
+			t.Errorf("active arm = %v, want the %d greatest ids of %d created together, descending: %v", gotActive, limit, len(active), want)
+		}
+		if want := descending(closed, db.FactoryClosedGraceLimit); !slices.Equal(gotClosed, want) {
+			t.Errorf("closed arm = %v, want the %d greatest ids of %d closed together, descending: %v", gotClosed, db.FactoryClosedGraceLimit, len(closed), want)
 		}
 	})
 

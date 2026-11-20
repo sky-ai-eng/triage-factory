@@ -24,7 +24,7 @@ func TestEntityKey_Postgres(t *testing.T) {
 		orgID, _ := seedPgEntityOrg(t, h)
 		return stores.Entities, orgID, func(t *testing.T, entityID string, at time.Time) {
 			t.Helper()
-			pgtest.MustExec(t, h.AdminDB, `UPDATE entities SET created_at = $1 WHERE org_id = $2 AND id = $3`, at.UTC(), orgID, entityID)
+			dbtest.MustUpdate(t, h.AdminDB, `UPDATE entities SET created_at = $1 WHERE org_id = $2 AND id = $3`, at.UTC(), orgID, entityID)
 		}
 	})
 }
@@ -43,9 +43,7 @@ func TestEntityKey_Postgres_Claims(t *testing.T) {
 			t.Helper()
 			return store, orgID, func(t *testing.T, entityID string, at time.Time) {
 				t.Helper()
-				if _, err := tx.Exec(`UPDATE entities SET created_at = $1 WHERE org_id = $2 AND id = $3`, at.UTC(), orgID, entityID); err != nil {
-					t.Fatalf("set created_at under the member's claims: %v", err)
-				}
+				dbtest.MustUpdate(t, tx, `UPDATE entities SET created_at = $1 WHERE org_id = $2 AND id = $3`, at.UTC(), orgID, entityID)
 			}
 		})
 		return nil
@@ -144,7 +142,7 @@ func TestEntityIdentity_Postgres(t *testing.T) {
 			},
 			SetCreatedAt: func(t *testing.T, entityID string, at time.Time) {
 				t.Helper()
-				pgtest.MustExec(t, h.AdminDB, `UPDATE entities SET created_at = $1 WHERE org_id = $2 AND id = $3`, at.UTC(), orgID, entityID)
+				dbtest.MustUpdate(t, h.AdminDB, `UPDATE entities SET created_at = $1 WHERE org_id = $2 AND id = $3`, at.UTC(), orgID, entityID)
 			},
 			Conversation: func(t *testing.T, suffix string) string {
 				t.Helper()

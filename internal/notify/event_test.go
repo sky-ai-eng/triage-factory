@@ -111,7 +111,7 @@ func TestMulti_EventRaise(t *testing.T) {
 
 	testEvent.Raise(ctx, orgID, failed)
 	for _, n := range eventRowsOf(t, stores, orgID, owner, domain.EventGitHubPRCICheckFailed) {
-		if n.SeenCount != 2 || !n.EscalatedAt.Equal(n.FirstSeenAt) {
+		if n.SeenCount != 2 || n.EscalatedSeenCount != 1 {
 			t.Errorf("a recurring condition = %+v; want it bumped and not resurfaced", n)
 		}
 	}
@@ -124,7 +124,7 @@ func TestMulti_EventRaise(t *testing.T) {
 	testEvent.Raise(ctx, orgID, commented)
 	notices := eventRowsOf(t, stores, orgID, owner, domain.EventGitHubPRReviewCommented)
 	if len(notices) != 1 || notices[0].Lifecycle != domain.NotificationNotice || notices[0].ExpiresAt == nil ||
-		notices[0].SeenCount != 2 || !notices[0].EscalatedAt.After(notices[0].FirstSeenAt) {
+		notices[0].SeenCount != 2 || notices[0].EscalatedSeenCount != 2 {
 		t.Fatalf("notice rows = %+v; want one notice, resurfaced by its second event", notices)
 	}
 	if pings, want := hub.take(t), sorted(bob, carol, bob, carol); !slices.Equal(pings, want) {

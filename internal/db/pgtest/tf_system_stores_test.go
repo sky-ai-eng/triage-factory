@@ -154,7 +154,7 @@ func TestTfSystem_CommitSignatureStoreConformance(t *testing.T) {
 			},
 			AgePush: func(t *testing.T, signatureID string, d time.Duration) {
 				t.Helper()
-				MustExec(t, h.AdminDB, `UPDATE commit_signatures SET pushed_at = pushed_at - $3 * interval '1 microsecond' WHERE org_id = $1 AND id = $2`,
+				dbtest.MustUpdate(t, h.AdminDB, `UPDATE commit_signatures SET pushed_at = pushed_at - $3 * interval '1 microsecond' WHERE org_id = $1 AND id = $2`,
 					orgID, signatureID, d.Microseconds())
 			},
 		}

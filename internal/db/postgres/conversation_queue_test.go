@@ -1363,7 +1363,7 @@ func TestClaimableProbe_Postgres(t *testing.T) {
 // released_at d earlier.
 func agePgClaims(t *testing.T, conn *sql.DB, convID string, d time.Duration) {
 	t.Helper()
-	pgtest.MustExec(t, conn, `UPDATE conversations SET queued_at = queued_at - $2 * interval '1 microsecond' WHERE id = $1`,
+	dbtest.MustUpdate(t, conn, `UPDATE conversations SET queued_at = queued_at - $2 * interval '1 microsecond' WHERE id = $1`,
 		convID, d.Microseconds())
 	pgtest.MustExec(t, conn, `
 		UPDATE claims SET

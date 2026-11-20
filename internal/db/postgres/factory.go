@@ -540,7 +540,7 @@ func (s *factoryReadStore) Entities(ctx context.Context, orgID string, limit int
 		WHERE e.org_id = $1 AND e.state = 'active'
 		  AND e.kind = '`+db.FactoryBeltKind+`'
 		  AND `+activeMembership+`
-		ORDER BY e.created_at DESC
+		ORDER BY e.created_at DESC, e.id DESC
 		LIMIT $2
 	`, activeArgs...)
 	if err != nil {
@@ -553,7 +553,7 @@ func (s *factoryReadStore) Entities(ctx context.Context, orgID string, limit int
 		WHERE e.org_id = $1 AND e.closed_at IS NOT NULL AND e.closed_at > $2
 		  AND e.kind = '`+db.FactoryBeltKind+`'
 		  AND `+closedMembership+`
-		ORDER BY e.closed_at DESC
+		ORDER BY e.closed_at DESC, e.id DESC
 		LIMIT $3
 	`, closedArgs...)
 	if err != nil {

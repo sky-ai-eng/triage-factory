@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -164,7 +165,7 @@ func TestClaimCredentialsStore_Postgres_PutLandsOnlyOnTheClaimItNames(t *testing
 	// A re-seal of the same claim (re-minted tokens for a long-lived one)
 	// replaces the bundle and the manifest. The first seal is moved a minute
 	// back, so the re-seal's stamp is later whatever the clock's resolution.
-	pgtest.MustExec(t, h.AdminDB, `UPDATE claim_credentials SET created_at = created_at - interval '1 minute' WHERE claim_id = $1`, claimB)
+	dbtest.MustUpdate(t, h.AdminDB, `UPDATE claim_credentials SET created_at = created_at - interval '1 minute' WHERE claim_id = $1`, claimB)
 	if got, ok, err = stores.ClaimCredentials.Get(ctx, orgID, conversationID); err != nil || !ok {
 		t.Fatalf("Get after aging the seal: ok=%v err=%v", ok, err)
 	}

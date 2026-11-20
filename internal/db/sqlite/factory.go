@@ -339,7 +339,7 @@ func (s *factoryReadStore) Entities(ctx context.Context, orgID string, limit int
 		SELECT `+sqliteFactoryEntitySelectColumns+`
 		FROM entities e
 		WHERE e.state = 'active' AND e.kind = '`+db.FactoryBeltKind+`'
-		ORDER BY e.created_at DESC
+		ORDER BY e.created_at DESC, e.id DESC
 		LIMIT ?
 	`, limit)
 	if err != nil {
@@ -351,7 +351,7 @@ func (s *factoryReadStore) Entities(ctx context.Context, orgID string, limit int
 		SELECT `+sqliteFactoryEntitySelectColumns+`
 		FROM entities e
 		WHERE e.closed_at IS NOT NULL AND e.closed_at > ? AND e.kind = '`+db.FactoryBeltKind+`'
-		ORDER BY e.closed_at DESC
+		ORDER BY e.closed_at DESC, e.id DESC
 		LIMIT ?
 	`, graceCutoff, db.FactoryClosedGraceLimit)
 	if err != nil {

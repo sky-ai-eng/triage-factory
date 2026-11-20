@@ -131,7 +131,7 @@ func TestPollReadinessStore_Postgres_ConnectionConformance(t *testing.T) {
 		orgID, _, _ := pgtest.SeedOrgWithUser(t, h, "connections")
 		age := func(t *testing.T, source string, d time.Duration) {
 			t.Helper()
-			pgtest.MustExec(t, h.AdminDB, `
+			dbtest.MustUpdate(t, h.AdminDB, `
 				UPDATE poll_readiness SET connection_changed_at = connection_changed_at - $3 * interval '1 microsecond'
 				WHERE org_id = $1 AND source = $2`, orgID, source, d.Microseconds())
 		}

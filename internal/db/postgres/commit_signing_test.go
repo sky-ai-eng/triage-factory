@@ -41,7 +41,7 @@ func TestOrgCommitSignerStore_Postgres_Conformance(t *testing.T) {
 		orgID, userID, _ := pgtest.SeedOrgWithUser(t, h, "signers")
 		age := func(t *testing.T, d time.Duration) {
 			t.Helper()
-			pgtest.MustExec(t, h.AdminDB, `
+			dbtest.MustUpdate(t, h.AdminDB, `
 				UPDATE org_commit_signers SET
 					status_since = status_since - $2 * interval '1 microsecond',
 					checked_at   = checked_at   - $2 * interval '1 microsecond'
@@ -235,7 +235,7 @@ func pgCommitSignatureSeeder(t *testing.T, h *pgtest.Harness, orgID, userID stri
 		},
 		AgePush: func(t *testing.T, signatureID string, d time.Duration) {
 			t.Helper()
-			pgtest.MustExec(t, h.AdminDB, `UPDATE commit_signatures SET pushed_at = pushed_at - $3 * interval '1 microsecond' WHERE org_id = $1 AND id = $2`,
+			dbtest.MustUpdate(t, h.AdminDB, `UPDATE commit_signatures SET pushed_at = pushed_at - $3 * interval '1 microsecond' WHERE org_id = $1 AND id = $2`,
 				orgID, signatureID, d.Microseconds())
 		},
 	}
@@ -282,7 +282,7 @@ func TestCommitSignatureQueue_Postgres_Conformance(t *testing.T) {
 			},
 			AgeRequest: func(t *testing.T, signatureID string, d time.Duration) {
 				t.Helper()
-				pgtest.MustExec(t, h.AdminDB, `UPDATE commit_signatures SET created_at = created_at - $3 * interval '1 microsecond' WHERE org_id = $1 AND id = $2`,
+				dbtest.MustUpdate(t, h.AdminDB, `UPDATE commit_signatures SET created_at = created_at - $3 * interval '1 microsecond' WHERE org_id = $1 AND id = $2`,
 					orgID, signatureID, d.Microseconds())
 			},
 		}

@@ -22,9 +22,7 @@ func TestEntityKey_SQLite(t *testing.T) {
 		conn := newSQLiteForEntityTest(t)
 		return sqlitestore.New(conn).Entities, runmode.LocalDefaultOrgID, func(t *testing.T, entityID string, at time.Time) {
 			t.Helper()
-			if _, err := conn.Exec(`UPDATE entities SET created_at = ? WHERE id = ?`, at.UTC(), entityID); err != nil {
-				t.Fatalf("set created_at: %v", err)
-			}
+			dbtest.MustUpdate(t, conn, `UPDATE entities SET created_at = ? WHERE id = ?`, at.UTC(), entityID)
 		}
 	})
 }
@@ -75,9 +73,7 @@ func TestEntityIdentity_SQLite(t *testing.T) {
 			},
 			SetCreatedAt: func(t *testing.T, entityID string, at time.Time) {
 				t.Helper()
-				if _, err := conn.Exec(`UPDATE entities SET created_at = ? WHERE id = ?`, at.UTC(), entityID); err != nil {
-					t.Fatalf("set created_at: %v", err)
-				}
+				dbtest.MustUpdate(t, conn, `UPDATE entities SET created_at = ? WHERE id = ?`, at.UTC(), entityID)
 			},
 			Conversation: func(t *testing.T, suffix string) string {
 				t.Helper()

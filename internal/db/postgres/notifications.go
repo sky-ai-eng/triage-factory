@@ -78,8 +78,8 @@ func (s *notificationStore) UpsertOpenSystem(ctx context.Context, o db.Notificat
 		expiresAt = *o.ExpiresAt
 	}
 	// One clock read per statement: every stamp the write sets is the same
-	// instant (NotificationUpsertOf relies on it), and two raises in one
-	// transaction get different instants, which now() would not.
+	// instant, and two raises in one transaction get different instants,
+	// which now() would not.
 	n, err := db.ScanNotification(s.admin.QueryRowContext(ctx, `
 		WITH clock AS (SELECT clock_timestamp() AS at)
 		INSERT INTO notifications AS n (

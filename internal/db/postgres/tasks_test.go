@@ -1039,7 +1039,7 @@ func TestTaskStore_Postgres_MemoryPendingConformance(t *testing.T) {
 			},
 			AgeAttempt: func(t *testing.T, attemptID string, age time.Duration) {
 				t.Helper()
-				pgtest.MustExec(t, h.AdminDB, `
+				dbtest.MustUpdate(t, h.AdminDB, `
 					UPDATE conversation_memory_attempts
 					SET started_at = $2, completed_at = CASE WHEN completed_at IS NULL THEN NULL ELSE $2::timestamptz END
 					WHERE id = $1`, attemptID, time.Now().UTC().Add(-age))

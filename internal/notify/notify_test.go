@@ -265,7 +265,7 @@ func TestLocal_SetCoalescesAndPingsOnChangeOnly(t *testing.T) {
 
 	p.Level = Urgent
 	teamCondition.Set(ctx, org, p, true)
-	if got := open(rows(t, stores, org, user, teamCondition)); len(got) != 1 || got[0].Priority != Urgent || !got[0].EscalatedAt.After(got[0].FirstSeenAt) {
+	if got := open(rows(t, stores, org, user, teamCondition)); len(got) != 1 || got[0].Priority != Urgent || got[0].EscalatedSeenCount != 3 {
 		t.Fatalf("after a raise at urgent: %+v; want the row escalated", got)
 	}
 	if pings := hub.take(t); !slices.Equal(pings, []string{user}) {

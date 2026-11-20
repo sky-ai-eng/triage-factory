@@ -51,7 +51,7 @@ func TestTaskMemoryStore_Postgres(t *testing.T) {
 			},
 			Age: func(t *testing.T, conversationID string, d time.Duration) {
 				t.Helper()
-				pgtest.MustExec(t, h.AdminDB, `
+				dbtest.MustUpdate(t, h.AdminDB, `
 					UPDATE conversation_memory SET
 						created_at = created_at - $2 * interval '1 microsecond',
 						updated_at = updated_at - $2 * interval '1 microsecond'

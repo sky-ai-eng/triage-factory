@@ -722,12 +722,10 @@ func TestTaskStore_SQLite_MemoryPendingConformance(t *testing.T) {
 			AgeAttempt: func(t *testing.T, attemptID string, age time.Duration) {
 				t.Helper()
 				at := time.Now().UTC().Add(-age)
-				if _, err := conn.Exec(`
+				dbtest.MustUpdate(t, conn, `
 					UPDATE conversation_memory_attempts
 					SET started_at = ?, completed_at = CASE WHEN completed_at IS NULL THEN NULL ELSE ? END
-					WHERE id = ?`, at, at, attemptID); err != nil {
-					t.Fatalf("age attempt: %v", err)
-				}
+					WHERE id = ?`, at, at, attemptID)
 			},
 			Conversation: func(t *testing.T, taskID, suffix string) string {
 				t.Helper()
