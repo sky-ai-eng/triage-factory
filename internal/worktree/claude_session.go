@@ -3,7 +3,9 @@ package worktree
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"unicode/utf16"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/cell"
@@ -54,25 +56,48 @@ func ClaudeProjectDir(resolvedCwd string) (string, error) {
 	return filepath.Join(home, claudeProjectsDir, encodeClaudeProjectDir(resolvedCwd)), nil
 }
 
+// claudeProjectNameMax is the longest project directory name Claude Code
+// writes as-is; a longer one is cut to this length and given a hash suffix.
+const claudeProjectNameMax = 200
+
 // encodeClaudeProjectDir returns the directory name Claude Code uses
 // under ~/.claude/projects/ for a symlink-resolved absolute cwd.
 //
-// Encoding rule (verified empirically against Claude Code 2.1.119):
-// every '/' AND every '.' in the resolved path becomes '-'. The
-// dot-replacement is the part that's easy to miss — paths like
-// ~/.triagefactory/... contain dots, and only replacing slashes
-// produces a name Claude Code can't find: a resolved cwd like
-// `/Users/.../.triagefactory/...` encodes to
-// `-Users-...--triagefactory-...` (note the `--` where the dot got
-// collapsed), not `-Users-...-.triagefactory-...`.
+// Claude Code computes it in JavaScript, on every platform alike:
 //
-// Caveat: only `/` and `.` are verified. Claude Code may also rewrite
-// other characters (underscores, spaces). The paths Triage Factory
-// actually uses (/tmp/triagefactory-runs/<uuid>) only contain slashes
-// and dots, so this matches in practice; if a cwd is ever configured
-// to a path with other special characters, revisit.
+//	n = cwd.replace(/[^a-zA-Z0-9]/g, "-")
+//	n.length <= 200 ? n : n.slice(0, 200) + "-" + Math.abs(h(cwd)).toString(36)
+//
+// where h is the 31-multiplier int32 string hash over the original cwd. A
+// JavaScript string is UTF-16, so both the replacement and the hash run per
+// UTF-16 unit, not per byte or per rune: a character outside the Basic
+// Multilingual Plane is two units and becomes two dashes. Claude Code does not
+// normalize the path first, so a decomposed "é" (e + U+0301) becomes "e-".
 func encodeClaudeProjectDir(resolvedAbs string) string {
-	return strings.NewReplacer("/", "-", ".", "-").Replace(resolvedAbs)
+	units := utf16.Encode([]rune(resolvedAbs))
+	name := make([]byte, len(units))
+	var hash int32 // overflow wraps, as JavaScript's `| 0` does
+	for i, u := range units {
+		if isASCIIAlnum(u) {
+			name[i] = byte(u)
+		} else {
+			name[i] = '-'
+		}
+		hash = hash*31 + int32(u)
+	}
+	if len(name) <= claudeProjectNameMax {
+		return string(name)
+	}
+	// int64, so the absolute value of math.MinInt32 does not overflow.
+	abs := int64(hash)
+	if abs < 0 {
+		abs = -abs
+	}
+	return string(name[:claudeProjectNameMax]) + "-" + strconv.FormatInt(abs, 36)
+}
+
+func isASCIIAlnum(u uint16) bool {
+	return 'a' <= u && u <= 'z' || 'A' <= u && u <= 'Z' || '0' <= u && u <= '9'
 }
 
 // claudeProjectEncoding combines symlink resolution and encoding for
@@ -133,7 +158,7 @@ func RemoveClaudeProjectDir(cwd string) {
 	if err != nil {
 		return
 	}
-	if !strings.HasPrefix(resolved, tmpResolved) {
+	if !pathUnder(resolved, tmpResolved) {
 		worktreeLog.Warn("refusing to clean project dir for non-tmp cwd", "cwd", resolved)
 		return
 	}
@@ -146,4 +171,12 @@ func RemoveClaudeProjectDir(cwd string) {
 	if err := os.RemoveAll(projectDir); err != nil {
 		worktreeLog.Warn("remove ghost project dir", "dir", projectDir, "error", err)
 	}
+}
+
+// pathUnder reports whether the clean absolute path p is strictly inside dir.
+// A string prefix test is not enough: it admits a sibling such as /tmpwork
+// for dir /tmp.
+func pathUnder(p, dir string) bool {
+	rel, err := filepath.Rel(dir, p)
+	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
