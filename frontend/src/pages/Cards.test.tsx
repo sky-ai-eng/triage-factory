@@ -38,7 +38,6 @@ vi.mock('../hooks/useTeams', async (importOriginal) => {
 })
 vi.mock('../components/TeamScopeSelect', () => ({ default: () => null }))
 vi.mock('../components/TaskRulesPanel', () => ({ default: () => null }))
-vi.mock('../components/NotifyRulesPanel', () => ({ default: () => null }))
 vi.mock('../components/PromptPicker', () => ({ default: () => null }))
 
 const CARD: Task = {

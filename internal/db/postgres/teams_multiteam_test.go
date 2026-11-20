@@ -180,11 +180,10 @@ func TestMultiTeam_Postgres(t *testing.T) {
 		}
 	})
 
-	t.Run("pending_refs_respect_team_filter", func(t *testing.T) {
-		// The factory station drawer attaches pending task refs per
-		// entity; that read must honor the same team filter as the entity
-		// belt, or a drawer for a team-A-filtered entity would still
-		// surface (and let you delegate) team B's task refs. (Codex P2 ⑤)
+	t.Run("entity_narrowing_respects_team_filter", func(t *testing.T) {
+		// A list narrowed to entities must honor the team filter beside it, or
+		// a team-A view of an entity would still surface (and let you
+		// delegate) team B's tasks on it.
 		var entA, entB string
 		if err := h.AdminDB.QueryRow(`SELECT entity_id::text FROM tasks WHERE id = $1`, taskA).Scan(&entA); err != nil {
 			t.Fatalf("entity for taskA: %v", err)
@@ -194,26 +193,26 @@ func TestMultiTeam_Postgres(t *testing.T) {
 		}
 		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
 			store := pgstore.NewForTx(tx, pgtest.SecretKey).Tasks
-			// Unfiltered: refs for both entities surface.
-			all, e := store.ListActiveRefsForEntities(ctx, orgID, []string{entA, entB}, nil)
+			// Unfiltered: the tasks on both entities surface.
+			all, _, e := store.List(ctx, orgID, db.TaskListFilter{EntityIDs: []string{entA, entB}}, db.Unwindowed)
 			if e != nil {
 				return e
 			}
-			if !hasRef(all, taskA) || !hasRef(all, taskB) {
-				t.Errorf("unfiltered refs missing one: %+v", all)
+			if !containsTask(all, taskA) || !containsTask(all, taskB) {
+				t.Errorf("unfiltered = %s; want both %s and %s", taskIDs(all), taskA, taskB)
 			}
-			// Filtered to A: only taskA's ref, even though entB was asked for.
-			onlyA, e := store.ListActiveRefsForEntities(ctx, orgID, []string{entA, entB}, []string{teamA})
+			// Filtered to A: only taskA, even though entB was asked for.
+			onlyA, _, e := store.List(ctx, orgID, db.TaskListFilter{EntityIDs: []string{entA, entB}, TeamIDs: []string{teamA}}, db.Unwindowed)
 			if e != nil {
 				return e
 			}
-			if !hasRef(onlyA, taskA) || hasRef(onlyA, taskB) {
-				t.Errorf("filter=teamA refs = %+v; want only taskA's ref", onlyA)
+			if !containsTask(onlyA, taskA) || containsTask(onlyA, taskB) {
+				t.Errorf("filter=teamA = %s; want only %s", taskIDs(onlyA), taskA)
 			}
 			return nil
 		})
 		if err != nil {
-			t.Fatalf("pending refs filter: %v", err)
+			t.Fatalf("entity narrowing filter: %v", err)
 		}
 	})
 
@@ -224,10 +223,9 @@ func TestMultiTeam_Postgres(t *testing.T) {
 		// unreferenced — Postgres 42P18 "could not determine data type of
 		// parameter $4". The single-team subtests above only ever bind one team
 		// placeholder, so nothing exercised the second; this pins that a
-		// multi-team factory view (or task list) doesn't 500. Covers the
-		// task-list caller (List, whose team placeholders land behind its
-		// own filter binds) and a base-2 caller
-		// (ListActiveRefsForEntities → $3,$4).
+		// multi-team task list doesn't 500, with the team placeholders behind
+		// the queue projection's own filter binds and behind an entity
+		// narrowing's.
 		var entA, entB string
 		if err := h.AdminDB.QueryRow(`SELECT entity_id::text FROM tasks WHERE id = $1`, taskA).Scan(&entA); err != nil {
 			t.Fatalf("entity for taskA: %v", err)
@@ -244,12 +242,12 @@ func TestMultiTeam_Postgres(t *testing.T) {
 			if !containsTask(both, taskA) || !containsTask(both, taskB) {
 				t.Errorf("queue projection(A,B) = %s; want both %s and %s", taskIDs(both), taskA, taskB)
 			}
-			refs, e := store.ListActiveRefsForEntities(ctx, orgID, []string{entA, entB}, []string{teamA, teamB})
+			onEntities, _, e := store.List(ctx, orgID, db.TaskListFilter{EntityIDs: []string{entA, entB}, TeamIDs: []string{teamA, teamB}}, db.Unwindowed)
 			if e != nil {
-				return fmt.Errorf("ListActiveRefsForEntities(A,B): %w", e)
+				return fmt.Errorf("entity narrowing (A,B): %w", e)
 			}
-			if !hasRef(refs, taskA) || !hasRef(refs, taskB) {
-				t.Errorf("refs(A,B) = %+v; want both taskA and taskB refs", refs)
+			if !containsTask(onEntities, taskA) || !containsTask(onEntities, taskB) {
+				t.Errorf("entity narrowing (A,B) = %s; want both %s and %s", taskIDs(onEntities), taskA, taskB)
 			}
 			return nil
 		})
@@ -389,23 +387,20 @@ func TestMultiTeam_Postgres(t *testing.T) {
 
 	t.Run("event_handlers_list_scoped_to_active_team", func(t *testing.T) {
 		// Mirror of the prompts narrowing for the binding graph's handlers
-		// (exercised with rules — same team_id predicate, no prompt FK
-		// needed). List(teamA) shows team A's handlers (plus org-visible
-		// team_id-NULL ones), never team B's.
-		priority := 0.5
-		sortOrder := 0
+		// (exercised with watch handlers — same team_id predicate, no
+		// blueprint FK needed). List(teamA) shows team A's handlers, never
+		// team B's.
 		mkRule := func(team, name string) string {
 			id := uuid.New().String()
 			if e := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
 				_, e := pgstore.NewForTx(tx, pgtest.SecretKey).EventHandlers.Create(ctx, orgID, team, domain.EventHandler{
-					ID:              id,
-					Kind:            domain.EventHandlerKindRule,
-					EventType:       domain.EventGitHubPRCICheckFailed,
-					Name:            name,
-					DefaultPriority: &priority,
-					SortOrder:       &sortOrder,
-					Enabled:         true,
-					Source:          domain.EventHandlerSourceUser,
+					ID:               id,
+					Mode:             domain.EventHandlerModeWatch,
+					EventType:        domain.EventGitHubPRCICheckFailed,
+					Name:             name,
+					DefaultPriority:  0.5,
+					BreakerThreshold: 4,
+					Source:           domain.EventHandlerSourceUser,
 				})
 				return e
 			}); e != nil {
@@ -425,19 +420,19 @@ func TestMultiTeam_Postgres(t *testing.T) {
 		}
 		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
 			store := pgstore.NewForTx(tx, pgtest.SecretKey).EventHandlers
-			a, _, e := store.List(ctx, orgID, db.EventHandlerListFilter{Kind: domain.EventHandlerKindRule, TeamID: teamA}, db.ListOpts{Limit: 200})
+			a, _, e := store.List(ctx, orgID, db.EventHandlerListFilter{TeamID: teamA}, db.ListOpts{Limit: 200})
 			if e != nil {
 				return e
 			}
 			if ga := handlerIDs(a); !ga[rA] || ga[rB] {
-				t.Errorf("List(rule, teamA): want A without B; got A=%v B=%v", ga[rA], ga[rB])
+				t.Errorf("List(teamA): want A without B; got A=%v B=%v", ga[rA], ga[rB])
 			}
-			b, _, e := store.List(ctx, orgID, db.EventHandlerListFilter{Kind: domain.EventHandlerKindRule, TeamID: teamB}, db.ListOpts{Limit: 200})
+			b, _, e := store.List(ctx, orgID, db.EventHandlerListFilter{TeamID: teamB}, db.ListOpts{Limit: 200})
 			if e != nil {
 				return e
 			}
 			if gb := handlerIDs(b); !gb[rB] || gb[rA] {
-				t.Errorf("List(rule, teamB): want B without A; got B=%v A=%v", gb[rB], gb[rA])
+				t.Errorf("List(teamB): want B without A; got B=%v A=%v", gb[rB], gb[rA])
 			}
 			return nil
 		})
@@ -657,15 +652,6 @@ func inProgressForTeams(ctx context.Context, store db.TaskStore, orgID string, t
 func containsTask(tasks []domain.Task, id string) bool {
 	for _, t := range tasks {
 		if t.ID == id {
-			return true
-		}
-	}
-	return false
-}
-
-func hasRef(refs []domain.PendingTaskRef, taskID string) bool {
-	for _, r := range refs {
-		if r.ID == taskID {
 			return true
 		}
 	}

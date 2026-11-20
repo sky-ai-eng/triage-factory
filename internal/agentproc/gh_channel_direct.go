@@ -17,8 +17,8 @@ import (
 // at the trust file, and the two suppressors keep gh non-interactive and off the
 // release-check network.
 //
-// Two entries exist only here, because only here is there a user to be confused
-// with:
+// Three entries exist only here, because only here is there a user to be
+// confused with:
 //
 //   - PATH leads with the channel's own bin dir, so `gh` resolves to the
 //     TF-owned pinned binary. Without it the shell would find the user's own
@@ -29,19 +29,24 @@ import (
 //     ~/.config/gh, hosts entry and personal credential included. It holds at
 //     most one setting, the one that sends gh's requests to the injector's
 //     unix socket.
+//   - GH_TOKEN carries ghNoCredentialToken. gh takes a host's token from the
+//     environment first, its config dir next, and the OS keyring last, and the
+//     keyring lookup needs only the host name, so an empty config dir still
+//     leaves a user who ran `gh auth login` reachable. With it, a request to
+//     github.com or a ghe.com tenancy that names its host around GH_HOST (an
+//     explicit --hostname, a GH_REPO or URL naming it) presents a value GitHub
+//     refuses instead of the user's keyring entry. A sandboxed run gets it
+//     too: the sandbox masks paths but shares the network namespace, so a
+//     session bus on an abstract socket still reaches the keyring. GITHUB_TOKEN
+//     stays unset: gh reads it only when GH_TOKEN is unset, and the tools that
+//     read it keep their anonymous path.
 //
-// An empty config dir is not enough on its own. gh takes a token from the
-// environment first and the OS keyring next, and the keyring lookup does not go
-// through the config dir, so a user who ran `gh auth login` would still be
-// reachable. GH_TOKEN therefore always carries ghNoCredentialToken, which is
-// not a credential: a github.com request made around GH_HOST (an explicit
-// --hostname, a GH_REPO naming github.com) presents it and is refused instead of
-// reaching the keyring. A channel that could not start (no pinned binary for
-// the platform, a failed fetch, no GitHub URL) arrives with only ConfigDir set,
-// and its run degrades to the scoped exec verbs; the gh on its PATH is then the
-// user's own, so GH_ENTERPRISE_TOKEN carries the same refusing value and nothing
-// of the user's is left for it to act with. isGitHubCLIEnvKey is the remaining
-// half: newDirectCommand drops those keys from the inherited env.
+// A channel that could not start (no pinned binary for the platform, a failed
+// fetch, no GitHub URL) arrives with only ConfigDir set, and its run degrades to
+// the scoped exec verbs. The gh on its PATH is then the user's own, so it gets
+// no GH_HOST and no PATH entry, and GH_ENTERPRISE_TOKEN carries the refusing
+// value too, covering every host GH_TOKEN does not: nothing of the user's is
+// left for that gh to act with.
 //
 // Empty when there is no channel at all.
 func directGHChannelEnv(gc *GHChannelParams) []string {
@@ -50,12 +55,13 @@ func directGHChannelEnv(gc *GHChannelParams) []string {
 	}
 	// A listener with no trust file is no channel on this path: pointing gh at
 	// it would fail every TLS handshake instead of degrading cleanly.
-	// The refusing tokens are unconditional here: newDirectCommand has already
-	// dropped the inherited ones for any non-nil channel, so leaving them unset
-	// would hand gh straight to the keyring.
 	if !gc.Live() || gc.CertSourcePath == "" {
-		env := ghRefusingTokenEnv("GH_TOKEN", "GH_ENTERPRISE_TOKEN")
-		env = append(env, "GH_PROMPT_DISABLED=1", "GH_NO_UPDATE_NOTIFIER=1")
+		env := []string{
+			"GH_TOKEN=" + ghNoCredentialToken,
+			"GH_ENTERPRISE_TOKEN=" + ghNoCredentialToken,
+			"GH_PROMPT_DISABLED=1",
+			"GH_NO_UPDATE_NOTIFIER=1",
+		}
 		if gc.ConfigDir != "" {
 			env = append(env, "GH_CONFIG_DIR="+gc.ConfigDir)
 		}
@@ -63,12 +69,12 @@ func directGHChannelEnv(gc *GHChannelParams) []string {
 	}
 	env := []string{
 		"GH_HOST=" + gc.Host,
+		"GH_TOKEN=" + ghNoCredentialToken,
 		"GH_ENTERPRISE_TOKEN=" + gc.Token,
 		"SSL_CERT_FILE=" + gc.CertSourcePath,
 		"GH_PROMPT_DISABLED=1",
 		"GH_NO_UPDATE_NOTIFIER=1",
 	}
-	env = append(env, ghRefusingTokenEnv("GH_TOKEN")...)
 	if gc.ConfigDir != "" {
 		env = append(env, "GH_CONFIG_DIR="+gc.ConfigDir)
 	}
@@ -78,19 +84,13 @@ func directGHChannelEnv(gc *GHChannelParams) []string {
 	return env
 }
 
-// ghNoCredentialToken is what gh presents when TF has no credential to give it.
-// It is not a credential anywhere: GitHub rejects it, and its only job is to
-// stand in front of the keyring, which gh would read in its absence.
+// ghNoCredentialToken is what a local run's gh presents for a host TF gives it
+// no credential for. It is a credential nowhere: GitHub answers it with 401 Bad
+// credentials, and its only job is to stand in front of the OS keyring, which
+// gh reads when the variable is unset. Other readers of GH_TOKEN meet the same
+// 401, public resources included, where they would have gone anonymous; the
+// alternative is a run that can reach GitHub as the user.
 const ghNoCredentialToken = "triagefactory-no-github-credential"
-
-// ghRefusingTokenEnv sets each named gh token variable to ghNoCredentialToken.
-func ghRefusingTokenEnv(names ...string) []string {
-	out := make([]string, 0, len(names))
-	for _, name := range names {
-		out = append(out, name+"="+ghNoCredentialToken)
-	}
-	return out
-}
 
 // isGitHubCLIEnvKey reports whether an inherited variable configures gh or
 // carries a GitHub token: every GH_ key, and the two token names gh reads

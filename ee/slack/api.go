@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"path"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
@@ -43,6 +44,45 @@ type authTestResult struct {
 	UserID       string
 	BotID        string
 	EnterpriseID string
+	// Scopes is the response's X-OAuth-Scopes header: the scopes granted to
+	// the token, comma-separated, "" when Slack sent none.
+	Scopes string
+}
+
+// slackRejectedError is a Slack answer refusing a call for a reason of the
+// caller's: any {"ok":false} outside slackTransientErrorCodes, or an answer
+// missing what the call exists to learn. A transport failure, a non-200, a
+// rate limit, or a transient code is not one: those say nothing about the
+// credential, and the same call may succeed later.
+type slackRejectedError struct{ method, reason string }
+
+func (e *slackRejectedError) Error() string { return "slack " + e.method + ": " + e.reason }
+
+// isSlackRejected reports whether err wraps a slackRejectedError.
+func isSlackRejected(err error) bool {
+	var rejected *slackRejectedError
+	return errors.As(err, &rejected)
+}
+
+// slackTransientErrorCodes are the {"ok":false} codes in which Slack reports a
+// failure on its own side, or a pause it lifts by itself. Sourced from the
+// error codes Slack documents for every Web API method.
+var slackTransientErrorCodes = map[string]bool{
+	"internal_error":      true,
+	"fatal_error":         true,
+	"service_unavailable": true,
+	"request_timeout":     true,
+	"ratelimited":         true,
+	"team_added_to_org":   true,
+}
+
+// slackRefusal is the error for method's {"ok":false} answer carrying code: a
+// slackRejectedError, unless code is one of slackTransientErrorCodes.
+func slackRefusal(method, code string) error {
+	if slackTransientErrorCodes[code] {
+		return fmt.Errorf("slack %s: %s", method, code)
+	}
+	return &slackRejectedError{method: method, reason: code}
 }
 
 // slackAuthTest validates botToken against Slack's auth.test and returns
@@ -70,17 +110,18 @@ func slackAuthTest(ctx context.Context, client *http.Client, caller slackCaller,
 		BotID        string `json:"bot_id"`
 		EnterpriseID string `json:"enterprise_id"`
 	}
-	if err := doSlackJSON(ctx, client, caller, req, &out); err != nil {
+	header, err := doSlackJSONHeader(ctx, client, caller, req, &out)
+	if err != nil {
 		return nil, err
 	}
 	if !out.OK {
-		return nil, fmt.Errorf("slack auth.test: %s", nonEmpty(out.Error, "not ok"))
+		return nil, slackRefusal("auth.test", nonEmpty(out.Error, "not ok"))
 	}
 	if out.TeamID == "" {
-		return nil, fmt.Errorf("slack auth.test: response carried no team_id")
+		return nil, &slackRejectedError{method: "auth.test", reason: "response carried no team_id"}
 	}
 	if out.BotID == "" {
-		return nil, fmt.Errorf("slack auth.test: response carried no bot_id")
+		return nil, &slackRejectedError{method: "auth.test", reason: "response carried no bot_id"}
 	}
 	return &authTestResult{
 		TeamID:       out.TeamID,
@@ -88,14 +129,17 @@ func slackAuthTest(ctx context.Context, client *http.Client, caller slackCaller,
 		UserID:       out.UserID,
 		BotID:        out.BotID,
 		EnterpriseID: out.EnterpriseID,
+		Scopes:       header.Get("X-OAuth-Scopes"),
 	}, nil
 }
 
 // botsInfoResult is the subset of Slack's bots.info response the connect
 // handler needs: the app id that owns this bot — the key material for the
-// app-single-org invariant.
+// app-single-org invariant — and the bot's name, which the connection shows
+// as its app's name.
 type botsInfoResult struct {
 	AppID string
+	Name  string
 }
 
 // slackBotsInfo looks up a bot's owning app id via bots.info — the second
@@ -119,6 +163,7 @@ func slackBotsInfo(ctx context.Context, client *http.Client, caller slackCaller,
 		Error string `json:"error"`
 		Bot   struct {
 			AppID string `json:"app_id"`
+			Name  string `json:"name"`
 		} `json:"bot"`
 	}
 	if err := doSlackJSON(ctx, client, caller, req, &out); err != nil {
@@ -130,7 +175,106 @@ func slackBotsInfo(ctx context.Context, client *http.Client, caller slackCaller,
 	if out.Bot.AppID == "" {
 		return nil, fmt.Errorf("slack bots.info: response carried no app_id")
 	}
-	return &botsInfoResult{AppID: out.Bot.AppID}, nil
+	return &botsInfoResult{AppID: out.Bot.AppID, Name: out.Bot.Name}, nil
+}
+
+// oauthV2AccessResult is the subset of Slack's oauth.v2.access response the
+// install callback reads. TeamID and TeamName are "" for an Enterprise Grid
+// org-wide install, which Slack answers with no team, and EnterpriseID is ""
+// for a workspace outside Enterprise Grid. TokenRotation is whether the app
+// has token rotation on: the answer carried a refresh_token, an expires_in, or
+// a rotating bot token.
+type oauthV2AccessResult struct {
+	AppID               string
+	AccessToken         string
+	TokenType           string
+	Scope               string
+	BotUserID           string
+	TeamID              string
+	TeamName            string
+	EnterpriseID        string
+	IsEnterpriseInstall bool
+	TokenRotation       bool
+}
+
+// isRotatingBotToken reports whether token is the bot token of an app with
+// token rotation on, which expires 12 hours after Slack issues it. Other
+// tokens starting "xoxe." (a rotating user token, an app configuration token)
+// are not bot tokens at all.
+func isRotatingBotToken(token string) bool {
+	return strings.HasPrefix(token, "xoxe.xoxb-")
+}
+
+// isBotToken reports whether token has the shape of a bot token that does not
+// expire. A rotating bot token does not have it, and neither does a user
+// token, an app-level token, or a signing secret.
+func isBotToken(token string) bool {
+	return strings.HasPrefix(token, "xoxb-")
+}
+
+// isAppLevelToken reports whether token has the shape of an app-level token,
+// the credential Socket Mode opens its connection with.
+func isAppLevelToken(token string) bool {
+	return strings.HasPrefix(token, "xapp-")
+}
+
+// slackOAuthV2Access exchanges an install's authorization code for its bot
+// token. The app authenticates with HTTP Basic, which Slack recommends over
+// sending the client id and secret in the body. A Slack-level {"ok":false}
+// is an error carrying Slack's code, and so is an ok answer with no token.
+func slackOAuthV2Access(ctx context.Context, client *http.Client, caller slackCaller, clientID, clientSecret, code, redirectURI string) (*oauthV2AccessResult, error) {
+	form := url.Values{"code": {code}, "redirect_uri": {redirectURI}}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, slackAPIBase+"/oauth.v2.access", strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth(clientID, clientSecret)
+
+	var out struct {
+		OK          bool   `json:"ok"`
+		Error       string `json:"error"`
+		AppID       string `json:"app_id"`
+		AccessToken string `json:"access_token"`
+		TokenType   string `json:"token_type"`
+		Scope       string `json:"scope"`
+		BotUserID   string `json:"bot_user_id"`
+		Team        *struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"team"`
+		Enterprise *struct {
+			ID string `json:"id"`
+		} `json:"enterprise"`
+		IsEnterpriseInstall bool   `json:"is_enterprise_install"`
+		RefreshToken        string `json:"refresh_token"`
+		ExpiresIn           *int64 `json:"expires_in"`
+	}
+	if err := doSlackJSON(ctx, client, caller, req, &out); err != nil {
+		return nil, err
+	}
+	if !out.OK {
+		return nil, fmt.Errorf("slack oauth.v2.access: %s", nonEmpty(out.Error, "not ok"))
+	}
+	if out.AccessToken == "" {
+		return nil, fmt.Errorf("slack oauth.v2.access: response carried no access_token")
+	}
+	res := &oauthV2AccessResult{
+		AppID:               out.AppID,
+		AccessToken:         out.AccessToken,
+		TokenType:           out.TokenType,
+		Scope:               out.Scope,
+		BotUserID:           out.BotUserID,
+		IsEnterpriseInstall: out.IsEnterpriseInstall,
+		TokenRotation:       out.RefreshToken != "" || out.ExpiresIn != nil || isRotatingBotToken(out.AccessToken),
+	}
+	if out.Team != nil {
+		res.TeamID, res.TeamName = out.Team.ID, out.Team.Name
+	}
+	if out.Enterprise != nil {
+		res.EnterpriseID = out.Enterprise.ID
+	}
+	return res, nil
 }
 
 // slackOpenConnection validates appToken (an app-level xapp- token) via
@@ -143,11 +287,12 @@ func slackOpenConnection(ctx context.Context, client *http.Client, caller slackC
 	return err
 }
 
-// slackAuthErrorCodes is the set of apps.connections.open error codes that
-// mean the app token itself is bad (revoked, wrong scope, disabled
-// workspace) rather than a transient upstream issue — retrying on the
-// normal backoff schedule would just hammer Slack with a token that will
-// never succeed. Sourced from Slack's documented auth-related error codes.
+// slackAuthErrorCodes is the set of Web API error codes that mean the token
+// itself is bad (revoked, wrong scope, disabled workspace) rather than a
+// transient upstream issue: a request answered with one failed on its
+// credential, though Slack's status says 200, and retrying it on the normal
+// backoff schedule would just hammer Slack with a token that will never
+// succeed. Sourced from Slack's documented auth-related error codes.
 var slackAuthErrorCodes = map[string]bool{
 	"invalid_auth":     true,
 	"not_authed":       true,
@@ -193,7 +338,7 @@ func slackConnectionsOpen(ctx context.Context, client *http.Client, caller slack
 		if slackAuthErrorCodes[out.Error] {
 			return "", &slackAuthError{code: nonEmpty(out.Error, "not ok")}
 		}
-		return "", fmt.Errorf("slack apps.connections.open: %s", nonEmpty(out.Error, "not ok"))
+		return "", slackRefusal("apps.connections.open", nonEmpty(out.Error, "not ok"))
 	}
 	if out.URL == "" {
 		return "", fmt.Errorf("slack apps.connections.open: response carried no url")
@@ -386,41 +531,49 @@ func slackAppCaller(orgID, apiAppID string) slackCaller {
 // Nothing else is retried: a 5xx or a transport failure returns on the
 // attempt that met it.
 func doSlackJSON(ctx context.Context, client *http.Client, caller slackCaller, req *http.Request, out any) error {
+	_, err := doSlackJSONHeader(ctx, client, caller, req, out)
+	return err
+}
+
+// doSlackJSONHeader is doSlackJSON that also answers the headers of the
+// response it decoded, for a method whose answer is partly a header (auth.test's
+// X-OAuth-Scopes).
+func doSlackJSONHeader(ctx context.Context, client *http.Client, caller slackCaller, req *http.Request, out any) (http.Header, error) {
 	method := path.Base(req.URL.Path)
 	resp, body, err := doSlackCall(ctx, client, caller, method, req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	if resp.StatusCode == http.StatusTooManyRequests {
 		wait := slackRetryAfter(resp.Header)
 		if wait > slackRetryAfterCap {
-			return &slackRateLimitError{retryAfter: wait}
+			return nil, &slackRateLimitError{retryAfter: wait}
 		}
 		upstream.RecordRetry(ctx, upstream.Slack, caller.orgID, upstream.RateLimited)
 		if err := slackWait(ctx, caller.orgID, wait); err != nil {
-			return err
+			return nil, err
 		}
 		retryReq, err := cloneSlackRequest(ctx, req)
 		if err != nil {
-			return fmt.Errorf("slack api: rebuild request for retry: %w", err)
+			return nil, fmt.Errorf("slack api: rebuild request for retry: %w", err)
 		}
 		resp, body, err = doSlackCall(ctx, client, caller, method, retryReq)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if resp.StatusCode == http.StatusTooManyRequests {
-			return &slackRateLimitError{retryAfter: slackRetryAfter(resp.Header)}
+			return nil, &slackRateLimitError{retryAfter: slackRetryAfter(resp.Header)}
 		}
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("slack api: http %d: %s", resp.StatusCode, upstream.Excerpt(body))
+		return nil, fmt.Errorf("slack api: http %d: %s", resp.StatusCode, upstream.Excerpt(body))
 	}
 	if err := json.Unmarshal(body, out); err != nil {
-		return fmt.Errorf("slack api: decode response: %w", err)
+		return nil, fmt.Errorf("slack api: decode response: %w", err)
 	}
-	return nil
+	return resp.Header, nil
 }
 
 // doSlackCall makes one attempt at a Web API method (doSlackRequest) and
@@ -464,11 +617,31 @@ func doSlackRequest(ctx context.Context, client *http.Client, orgID string, req 
 		recordSlackTransport(ctx, orgID, err)
 		return nil, nil, fmt.Errorf("slack api: read response: %w", err)
 	}
-	upstream.Record(ctx, upstream.Slack, orgID, upstream.ClassifyResponse(resp.StatusCode, resp.Header, body))
+	class := upstream.ClassifyResponse(resp.StatusCode, resp.Header, body)
+	if class == upstream.OK && slackRefusesCredential(body) {
+		class = upstream.Auth
+	}
+	upstream.Record(ctx, upstream.Slack, orgID, class)
 	if len(body) > slackMaxResponseBody {
 		return nil, nil, fmt.Errorf("slack api: response exceeds %d bytes", slackMaxResponseBody)
 	}
 	return resp, body, nil
+}
+
+// slackRefusesCredential reports whether body is a Web API answer refusing
+// the request's token. Slack answers a bad token with HTTP 200 and
+// {"ok":false,"error":"invalid_auth"}, so classed by its status alone the
+// attempt would count as OK and no org's revoked token would show as auth.
+// A body that is not the {ok,...} shape refuses nothing.
+func slackRefusesCredential(body []byte) bool {
+	var out struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return false
+	}
+	return !out.OK && slackAuthErrorCodes[out.Error]
 }
 
 // recordSlackTransport counts a transport failure against orgID, unless ctx

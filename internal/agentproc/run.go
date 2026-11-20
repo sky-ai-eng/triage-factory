@@ -126,9 +126,10 @@ type RunOptions struct {
 	// delegated agent rides here: the framework blocks and the conversation's
 	// own block — its mission, its run context, its verb reference and its
 	// step addendum — composed by the caller
-	// (internal/delegate.sdkSystemPrompt). A resume re-sends the same bytes,
-	// because the harness replays the session's history but not the prompt
-	// that was appended to it.
+	// (internal/delegate.sdkSystemPrompt). A resume re-sends the bytes the
+	// session was started with, because the harness replays the session's
+	// history but not the prompt that was appended to it, and the provider
+	// binds the session's thinking to that prompt.
 	SystemPrompt string
 
 	// MaxTurns sets --max-turns. Zero omits the flag.
@@ -336,9 +337,10 @@ type RunOptions struct {
 	// trust file, with the channel's own bin dir leading PATH. Either way the
 	// env is GH_HOST → the injector, GH_ENTERPRISE_TOKEN → the per-run
 	// placeholder, plus the prompt / update-notifier suppressors. nil on
-	// runs that don't touch GitHub, and whenever the channel could not be
-	// provisioned (which degrades the run to the scoped exec verbs, never
-	// fails it). See GHChannelParams.
+	// runs that don't touch GitHub. A local run whose channel could not be
+	// provisioned degrades to the scoped exec verbs, never fails, and carries
+	// params that are not Live: they keep the gh it finds on PATH off the
+	// user's login. See GHChannelParams.
 	GHChannel *GHChannelParams
 
 	// SkillsSourcePath, when non-empty, is the orchestrator-owned staging dir
@@ -426,11 +428,11 @@ type GHChannelParams struct {
 	ConfigDir string
 }
 
-// Live reports whether gc is a working channel — an injector the agent's gh
-// can reach — rather than nil or the isolation-only params a run gets when its
-// channel could not start. Anything that grants or advertises real `gh` keys on
-// Live, never on gc being non-nil: an isolation-only run has no TF-owned gh,
-// so the gh on its PATH is the user's.
+// Live reports whether gc is a working channel, an injector the agent's gh can
+// reach, rather than nil or the params a local run gets when its channel could
+// not start. Whatever grants or advertises real `gh` keys on Live, never on gc
+// being non-nil: a run with a channel that is not live has no TF-owned gh, so
+// the gh on its PATH is the user's.
 //
 // The host alone decides it, because a sidecar's channel carries no trust-file
 // path (its gh trusts the injector through the run's CA bundle); the direct
@@ -774,6 +776,10 @@ func newDirectCommand(runCtx context.Context, opts RunOptions, nodeArgs []string
 		// config is still the right answer and this branch never fires.
 		identityPairs = githooks.FallbackIdentityConfigPairs()
 	}
+	// TODO(TFAC-1357): the agent's git still reads the operator's global and
+	// system git config, so a credential helper there (osxkeychain, from
+	// Apple's system config) answers as the operator for a host the run's proxy
+	// does not cover.
 	identityPairs = append(identityPairs, opts.GitConfigPairs...)
 	if gitLFSBinary() != "" {
 		identityPairs = append(identityPairs, githooks.LFSConfigPairs()...)

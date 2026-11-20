@@ -240,8 +240,10 @@ var TaskListStatuses = []string{
 //     key — the default order has no direction to flip — and the HTTP layer
 //     refuses that combination rather than silently ignoring it.
 type TaskListFilter struct {
-	Statuses       []string
-	IDs            []string
+	Statuses []string
+	IDs      []string
+	// EntityIDs keeps the tasks on these entities. Empty = every entity.
+	EntityIDs      []string
 	TeamIDs        []string
 	OnlyUnclaimed  bool
 	IncludeSnoozed bool
@@ -528,21 +530,6 @@ type TaskStore interface {
 	// regardless of event type. Used by entity lifecycle to close
 	// everything when the underlying entity (PR / ticket) closes.
 	FindActiveByEntity(ctx context.Context, orgID, entityID string) ([]domain.Task, error)
-
-	// ListActiveRefsForEntities returns minimal active-task refs
-	// (id, entity_id, event_type, dedup_key) for any entity in
-	// entityIDs. Used by the factory snapshot to attach pending
-	// tasks per entity in a single round-trip — no entity JOIN,
-	// no priority columns. Chunks internally on SQLite's
-	// variable-bind limit.
-	//
-	// teamIDs is the factory's per-page team filter (same shape as
-	// Queued): empty = the viewer's union, non-empty narrows the refs to
-	// those teams via the same RLS-mirroring predicate as Queued. Without
-	// it the station drawer would surface (and let you delegate) task
-	// refs outside the selected team scope even when the entity belt was
-	// filtered. Postgres-only effect; SQLite is N=1 and ignores it.
-	ListActiveRefsForEntities(ctx context.Context, orgID string, entityIDs []string, teamIDs []string) ([]domain.PendingTaskRef, error)
 
 	// EntityIDsWithActiveTasks returns the set of entity IDs with
 	// at least one non-terminal task, scoped to the given entity
@@ -1086,10 +1073,19 @@ type TaskStore interface {
 	// bumped the task: its newest task_events row of kind 'spawned', 'bumped'
 	// or 'injected' (a bump folded into a live conversation, whose row
 	// MarkEventInjectedSystem rewrote), ordered by the event's created_at,
-	// newest first, ties broken by event id descending. "" when the task has
-	// no such row. primary_event_id stays the spawning event; this is what a
-	// delegated run is briefed with. Admin pool, org_id bound by argument.
+	// newest first. Two events can share a created_at, and a tie goes to the
+	// later insert (SQLite's rowid, Postgres's events.seq). "" when the task
+	// has no such row. primary_event_id stays the spawning event; this is what
+	// a delegated run is briefed with. Admin pool, org_id bound by argument.
 	LatestEventIDSystem(ctx context.Context, orgID, taskID string) (string, error)
+
+	// LatestEventAfterSystem returns the id of the newest of those events
+	// that is newer than eventID, in LatestEventIDSystem's order, or "" when
+	// none is. eventID need not be on the task's timeline, but it must name an
+	// event: "" also answers an id with no event row, so a caller that needs
+	// to tell the two apart reads the event first. Admin pool, org_id bound by
+	// argument.
+	LatestEventAfterSystem(ctx context.Context, orgID, taskID, eventID string) (string, error)
 
 	// MarkEventInjectedSystem flips the (task_id, event_id) timeline row's
 	// kind to "injected" in place — the event bumped the task AND was folded
@@ -1108,19 +1104,25 @@ type TaskStore interface {
 
 	// --- Breaker ---
 	//
-	// A trigger's breaker is keyed on its blueprint: every run a trigger
-	// fires is a blueprint run, and event_handlers_one_trigger_per_blueprint
-	// gives each blueprint one live trigger. It counts blueprint runs, so a
+	// A trigger's breaker is its own: it counts the blueprint runs that
+	// trigger fired of its current blueprint under its current predicate, so
+	// another trigger on the same blueprint, the trigger's runs of a
+	// blueprint it was retargeted away from, and its runs under a predicate
+	// it no longer holds neither count toward it nor reset it. Predicates are
+	// compared as the text the trigger row stores, so a trigger edited back
+	// to an earlier predicate, or retargeted back to an earlier blueprint,
+	// counts the runs it fired under it again. It counts blueprint runs, so a
 	// run of several steps counts once.
 
-	// BreakerStreakSystem counts the failed and aborted blueprint runs of
-	// blueprintID that an event fired on entityID's tasks and that no
-	// resetting run started at or after: a completed run of the same
-	// blueprint, or a completed run a person started on the entity, of any
-	// blueprint. A person's failed run neither counts nor resets.
-	BreakerStreakSystem(ctx context.Context, orgID, entityID, blueprintID string) (domain.BreakerStreak, error)
-	// ListTrippedBreakersSystem returns every enabled, undeleted trigger in
-	// the org whose BreakerStreakSystem on an active entity has reached its
+	// BreakerStreakSystem counts the failed and aborted blueprint runs that
+	// triggerID fired of its current blueprint under its current predicate
+	// on entityID's tasks, and that no resetting run started at or after: a
+	// completed run the trigger fired of that blueprint under that predicate,
+	// or a completed run a person started on the entity, of any blueprint. A
+	// person's failed run neither counts nor resets.
+	BreakerStreakSystem(ctx context.Context, orgID, entityID, triggerID string) (domain.BreakerStreak, error)
+	// ListTrippedBreakersSystem returns every undeleted handler in automate
+	// in the org whose BreakerStreakSystem on an active entity has reached its
 	// breaker_threshold, ordered by trigger id then entity id.
 	ListTrippedBreakersSystem(ctx context.Context, orgID string) ([]domain.TrippedBreaker, error)
 

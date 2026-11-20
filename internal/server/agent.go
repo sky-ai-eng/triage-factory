@@ -1549,9 +1549,9 @@ const maxBatchTaskIDs = 500
 // as many teams as the viewer belongs to — so 100 is generous for the question
 // and still leaves the SQLite statement inside the 999-variable budget the
 // oldest supported build enforces: a full 500-id task chunk plus a team list
-// this size plus the status placeholders. Rejected rather than truncated, like
-// the task cap above, because a silently dropped team is a count that reads as
-// real work disappearing.
+// this size, an entity list of maxEntityListIDs, and the status placeholders.
+// Rejected rather than truncated, like the task cap above, because a silently
+// dropped team is a count that reads as real work disappearing.
 const maxBatchTeamIDs = 100
 
 // conversationListRequest is the body of POST /api/agent/conversations/list.
@@ -1575,6 +1575,13 @@ type conversationListRequest struct {
 	// otherwise report another team's work as this team's. When present, at
 	// most maxBatchTeamIDs, each a valid team id.
 	TeamIDs []string `json:"team_ids"`
+	// EntityIDs narrows to the conversations whose task is on one of these
+	// entities, for a caller that holds the entities it shows and wants the
+	// work on them. Optional: absent or empty is no entity narrowing. When
+	// present, at most maxEntityListIDs, each in canonical form. The rows
+	// still group by task id, and each row's task_id is the key a caller
+	// joins its tasks on.
+	EntityIDs []string `json:"entity_ids"`
 	// Statuses narrows to these DISPLAY statuses — the value every surface
 	// shows, which is why a claim phase is a legal value here and the stored
 	// column is not what gets filtered. Empty = every status. An unknown value
@@ -1594,6 +1601,7 @@ type conversationListRequest struct {
 type conversationListFilterKey struct {
 	TaskIDs         []string `json:"task_ids"`
 	TeamIDs         []string `json:"team_ids"`
+	EntityIDs       []string `json:"entity_ids"`
 	Statuses        []string `json:"statuses"`
 	Attention       bool     `json:"attention"`
 	IncludeMessages bool     `json:"include_messages"`
@@ -1664,6 +1672,7 @@ func (ag *agentHandler) handleConversations(w http.ResponseWriter, r *http.Reque
 			v.Invalid("team_ids", fmt.Sprintf("team id %q is not a valid team id", id))
 		}
 	}
+	entityIDs := canonicalIDList(&v, "entity_ids", "an entity", req.EntityIDs)
 	statuses := httpx.CanonicalStrings(req.Statuses)
 	validStatuses := domain.AllConversationStatuses()
 	for _, st := range statuses {
@@ -1673,7 +1682,7 @@ func (ag *agentHandler) handleConversations(w http.ResponseWriter, r *http.Reque
 		}
 	}
 	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(conversationListFilterKey{
-		TaskIDs: taskIDs, TeamIDs: teamIDs, Statuses: statuses,
+		TaskIDs: taskIDs, TeamIDs: teamIDs, EntityIDs: entityIDs, Statuses: statuses,
 		Attention: req.Attention, IncludeMessages: req.IncludeMessages,
 	}), maxBatchTaskIDs)
 	if v.Flush(w, http.StatusBadRequest) {
@@ -1690,7 +1699,7 @@ func (ag *agentHandler) handleConversations(w http.ResponseWriter, r *http.Reque
 	)
 	if err := ag.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		convs, total, e := tx.Conversations.List(r.Context(), orgID,
-			db.ConversationListFilter{TaskIDs: taskIDs, TeamIDs: teamIDs, Statuses: statuses, Attention: req.Attention},
+			db.ConversationListFilter{TaskIDs: taskIDs, TeamIDs: teamIDs, EntityIDs: entityIDs, Statuses: statuses, Attention: req.Attention},
 			db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		if e != nil {
 			return e

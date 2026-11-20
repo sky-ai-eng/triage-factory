@@ -343,6 +343,10 @@ func (f *fakeChannelRegistry) ListForOrg(context.Context, string) ([]slackstore.
 	return nil, nil
 }
 
+func (f *fakeChannelRegistry) ListWatchedInWorkspaceSystem(context.Context, string, string) ([]slackstore.Channel, error) {
+	return nil, nil
+}
+
 // FindOrCreateThreadSystem finds or creates the thread on the channel's row
 // in the linked fakeEntities, displayed under the id the row carries.
 func (f *fakeChannelRegistry) FindOrCreateThreadSystem(_ context.Context, orgID, channelID, threadTS, kind, title, url string) (slackstore.Thread, error) {
@@ -405,9 +409,9 @@ func (f *fakeChannelRegistry) MoveSystem(_ context.Context, orgID, oldID, newID 
 
 var _ slackstore.ChannelRegistryStore = (*fakeChannelRegistry)(nil)
 
-// testWorkspaceRow is a small helper for a slackstore.Workspace fixture.
-func testWorkspaceRow(orgID string) slackstore.Workspace {
-	return slackstore.Workspace{WorkspaceID: "T0PIPE001", APIAppID: "A0PIPE001", OrgID: orgID, BotUserID: "U0BOT"}
+// testWorkspaceRow is a small helper for a slackstore.Connection fixture.
+func testWorkspaceRow(orgID string) slackstore.Connection {
+	return slackstore.Connection{Source: slackstore.SourceOrg, Active: true, WorkspaceID: "T0PIPE001", APIAppID: "A0PIPE001", OrgID: orgID, BotUserID: "U0BOT"}
 }
 
 func newTestPipeline() (*ingestPipeline, *fakeEntities, *fakeDeliveries, *[]domain.Event) {

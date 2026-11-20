@@ -70,7 +70,7 @@ func (m *Manager) checkJiraDrift(ctx context.Context, client *jiraclient.Client,
 
 	var handlers []domain.EventHandler
 	for _, eventType := range jiradrift.EventTypes() {
-		hs, err := m.EventHandlers.GetEnabledForEventSystem(ctx, orgID, eventType)
+		hs, err := m.EventHandlers.GetActiveForEventSystem(ctx, orgID, eventType)
 		if err != nil {
 			span.SetStatus(codes.Error, "list handlers")
 			jiraLog.ErrorContext(ctx, "list jira handlers for the drift check failed; checking them next pass",

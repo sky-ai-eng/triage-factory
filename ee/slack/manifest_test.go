@@ -1,7 +1,14 @@
 package slack
 
 import (
+	"bytes"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -138,3 +145,139 @@ func TestBuildSlackManifest_NoOrgName_FallsBackToBareName(t *testing.T) {
 // through adminGate with a live authz.Checker) lives in the pgtest-backed
 // suite — workspaces_pg_test.go — alongside the other admin-gated handler
 // behavior, since adminGate needs a real org-membership read.
+
+// deploymentManifestPlaceholderURL is the public URL the published manifest
+// files carry, which the operator replaces with their own.
+const deploymentManifestPlaceholderURL = "https://YOUR-TF-PUBLIC-URL"
+
+// deploymentManifestFiles are the files an operator creates the deployment's
+// Slack app from, one per transport, beside the page that explains them.
+var deploymentManifestFiles = []struct{ transport, path string }{
+	{transportEventsAPI, "../../docs/users/self-hosting/deployment-integrations/slack-app-manifest.events-api.json"},
+	{transportSocket, "../../docs/users/self-hosting/deployment-integrations/slack-app-manifest.socket.json"},
+}
+
+// renderDeploymentManifestFile is a manifest file's exact contents: indented
+// for a person to read, with the long description's arrows and bullets left
+// unescaped, and a trailing newline.
+func renderDeploymentManifestFile(t *testing.T, transport string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(buildDeploymentSlackManifest(transport, deploymentManifestPlaceholderURL)); err != nil {
+		t.Fatalf("encode the %s manifest: %v", transport, err)
+	}
+	return buf.Bytes()
+}
+
+// TestDeploymentSlackManifestFiles: each published manifest file is the
+// builder's output, byte for byte, so a change to the scopes or the events
+// reaches an operator the next time they create the app. With
+// TF_UPDATE_SLACK_MANIFESTS=1 the test writes the files instead.
+func TestDeploymentSlackManifestFiles(t *testing.T) {
+	update := os.Getenv("TF_UPDATE_SLACK_MANIFESTS") == "1"
+	for _, f := range deploymentManifestFiles {
+		want := renderDeploymentManifestFile(t, f.transport)
+		if update {
+			if err := os.WriteFile(f.path, want, 0o644); err != nil {
+				t.Fatalf("write %s: %v", f.path, err)
+			}
+			continue
+		}
+		got, err := os.ReadFile(f.path)
+		if err != nil {
+			t.Errorf("read %s: %v", f.path, err)
+			continue
+		}
+		if !bytes.Equal(got, want) {
+			t.Errorf("%s is not buildDeploymentSlackManifest(%q, %q). Regenerate the files with\n"+
+				"\tTF_UPDATE_SLACK_MANIFESTS=1 go test ./ee/slack -run TestDeploymentSlackManifestFiles\n"+
+				"and commit them.\ngot:\n%s\nwant:\n%s",
+				filepath.Base(f.path), f.transport, deploymentManifestPlaceholderURL, got, want)
+		}
+	}
+}
+
+// TestBuildDeploymentSlackManifest: the deployment's manifest names no org,
+// registers the install callback, and for the Events API points at the
+// org-free webhook; everything else matches an org's own manifest for the
+// same transport.
+func TestBuildDeploymentSlackManifest(t *testing.T) {
+	const base = "https://tf.example"
+	for _, tc := range []struct {
+		transport      string
+		wantRequestURL string
+	}{
+		{transportEventsAPI, base + "/api/webhooks/slack"},
+		{transportSocket, ""},
+	} {
+		t.Run(tc.transport, func(t *testing.T) {
+			m := buildDeploymentSlackManifest(tc.transport, base)
+
+			if m.DisplayInformation.Name != "Triage Factory" {
+				t.Errorf("name = %q, want %q", m.DisplayInformation.Name, "Triage Factory")
+			}
+			wantRedirect := []string{base + "/api/slack/install/callback"}
+			if !reflect.DeepEqual(m.OAuthConfig.RedirectURLs, wantRedirect) {
+				t.Errorf("redirect_urls = %v, want %v", m.OAuthConfig.RedirectURLs, wantRedirect)
+			}
+			if got := m.Settings.EventSubscriptions.RequestURL; got != tc.wantRequestURL {
+				t.Errorf("request_url = %q, want %q", got, tc.wantRequestURL)
+			}
+			if m.Settings.OrgDeployEnabled {
+				t.Error("org_deploy_enabled = true; the deployment app refuses Enterprise Grid org-wide installs")
+			}
+			if m.Settings.TokenRotationEnabled {
+				t.Error("token_rotation_enabled = true; TF never refreshes a bot token")
+			}
+
+			// The rest is the org manifest's, with the fields above set to
+			// what it has for the same transport.
+			org := buildSlackManifest("Acme", tc.transport, base, "org-123")
+			m.DisplayInformation.Name = org.DisplayInformation.Name
+			m.OAuthConfig.RedirectURLs = nil
+			m.Settings.EventSubscriptions.RequestURL = org.Settings.EventSubscriptions.RequestURL
+			if !reflect.DeepEqual(m, org) {
+				t.Errorf("past its name, redirect URL and request URL, the deployment manifest differs from an org's:\n got %+v\nwant %+v", m, org)
+			}
+		})
+	}
+}
+
+// TestBuildSlackManifest_NoRedirectURLs: an org's own app is connected with
+// pasted tokens, never through OAuth, so its manifest registers no redirect.
+func TestBuildSlackManifest_NoRedirectURLs(t *testing.T) {
+	raw, err := json.Marshal(buildSlackManifest("Acme", transportEventsAPI, "https://tf.example", "org-123"))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(raw), "redirect_urls") {
+		t.Errorf("org manifest JSON carries redirect_urls: %s", raw)
+	}
+}
+
+// TestDeploymentManifestURLsAreMounted: the request URL and the redirect URL
+// the deployment manifest registers are routes the extension mounts, so an
+// app created from the published file reaches TF.
+func TestDeploymentManifestURLsAreMounted(t *testing.T) {
+	mnt := muxMounter{mux: http.NewServeMux()}
+	mountRoutes(mnt, &workspacesHandler{}, &deploymentAppHandler{}, &installHandler{}, &channelsHandler{}, &webhookHandler{})
+
+	m := buildDeploymentSlackManifest(transportEventsAPI, "https://tf.example")
+	for _, tc := range []struct{ method, rawURL string }{
+		{http.MethodPost, m.Settings.EventSubscriptions.RequestURL},
+		{http.MethodGet, m.OAuthConfig.RedirectURLs[0]},
+	} {
+		u, err := url.Parse(tc.rawURL)
+		if err != nil {
+			t.Fatalf("parse %q: %v", tc.rawURL, err)
+		}
+		rec := httptest.NewRecorder()
+		mnt.mux.ServeHTTP(rec, httptest.NewRequest(tc.method, u.Path, nil))
+		if rec.Code != http.StatusOK {
+			t.Errorf("%s %s = %d; the manifest registers a URL no route serves", tc.method, u.Path, rec.Code)
+		}
+	}
+}

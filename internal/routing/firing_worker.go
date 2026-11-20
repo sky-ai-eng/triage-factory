@@ -163,32 +163,32 @@ func closedByRunFinish(task *domain.Task) bool {
 }
 
 // newestEventSince returns the event a reroute of f's task routes: the task's
-// newest event unless it is older than the one f was queued for, else f's own.
-// The comparison is what keeps a task whose timeline is missing f's event
-// from being rerouted with an older one. Two events can carry one created_at
-// (a coarse clock, Windows' among them), and the timeline's own tiebreak has
-// already ordered such a pair, so a tie goes to the timeline's newest. Nil
-// when f's event row is gone.
+// newest event when it is newer than the one f was queued for, else f's own.
+// Asking for an event newer than f's, rather than for the newest, is what
+// keeps a task whose timeline is missing f's event from being rerouted with
+// an older one. The comparison is the store's because the insertion order
+// that breaks a created_at tie is not on an Event. Nil when f's event row is
+// gone.
 func (r *Router) newestEventSince(ctx context.Context, f domain.PendingFiring) (*domain.Event, error) {
 	ev, err := r.events.GetSystem(ctx, f.OrgID, f.TriggeringEventID)
 	if err != nil || ev == nil {
 		return nil, err
 	}
-	latestID, err := r.tasks.LatestEventIDSystem(ctx, f.OrgID, f.TaskID)
+	newerID, err := r.tasks.LatestEventAfterSystem(ctx, f.OrgID, f.TaskID, ev.ID)
 	if err != nil {
 		return nil, err
 	}
-	if latestID == "" || latestID == ev.ID {
+	if newerID == "" {
 		return ev, nil
 	}
-	latest, err := r.events.GetSystem(ctx, f.OrgID, latestID)
+	newer, err := r.events.GetSystem(ctx, f.OrgID, newerID)
 	if err != nil {
 		return nil, err
 	}
-	if latest != nil && !latest.CreatedAt.Before(ev.CreatedAt) {
-		return latest, nil
+	if newer == nil {
+		return ev, nil
 	}
-	return ev, nil
+	return newer, nil
 }
 
 // processFiring runs one claimed firing as one unit: renew the lease,
@@ -400,7 +400,7 @@ func (r *Router) processFiring(ctx context.Context, cf dbpkg.ClaimedFiring) {
 		requeue(workitem.OutcomeTransient, fmt.Errorf("trigger lookup: %w", err))
 		return
 	}
-	if trigger == nil || trigger.Kind != domain.EventHandlerKindTrigger || !trigger.Enabled {
+	if trigger == nil || !trigger.Automates() {
 		skip(domain.PendingFiringSkipTriggerDisabled)
 		return
 	}

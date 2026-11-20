@@ -44,11 +44,10 @@ type Stores struct {
 	// and blocks cross-tenant writes; sqlite asserts LocalDefaultOrgID.
 	Secrets SecretStore
 
-	// EventHandlers owns the unified event_handlers table:
-	// rules + triggers as one primitive with a kind discriminator.
-	// Rules create unclaimed tasks (human triage); triggers also fire
-	// an auto-delegation prompt. The router reads via GetEnabledForEvent
-	// on every routed event; handlers do full CRUD per kind.
+	// EventHandlers owns event_handlers: each a team's answer to one event
+	// type, whose mode says what a matching event does (off, notify, watch
+	// makes a task, automate makes one and runs the handler's blueprint).
+	// The router reads via GetActiveForEventSystem on every routed event.
 	EventHandlers EventHandlerStore
 
 	// Blueprints owns blueprints + blueprint_steps + blueprint_runs. Read by
@@ -81,15 +80,6 @@ type Stores struct {
 	// driven; the AI scorer reads tasks via the admin-pooled
 	// ScoreStore.
 	Tasks TaskStore
-
-	// Factory is the read-only projection that backs the
-	// /api/factory/snapshot handler. Every method is org-scoped via
-	// an explicit orgID parameter (the handler reads from request
-	// claims and forwards it). Admin-pool in Postgres for the
-	// non-tx wiring on this bundle; production callers always run
-	// inside WithTx and get the tx-bound, claims-set Factory via
-	// TxStores instead.
-	Factory FactoryReadStore
 
 	// TeamActivity computes the team activity node (GET
 	// /api/teams/{team_id}/activity). Read it through TxStores under the
@@ -605,7 +595,6 @@ type TxStores struct {
 	TeamAgents               TeamAgentStore
 	Users                    UsersStore
 	Tasks                    TaskStore
-	Factory                  FactoryReadStore
 	TeamActivity             TeamActivityStore
 	TeamPRs                  TeamPRStore
 	Conversations            ConversationStore

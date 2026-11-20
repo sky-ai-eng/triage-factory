@@ -20,47 +20,52 @@ import (
 // sees a Slack credential symbol.
 //
 // The unifying insight (same as GitHub's per-repo token set): a conversation's Slack
-// credential is not one token but a SET keyed by (workspace, app), resolved at
-// provision time to exactly the workspaces of the team's tracked channels —
+// credential is not one token but a SET keyed by workspace, holding each one's
+// active connection, resolved at provision time to exactly the workspaces of
+// the team's tracked channels —
 // which IS the authorizable set authorizeChannel already enforces, so sealing
 // those and no others loses nothing. The secret rides in the sealed bundle;
 // the runtime SELECTION (channel -> workspace) is non-secret policy the
 // handler relays for, and the orchestrator answers with a workspace identity,
 // never a token.
 
-// slackBundleCreds is the Slack provider's sealed keyed set: one bot token per
-// (workspaceID, apiAppID) the conversation may act as. Marshaled opaque into
-// bundle.Providers["slack"].
+// slackBundleCreds is the Slack provider's sealed keyed set: the bot token of
+// the active connection in each workspace the conversation may act in.
+// Marshaled opaque into bundle.Providers["slack"].
 type slackBundleCreds struct {
 	Workspaces []slackWorkspaceToken `json:"workspaces,omitempty"`
 }
 
-// slackWorkspaceToken is one member of the keyed set — the bot token for a
-// (workspace, app) pair, selected in-sidecar by the same (workspaceID,
-// apiAppID) the resolve_workspace relay returns for a channel.
+// slackWorkspaceToken is one member of the keyed set — the bot token of the
+// connection that was active in a workspace when the set was sealed, selected
+// in-sidecar by the workspace the resolve_workspace relay returns for a
+// channel. APIAppID records which connection that was.
 type slackWorkspaceToken struct {
 	WorkspaceID string `json:"workspace_id"`
 	APIAppID    string `json:"api_app_id"`
 	BotToken    string `json:"bot_token"`
 }
 
-// tokenFor selects the bot token for (workspaceID, apiAppID) from the sealed
-// set, in-sidecar, never asking the orchestrator for a secret. ok=false when
-// the pair is outside the sealed (== authorizable) set — the handler surfaces
+// tokenFor selects the sealed token for workspaceID from the sealed set,
+// in-sidecar, never asking the orchestrator for a secret. It matches the
+// workspace alone: after a switch, the relay names the new active connection
+// while a set sealed before it holds the old one's token, which still works,
+// so a run in flight keeps using it until its next re-seal. ok=false when the
+// workspace is outside the sealed (== authorizable) set — the handler surfaces
 // that as an authorization failure, symmetric with a channel the team doesn't
 // track.
-func (c slackBundleCreds) tokenFor(workspaceID, apiAppID string) (string, bool) {
+func (c slackBundleCreds) tokenFor(workspaceID string) (slackWorkspaceToken, bool) {
 	for _, w := range c.Workspaces {
-		if w.WorkspaceID == workspaceID && w.APIAppID == apiAppID {
-			return w.BotToken, w.BotToken != ""
+		if w.WorkspaceID == workspaceID {
+			return w, w.BotToken != ""
 		}
 	}
-	return "", false
+	return slackWorkspaceToken{}, false
 }
 
 // slackProviderCredential is the brain-side resolver registered under the
-// "slack" namespace: it seals a bot token for every (workspace, app) that owns
-// a channel the conversation's team tracks. Returns (nil, nil) when the team tracks no
+// "slack" namespace: it seals the bot token of the active connection in every
+// workspace that holds a channel the conversation's team tracks. Returns (nil, nil) when the team tracks no
 // Slack channels or the org has none connected (a GitHub/Jira-only conversation's
 // bundle then carries no Slack section). Runs only on the brain, against the
 // secret-bearing stores — the sidecar never reaches a secret store.
@@ -118,15 +123,12 @@ func slackProviderCredential(ctx context.Context, stores db.Stores, scope agenth
 		return nil, nil
 	}
 
-	all, err := bundle.Workspaces.ListAllSystem(ctx)
+	conns, err := bundle.Connections.ListForOrgSystem(ctx, scope.OrgID)
 	if err != nil {
-		return nil, fmt.Errorf("list workspaces: %w", err)
+		return nil, fmt.Errorf("list connections: %w", err)
 	}
 	var creds slackBundleCreds
-	for _, ws := range all {
-		if ws.OrgID != scope.OrgID {
-			continue
-		}
+	for _, ws := range activeConnections(conns) {
 		if _, ok := workspaceIDs[ws.WorkspaceID]; !ok {
 			continue
 		}
@@ -146,12 +148,10 @@ func slackProviderCredential(ctx context.Context, stores db.Stores, scope agenth
 	if len(creds.Workspaces) == 0 {
 		return nil, nil
 	}
-	// Deterministic order so a given input seals byte-stably.
+	// Deterministic order so a given input seals byte-stably. One active
+	// connection per workspace makes the workspace a total order.
 	sort.Slice(creds.Workspaces, func(i, j int) bool {
-		if creds.Workspaces[i].WorkspaceID != creds.Workspaces[j].WorkspaceID {
-			return creds.Workspaces[i].WorkspaceID < creds.Workspaces[j].WorkspaceID
-		}
-		return creds.Workspaces[i].APIAppID < creds.Workspaces[j].APIAppID
+		return creds.Workspaces[i].WorkspaceID < creds.Workspaces[j].WorkspaceID
 	})
 	return json.Marshal(creds)
 }

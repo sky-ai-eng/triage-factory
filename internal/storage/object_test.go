@@ -26,6 +26,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace/noop"
 
+	"github.com/sky-ai-eng/triage-factory/internal/containertest"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -307,12 +308,13 @@ func TestObjectStorage_TracesUnderParent(t *testing.T) {
 // identity holding the returned keys, so the gateway checks every request's
 // SigV4 signature, as the compose stack's does. The identity is not limited to
 // a bucket, because the suite creates its buckets and sets versioning itself.
-// Like pgtest, it skips cleanly when Docker is unavailable — the SQLite/local
-// suite stays green on machines with no daemon — but a reachable-but-broken
-// daemon fails loudly rather than skipping a real regression into a green pass.
+// Like pgtest, it skips cleanly when Docker is unreachable or cannot run Linux
+// containers — the SQLite/local suite stays green on such machines — but a
+// healthy Linux daemon whose container fails to boot fails loudly rather than
+// skipping a real regression into a green pass.
 func startSeaweedFS(t *testing.T) (endpoint, accessKey, secretKey string) {
 	t.Helper()
-	testcontainers.SkipIfProviderIsNotHealthy(t)
+	containertest.SkipUnlessLinuxDaemon(t)
 
 	ctx := context.Background()
 	const user, pass = "tfaccesskey", "tfsecretkey"

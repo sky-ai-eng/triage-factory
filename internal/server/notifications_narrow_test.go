@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
@@ -138,27 +139,19 @@ func TestNotificationList_Audience(t *testing.T) {
 	}
 }
 
-// awaitClockTick returns once the wall clock reads later than it did on entry.
-// The timestamp sorts order rows by the instant each write stamped, and a coarse
-// clock (Windows ticks in milliseconds) gives two back-to-back writes one
-// instant, which leaves their order to the id tiebreak.
-func awaitClockTick() {
-	start := time.Now().Round(0)
-	for !time.Now().Round(0).After(start) {
-		time.Sleep(time.Millisecond)
-	}
-}
-
 // TestNotificationList_SortEveryKey: every sort_key orders both lists over
 // the whole set, each key's own direction applies without a sort_dir, and a
 // page token is bound to the order it was minted under.
 func TestNotificationList_SortEveryKey(t *testing.T) {
 	s, _ := newNotificationsServer(t)
-	localNotification(t, s, "b")
-	awaitClockTick()
-	localNotification(t, s, "a")
-	awaitClockTick()
+	b := localNotification(t, s, "b")
+	a := localNotification(t, s, "a")
 	requiredCondition.Set(context.Background(), runmode.LocalDefaultOrgID, notificationTestParams{ID: "c"}, true)
+	c := notificationIDByTitle(t, s, "required c")
+	// Raised b, a, c, in that order, whatever the clock's resolution.
+	for i, id := range []string{b, a, c} {
+		dbtest.AgeNotification(t, s.db, id, time.Duration(3-i)*time.Minute)
+	}
 
 	for _, path := range []string{meNotifications + "/list", orgNotificationsList()} {
 		order := func(body map[string]any) []string {
@@ -209,8 +202,8 @@ func TestNotificationList_SortEveryKey(t *testing.T) {
 
 	// b resolves before a; c stays open.
 	fixableCondition.Set(context.Background(), runmode.LocalDefaultOrgID, notificationTestParams{ID: "b"}, false)
-	awaitClockTick()
 	fixableCondition.Set(context.Background(), runmode.LocalDefaultOrgID, notificationTestParams{ID: "a"}, false)
+	dbtest.AgeNotification(t, s.db, b, time.Minute)
 	for _, path := range []string{meNotifications + "/list", orgNotificationsList()} {
 		for _, c := range []struct {
 			body map[string]any

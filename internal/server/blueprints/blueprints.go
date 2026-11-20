@@ -332,7 +332,7 @@ func (h *Handler) handleBlueprintUpdate(w http.ResponseWriter, r *http.Request) 
 // handleBlueprintDelete soft-deletes a whole blueprint and cascades, in one
 // tx (team-scoped, mutating, RLS under the acting team). The cascade is
 // richer than a plain delete because team blueprints carry copy-only step
-// prompts and a bound trigger:
+// prompts and the event handlers that reference it:
 //
 //   - The header is soft-deleted (Blueprints.Delete stamps deleted_at). The row
 //     and its blueprint_steps stay as durable audit so the ...System reads keep
@@ -343,16 +343,13 @@ func (h *Handler) handleBlueprintUpdate(w http.ResponseWriter, r *http.Request) 
 //     their blueprint), so leaving them behind orphans rows with no canvas
 //     presence. We resolve the steps and soft-delete each via the shared
 //     source-dispatch — the other half of the prompt-delete sole-owner pairing.
-//   - The bound trigger is detached: every handler ListForBlueprint resolves is
-//     deleted via EventHandlers.Delete, matching DELETE /api/event-handlers/{id}
-//     and the prompt head-delete path. A trigger is kept as a deleted row, so
-//     the runs that reference it keep their trigger_id. The blueprint header
-//     stays present (soft-deleted, not gone), so the trigger's
-//     (blueprint_id, org_id) / (blueprint_id, team_id) FKs are always
-//     satisfied regardless of order.
+//   - Its event handlers are detached (EventHandlers.DetachBlueprint): each
+//     loses its blueprint and stays live, and one that automated moves to
+//     watch and keeps making tasks. The prompt head-delete path detaches the
+//     same way.
 //
-// 404 by re-read (Get filters soft-deleted) when the blueprint is missing or
-// already deleted.
+// 404 by re-read (GetForUpdate filters soft-deleted) when the blueprint is
+// missing or already deleted.
 func (h *Handler) handleBlueprintDelete(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
@@ -371,7 +368,10 @@ func (h *Handler) handleBlueprintDelete(w http.ResponseWriter, r *http.Request) 
 
 	var found bool
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		existing, e := tx.Blueprints.Get(r.Context(), orgID, id)
+		// Held until commit, before the detach below reads which handlers
+		// reference the blueprint, so that set cannot gain a handler before
+		// the delete lands (BlueprintStore.GetForUpdate).
+		existing, e := tx.Blueprints.GetForUpdate(r.Context(), orgID, id)
 		if e != nil || existing == nil {
 			return e
 		}
@@ -401,16 +401,8 @@ func (h *Handler) handleBlueprintDelete(w http.ResponseWriter, r *http.Request) 
 			}
 		}
 
-		// Detach the bound trigger(s). EventHandlers.Delete keeps each one as a
-		// deleted row, system rows included.
-		triggers, e := tx.EventHandlers.ListForBlueprint(r.Context(), orgID, id)
-		if e != nil {
+		if e := tx.EventHandlers.DetachBlueprint(r.Context(), orgID, id); e != nil {
 			return e
-		}
-		for _, tr := range triggers {
-			if de := tx.EventHandlers.Delete(r.Context(), orgID, tr.ID); de != nil {
-				return de
-			}
 		}
 
 		// Retire the header last (audit row + steps stay; deleted_at stamped).
@@ -717,6 +709,20 @@ func (f *blueprintFault) raise(status int, reason, message, field string) {
 	f.item = httpx.ErrorItem{Reason: reason, Message: message, Field: field}
 }
 
+// errRefused is what a closure returns when it finds, after it has written,
+// that the request is refused: a raised fault, or a blueprint that is gone
+// since the closure read it. The transaction then rolls back instead of
+// committing writes the answer does not describe.
+var errRefused = errors.New("blueprint write refused")
+
+// refuse is raise for a refusal found after the closure wrote. The caller
+// returns what it returns, and treats errRefused from the transaction as the
+// raised fault rather than as a failure.
+func (f *blueprintFault) refuse(status int, reason, message, field string) error {
+	f.raise(status, reason, message, field)
+	return errRefused
+}
+
 // write emits the refusal if one was raised, reporting whether it did so the
 // caller can return without falling through to the success body.
 func (f *blueprintFault) write(w http.ResponseWriter) bool {
@@ -802,19 +808,6 @@ func (h *Handler) handleBlueprintMerge(w http.ResponseWriter, r *http.Request) {
 				"host and source blueprints belong to different teams", "source_blueprint_id")
 			return nil
 		}
-		// Source must be trigger-less. Unreachable from the canvas (you can only
-		// connect a tail into a trigger-less entry), but the endpoint is
-		// third-party-callable so it asserts rather than corrupting state. The
-		// ≤1-trigger-per-blueprint partial-unique is the hard backstop.
-		triggers, e := tx.EventHandlers.ListForBlueprint(r.Context(), orgID, req.SourceBlueprintID)
-		if e != nil {
-			return e
-		}
-		if len(triggers) > 0 {
-			fault.raise(http.StatusUnprocessableEntity, httpx.ReasonConflict,
-				"the absorbed blueprint has its own event trigger; detach it first", "source_blueprint_id")
-			return nil
-		}
 		// Cap: the merged blueprint must stay editable via the normal steps-PUT,
 		// which rejects lists longer than maxBlueprintSteps. Reject up front
 		// rather than minting an un-editable blueprint.
@@ -832,14 +825,36 @@ func (h *Handler) handleBlueprintMerge(w http.ResponseWriter, r *http.Request) {
 			return nil
 		}
 		if e := tx.Blueprints.MergeInto(r.Context(), orgID, hostID, req.SourceBlueprintID); e != nil {
+			if errors.Is(e, db.ErrNoSuchBlueprint) {
+				source = nil // retired since the read above; resolved to 404 below
+				return errRefused
+			}
 			return e
+		}
+		// No event handler may reference the source, in any mode: the merge
+		// retires it, and a handler on it would be left referencing a retired
+		// blueprint. Unreachable from the canvas (you can only connect a tail
+		// into an entry no handler references), but the endpoint is
+		// third-party-callable, so it refuses here, and rolls the merge back.
+		// The check comes after the retire so that it runs while the retire's
+		// write holds the source's row: a handler write holding the source
+		// (GetForShare) either committed before that write, and its handler
+		// is listed here, or waits for this transaction and then reads the
+		// source as absent.
+		triggers, e := tx.EventHandlers.ListForBlueprint(r.Context(), orgID, req.SourceBlueprintID)
+		if e != nil {
+			return e
+		}
+		if len(triggers) > 0 {
+			return fault.refuse(http.StatusUnprocessableEntity, httpx.ReasonConflict,
+				"an event handler references the absorbed blueprint; detach it first", "source_blueprint_id")
 		}
 		if merged, e = tx.Blueprints.Get(r.Context(), orgID, hostID); e != nil {
 			return e
 		}
 		steps, e = tx.Blueprints.ListSteps(r.Context(), orgID, hostID)
 		return e
-	}); err != nil {
+	}); err != nil && !errors.Is(err, errRefused) {
 		httpx.InternalError(w, "blueprints", err)
 		return
 	}
@@ -1074,17 +1089,6 @@ func (h *Handler) handleBlueprintReconnect(w http.ResponseWriter, r *http.Reques
 				"at_step_index must split the blueprint into two non-empty halves", "at_step_index")
 			return nil
 		}
-		// Target must be trigger-less to be absorbed (mirrors merge). The
-		// one-trigger-per-blueprint partial-unique index is the hard backstop.
-		triggers, e := tx.EventHandlers.ListForBlueprint(r.Context(), orgID, req.TargetBlueprintID)
-		if e != nil {
-			return e
-		}
-		if len(triggers) > 0 {
-			fault.raise(http.StatusUnprocessableEntity, httpx.ReasonConflict,
-				"the target blueprint has its own event trigger; detach it first", "target_blueprint_id")
-			return nil
-		}
 		// Cap: the surviving upstream (atIndex steps) + the absorbed target must
 		// stay editable via the steps-PUT, which rejects lists over the max.
 		targetSteps, e := tx.Blueprints.ListSteps(r.Context(), orgID, req.TargetBlueprintID)
@@ -1111,7 +1115,23 @@ func (h *Handler) handleBlueprintReconnect(w http.ResponseWriter, r *http.Reques
 			return e
 		}
 		if e = tx.Blueprints.MergeInto(r.Context(), orgID, id, req.TargetBlueprintID); e != nil {
+			if errors.Is(e, db.ErrNoSuchBlueprint) {
+				target = nil // retired since the read above; resolved to 404 below
+				return errRefused
+			}
 			return e
+		}
+		// No event handler may reference the target, as for a merge's source:
+		// the absorb retires it, and a handler on it would be left referencing a
+		// retired blueprint. The check comes after the retire, and a handler
+		// found here rolls the reconnect back, for the merge's reason.
+		triggers, e := tx.EventHandlers.ListForBlueprint(r.Context(), orgID, req.TargetBlueprintID)
+		if e != nil {
+			return e
+		}
+		if len(triggers) > 0 {
+			return fault.refuse(http.StatusUnprocessableEntity, httpx.ReasonConflict,
+				"an event handler references the target blueprint; detach it first", "target_blueprint_id")
 		}
 		if hostOut, e = tx.Blueprints.Get(r.Context(), orgID, id); e != nil {
 			return e
@@ -1123,7 +1143,7 @@ func (h *Handler) handleBlueprintReconnect(w http.ResponseWriter, r *http.Reques
 		}
 		hostSteps, e = tx.Blueprints.ListSteps(r.Context(), orgID, id)
 		return e
-	}); err != nil {
+	}); err != nil && !errors.Is(err, errRefused) {
 		httpx.InternalError(w, "blueprints", err)
 		return
 	}

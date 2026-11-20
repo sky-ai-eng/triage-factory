@@ -1,7 +1,7 @@
 // Package lite holds the SQLite stub implementation of the Enterprise
-// Edition Slack workspace store and registers it for the "sqlite" dialect.
-// Slack workspace connect is a multi-mode concept: local mode is N=1 and
-// never registers a workspace, so every method returns
+// Edition Slack stores and registers it for the "sqlite" dialect.
+// Connecting Slack is a multi-mode concept: local mode is N=1 and
+// never registers a connection, so every method returns
 // db.ErrNotApplicableInLocal. The stub exists only so the Slack bundle is
 // fully wired in both modes — no local caller ever reaches it (the Slack
 // routes gate on the `slack` entitlement, which a community/unlicensed
@@ -22,7 +22,7 @@ import (
 func init() {
 	db.RegisterStoreExtension("sqlite", slackstore.ExtKey, func(app, admin db.Execer) any {
 		return &slackstore.Bundle{
-			Workspaces:   newWorkspaceStore(app, admin),
+			Connections:  newConnectionStore(app, admin),
 			Identities:   newIdentityStore(admin),
 			Deliveries:   newDeliveryStore(),
 			Channels:     newChannelRegistryStore(app, admin),
@@ -31,51 +31,63 @@ func init() {
 	})
 }
 
-type workspaceStore struct{ q db.Execer }
+type connectionStore struct{ q db.Execer }
 
-func newWorkspaceStore(q, _ db.Execer) slackstore.WorkspaceStore {
-	return &workspaceStore{q: q}
+func newConnectionStore(q, _ db.Execer) slackstore.ConnectionStore {
+	return &connectionStore{q: q}
 }
 
-var _ slackstore.WorkspaceStore = (*workspaceStore)(nil)
+var _ slackstore.ConnectionStore = (*connectionStore)(nil)
 
-func (s *workspaceStore) Upsert(context.Context, slackstore.Workspace) error {
-	return db.ErrNotApplicableInLocal
+func (s *connectionStore) Upsert(context.Context, slackstore.Connection) (slackstore.Connection, error) {
+	return slackstore.Connection{}, db.ErrNotApplicableInLocal
 }
 
-func (s *workspaceStore) ListForOrg(context.Context, string) ([]slackstore.Workspace, error) {
+func (s *connectionStore) ListForOrg(context.Context, string, db.ListOpts) ([]slackstore.Connection, int, error) {
+	return nil, 0, db.ErrNotApplicableInLocal
+}
+
+func (s *connectionStore) Get(context.Context, string, string, string) (*slackstore.Connection, error) {
 	return nil, db.ErrNotApplicableInLocal
 }
 
-func (s *workspaceStore) Get(context.Context, string, string, string) (*slackstore.Workspace, error) {
-	return nil, db.ErrNotApplicableInLocal
-}
-
-func (s *workspaceStore) Delete(context.Context, string, string, string) error {
+func (s *connectionStore) Delete(context.Context, string, string, string) error {
 	return db.ErrNotApplicableInLocal
 }
 
-func (s *workspaceStore) DeleteSystem(context.Context, string, string, string, time.Time) (bool, error) {
+func (s *connectionStore) LockWorkspace(context.Context, string, string) ([]slackstore.Connection, error) {
+	return nil, db.ErrNotApplicableInLocal
+}
+
+func (s *connectionStore) Activate(context.Context, string, string, string) (slackstore.Connection, error) {
+	return slackstore.Connection{}, db.ErrNotApplicableInLocal
+}
+
+func (s *connectionStore) DeleteSystem(context.Context, string, string, string, time.Time) (bool, error) {
 	return false, db.ErrNotApplicableInLocal
 }
 
-func (s *workspaceStore) ListAllSystem(context.Context) ([]slackstore.Workspace, error) {
+func (s *connectionStore) ListAllSystem(context.Context) ([]slackstore.Connection, error) {
 	return nil, db.ErrNotApplicableInLocal
 }
 
-func (s *workspaceStore) ListForOrgSystem(context.Context, string) ([]slackstore.Workspace, error) {
+func (s *connectionStore) ListForOrgSystem(context.Context, string) ([]slackstore.Connection, error) {
 	return nil, db.ErrNotApplicableInLocal
 }
 
-func (s *workspaceStore) GetByWorkspaceAppSystem(context.Context, string, string) (*slackstore.Workspace, error) {
+func (s *connectionStore) ActiveForWorkspaceSystem(context.Context, string, string) (*slackstore.Connection, error) {
 	return nil, db.ErrNotApplicableInLocal
 }
 
-func (s *workspaceStore) LockApp(context.Context, string) error {
+func (s *connectionStore) GetByWorkspaceAppSystem(context.Context, string, string) (*slackstore.Connection, error) {
+	return nil, db.ErrNotApplicableInLocal
+}
+
+func (s *connectionStore) LockApp(context.Context, string) error {
 	return db.ErrNotApplicableInLocal
 }
 
-func (s *workspaceStore) AppBoundToOtherOrgSystem(context.Context, string, string) (bool, error) {
+func (s *connectionStore) AppBoundToOtherOrgSystem(context.Context, string, string) (bool, error) {
 	return false, db.ErrNotApplicableInLocal
 }
 

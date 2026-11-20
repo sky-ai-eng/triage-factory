@@ -549,28 +549,37 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		}
 	})
 
-	t.Run("ListActiveRefsForEntities_filters_terminal", func(t *testing.T) {
+	t.Run("List_narrows_by_entity", func(t *testing.T) {
 		s, orgID, _, _, _, seed, _ := mk(t)
-		for _, none := range [][]string{nil, {}} {
-			if refs, err := s.ListActiveRefsForEntities(ctx, orgID, none, nil); err != nil || len(refs) != 0 {
-				t.Errorf("ListActiveRefsForEntities(%#v) = (%d refs, %v), want none", none, len(refs), err)
-			}
-		}
-		entityA, _, taskA := seed(t, "ref-a")
-		entityB, _, taskB := seed(t, "ref-b")
-		// Close B; only A should remain.
+		entityA, _, taskA := seed(t, "ent-a")
+		entityB, _, taskB := seed(t, "ent-b")
+		_, _, taskC := seed(t, "ent-c")
+		// Close B; an open-status narrowing then keeps only A of the two named.
 		if _, err := s.Close(ctx, orgID, taskB, "test", ""); err != nil {
 			t.Fatalf("Close: %v", err)
 		}
-		refs, err := s.ListActiveRefsForEntities(ctx, orgID, []string{entityA, entityB}, nil)
-		if err != nil {
-			t.Fatalf("ListActiveRefsForEntities: %v", err)
+		ids := func(f db.TaskListFilter) map[string]bool {
+			t.Helper()
+			tasks, total, err := s.List(ctx, orgID, f, db.Unwindowed)
+			if err != nil {
+				t.Fatalf("List(%+v): %v", f, err)
+			}
+			if total != len(tasks) {
+				t.Errorf("List(%+v): total = %d, want the %d rows it served", f, total, len(tasks))
+			}
+			out := map[string]bool{}
+			for _, task := range tasks {
+				out[task.ID] = true
+			}
+			return out
 		}
-		if len(refs) != 1 {
-			t.Fatalf("got %d refs, want 1 (only A active)", len(refs))
+		named := ids(db.TaskListFilter{EntityIDs: []string{entityA, entityB}})
+		if !named[taskA] || !named[taskB] || named[taskC] {
+			t.Errorf("entity_ids [A B] = %v, want A's and B's tasks and not C's", named)
 		}
-		if refs[0].ID != taskA {
-			t.Errorf("ref ID = %s, want %s", refs[0].ID, taskA)
+		open := ids(db.TaskListFilter{EntityIDs: []string{entityA, entityB}, Statuses: []string{"queued", "in_progress", "snoozed"}})
+		if !open[taskA] || open[taskB] || len(open) != 1 {
+			t.Errorf("entity_ids [A B] open = %v, want A's task alone", open)
 		}
 	})
 
@@ -2070,6 +2079,11 @@ type TaskMemoryPendingHarness struct {
 	// unmet debt, so which boundary is newest has to be staged rather than
 	// inferred from how fast two EndConversation calls happen to run.
 	BackdateEndedAt func(t *testing.T, conversationID string, age time.Duration)
+
+	// AgeAttempt rewrites an attempt's started_at, and its completed_at when
+	// it has one, to `age` ago, as MemoryAttemptSeeder.AgeAttempt does, so
+	// attempts made back to back have an order that cannot tie.
+	AgeAttempt func(t *testing.T, attemptID string, age time.Duration)
 }
 
 // TaskMemoryPendingFactory builds a fresh harness per subtest.
@@ -2298,7 +2312,9 @@ func RunTaskMemoryPendingConformance(t *testing.T, mk TaskMemoryPendingFactory) 
 		}
 
 		// A second attempt is what a reader should now see: the summary is
-		// the newest try, not the first one.
+		// the newest try, not the first one. The first is aged, since two
+		// attempts begun back to back can share a started_at.
+		h.AgeAttempt(t, begun.ID, time.Minute)
 		second, err := h.Stores.MemoryAttempts.BeginAttemptSystem(ctx, h.OrgID, convID)
 		if err != nil {
 			t.Fatalf("BeginAttemptSystem (second): %v", err)

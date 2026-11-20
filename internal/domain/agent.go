@@ -3,6 +3,7 @@ package domain
 import (
 	"fmt"
 	"math"
+	"slices"
 	"time"
 )
 
@@ -744,7 +745,7 @@ type Message struct {
 	// it; empty for rows produced outside any claim (a queued user
 	// message, a pending injection). Never read by assembly.
 	ClaimID string
-	Role    string // "assistant" | "tool" | "user" — see ConversationStore's doc comment for the full allowed set incl. reserved subtypes
+	Role    string // "assistant" | "tool" | "user" | "system" — see ConversationStore's doc comment for the full allowed set incl. reserved subtypes
 	Content string
 	// Subtype discriminates a row that deviates from ordinary role
 	// behavior. Blank is normal — an assistant turn, a tool result, a
@@ -886,6 +887,42 @@ type MessageDTO struct {
 	ContentBlocks []ContentBlock    `json:"content_blocks,omitempty"`
 }
 
+// MessageMetadataToolsFingerprint is the Message.Metadata key under which an
+// assistant row records a fingerprint of the tools its request carried. The
+// native loop compares it with a later request's tools before it replays the
+// row's reasoning. Stored rows carry this key, so it cannot be renamed.
+const MessageMetadataToolsFingerprint = "tools_fingerprint"
+
+// wireMetadata is a row's metadata as a client receives it, which leaves out
+// the tools fingerprint and a system update's parts: only the runtimes read
+// them, and the parts are kilobytes of prompt text the row's content already
+// summarizes. It copies before it removes, because the row and its DTO
+// otherwise share one map.
+func wireMetadata(metadata map[string]any) map[string]any {
+	omitted := 0
+	for _, k := range runtimeOnlyMetadata {
+		if _, ok := metadata[k]; ok {
+			omitted++
+		}
+	}
+	if omitted == 0 {
+		return metadata
+	}
+	if len(metadata) == omitted {
+		return nil
+	}
+	out := make(map[string]any, len(metadata)-omitted)
+	for k, v := range metadata {
+		if !slices.Contains(runtimeOnlyMetadata, k) {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// runtimeOnlyMetadata are the metadata keys wireMetadata leaves out.
+var runtimeOnlyMetadata = []string{MessageMetadataToolsFingerprint, MessageMetadataSystemParts}
+
 // ToDTO projects a transcript row onto the shared snake_case wire shape.
 func (m Message) ToDTO() MessageDTO {
 	return MessageDTO{
@@ -897,7 +934,7 @@ func (m Message) ToDTO() MessageDTO {
 		ToolCalls:           m.ToolCalls,
 		ToolCallID:          m.ToolCallID,
 		IsError:             m.IsError,
-		Metadata:            m.Metadata,
+		Metadata:            wireMetadata(m.Metadata),
 		Model:               m.Model,
 		InputTokens:         m.InputTokens,
 		OutputTokens:        m.OutputTokens,

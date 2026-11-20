@@ -406,12 +406,10 @@ func TestReactor_AdvanceInheritsTriggerID(t *testing.T) {
 	// Freeze a firing trigger on the blueprint_run, as the event path does at
 	// mint. The event_handlers row satisfies the trigger_id FK; the br flips to
 	// the event shape (creator NULL) so its trigger-type CHECK holds.
-	breaker, minSuit := 3, 0.5
 	trigID := "trig-inherit-handler"
 	if _, err := sqlitestore.New(database).EventHandlers.Create(ctx, org, runmode.LocalDefaultTeamID, domain.EventHandler{
-		ID: trigID, Kind: domain.EventHandlerKindTrigger, EventType: domain.EventGitHubPRCICheckFailed,
-		BlueprintID: "rbp-trig-inherit", BreakerThreshold: &breaker, MinAutonomySuitability: &minSuit,
-		Enabled: true,
+		ID: trigID, Mode: domain.EventHandlerModeAutomate, EventType: domain.EventGitHubPRCICheckFailed,
+		Name: "CI fix", DefaultPriority: 0.5, BlueprintID: "rbp-trig-inherit", BreakerThreshold: 3, MinAutonomySuitability: 0.5,
 	}); err != nil {
 		t.Fatalf("EventHandlers.Create: %v", err)
 	}

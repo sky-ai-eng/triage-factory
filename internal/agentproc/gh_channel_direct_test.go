@@ -1,7 +1,7 @@
 package agentproc
 
 import (
-	"context"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,45 +25,36 @@ func TestDirectGHChannelEnv_Off(t *testing.T) {
 	if got := directGHChannelEnv(nil); got != nil {
 		t.Errorf("directGHChannelEnv(nil) = %v, want nil", got)
 	}
-	// A half-built channel never points gh at its listener: with no trust file
-	// that would fail every TLS handshake instead of degrading cleanly. It still
-	// carries the refusing tokens, since the inherited ones are already gone.
-	env := envMap(t, directGHChannelEnv(&GHChannelParams{Host: "127.0.0.1:1"}))
-	if _, ok := env["GH_HOST"]; ok {
-		t.Errorf("directGHChannelEnv(no cert) sets GH_HOST: %v", env)
-	}
-	if env["GH_TOKEN"] != ghNoCredentialToken || env["GH_ENTERPRISE_TOKEN"] != ghNoCredentialToken {
-		t.Errorf("directGHChannelEnv(no cert) = %v, want the refusing tokens", env)
-	}
 }
 
-// A run whose channel could not start gets a gh config dir of its own and a
-// refusing token for both hosts gh knows, and nothing else: no listener to
+// A local run whose channel could not start gets a gh config dir of its own and
+// a refusing token for every host gh knows, and nothing else: no listener to
 // point gh at, no PATH entry for a binary TF does not have. Both token
-// variables matter, because gh reads the OS keyring when they are unset, and
-// the keyring is where `gh auth login` keeps the user's credential.
-func TestDirectGHChannelEnv_IsolationOnly(t *testing.T) {
+// variables matter, because gh reads the OS keyring for a host whose variable
+// is unset, and the keyring is where `gh auth login` keeps the user's
+// credential. A half-built channel gets the same: pointing gh at a listener
+// with no trust file would fail every TLS handshake instead of degrading
+// cleanly.
+func TestDirectGHChannelEnv_NotLive(t *testing.T) {
+	const configDir = "/state/gh-channel/run1/config"
 	want := map[string]string{
-		"GH_CONFIG_DIR":         "/state/gh-channel/run1/config",
+		"GH_CONFIG_DIR":         configDir,
 		"GH_TOKEN":              ghNoCredentialToken,
 		"GH_ENTERPRISE_TOKEN":   ghNoCredentialToken,
 		"GH_PROMPT_DISABLED":    "1",
 		"GH_NO_UPDATE_NOTIFIER": "1",
 	}
 	for name, gc := range map[string]*GHChannelParams{
-		"no listener":             {ConfigDir: "/state/gh-channel/run1/config"},
-		"listener, no trust file": {Host: "127.0.0.1:1", ConfigDir: "/state/gh-channel/run1/config"},
+		"channel did not start":   {ConfigDir: configDir},
+		"listener, no trust file": {Host: "127.0.0.1:1", Token: "per-run-placeholder", BinDir: "/state/bin", ConfigDir: configDir},
 	} {
-		env := envMap(t, directGHChannelEnv(gc))
-		if len(env) != len(want) {
-			t.Errorf("%s: env = %v, want exactly %v", name, env, want)
-			continue
+		if got := envMap(t, directGHChannelEnv(gc)); !maps.Equal(got, want) {
+			t.Errorf("%s: env = %v, want %v", name, got, want)
 		}
-		for k, v := range want {
-			if env[k] != v {
-				t.Errorf("%s: %s = %q, want %q", name, k, env[k], v)
-			}
-		}
+	}
+	// With no config dir to name, the tokens still keep gh off the keyring.
+	if got := envMap(t, directGHChannelEnv(&GHChannelParams{})); got["GH_TOKEN"] != ghNoCredentialToken || got["GH_ENTERPRISE_TOKEN"] != ghNoCredentialToken {
+		t.Errorf("no config dir: env = %v, want the refusing tokens", got)
 	}
 }
 
@@ -73,52 +64,13 @@ func TestGHChannelParams_Live(t *testing.T) {
 		gc   *GHChannelParams
 		want bool
 	}{
-		"nil":            {none, false},
-		"isolation-only": {&GHChannelParams{ConfigDir: "/state/gh-channel/run1/config"}, false},
-		"live":           {&GHChannelParams{Host: "127.0.0.1:1", CertSourcePath: "/c", ConfigDir: "/d"}, true},
+		"nil":                   {none, false},
+		"channel did not start": {&GHChannelParams{ConfigDir: "/state/gh-channel/run1/config"}, false},
+		"local channel":         {&GHChannelParams{Host: "127.0.0.1", CertSourcePath: "/c", ConfigDir: "/d"}, true},
+		"sidecar channel":       {&GHChannelParams{Host: "10.0.0.1:8443", Token: "placeholder"}, true},
 	} {
 		if got := tc.gc.Live(); got != tc.want {
 			t.Errorf("%s: Live() = %v, want %v", name, got, tc.want)
-		}
-	}
-}
-
-// Every GitHub credential the operator's shell exported stays out of a run that
-// has a gh channel, isolation-only or full: gh reads a token from the
-// environment before it reads its config dir, so an empty config dir alone
-// would still hand the agent the operator's identity.
-func TestNewDirectCommand_GHChannelDropsInheritedGitHubTokens(t *testing.T) {
-	writeOperatorSettings(t, `{}`)
-	const fromShell = "from-the-shell"
-	for _, k := range []string{"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_HOST", "GH_CONFIG_DIR"} {
-		t.Setenv(k, fromShell)
-	}
-	// Mixed case: Windows reads `github_token` as GITHUB_TOKEN. Elsewhere the
-	// name is distinct and gh ignores it, so dropping it costs nothing.
-	t.Setenv("github_Token", fromShell)
-	configDir := filepath.Join(t.TempDir(), "config")
-
-	cmd, err := newDirectCommand(context.Background(), RunOptions{
-		Cwd:       t.TempDir(),
-		GHChannel: &GHChannelParams{ConfigDir: configDir},
-	}, []string{"wrapper.mjs"})
-	if err != nil {
-		t.Fatalf("newDirectCommand: %v", err)
-	}
-	for _, e := range cmd.Env {
-		k, v, _ := strings.Cut(e, "=")
-		if v == fromShell && isGitHubCLIEnvKey(envNameForMatch(k)) {
-			t.Errorf("%s=%q reached a run with a gh channel", k, v)
-		}
-	}
-	env := envMap(t, cmd.Env)
-	for k, want := range map[string]string{
-		"GH_CONFIG_DIR":       configDir,
-		"GH_TOKEN":            ghNoCredentialToken,
-		"GH_ENTERPRISE_TOKEN": ghNoCredentialToken,
-	} {
-		if env[k] != want {
-			t.Errorf("%s = %q, want %q", k, env[k], want)
 		}
 	}
 }
@@ -137,8 +89,8 @@ func TestDirectGHChannelEnv_Shape(t *testing.T) {
 
 	for k, want := range map[string]string{
 		"GH_HOST":               "127.0.0.1:54321",
-		"GH_ENTERPRISE_TOKEN":   "per-run-placeholder",
 		"GH_TOKEN":              ghNoCredentialToken,
+		"GH_ENTERPRISE_TOKEN":   "per-run-placeholder",
 		"SSL_CERT_FILE":         "/state/gh-channel/run1/injector.crt",
 		"GH_PROMPT_DISABLED":    "1",
 		"GH_NO_UPDATE_NOTIFIER": "1",

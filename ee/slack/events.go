@@ -26,13 +26,13 @@ type SlackMessageMetadata struct {
 	// (routing, exec verbs) resolves token/workspace context from THIS
 	// field, never from the entity key.
 	WorkspaceID string `json:"workspace_id"`
-	// APIAppID is the Slack app id, alongside WorkspaceID, needed to resolve
-	// the exact org_slack_workspaces row this message belongs to — since
-	// TFAC-533's re-key, one org can hold two Slack apps in the same
-	// workspace, so WorkspaceID alone can't select the row (and the wrong
-	// row means acting as the wrong bot identity). Downstream consumers
-	// resolve via WorkspaceStore.GetByWorkspaceAppSystem(workspaceID,
-	// apiAppID). No fallback for pre-release events — none exist.
+	// APIAppID records the connection that delivered the event: the Slack
+	// app, alongside WorkspaceID. No token is resolved from it. An org can
+	// connect several apps in one workspace, and the one that acts is
+	// whichever is active when the call is made
+	// (ConnectionStore.ActiveForWorkspaceSystem, by org and WorkspaceID), not
+	// necessarily the one the event arrived through. Events are append-only,
+	// so stored events carry this field.
 	APIAppID string `json:"api_app_id"`
 	// Channel is the id Slack gave the channel when the message arrived; it
 	// can change, and the current view (slackMessageCurrentView) reads it as
@@ -56,7 +56,7 @@ type SlackMessageMetadata struct {
 
 // SlackMessagePredicate narrows which messages a handler fires on.
 type SlackMessagePredicate struct {
-	ChannelIn []string `json:"channel_in,omitempty" doc:"Match only messages in these channels, each one the team tracks, by registry id (the id field of POST /api/slack/teams/{team_id}/channels/list, not Slack's channel id). Empty matches every channel the team tracks."`
+	ChannelIn []string `json:"channel_in,omitempty" doc:"Match only messages in these channels, each one the team tracks, by registry id (the id field of POST /api/teams/{team_id}/slack-channels/list, not Slack's channel id). Empty matches every channel the team tracks."`
 	// MentionedOnly, when true, restricts to messages that explicitly
 	// @-mentioned the bot — excluding engaged-thread follow-ups that
 	// didn't. false (the default) matches both.
@@ -198,7 +198,7 @@ func channelInFaults(ctx context.Context, tx db.TxStores, orgID, teamID string, 
 	for _, id := range added {
 		if !tracked[id] {
 			faults = append(faults, server.PredicateReferenceFault{Key: "channel_in", Message: fmt.Sprintf("channel_in: %q is not the registry id of a channel this team tracks "+
-				"(channel_in takes the id field of POST /api/slack/teams/{team_id}/channels/list, not Slack's channel id)", id)})
+				"(channel_in takes the id field of POST /api/teams/{team_id}/slack-channels/list, not Slack's channel id)", id)})
 		}
 	}
 	return faults, nil

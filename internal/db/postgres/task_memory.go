@@ -122,7 +122,7 @@ func (s *taskMemoryStore) GetMemoriesForEntity(ctx context.Context, orgID, entit
 // conversation's team and task. See entityMemoryForReaderSQL.
 func (s *taskMemoryStore) GetMemoriesForEntitySystem(ctx context.Context, orgID, entityID, teamID, taskID string) ([]domain.TaskMemory, error) {
 	rows, err := s.admin.QueryContext(ctx, taskMemorySelectTeamScoped+entityMemoryForReaderSQL+`
-		ORDER BY rm.created_at ASC
+		ORDER BY rm.created_at ASC, rm.id ASC
 	`, orgID, entityID, teamID, taskID)
 	if err != nil {
 		return nil, err
@@ -136,7 +136,7 @@ func getMemoriesForEntity(ctx context.Context, q queryer, orgID, entityID string
 		WHERE rm.org_id = $1
 		  AND rm.agent_content IS NOT NULL
 		  AND rm.conversation_id IN (SELECT conversation_id FROM conversation_memory_entities WHERE org_id = $1 AND entity_id = $2)
-		ORDER BY rm.created_at ASC
+		ORDER BY rm.created_at ASC, rm.id ASC
 	`, orgID, entityID)
 	if err != nil {
 		return nil, err
@@ -157,7 +157,7 @@ func (s *taskMemoryStore) GetRecentMemoriesForEntitySystem(ctx context.Context, 
 		return nil, nil
 	}
 	rows, err := s.admin.QueryContext(ctx, taskMemorySelectTeamScoped+entityMemoryForReaderSQL+`
-		ORDER BY rm.created_at DESC
+		ORDER BY rm.created_at DESC, rm.id DESC
 		LIMIT $5
 	`, orgID, entityID, teamID, taskID, limit)
 	if err != nil {

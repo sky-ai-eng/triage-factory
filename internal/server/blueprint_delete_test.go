@@ -3,18 +3,20 @@ package server
 import (
 	"net/http"
 	"testing"
+
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// TestBlueprintDelete_CascadesPromptsAndTrigger deletes a multi-step blueprint
-// whose trigger has run: the header, every step prompt and the bound trigger
-// soft-delete (request reads 404, but the rows survive for the ...System reads
-// of in-flight run timelines and for the runs that reference the trigger).
-func TestBlueprintDelete_CascadesPromptsAndTrigger(t *testing.T) {
+// TestBlueprintDelete_CascadesPrompts deletes a multi-step blueprint a
+// handler has run: the header and every step prompt soft-delete (request reads
+// 404, but the rows survive for the ...System reads of in-flight run
+// timelines), and the run still names the handler that started it.
+func TestBlueprintDelete_CascadesPrompts(t *testing.T) {
 	s := newTestServer(t)
 	configureEventSources(t, s)
 	bp, ps := createChainBlueprint(t, s, "DeleteMe", 3)
-	trigger := attachTrigger(t, s, bp, "github:pr:ci_check_failed")
-	run := seedTriggerRun(t, s, trigger, "bpdel")
+	handler := attachHandler(t, s, bp, "github:pr:ci_check_failed")
+	run := seedHandlerRun(t, s, handler, "bpdel")
 
 	del := doJSON(t, s, http.MethodDelete, "/api/blueprints/"+bp, nil)
 	if del.Code != http.StatusOK {
@@ -36,13 +38,8 @@ func TestBlueprintDelete_CascadesPromptsAndTrigger(t *testing.T) {
 		}
 	}
 
-	// Trigger detached at the API surface.
-	if n := len(triggersForBlueprint(t, s, bp)); n != 0 {
-		t.Errorf("trigger count after blueprint delete = %d, want 0 (detached)", n)
-	}
-
-	// At the row level, the header, every step prompt and the trigger survive
-	// with deleted_at stamped, and the run still names its trigger.
+	// At the row level, the header and every step prompt survive with
+	// deleted_at stamped, and the run still names its handler.
 	if n := countRows(t, s, `SELECT COUNT(*) FROM blueprints WHERE id = ? AND deleted_at IS NOT NULL`, bp); n != 1 {
 		t.Errorf("blueprint header rows with deleted_at = %d, want 1 (soft-delete, row survives)", n)
 	}
@@ -51,11 +48,30 @@ func TestBlueprintDelete_CascadesPromptsAndTrigger(t *testing.T) {
 			t.Errorf("step prompt %s rows with deleted_at = %d, want 1 (soft-delete)", p, n)
 		}
 	}
-	if n := countRows(t, s, `SELECT COUNT(*) FROM event_handlers WHERE id = ? AND deleted_at IS NOT NULL`, trigger); n != 1 {
-		t.Errorf("trigger rows with deleted_at = %d, want 1 (soft-delete)", n)
+	if c, br := runTriggerIDs(t, s, run); c != handler || br != handler {
+		t.Errorf("run trigger_id after blueprint delete = (conversation %q, blueprint run %q), want %q", c, br, handler)
 	}
-	if c, br := runTriggerIDs(t, s, run); c != trigger || br != trigger {
-		t.Errorf("run trigger_id after blueprint delete = (conversation %q, blueprint run %q), want %q", c, br, trigger)
+}
+
+// TestBlueprintDelete_DetachesEveryHandler: the blueprint's handlers outlive
+// it. Each stays live with no blueprint; one in automate moves to watch, so it
+// keeps making tasks, and one in any other mode keeps its mode.
+func TestBlueprintDelete_DetachesEveryHandler(t *testing.T) {
+	s := newTestServer(t)
+	configureEventSources(t, s)
+	bp, _ := createWrappedBlueprint(t, s, "TwoEvents")
+	automating := attachHandler(t, s, bp, "github:pr:ci_check_failed")
+	off := createHandlerID(t, s, map[string]any{
+		"event_type": "github:pr:review_changes_requested", "mode": domain.EventHandlerModeOff, "blueprint_id": bp,
+	})
+
+	if del := doJSON(t, s, http.MethodDelete, "/api/blueprints/"+bp, nil); del.Code != http.StatusOK {
+		t.Fatalf("delete blueprint: expected 200, got %d: %s", del.Code, del.Body.String())
+	}
+	for id, wantMode := range map[string]string{automating: domain.EventHandlerModeWatch, off: domain.EventHandlerModeOff} {
+		if got := getEventHandler(t, s, id); got["blueprint_id"] != nil || got["mode"] != wantMode {
+			t.Errorf("handler %s after the blueprint delete = %v, want it live in %s with no blueprint", id, got, wantMode)
+		}
 	}
 }
 

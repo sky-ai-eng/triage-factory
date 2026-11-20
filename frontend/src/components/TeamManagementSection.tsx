@@ -155,7 +155,7 @@ export default function TeamManagementSection() {
           className="
             flex-1 rounded-lg border border-line-1 bg-raised px-3 py-1.5
             text-body text-ink-1 placeholder:text-ink-3
-            focus:border-warm focus:bg-raised focus:outline-none
+            focus:border-warm focus:bg-raised
           "
         />
         <button

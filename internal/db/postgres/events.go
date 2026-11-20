@@ -96,14 +96,13 @@ func (s *eventStore) LatestForEntityTypeAndDedupKey(ctx context.Context, orgID, 
 	// picked reflects underlying event order when the source clock
 	// is known (check completion, review submission). Fall back to
 	// created_at for events that don't carry a source timestamp
-	// (system events, derived events). id DESC at the end is the
-	// deterministic tiebreaker for the otherwise-impossible case
-	// where two writes share both timestamps to the nanosecond.
+	// (system events, derived events). Two writes can share both
+	// timestamps, so seq DESC, insertion order, breaks that tie.
 	return scanEvent(s.q.QueryRowContext(ctx, `
 		SELECT `+eventColumns+`
 		FROM events
 		WHERE org_id = $1 AND entity_id = $2 AND event_type = $3 AND dedup_key = $4
-		ORDER BY COALESCE(occurred_at, created_at) DESC, created_at DESC, id DESC
+		ORDER BY COALESCE(occurred_at, created_at) DESC, created_at DESC, seq DESC
 		LIMIT 1
 	`, orgID, entityID, eventType, dedupKey))
 }

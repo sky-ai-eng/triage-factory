@@ -81,14 +81,15 @@ func (r *usageRig) seedSpend(t *testing.T) {
 	t.Helper()
 	when := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
 
-	// Blueprint + trigger (teamA) so the autonomous run has a firing trigger and
-	// by_rule resolves a human name (the trigger itself carries a NULL name).
+	// Blueprint + handler (teamA) so the autonomous run has a firing handler
+	// for by_rule to name. The handler is named after its blueprint, as a
+	// create naming a blueprint and no name is.
 	bpID := uuid.New().String()
 	pgtest.MustExec(t, r.h.AdminDB, `INSERT INTO blueprints (id, org_id, team_id, creator_user_id, name) VALUES ($1, $2, $3, $4, $5)`,
 		bpID, r.orgID, r.teamA, r.owner, r.blueprint)
 	triggerID := uuid.New().String()
-	pgtest.MustExec(t, r.h.AdminDB, `INSERT INTO event_handlers (id, org_id, team_id, creator_user_id, kind, event_type, blueprint_id, breaker_threshold, min_autonomy_suitability) VALUES ($1, $2, $3, $4, 'trigger', 'github:pr:ci_check_failed', $5, 3, 0.5)`,
-		triggerID, r.orgID, r.teamA, r.owner, bpID)
+	pgtest.MustExec(t, r.h.AdminDB, `INSERT INTO event_handlers (id, org_id, team_id, creator_user_id, mode, name, event_type, blueprint_id, breaker_threshold, min_autonomy_suitability) VALUES ($1, $2, $3, $4, 'automate', $5, 'github:pr:ci_check_failed', $6, 3, 0.5)`,
+		triggerID, r.orgID, r.teamA, r.owner, r.blueprint, bpID)
 
 	// teamA: manual run by member ($1.00), autonomous run via trigger ($0.25).
 	// Spend is the messages ledger, so every conversation gets one

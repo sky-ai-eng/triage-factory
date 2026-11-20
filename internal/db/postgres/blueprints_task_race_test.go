@@ -18,11 +18,9 @@ import (
 )
 
 // raceFixture is one entity plus a factory for firings against a chosen task
-// on it. Each firing carries its own blueprint, trigger and triggering event
-// (event_handlers_one_trigger_per_blueprint means each trigger needs its own
-// blueprint), so the (triggering_event_id, trigger_id) replay fence never
-// engages and the only thing that can stop a firing is the one-active-run
-// index under test.
+// on it. Each firing carries its own blueprint, trigger and triggering event,
+// so the (triggering_event_id, trigger_id) replay fence never engages and the
+// only thing that can stop a firing is the one-active-run index under test.
 type raceFixture struct {
 	orgID    string
 	entityID string
@@ -85,8 +83,8 @@ func newRaceFixture(t *testing.T, h *pgtest.Harness) raceFixture {
 		seedPgBlueprint(t, h, orgID, userID, blueprintID)
 		triggerID := uuid.New().String()
 		if _, err := h.AdminDB.Exec(`
-			INSERT INTO event_handlers (id, org_id, team_id, creator_user_id, kind, event_type, enabled, source, blueprint_id, breaker_threshold, min_autonomy_suitability, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, 'trigger', $5, true, 'user', $6, 4, 0, now(), now())
+			INSERT INTO event_handlers (id, org_id, team_id, creator_user_id, mode, event_type, name, source, blueprint_id, breaker_threshold, min_autonomy_suitability, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, 'automate', $5, 'Race', 'user', $6, 4, 0, now(), now())
 		`, triggerID, orgID, teamID, userID, domain.EventGitHubPRCICheckFailed, blueprintID); err != nil {
 			t.Fatalf("seed trigger: %v", err)
 		}

@@ -177,7 +177,8 @@ type App struct {
 	// through it, minting short-lived STS session creds for role-mode orgs
 	// and passing stored material through otherwise. Non-nil only in multi
 	// mode (built in buildRunCredentials alongside runSecrets); nil in local,
-	// where there are no role-mode orgs and resolution reads runSecrets directly.
+	// which cannot bind role mode and resolves stored material through
+	// runSecrets.
 	llmResolver *llmcred.Resolver
 	// llmRecorder lands one system_llm_runs row per call TF makes on its own
 	// behalf — the three background jobs and the availability probe. One per
@@ -495,8 +496,9 @@ func New(ctx context.Context, cfg Config, static fs.FS) (_ *App, err error) {
 		// process, because a probe resolves credentials exactly as a run does
 		// and every serving process has runs to answer for. The seams it takes
 		// are therefore the ones a run takes here: the role-aware resolver in
-		// multi, and in local the same two nils, which send the probe through
-		// the agent runtime against the host's own environment.
+		// multi, and in local the bound-provider reader with no resolver, which
+		// sends the probe through the agent runtime on the org's stored
+		// credential, or on the host's environment when it bound none.
 		// SystemEnvResolver answers nil for a nil resolver, so local needs no
 		// branch of its own.
 		a.srv.SetModelProber(modelprobe.New(a.runSecrets, llmcred.SystemEnvResolver(a.llmResolver, "tf-model-probe"), a.llmRecorder))

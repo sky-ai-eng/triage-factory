@@ -102,9 +102,8 @@ func pgSequenceScaffold(t *testing.T, h *pgtest.Harness) (db.BlueprintStore, dbt
 	seedPgPrompt(t, h, orgID, userID, promptID)
 
 	n := 0
-	// Each firing brings its own blueprint and trigger:
-	// event_handlers_one_trigger_per_blueprint means a second trigger needs
-	// a second blueprint, and the suite stages several firings per test.
+	// Each firing brings its own blueprint and trigger, so two firings in one
+	// test never meet at the (triggering_event_id, trigger_id) replay fence.
 	newFiring := func(t *testing.T, taskID string, manual bool) domain.BlueprintRun {
 		t.Helper()
 		n++
@@ -122,8 +121,8 @@ func pgSequenceScaffold(t *testing.T, h *pgtest.Harness) (db.BlueprintStore, dbt
 		}
 		triggerID := uuid.New().String()
 		pgtest.MustExec(t, h.AdminDB, `
-			INSERT INTO event_handlers (id, org_id, team_id, creator_user_id, kind, event_type, enabled, source, blueprint_id, breaker_threshold, min_autonomy_suitability, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, 'trigger', $5, true, 'user', $6, 4, 0, now(), now())
+			INSERT INTO event_handlers (id, org_id, team_id, creator_user_id, mode, event_type, name, source, blueprint_id, breaker_threshold, min_autonomy_suitability, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, 'automate', $5, 'Firing', 'user', $6, 4, 0, now(), now())
 		`, triggerID, orgID, ensurePgTeamForOrg(t, h, orgID, userID), userID, domain.EventGitHubPRCICheckFailed, bpID)
 		eventID := uuid.New().String()
 		var entityID string
@@ -254,6 +253,23 @@ func pgSequenceScaffold(t *testing.T, h *pgtest.Harness) (db.BlueprintStore, dbt
 				t.Fatalf("read current_step_index: %v", err)
 			}
 			return idx
+		},
+		SetTriggerPredicate: func(t *testing.T, triggerID, predicate string) string {
+			t.Helper()
+			var stored string
+			if err := h.AdminDB.QueryRow(`UPDATE event_handlers SET scope_predicate_json = NULLIF($1, '')::jsonb WHERE id = $2
+				RETURNING COALESCE(scope_predicate_json::text, '')`, predicate, triggerID).Scan(&stored); err != nil {
+				t.Fatalf("set the trigger's predicate: %v", err)
+			}
+			return stored
+		},
+		RunPredicate: func(t *testing.T, blueprintRunID string) string {
+			t.Helper()
+			var got string
+			if err := h.AdminDB.QueryRow(`SELECT scope_predicate_json FROM blueprint_runs WHERE id = $1`, blueprintRunID).Scan(&got); err != nil {
+				t.Fatalf("read scope_predicate_json: %v", err)
+			}
+			return got
 		},
 		BackdateRunStartedAt: func(t *testing.T, blueprintRunID string, age time.Duration) {
 			t.Helper()

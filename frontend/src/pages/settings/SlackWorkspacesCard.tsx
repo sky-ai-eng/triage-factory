@@ -1,28 +1,50 @@
-// SlackWorkspacesCard — the org-admin "Connect Slack" surface (TFAC-529),
-// modeled on AtlassianOAuthAppCard: an own card, self-contained (owns its
-// list fetch, the connect draft, and the disconnect action — no shared Save
-// footer). An org may connect several workspaces, so unlike the Atlassian
-// card this renders a list PLUS a standing connect form rather than a single
-// override slot.
+// SlackWorkspacesCard is the org's Slack section in Settings: the org's
+// connections, one row per Slack workspace, and the ways to connect one. It is
+// self-contained (it owns its list fetch, the connect draft, and every action),
+// so it has no shared Save footer.
 //
-// Slack has no GitHub-style manifest-redirect handoff, so the connect UX is
-// deep link + copy-paste manifest + paste-back credentials: open Slack's app
-// creation page, paste the copied manifest to scaffold the app, install it
-// to the workspace, then paste the resulting bot token (and, depending on
-// transport, the signing secret or the app-level token) back here. Transport
-// is inferred server-side from which credentials are supplied — see
-// ee/slack's inferTransport — so this form never asks the admin to choose a
-// transport up front; it only surfaces the choice when both a signing
-// secret and an app-level token are supplied (the one genuinely ambiguous
-// case) and the server 400s.
+// There are two ways to connect. When the deployment has a Slack app, Add to
+// Slack runs its install ceremony, a navigation to Slack and back whose outcome
+// arrives on this page's URL. An org's own app is the alternative, and the
+// only way when the deployment has no app: create it from a copied manifest,
+// install it to the workspace, then paste its credentials back here. Transport
+// is inferred server-side from which credentials are supplied, so the form
+// asks for a choice only when both a signing secret and an app-level token are
+// supplied.
+//
+// A workspace can hold several of the org's connections, and one of them is
+// active. Connecting a second app into a workspace stages it inactive beside
+// the active one, and the switch preview (SlackActivationDialog) makes it the
+// active one.
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Tooltip } from '../../ui/tooltip/Tooltip'
 import { Check, Copy, ExternalLink, HelpCircle, Plus, Trash2, X } from 'lucide-react'
-import { apiFetch, apiJSON, httpErrorMessage } from '../../lib/apiClient'
+import { httpErrorMessage } from '../../lib/apiClient'
 import { invalidateEventSources } from '../../hooks/useEventSources'
+import { usePagedList } from '../../hooks/usePagedList'
 import { toast } from '../../components/Toast/toastStore'
 import { glassInputClass } from './primitives'
+import SlackActivationDialog from './SlackActivationDialog'
+import { ConnectionStatusChip, SourceChip, StatusDot, TransportChip } from './SlackChips'
+import {
+  disconnectSlackConnection,
+  fetchSlackDeploymentApp,
+  fetchSlackManifest,
+  groupSlackWorkspaces,
+  importSlackConnection,
+  readSlackInstallReturn,
+  slackAppLabel,
+  slackInstallErrorText,
+  slackInstallReturnTo,
+  slackInstallStartURL,
+  slackWorkspaceLabel,
+  stripSlackInstallReturn,
+  type SlackConnection,
+  type SlackDeploymentApp,
+  type SlackImportBody,
+  type SlackWorkspaceGroup,
+} from './slackConnect'
 
 // FieldHelp is the hover [?] beside a credential label: the "where in Slack do
 // I find this" navigation lives here rather than as always-on body text, so the
@@ -45,86 +67,193 @@ function FieldHelp({ children }: { children: React.ReactNode }) {
   )
 }
 
-// SlackConnectionStatus is one app's live Socket Mode connection status
-// (TFAC-534) — present only when the backend's socket manager has a
-// connection running for this row's api_app_id (rows sharing an app share
-// the same connection). Absent for a webhook-only app, an unentitled org,
-// or before the reconciler's first pass — rendered as "n/a".
-interface SlackConnectionStatus {
-  state: 'dialing' | 'open' | 'draining' | 'backing_off' | 'auth_failed'
-  connected_at?: string
-  last_event_at?: string
-  consecutive_failures: number
-  last_error?: string
-}
-
-interface SlackWorkspace {
-  workspace_id: string
-  api_app_id: string
-  workspace_name: string
-  enterprise_id?: string
-  transport: 'socket' | 'events_api'
-  bot_user_id: string
-  registered_by_user_id?: string
-  created_at: string
-  updated_at: string
-  connection?: SlackConnectionStatus
-}
-
-// rowKey is the composite (workspace, app) identity a row is now keyed on —
-// a workspace may host several connected apps, so workspace_id alone can no
-// longer disambiguate list/upsert/remove operations.
-const rowKey = (ws: Pick<SlackWorkspace, 'workspace_id' | 'api_app_id'>) =>
-  `${ws.workspace_id}:${ws.api_app_id}`
+// rowKey is a connection's identity: a workspace may hold several of the org's
+// connected apps, so workspace_id alone does not name one.
+const rowKey = (c: Pick<SlackConnection, 'workspace_id' | 'api_app_id'>) =>
+  `${c.workspace_id}:${c.api_app_id}`
 
 const SLACK_APP_CREATE_URL = 'https://api.slack.com/apps?new_app=1'
 
-export default function SlackWorkspacesCard({ orgId }: { orgId: string }) {
-  const [workspaces, setWorkspaces] = useState<SlackWorkspace[] | null>(null)
-  const [loadError, setLoadError] = useState<string | null>(null)
+const primaryButtonClass =
+  'inline-flex items-center rounded-full bg-warm px-6 py-2.5 text-body font-medium text-warm-ink shadow-[0_10px_28px_-10px_var(--color-warm)] transition-all hover:bg-warm/90 disabled:opacity-40 disabled:shadow-none'
+
+const textActionClass = 'text-reported text-warm transition-colors hover:underline'
+
+/**
+ * canManage is whether the viewer is an org admin. Every action here is
+ * admin-only on the server; a member sees the connections and nothing to do
+ * with them.
+ */
+export default function SlackWorkspacesCard({
+  orgId,
+  canManage,
+}: {
+  orgId: string
+  canManage: boolean
+}) {
+  const connections = usePagedList<SlackConnection>(
+    `/api/orgs/${encodeURIComponent(orgId)}/slack/connections/list`,
+    'Could not load connected Slack workspaces.',
+  )
+  const { load, setItems } = connections
+  const workspaces = connections.items
+  // The org whose list a read has answered. Only a failure before then is
+  // shown: a transient poll failure must not put a banner over the list
+  // already on screen.
+  const [loadedFor, setLoadedFor] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
-    const load = (initial: boolean) => {
-      apiJSON<SlackWorkspace[]>('/api/slack/workspaces')
-        .then((ws) => {
-          if (cancelled) return
-          setWorkspaces(ws)
-          // Clear a stale banner: a later poll succeeding means the list is
-          // current, so an error from the initial (failed) load must not linger.
-          setLoadError(null)
-        })
-        .catch((e) => {
-          // Only the initial fetch surfaces a load error; a transient poll
-          // failure must not blow away the list already on screen.
-          if (!cancelled && initial)
-            setLoadError(httpErrorMessage(e, 'Could not load connected Slack workspaces.'))
-        })
-    }
-    load(true)
+    const read = (keepDepth: boolean) =>
+      void load({}, { keepDepth }).then((page) => {
+        if (!cancelled && page) setLoadedFor(orgId)
+      })
+    read(false)
     // Poll so a row's live Socket Mode status resolves (Connecting… →
     // Connected, or a reconnect) without a manual reload — the connection
     // state lives in the backend socket manager, not the websocket stream.
-    const timer = setInterval(() => load(false), 5000)
+    const timer = setInterval(() => read(true), 5000)
     return () => {
       cancelled = true
       clearInterval(timer)
     }
-  }, [orgId])
+  }, [load, orgId])
 
-  const removeFromList = (key: string) =>
-    setWorkspaces((ws) => (ws ?? []).filter((w) => rowKey(w) !== key))
+  const loaded = loadedFor === orgId
+  const loadError = loaded ? '' : connections.error
 
-  const upsertInList = (ws: SlackWorkspace) =>
-    setWorkspaces((list) => [...(list ?? []).filter((w) => rowKey(w) !== rowKey(ws)), ws])
+  // The deployment's Slack app, or null when it has none; undefined until the
+  // read answers, so the connect actions do not change under the viewer. A
+  // failed read offers only the org's own app, which works either way.
+  const [deployment, setDeployment] = useState<SlackDeploymentApp | null | undefined>(undefined)
+  useEffect(() => {
+    let live = true
+    fetchSlackDeploymentApp().then(
+      (app) => live && setDeployment(app),
+      () => live && setDeployment(null),
+    )
+    return () => {
+      live = false
+    }
+  }, [])
+
+  // The install ceremony reports its outcome on the URL it returns to. Read it
+  // once, then drop it from the URL so a reload does not report it again.
+  const [returned] = useState(() => readSlackInstallReturn(window.location.search))
+  useEffect(() => {
+    stripSlackInstallReturn()
+  }, [])
+  const [installError, setInstallError] = useState(() => slackInstallErrorText(returned.error))
+  // The deployment app's install is another org's in that workspace, so the
+  // org's own app is the way left.
+  const [formOpen, setFormOpen] = useState(returned.error === 'workspace_taken')
+  const formRef = useRef<HTMLDivElement>(null)
+
+  // The connection whose switch preview is open.
+  const [previewFor, setPreviewFor] = useState<SlackConnection | null>(null)
+
+  // A staged install is the first step of a switch the admin started, so its
+  // preview opens as soon as the list holds the connection.
+  const [stagedReturn, setStagedReturn] = useState(
+    returned.outcome?.kind === 'staged' ? returned.outcome.workspaceId : null,
+  )
+  if (stagedReturn && loaded) {
+    setStagedReturn(null)
+    const staged = workspaces.find(
+      (c) => c.workspace_id === stagedReturn && c.source === 'deployment' && !c.active,
+    )
+    if (staged && canManage) setPreviewFor(staged)
+  }
+
+  const announced = useRef(false)
+  useEffect(() => {
+    if (announced.current || returned.outcome?.kind !== 'installed' || !loaded) return
+    announced.current = true
+    const id = returned.outcome.workspaceId
+    const conn = workspaces.find((c) => c.workspace_id === id)
+    // The org's first workspace moves slack from unconfigured to available.
+    invalidateEventSources()
+    toast.success(`Connected ${conn ? slackWorkspaceLabel(conn) : id}`)
+  }, [returned, loaded, workspaces])
+
+  // A write shows on the held rows at once, then rereads them: the reread
+  // supersedes a poll that began before the write and would otherwise land
+  // after it with the rows as they were, and it mints the next page's token
+  // against the list the write left.
+  const reread = () => void load({}, { keepDepth: true })
+
+  const removeFromList = (conn: SlackConnection) => {
+    setItems((list) => list.filter((c) => rowKey(c) !== rowKey(conn)))
+    reread()
+  }
+
+  const imported = (conn: SlackConnection) => {
+    setItems((list) => [...list.filter((c) => rowKey(c) !== rowKey(conn)), conn])
+    reread()
+    invalidateEventSources()
+    setInstallError(null)
+    setFormOpen(false)
+    // An app connected into a workspace that has an active connection is
+    // staged beside it; the preview is the rest of that switch.
+    if (conn.active) toast.success(`Connected ${slackWorkspaceLabel(conn)}`)
+    else setPreviewFor(conn)
+  }
+
+  const activated = (conn: SlackConnection) => {
+    setItems((list) =>
+      list.map((c) =>
+        c.workspace_id !== conn.workspace_id
+          ? c
+          : rowKey(c) === rowKey(conn)
+            ? conn
+            : { ...c, active: false },
+      ),
+    )
+    reread()
+  }
+
+  // Scrolled once the form has expanded, so the form itself is brought into
+  // view rather than the folded controls above it.
+  const openOwnForm = () => {
+    setFormOpen(true)
+    setTimeout(
+      () => formRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' }),
+      COLLAPSE_MS,
+    )
+  }
+
+  // The page the install ceremony comes back to.
+  const returnTo = slackInstallReturnTo(window.location.href)
+  const groups = groupSlackWorkspaces(workspaces)
 
   return (
     <div className="space-y-5">
       <p className="text-body leading-relaxed text-ink-3">
-        Connect one or more Slack workspaces so Triage Factory can respond to @mentions. Slack has
-        no one-click install for a custom app — create the app from the manifest below, install it
-        to your workspace, then paste the resulting credentials here.
+        Connect one or more Slack workspaces so Triage Factory can respond to @mentions.
+        {canManage && deployment && (
+          <>
+            {' '}
+            Add to Slack installs this deployment&rsquo;s Slack app into a workspace. You can
+            connect a Slack app of your own instead.
+          </>
+        )}
+        {canManage && deployment === null && (
+          <>
+            {' '}
+            Create a Slack app from the manifest below, install it to your workspace, then paste its
+            credentials here.
+          </>
+        )}
       </p>
+
+      {installError && (
+        <p
+          role="alert"
+          className="rounded-xl border border-alarm/30 bg-alarm/5 px-4 py-2.5 text-ui leading-snug text-alarm"
+        >
+          {installError}
+        </p>
+      )}
 
       {loadError && (
         <p role="alert" className="text-ui leading-relaxed text-[var(--color-alarm)]">
@@ -132,22 +261,58 @@ export default function SlackWorkspacesCard({ orgId }: { orgId: string }) {
         </p>
       )}
 
-      {workspaces && workspaces.length > 0 && (
+      {groups.length > 0 && (
         <ul className="space-y-2">
-          {workspaces.map((ws) => (
+          {groups.map((g) => (
             <WorkspaceRow
-              key={rowKey(ws)}
-              workspace={ws}
-              onRemoved={() => removeFromList(rowKey(ws))}
+              key={g.workspaceId}
+              orgId={orgId}
+              group={g}
+              deploymentApp={!!deployment}
+              canManage={canManage}
+              returnTo={returnTo}
+              onReview={setPreviewFor}
+              onSwitchToOwn={openOwnForm}
+              onRemoved={removeFromList}
             />
           ))}
         </ul>
       )}
 
-      <AddWorkspaceSection
-        hasWorkspaces={!!workspaces && workspaces.length > 0}
-        onConnected={upsertInList}
-      />
+      {connections.hasMore && (
+        <button
+          type="button"
+          onClick={() => void connections.loadMore()}
+          disabled={connections.loading}
+          className="text-ui font-medium text-ink-2 transition-colors hover:text-ink-1 disabled:opacity-40"
+        >
+          Show more
+        </button>
+      )}
+
+      {canManage && (
+        <div ref={formRef}>
+          <ConnectArea
+            orgId={orgId}
+            deployment={deployment}
+            hasWorkspaces={groups.length > 0}
+            formOpen={formOpen}
+            setFormOpen={setFormOpen}
+            returnTo={returnTo}
+            onImported={imported}
+          />
+        </div>
+      )}
+
+      {canManage && previewFor && (
+        <SlackActivationDialog
+          orgId={orgId}
+          target={previewFor}
+          switching={workspaces.some((c) => c.workspace_id === previewFor.workspace_id && c.active)}
+          onClose={() => setPreviewFor(null)}
+          onActivated={activated}
+        />
+      )}
     </div>
   )
 }
@@ -175,8 +340,11 @@ function Collapsible({ open, children }: { open: boolean; children: React.ReactN
       }`}
     >
       <div
-        className={`overflow-hidden ${open ? 'visible' : 'invisible'}`}
-        style={{ transition: `visibility 0s linear ${open ? '0s' : `${COLLAPSE_MS}ms`}` }}
+        className="overflow-hidden"
+        style={{
+          visibility: open ? 'visible' : 'hidden',
+          transition: `visibility 0s linear ${open ? '0s' : `${COLLAPSE_MS}ms`}`,
+        }}
       >
         {children}
       </div>
@@ -184,31 +352,60 @@ function Collapsible({ open, children }: { open: boolean; children: React.ReactN
   )
 }
 
-// AddWorkspaceSection decides how the connect form is presented. Before the
-// first workspace is connected the form is the primary action and stays open.
-// Once at least one workspace exists, connecting another is the rare case, so
-// the form collapses behind a single "Add another workspace" row and expands
-// back — with a close affordance — on demand.
-function AddWorkspaceSection({
+// ConnectArea is how a workspace gets connected. With a deployment app, Add to
+// Slack is the main action and the org's own app sits behind a link. Without
+// one, the own-app form is the only way: open before the first workspace is
+// connected, and folded behind "Add another workspace" after, since another
+// is then the rare case.
+function ConnectArea({
+  orgId,
+  deployment,
   hasWorkspaces,
-  onConnected,
+  formOpen,
+  setFormOpen,
+  returnTo,
+  onImported,
 }: {
+  orgId: string
+  deployment: SlackDeploymentApp | null | undefined
   hasWorkspaces: boolean
-  onConnected: (ws: SlackWorkspace) => void
+  formOpen: boolean
+  setFormOpen: (open: boolean) => void
+  returnTo: string
+  onImported: (conn: SlackConnection) => void
 }) {
-  const [expanded, setExpanded] = useState(false)
+  if (deployment === undefined) return null
 
-  // A successful connect from the "add another" flow folds the form back up so
-  // the newly connected workspace lands in the list above, not under an open
-  // form the user has to dismiss.
-  const handleConnected = (ws: SlackWorkspace) => {
-    onConnected(ws)
-    setExpanded(false)
+  if (deployment) {
+    return (
+      <div className="space-y-3">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+          <a href={slackInstallStartURL(orgId, returnTo)} className={primaryButtonClass}>
+            Add to Slack
+          </a>
+          <button
+            type="button"
+            onClick={() => setFormOpen(!formOpen)}
+            aria-expanded={formOpen}
+            className="text-ui text-warm transition-colors hover:underline"
+          >
+            Use your own Slack app instead
+          </button>
+        </div>
+        <Collapsible open={formOpen}>
+          <ConnectFlow
+            orgId={orgId}
+            title="Your own Slack app"
+            onConnected={onImported}
+            onCollapse={() => setFormOpen(false)}
+          />
+        </Collapsible>
+      </div>
+    )
   }
 
-  // First connect: no collapse chrome, the form is simply the content.
   if (!hasWorkspaces) {
-    return <ConnectFlow onConnected={onConnected} />
+    return <ConnectFlow orgId={orgId} onConnected={onImported} />
   }
 
   return (
@@ -217,11 +414,11 @@ function AddWorkspaceSection({
           isn't showing collapses to height 0 and (via Collapsible) visibility
           hidden, so exactly one is interactive at a time and they cross-fade
           rather than pop. */}
-      <Collapsible open={!expanded}>
+      <Collapsible open={!formOpen}>
         <button
           type="button"
-          onClick={() => setExpanded(true)}
-          aria-expanded={expanded}
+          onClick={() => setFormOpen(true)}
+          aria-expanded={formOpen}
           className="flex w-full items-center justify-center gap-1.5 rounded-2xl border border-dashed border-[var(--color-line-1)] px-4 py-3 text-ui font-medium text-ink-2 transition-colors hover:border-warm/30 hover:text-ink-1"
         >
           <Plus size={14} />
@@ -229,160 +426,218 @@ function AddWorkspaceSection({
         </button>
       </Collapsible>
 
-      <Collapsible open={expanded}>
-        <ConnectFlow onConnected={handleConnected} onCollapse={() => setExpanded(false)} />
+      <Collapsible open={formOpen}>
+        <ConnectFlow
+          orgId={orgId}
+          title="Add another workspace"
+          onConnected={onImported}
+          onCollapse={() => setFormOpen(false)}
+        />
       </Collapsible>
     </div>
   )
 }
 
+// WorkspaceRow is one Slack workspace: its active connection, or the inactive
+// one left when the active one was disconnected, and a staged line for each
+// other connection.
 function WorkspaceRow({
-  workspace,
+  orgId,
+  group,
+  deploymentApp,
+  canManage,
+  returnTo,
+  onReview,
+  onSwitchToOwn,
   onRemoved,
 }: {
-  workspace: SlackWorkspace
-  onRemoved: () => void
+  orgId: string
+  group: SlackWorkspaceGroup
+  deploymentApp: boolean
+  canManage: boolean
+  returnTo: string
+  onReview: (conn: SlackConnection) => void
+  onSwitchToOwn: () => void
+  onRemoved: (conn: SlackConnection) => void
 }) {
-  const [busy, setBusy] = useState(false)
+  const main = group.active ?? group.inactive[0]
+  const staged = group.active ? group.inactive : group.inactive.slice(1)
+  const workspace = slackWorkspaceLabel(main)
 
-  const disconnect = async () => {
-    if (busy) return
-    const label = workspace.workspace_name || workspace.workspace_id
-    if (
-      !window.confirm(
-        `Disconnect ${label}? Triage Factory will stop receiving events from this workspace.`,
-      )
-    ) {
-      return
-    }
-    setBusy(true)
-    try {
-      await apiFetch(
-        `/api/slack/workspaces/${encodeURIComponent(workspace.workspace_id)}/${encodeURIComponent(workspace.api_app_id)}`,
-        { method: 'DELETE' },
-      )
-      // The org's last workspace going away moves slack from available back to
-      // unconfigured; drop the cached answer either way.
-      invalidateEventSources()
-      toast.success(`${label} disconnected`)
-      onRemoved()
-    } catch (e) {
-      toast.failed(e, 'Could not disconnect the workspace.')
-      setBusy(false)
-    }
+  let action: React.ReactNode = null
+  if (!main.active) {
+    action = (
+      <button type="button" onClick={() => onReview(main)} className={textActionClass}>
+        Activate
+      </button>
+    )
+  } else if (main.source === 'deployment') {
+    action = (
+      <button type="button" onClick={onSwitchToOwn} className={textActionClass}>
+        Switch to your own app
+      </button>
+    )
+  } else if (deploymentApp) {
+    action = (
+      <a
+        href={slackInstallStartURL(orgId, returnTo, main.workspace_id)}
+        className={textActionClass}
+      >
+        Switch to the deployment&rsquo;s app
+      </a>
+    )
   }
 
   return (
-    <li className="flex items-center justify-between gap-3 rounded-2xl border border-[var(--color-line-1)] bg-[var(--color-raised)]/40 px-4 py-3">
-      <div className="min-w-0">
-        <div className="flex items-center gap-2">
-          <span className="truncate text-body font-medium text-ink-1">
-            {workspace.workspace_name || workspace.workspace_id}
-          </span>
-          <TransportChip transport={workspace.transport} />
-          <ConnectionStatusChip workspace={workspace} />
+    <li className="rounded-2xl border border-[var(--color-line-1)] bg-[var(--color-raised)]/40 px-4 py-3">
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="truncate text-body font-medium text-ink-1">{workspace}</span>
+            {main.active ? (
+              <ConnectionStatusChip conn={main} />
+            ) : (
+              <StatusDot label="Inactive" dot="bg-ink-3/40" text="text-ink-3" />
+            )}
+          </div>
+          <div className="mt-1 flex flex-wrap items-center gap-1.5">
+            <span className="truncate text-reported text-ink-2">{slackAppLabel(main)}</span>
+            <SourceChip source={main.source} />
+            {main.source === 'org' && main.transport && (
+              <TransportChip transport={main.transport} />
+            )}
+            {main.enterprise_id && (
+              <span className="text-reported text-ink-3">Enterprise Grid</span>
+            )}
+          </div>
         </div>
-        <p className="mt-0.5 truncate text-reported text-ink-3">
-          {workspace.workspace_id}
-          {workspace.enterprise_id ? ' · Enterprise Grid' : ''}
-          <span className="ml-1.5 rounded bg-tint-3 px-1 py-px font-mono text-label text-ink-3">
-            {workspace.api_app_id}
-          </span>
-        </p>
+        {canManage && (
+          <div className="flex shrink-0 items-center gap-3">
+            {action}
+            <DisconnectButton
+              key={rowKey(main)}
+              orgId={orgId}
+              conn={main}
+              workspace={workspace}
+              onRemoved={onRemoved}
+            />
+          </div>
+        )}
       </div>
-      <button
-        type="button"
-        onClick={() => void disconnect()}
-        disabled={busy}
-        aria-label={`Disconnect ${workspace.workspace_name || workspace.workspace_id}`}
-        className="inline-flex shrink-0 items-center rounded-full p-1.5 text-ink-3 transition-colors hover:text-alarm disabled:opacity-40"
-      >
-        <Trash2 size={14} />
-      </button>
+
+      {staged.map((s) => (
+        <div
+          key={rowKey(s)}
+          className="mt-2.5 flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-line-1 pt-2.5 text-reported text-ink-3"
+        >
+          <span>
+            Staged: <span className="text-ink-2">{slackAppLabel(s)}</span>
+          </span>
+          {canManage && (
+            <>
+              <span aria-hidden="true">·</span>
+              <button
+                type="button"
+                onClick={() => onReview(s)}
+                aria-label={`Review switch to ${slackAppLabel(s)}`}
+                className={textActionClass}
+              >
+                Review switch
+              </button>
+              <span aria-hidden="true">·</span>
+              <DisconnectButton
+                orgId={orgId}
+                conn={s}
+                workspace={workspace}
+                text
+                onRemoved={onRemoved}
+              />
+            </>
+          )}
+        </div>
+      ))}
     </li>
   )
 }
 
-// CONNECTION_STATUS_DISPLAY maps the backend's connection.state (TFAC-534)
-// to the chip's label/dot color. "draining" (the brief moment between a
-// disconnect frame and redialing) folds into "Reconnecting…" — it's not
-// worth a distinct label for something that resolves in milliseconds.
-const CONNECTION_STATUS_DISPLAY: Record<
-  SlackConnectionStatus['state'],
-  { label: string; dot: string; text: string }
-> = {
-  open: { label: 'Connected', dot: 'bg-ink-1', text: 'text-ink-1' },
-  dialing: { label: 'Connecting…', dot: 'bg-warm', text: 'text-warm' },
-  draining: { label: 'Reconnecting…', dot: 'bg-warm', text: 'text-warm' },
-  backing_off: { label: 'Reconnecting…', dot: 'bg-warm', text: 'text-warm' },
-  auth_failed: { label: 'Auth failed', dot: 'bg-alarm', text: 'text-alarm' },
-}
-
-// ConnectionStatusChip is the Socket Mode connection status indicator
-// (TFAC-534) — minimal by design: a colored dot plus a short label, with
-// the last error (if any) available on hover via title. Rows sharing an
-// app report the same connection object. No connection object means one of
-// two things: a webhook-only row (this app never gets a socket — renders
-// the muted "n/a" chip), or a socket-transport row the reconciler hasn't
-// started yet (a brief window right after connect, or before the first
-// tick — renders "Connecting…", same as an in-progress dial).
-function ConnectionStatusChip({ workspace }: { workspace: SlackWorkspace }) {
-  const status = workspace.connection
-  if (!status) {
-    if (workspace.transport === 'socket') {
-      return <StatusDot label="Connecting…" dot="bg-warm" text="text-warm" />
-    }
-    return <StatusDot label="n/a" dot="bg-ink-3/40" text="text-ink-3" />
-  }
-  const display = CONNECTION_STATUS_DISPLAY[status.state] ?? CONNECTION_STATUS_DISPLAY.dialing
-  return (
-    <StatusDot
-      label={display.label}
-      dot={display.dot}
-      text={display.text}
-      title={status.last_error || undefined}
-    />
-  )
-}
-
-// StatusDot carries its own `title` rather than being wrapped in an outer span:
-// a plain inline wrapper would sit on the text baseline and nudge the pill a
-// hair below the sibling TransportChip, so keeping every chip a single
-// inline-flex flex item is what lets the flex row's items-center line them up.
-function StatusDot({
-  label,
-  dot,
-  text,
-  title,
+// DisconnectButton makes Triage Factory forget one connection's credential.
+// Nothing is removed in Slack: the app stays installed there.
+function DisconnectButton({
+  orgId,
+  conn,
+  workspace,
+  text = false,
+  onRemoved,
 }: {
-  label: string
-  dot: string
-  text: string
-  title?: string
+  orgId: string
+  conn: SlackConnection
+  workspace: string
+  /** A text action, for the staged line; an icon otherwise. */
+  text?: boolean
+  onRemoved: (conn: SlackConnection) => void
 }) {
+  const [busy, setBusy] = useState(false)
+  const app = slackAppLabel(conn)
+
+  const disconnect = async () => {
+    if (busy) return
+    const effect = conn.active
+      ? 'Triage Factory stops receiving events from this workspace.'
+      : 'It is not the workspace’s active connection, so Triage Factory’s work there is unaffected.'
+    const kept =
+      conn.source === 'deployment'
+        ? ' The app stays installed in Slack until someone removes it there.'
+        : ''
+    if (!window.confirm(`Disconnect ${app} from ${workspace}? ${effect}${kept}`)) return
+    setBusy(true)
+    try {
+      await disconnectSlackConnection(orgId, conn)
+      // The org's last workspace going away moves slack from available back to
+      // unconfigured; drop the cached answer either way.
+      invalidateEventSources()
+      toast.success(`${app} disconnected from ${workspace}`)
+      onRemoved(conn)
+    } catch (e) {
+      toast.failed(e, 'Could not disconnect the Slack app.')
+      setBusy(false)
+    }
+  }
+
+  const label = `Disconnect ${app} from ${workspace}`
+  if (text) {
+    return (
+      <button
+        type="button"
+        onClick={() => void disconnect()}
+        disabled={busy}
+        aria-label={label}
+        className="text-reported text-alarm transition-colors hover:text-alarm/80 disabled:opacity-40"
+      >
+        Disconnect
+      </button>
+    )
+  }
   return (
-    <span
-      title={title}
-      className={`inline-flex shrink-0 items-center gap-1 rounded-full bg-tint-3 px-2 py-0.5 text-reported font-medium ${text}`}
+    <button
+      type="button"
+      onClick={() => void disconnect()}
+      disabled={busy}
+      aria-label={label}
+      className="inline-flex shrink-0 items-center rounded-full p-1.5 text-ink-3 transition-colors hover:text-alarm disabled:opacity-40"
     >
-      <span className={`h-1.5 w-1.5 rounded-full ${dot}`} />
-      {label}
-    </span>
+      <Trash2 size={14} />
+    </button>
   )
 }
 
-function TransportChip({ transport }: { transport: 'socket' | 'events_api' }) {
-  return (
-    <span className="inline-flex shrink-0 items-center rounded-full bg-tint-3 px-2 py-0.5 text-reported font-medium text-ink-3">
-      {transport === 'socket' ? 'Socket Mode' : 'Events API'}
-    </span>
-  )
-}
-
-// credentialShapeError catches the two credential mix-ups that otherwise fail
-// deep in Slack's API with an opaque message. Returns a user-facing hint that
-// names the Slack page to copy from, or null when the shapes look right.
+// credentialShapeError catches the credential mix-ups that otherwise fail deep
+// in Slack's API with an opaque message, and the expiring bot token of an app
+// with token rotation on, which the server refuses. Returns a user-facing hint, or
+// null when the shapes look right.
 function credentialShapeError(botToken: string, appToken: string): string | null {
+  if (botToken.startsWith('xoxe.xoxb-')) {
+    return 'This bot token expires, because your Slack app has token rotation turned on. Slack doesn’t allow turning it off, so create a new app from the copied manifest and use its Bot User OAuth Token.'
+  }
   if (!botToken.startsWith('xoxb-')) {
     return "That doesn't look like a bot token. Copy the Bot User OAuth Token (starts “xoxb-”) from your Slack app's OAuth & Permissions page."
   }
@@ -409,18 +664,22 @@ function humanizeConnectError(raw: string): string {
   return raw
 }
 
-// ConnectFlow is the standing "connect another workspace" form: the deep
-// link + manifest copy buttons, then the paste-back credential fields.
-// Fields carry the "leave blank to keep current" convention for re-submits
-// (re-pasting the same bot token to update signing_secret/app_token without
-// retyping the one that isn't changing).
+// ConnectFlow is the own-app form: the deep link + manifest copy buttons, then
+// the paste-back credential fields. Fields carry the "leave blank to keep
+// current" convention for re-submits (re-pasting the same bot token to update
+// signing_secret/app_token without retyping the one that isn't changing).
 function ConnectFlow({
+  orgId,
+  title,
   onConnected,
   onCollapse,
 }: {
-  onConnected: (ws: SlackWorkspace) => void
-  // Present only when the form is a collapsible "add another" panel; renders
-  // the close affordance that folds it back to the trigger row.
+  orgId: string
+  /** The heading of a collapsible panel, beside its close affordance. */
+  title?: string
+  onConnected: (conn: SlackConnection) => void
+  // Present only when the form is a collapsible panel; renders the close
+  // affordance that folds it back.
   onCollapse?: () => void
 }) {
   const [botToken, setBotToken] = useState('')
@@ -436,8 +695,8 @@ function ConnectFlow({
 
   const connect = async () => {
     if (!canSubmit) return
-    // Catch the two credential mix-ups locally, with a message that names the
-    // page to copy from — otherwise they fail deep in Slack's API with an
+    // Catch a token of the wrong shape locally, with a message that says what
+    // to copy instead: a mix-up otherwise fails deep in Slack's API with an
     // opaque error (a bot token pasted from App Credentials, an app-level
     // token that isn't one). Slack still has the final say on a well-shaped
     // token.
@@ -449,22 +708,16 @@ function ConnectFlow({
     setConnecting(true)
     setError(null)
     try {
-      const body: Record<string, string> = { bot_token: botToken.trim() }
+      const body: SlackImportBody = { bot_token: botToken.trim() }
       if (signingSecret.trim()) body.signing_secret = signingSecret.trim()
       if (appToken.trim()) body.app_token = appToken.trim()
       if (transport) body.transport = transport
-      const ws = await apiJSON<SlackWorkspace>('/api/slack/workspaces', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      })
-      invalidateEventSources()
-      onConnected(ws)
+      const conn = await importSlackConnection(orgId, body)
       setBotToken('')
       setSigningSecret('')
       setAppToken('')
       setTransport('')
-      toast.success(`Connected ${ws.workspace_name || ws.workspace_id}`)
+      onConnected(conn)
     } catch (e) {
       setError(humanizeConnectError(httpErrorMessage(e, 'Could not connect the Slack workspace.')))
     } finally {
@@ -476,7 +729,7 @@ function ConnectFlow({
     <div className="space-y-4 rounded-2xl border border-[var(--color-line-1)] bg-[var(--color-raised)]/20 px-4 py-4">
       {onCollapse && (
         <div className="flex items-center justify-between">
-          <span className="text-ui font-medium text-ink-2">Add another workspace</span>
+          <span className="text-ui font-medium text-ink-2">{title}</span>
           <button
             type="button"
             onClick={onCollapse}
@@ -496,8 +749,12 @@ function ConnectFlow({
         >
           Create a Slack app <ExternalLink size={12} />
         </a>
-        <CopyManifestButton transport="socket" label="Copy manifest (Socket Mode)" />
-        <CopyManifestButton transport="events_api" label="Copy manifest (Events API)" />
+        <CopyManifestButton orgId={orgId} transport="socket" label="Copy manifest (Socket Mode)" />
+        <CopyManifestButton
+          orgId={orgId}
+          transport="events_api"
+          label="Copy manifest (Events API)"
+        />
       </div>
       <p className="text-reported leading-relaxed text-ink-3">
         Two ways to receive events: <strong className="font-medium text-ink-2">Socket Mode</strong>{' '}
@@ -600,7 +857,7 @@ function ConnectFlow({
         type="button"
         onClick={() => void connect()}
         disabled={!canSubmit}
-        className="rounded-full bg-warm px-6 py-2.5 text-body font-medium text-warm-ink shadow-[0_10px_28px_-10px_var(--color-warm)] transition-all hover:bg-warm/90 disabled:opacity-40 disabled:shadow-none"
+        className={primaryButtonClass}
       >
         {connecting ? 'Connecting…' : 'Connect workspace'}
       </button>
@@ -609,9 +866,11 @@ function ConnectFlow({
 }
 
 function CopyManifestButton({
+  orgId,
   transport,
   label,
 }: {
+  orgId: string
   transport: 'socket' | 'events_api'
   label: string
 }) {
@@ -622,8 +881,7 @@ function CopyManifestButton({
     if (busy) return
     setBusy(true)
     try {
-      const resp = await apiFetch(`/api/slack/manifest?transport=${transport}`)
-      const text = await resp.text()
+      const text = await fetchSlackManifest(orgId, transport)
       await navigator.clipboard.writeText(text)
       setCopied(true)
       setTimeout(() => setCopied(false), 1500)

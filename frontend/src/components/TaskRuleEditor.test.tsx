@@ -82,10 +82,13 @@ describe('TaskRuleEditor on a vulnerability alert', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Create' }))
 
     await waitFor(() => expect(onSaved).toHaveBeenCalled())
-    const create = fetchMock.mock.calls.find(([url]) => url === '/api/event-handlers/rules')
+    const create = fetchMock.mock.calls.find(
+      ([url, init]) => url === '/api/event-handlers' && init?.method === 'POST',
+    )
     expect(create).toBeDefined()
     const body = JSON.parse(create![1]!.body as string)
     expect(body.event_type).toBe('github:vulnerability:alert_opened')
+    expect(body.mode).toBe('watch')
     expect(body).not.toHaveProperty('applies_to_unowned')
   })
 })

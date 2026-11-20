@@ -733,32 +733,41 @@ func TestSuspendRecovery_SecondSuspendReacquiresAgain(t *testing.T) {
 // claim back is older news. Recording it would rewind the suspend base to
 // before the sleep, and a later lapse with no suspend behind it (a wall-clock
 // step on the database's clock) would count that sleep again.
+//
+// The renewal's issue time can also equal the re-acquire's, as a coarse clock
+// gives two calls in one tick; it is older news all the same.
 func TestSuspendRecovery_StaleRenewalDoesNotRewindTheBase(t *testing.T) {
-	f := newSuspendFixture(t)
-	st := f.register(t, time.Now().Add(-renewedRecently))
-	issuedBeforeTheSleep, baseBeforeTheSleep := time.Now(), time.Duration(f.asleep.Load())
-	// The recovery stamps its own re-acquire after this instant, by more than a
-	// tick of the clock, which is coarse on Windows.
-	time.Sleep(50 * time.Millisecond)
-	f.lapse(t)
-	f.sleep(suspendPastTheLease)
-	if _, err := f.s.conversations.InsertMessageForClaimSystem(context.Background(), f.conv.OrgID, f.conv.ClaimID,
-		&domain.Message{ConversationID: f.conv.ID, Role: "assistant", Content: "after the sleep"}); err != nil {
-		t.Fatalf("write after the sleep: %v", err)
-	}
-	// The renewal that was out across the sleep returns, accepted.
-	st.accepted(issuedBeforeTheSleep, baseBeforeTheSleep, true)
+	for name, issued := range map[string]func(st *claimLeaseState, beforeTheSleep time.Time) time.Time{
+		"issued before the re-acquire": func(_ *claimLeaseState, beforeTheSleep time.Time) time.Time { return beforeTheSleep },
+		"issued in the re-acquire's tick": func(st *claimLeaseState, _ time.Time) time.Time {
+			return *st.lastRenewal.Load()
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newSuspendFixture(t)
+			st := f.register(t, time.Now().Add(-renewedRecently))
+			issuedBeforeTheSleep, baseBeforeTheSleep := time.Now(), time.Duration(f.asleep.Load())
+			f.lapse(t)
+			f.sleep(suspendPastTheLease)
+			if _, err := f.s.conversations.InsertMessageForClaimSystem(context.Background(), f.conv.OrgID, f.conv.ClaimID,
+				&domain.Message{ConversationID: f.conv.ID, Role: "assistant", Content: "after the sleep"}); err != nil {
+				t.Fatalf("write after the sleep: %v", err)
+			}
+			// The renewal that was out across the sleep returns, accepted.
+			st.accepted(issued(st, issuedBeforeTheSleep), baseBeforeTheSleep, true)
 
-	f.lapse(t)
-	_, err := f.s.conversations.InsertMessageForClaimSystem(context.Background(), f.conv.OrgID, f.conv.ClaimID,
-		&domain.Message{ConversationID: f.conv.ID, Role: "assistant", Content: "after the step"})
-	if !errors.Is(err, db.ErrClaimLeaseExpired) {
-		t.Fatalf("write after a lapse with no suspend = %v, want the lapse refused", err)
+			f.lapse(t)
+			_, err := f.s.conversations.InsertMessageForClaimSystem(context.Background(), f.conv.OrgID, f.conv.ClaimID,
+				&domain.Message{ConversationID: f.conv.ID, Role: "assistant", Content: "after the step"})
+			if !errors.Is(err, db.ErrClaimLeaseExpired) {
+				t.Fatalf("write after a lapse with no suspend = %v, want the lapse refused", err)
+			}
+			if _, _, reacquires := f.queue.counts(); reacquires != 1 {
+				t.Errorf("re-acquires = %d, want only the sleep's", reacquires)
+			}
+			f.assertRecoveries(t, map[string]int64{suspendRecoveryReacquired: 1})
+		})
 	}
-	if _, _, reacquires := f.queue.counts(); reacquires != 1 {
-		t.Errorf("re-acquires = %d, want only the sleep's", reacquires)
-	}
-	f.assertRecoveries(t, map[string]int64{suspendRecoveryReacquired: 1})
 }
 
 // TestSuspendRecovery_AbandonedReacquireDoesNotFence: a write whose caller

@@ -327,7 +327,7 @@ function ConnectionBlock({
                 // The options carry their own ground: Chromium on Windows and
                 // Linux draws the open list on the system's light ground, where
                 // dark mode's inherited ink-1 would be light on light.
-                className="rounded-md border border-line-1 bg-transparent px-2 py-0.5 text-ui font-medium text-ink-1 focus:border-warm focus:outline-none disabled:opacity-50 [&_option]:bg-raised [&_option]:text-ink-1"
+                className="rounded-md border border-line-1 bg-transparent px-2 py-0.5 text-ui font-medium text-ink-1 focus:border-warm disabled:opacity-50 [&_option]:bg-raised [&_option]:text-ink-1"
               >
                 {/* Not known is a state the server can hold but never one to
                     pick, so it shows only while it is the stored value. */}

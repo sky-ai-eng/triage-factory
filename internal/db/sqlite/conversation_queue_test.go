@@ -688,6 +688,10 @@ func TestClaimPredicate_SQLite(t *testing.T) {
 					t.Fatalf("set parent_conversation_id: %v", err)
 				}
 			},
+			Age: func(t *testing.T, convID string, d time.Duration) {
+				t.Helper()
+				ageSQLiteClaims(t, conn, convID, d)
+			},
 			CollapseClaimTimestamps: func(t *testing.T, convID string) {
 				t.Helper()
 				if _, err := conn.Exec(`
@@ -947,6 +951,10 @@ func sqliteClaimLeaseFixtureOn(t *testing.T) (dbtest.ClaimLeaseFixture, *sql.DB)
 	return dbtest.ClaimLeaseFixture{
 		Stores: stores,
 		OrgID:  runmode.LocalDefaultOrgID,
+		AgeClaims: func(t *testing.T, conversationID string, d time.Duration) {
+			t.Helper()
+			ageSQLiteClaims(t, conn, conversationID, d)
+		},
 		StageStep: func(t *testing.T) (string, string) {
 			t.Helper()
 			seq++
@@ -1072,4 +1080,54 @@ func sqliteClaimLeaseFixtureOn(t *testing.T) (dbtest.ClaimLeaseFixture, *sql.DB)
 			return parse(at.String), parse(now), true
 		},
 	}, conn
+}
+
+// ageSQLiteClaims moves a conversation's queued_at and its claims'
+// claimed_at and released_at d earlier. They are read and bound back from Go:
+// the mint writes queued_at as CURRENT_TIMESTAMP and the claims carry bound Go
+// times, and both layouts read into a time.Time.
+func ageSQLiteClaims(t *testing.T, conn *sql.DB, convID string, d time.Duration) {
+	t.Helper()
+	var queued sql.NullTime
+	if err := conn.QueryRow(`SELECT queued_at FROM conversations WHERE id = ?`, convID).Scan(&queued); err != nil {
+		t.Fatalf("read queued_at: %v", err)
+	}
+	if queued.Valid {
+		if _, err := conn.Exec(`UPDATE conversations SET queued_at = ? WHERE id = ?`, queued.Time.Add(-d).UTC(), convID); err != nil {
+			t.Fatalf("age queued_at: %v", err)
+		}
+	}
+	type claimStamps struct {
+		id       string
+		claimed  time.Time
+		released sql.NullTime
+	}
+	rows, err := conn.Query(`SELECT id, claimed_at, released_at FROM claims WHERE conversation_id = ?`, convID)
+	if err != nil {
+		t.Fatalf("read claims: %v", err)
+	}
+	var all []claimStamps
+	for rows.Next() {
+		var c claimStamps
+		if err := rows.Scan(&c.id, &c.claimed, &c.released); err != nil {
+			rows.Close()
+			t.Fatalf("scan claim: %v", err)
+		}
+		all = append(all, c)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		t.Fatalf("read claims: %v", err)
+	}
+	for _, c := range all {
+		var released any
+		if c.released.Valid {
+			released = c.released.Time.Add(-d).UTC()
+		}
+		if _, err := conn.Exec(`UPDATE claims SET claimed_at = ?, released_at = ? WHERE id = ?`,
+			c.claimed.Add(-d).UTC(), released, c.id); err != nil {
+			t.Fatalf("age claim %s: %v", c.id, err)
+		}
+	}
 }

@@ -64,6 +64,7 @@ import LinearOAuthAppCard from '../LinearOAuthAppCard'
 import LinearSwitchDialog from '../LinearSwitchDialog'
 import { useLinearSwitchWarning } from '../linearSwitchWarning'
 import SlackWorkspacesCard from '../SlackWorkspacesCard'
+import { hasSlackInstallReturn } from '../slackConnect'
 import TeamManagementSection from '../../../components/TeamManagementSection'
 import {
   dailyCapError,
@@ -127,7 +128,7 @@ export default function OrgSettings({
   const parkedWork = useParkedWork(orgId, true)
 
   // EE SSO / Slack entitlements — dark until the probe resolves, matching the
-  // backend's 404-and-hide at every /api/sso/* and /api/slack/* seam.
+  // backend's 404-and-hide at every SSO and Slack route.
   const { has, loaded: entLoaded } = useEntitlements()
   const sso = entLoaded && has(FeatureSSO)
   const slackEnt = entLoaded && has(FeatureSlack)
@@ -843,14 +844,21 @@ export default function OrgSettings({
         </SettingsSection>
       )}
 
-      {/* ── Slack (TFAC-529) ── EE, multi-mode only: every /api/slack/* seam
+      {/* ── Slack (TFAC-529) ── EE, multi-mode only: every Slack route
           404s an unlicensed org, so the FE hides the surface rather than
           presenting a dead flow — same gating shape as SSO below. An action
           section (no Save footer): the card owns its own connect/disconnect
-          controls and list fetch. */}
+          controls and list fetch. canManage is unconditional because this
+          whole group renders only for an org admin. A return from Slack's
+          install opens the section, since the card is what reads its outcome
+          and a folded section does not mount it. */}
       {orgId && !isLocal && slackEnt && (
-        <SettingsSection title="Slack" summary="Connect a workspace">
-          <SlackWorkspacesCard orgId={orgId} />
+        <SettingsSection
+          title="Slack"
+          summary="Connect a workspace"
+          defaultExpanded={hasSlackInstallReturn(window.location.search)}
+        >
+          <SlackWorkspacesCard orgId={orgId} canManage />
         </SettingsSection>
       )}
 
@@ -1501,7 +1509,7 @@ function SkillPasteImport() {
         onChange={(e) => setContent(e.target.value)}
         placeholder={'---\nname: my-skill\ndescription: …\n---\n\nInstructions…'}
         rows={5}
-        className="w-full rounded-xl border border-line-1 bg-raised px-3 py-2 font-mono text-ui text-ink-1 placeholder:text-ink-3/60 focus:outline-none focus:border-warm/40"
+        className="w-full rounded-xl border border-line-1 bg-raised px-3 py-2 font-mono text-ui text-ink-1 placeholder:text-ink-3/60 focus:border-warm/40"
       />
       <TeamPicker value={team} onChange={setTeam} className="max-w-xs" />
       <div className="flex items-center justify-between gap-4">

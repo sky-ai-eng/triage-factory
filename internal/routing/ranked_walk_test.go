@@ -36,8 +36,8 @@ func walkRouter(t *testing.T, database *sql.DB, stub *stubDelegator, beforeCompl
 }
 
 // twoAuthorTeams seeds the author aidan on two teams, both opted into
-// auto-delegation, and returns them in rank order: with no rule priority
-// between them, the lower team id first.
+// auto-delegation, and returns them in rank order: with equal handler
+// priority between them, the lower team id first.
 func twoAuthorTeams(t *testing.T, database *sql.DB) (first, second string) {
 	t.Helper()
 	seedHandlerFKTargets(t, database)
@@ -195,14 +195,14 @@ func TestRankedWalk_AssigneeOnTwoTeams_WatcherWithNewestTrigger_MemberFires(t *t
 
 // TestRankedWalk_ReDeriveWinner_FollowsPriorityThenTeamID: the post-scoring
 // walk ranks a pool task's teams the way the event-time walk does — the
-// highest matched-rule default_priority, then the lowest team id — and the
+// highest matched-handler default_priority, then the lowest team id — and the
 // order the triggers were created in decides nothing. In both cases the team
 // that must lose holds the newest trigger.
 func TestRankedWalk_ReDeriveWinner_FollowsPriorityThenTeamID(t *testing.T) {
 	for _, c := range []struct {
 		name string
-		// priority gives the higher team id a 0.75 rule, which outranks the
-		// 0.5 a team with only triggers gets.
+		// priority gives the higher team id a 0.75 watch handler, which
+		// outranks the 0.5 both teams' automate handlers carry.
 		priority bool
 	}{
 		{"priority", true},

@@ -18,13 +18,13 @@ import (
 )
 
 // erroringHandlerStore wraps a real EventHandlerStore and forces
-// GetEnabledForEventSystem to fail, simulating a transient query error
+// GetActiveForEventSystem to fail, simulating a transient query error
 // distinct from "queried fine, zero handlers matched."
 type erroringHandlerStore struct {
 	db.EventHandlerStore
 }
 
-func (erroringHandlerStore) GetEnabledForEventSystem(ctx context.Context, orgID, eventType string) ([]domain.EventHandler, error) {
+func (erroringHandlerStore) GetActiveForEventSystem(ctx context.Context, orgID, eventType string) ([]domain.EventHandler, error) {
 	return nil, errors.New("boom: event_handlers query failed")
 }
 
@@ -131,8 +131,8 @@ func TestHandleEvent_NoHandlerMatched_PublishesTasklessNoHandler(t *testing.T) {
 	seedHandlerFKTargets(t, database)
 	setReviewHost(t, database)
 	seedUserOnTeam(t, database, runmode.LocalDefaultTeamID, "aidan")
-	// No event_handlers seeded at all (shipped triggers ship disabled and
-	// this fixture doesn't call Seed), so nothing can match.
+	// No event_handlers seeded at all (this fixture doesn't call Seed), so
+	// nothing can match.
 
 	pub := &fakeDispositionPublisher{}
 	deps := testRouterDeps(database)
@@ -409,20 +409,24 @@ func TestHandleEvent_MultipleTeams_TriggersFiredCountsOnlyCommitted(t *testing.T
 	createTestPrompt(t, database, domain.Prompt{ID: "p-dispfired", Name: "Disp fired", Body: "x", Source: "user"})
 	insertPromptForTeam(t, database, "p-dispfired-b", teamB)
 
-	createTriggerForTestRouting(t, database, domain.EventHandler{
-		ID: "trigger-A-dispfired", Kind: domain.EventHandlerKindTrigger,
-		BlueprintID: "p-dispfired", TriggerType: domain.TriggerTypeEvent,
-		EventType: domain.EventJiraIssueAvailable, BreakerThreshold: intPtr(4),
-		MinAutonomySuitability: floatPtr(0), Enabled: true,
+	createHandlerForTestRouting(t, database, domain.EventHandler{
+		ID:                     "trigger-A-dispfired",
+		Name:                   "trigger-A-dispfired",
+		DefaultPriority:        0.5,
+		Mode:                   domain.EventHandlerModeAutomate,
+		BlueprintID:            "p-dispfired",
+		EventType:              domain.EventJiraIssueAvailable,
+		BreakerThreshold:       4,
+		MinAutonomySuitability: 0,
 	})
 	bpDispfiredB := insertBlueprintForTeam(t, database, "bp-dispfired-b", "p-dispfired-b", teamB)
 	if _, err := database.Exec(`
 		INSERT INTO event_handlers
-			(id, org_id, team_id, creator_user_id, kind, event_type,
-			 scope_predicate_json, enabled, source,
+			(id, org_id, team_id, creator_user_id, mode, event_type,
+			 scope_predicate_json, source, name,
 			 blueprint_id, breaker_threshold, min_autonomy_suitability,
 			 created_at, updated_at)
-		VALUES (?, ?, ?, ?, 'trigger', ?, NULL, 1, 'user', ?, 4, 0, datetime('now'), datetime('now'))
+		VALUES (?, ?, ?, ?, 'automate', ?, NULL, 'user', 'B trigger', ?, 4, 0, datetime('now'), datetime('now'))
 	`, "trigger-B-dispfired", runmode.LocalDefaultOrgID, teamB, runmode.LocalDefaultUserID,
 		domain.EventJiraIssueAvailable, bpDispfiredB); err != nil {
 		t.Fatalf("seed team B trigger: %v", err)

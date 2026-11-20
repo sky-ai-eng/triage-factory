@@ -178,9 +178,10 @@ func seedLifecycleWorkspace(t *testing.T, stores db.Stores, orgID, userID, works
 		if err := tx.Secrets.Put(t.Context(), orgID, botTokenRef, botToken, "test bot token"); err != nil {
 			return err
 		}
-		return slackstore.FromTx(tx).Workspaces.Upsert(t.Context(), slackstore.Workspace{
+		return upsertActiveConnection(t.Context(), tx, slackstore.Connection{
 			WorkspaceID: workspaceID, APIAppID: apiAppID, OrgID: orgID, WorkspaceName: "Acme",
 			Transport: "socket", BotUserID: "U0BOT", BotTokenRef: botTokenRef, RegisteredByUserID: userID,
+			AppTokenRef: "slack_ws_" + workspaceID + "_" + apiAppID + "_app_token",
 		})
 	}); err != nil {
 		t.Fatalf("seed workspace: %v", err)

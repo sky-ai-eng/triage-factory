@@ -136,8 +136,8 @@ func (f *fakeIdentityStore) MarkAttemptSystem(_ context.Context, ws, su, display
 
 // ---------- test scaffolding ----------
 
-func testWorkspaceForResolver() slackstore.Workspace {
-	return slackstore.Workspace{WorkspaceID: "T0RESOLVE1", OrgID: "org-1", BotTokenRef: "slack_ws_T0RESOLVE1_bot_token"}
+func testWorkspaceForResolver() slackstore.Connection {
+	return slackstore.Connection{WorkspaceID: "T0RESOLVE1", OrgID: "org-1", BotTokenRef: "slack_ws_T0RESOLVE1_bot_token"}
 }
 
 // newUsersInfoServer serves a fixed users.info JSON body and counts hits.

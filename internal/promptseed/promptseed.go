@@ -43,9 +43,8 @@ var prSecurityReview string
 //go:embed prompts/pr-correctness-review.txt
 var prCorrectnessReview string
 
-// One implementation body ships as two prompts, one per tracker. Each is
-// wrapped by its own blueprint because a blueprint is fired by exactly one
-// trigger, and each tracker's assignment event needs a trigger of its own.
+// One implementation body ships as two prompts, one per tracker, each wrapped
+// by its own blueprint and fired by its tracker's assignment trigger.
 //
 //go:embed prompts/issue-implement.txt
 var issueImplement string
@@ -71,7 +70,7 @@ var vulnerabilityRemediate string
 // Order is not significant for prompts (each upserts independently), but note
 // the seed chains through blueprints: each shipped prompt is a step of one
 // shipped blueprint (Blueprints), and the shipped event handlers
-// (db.ShippedEventHandlers) carry trigger rows whose blueprint_id FKs into
+// (db.ShippedEventHandlers) carry blueprint_id values that FK into
 // most of those blueprints — so any seed flow must run prompts → blueprints →
 // handlers. The SystemSlug values here must stay in sync with the slugs
 // Blueprints wraps and the BlueprintID references in db.ShippedEventHandlers.
@@ -111,7 +110,7 @@ func Prompts() []domain.Prompt {
 		// conflicts on the user's own PRs via the matching trigger.
 		{SystemSlug: "system-conflict-resolution", Name: "Merge Conflict Resolution", Body: conflictResolution, Source: "system"},
 
-		// CI fix prompt — auto-fired on CI failures via prompt_trigger.
+		// CI fix prompt — run on CI failures by the shipped CI handler in automate.
 		{SystemSlug: "system-ci-fix", Name: "CI Fix", Body: ciFix, Source: "system"},
 
 		// Issue implementation, one copy per tracker under one name — each
@@ -138,21 +137,21 @@ func Prompts() []domain.Prompt {
 // Blueprints returns the shipped blueprints. Most are a 1-step blueprint
 // wrapping a single prompt: the blueprint reuses the wrapped prompt's
 // system_slug (distinct table, no collision) and its single step points at that
-// prompt's slug. Wrapping keeps a shipped trigger's blueprint reference
+// prompt's slug. Wrapping keeps a shipped handler's blueprint reference
 // resolvable (CI-fix, conflict-resolution, jira-implement, linear-implement,
 // fix-review-feedback, vulnerability-remediate), and it puts the prompt under the drift sync, which
 // walks blueprints — the reason the standalone security and correctness
-// reviews are wrapped though no trigger fires them.
+// reviews are wrapped though no handler runs them.
 //
 // The exception is PR review (system-pr-review), the one multi-step shipped
 // blueprint: security → correctness → aggregate. Its step prompts
 // are NOT auto-wrapped below — a prompt can be a step in at most one blueprint
 // (unique index on blueprint_steps.step_prompt_id), and these three belong to
 // this chain. The blueprint keeps the slug `system-pr-review` so the
-// system-trigger-pr-review handler's blueprint_id still resolves.
+// system-handler-review-requested handler's blueprint_id still resolves.
 //
 // The seeder seeds prompts first, then these blueprints + steps, then wires
-// triggers to the blueprint slugs.
+// handlers to the blueprint slugs.
 func Blueprints() []domain.SeedBlueprint {
 	prReviewSteps := []string{
 		"system-pr-review-security",

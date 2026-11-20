@@ -165,7 +165,11 @@ func TestResolveCredentials_ModelProviderNotConnected(t *testing.T) {
 		t.Run(string(mode), func(t *testing.T) {
 			runmode.SetForTest(t, mode)
 			const orgID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
-			secrets := newFakeSecrets(orgID, map[string]string{"anthropic_api_key": "sk-ant-only"})
+			stored := map[string]string{"anthropic_api_key": "sk-ant-only"}
+			var secrets SecretsReader = newFakeSecrets(orgID, stored)
+			if mode == runmode.ModeLocal {
+				secrets = NewBoundSecretsReader(&keychainBag{values: stored}, boundTo(modelcatalog.ProviderAnthropic))
+			}
 
 			_, err := resolveCredentials(context.Background(), secrets, orgID, bedrockCatalogKey, nil)
 			if !errors.Is(err, ErrProviderNotConfigured) {
@@ -186,7 +190,7 @@ func TestResolveCredentials_ModelProviderNotConnected(t *testing.T) {
 // is the credential there.
 func TestResolveCredentials_LocalAmbientIgnoresTheModel(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
-	secrets := newFakeSecrets(runmode.LocalDefaultOrgID, map[string]string{})
+	secrets := NewBoundSecretsReader(&keychainBag{}, boundTo())
 
 	env, err := resolveCredentials(context.Background(), secrets, runmode.LocalDefaultOrgID, bedrockCatalogKey, nil)
 	if err != nil {
@@ -413,14 +417,12 @@ func TestResolveCredentials_MultiModeOrgWithNoKey(t *testing.T) {
 
 // TestResolveCredentials_LocalModeOrgWithKey pins the local-mode +
 // per-org key path: the resolver returns the key so mergeEnv strips
-// credential vars from os.Environ and uses the keychain value. This
-// is the seam that lets the future per-org credential UI work
-// identically in local-as-N=1 and multi mode.
+// credential vars from os.Environ and uses the keychain value.
 func TestResolveCredentials_LocalModeOrgWithKey(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
-	secrets := newFakeSecrets(runmode.LocalDefaultOrgID, map[string]string{
+	secrets := NewBoundSecretsReader(&keychainBag{values: map[string]string{
 		"anthropic_api_key": "sk-ant-local-configured",
-	})
+	}}, boundTo(modelcatalog.ProviderAnthropic))
 
 	env, err := resolveCredentials(context.Background(), secrets, runmode.LocalDefaultOrgID, "", nil)
 	if err != nil {

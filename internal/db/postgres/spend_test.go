@@ -249,9 +249,9 @@ func seedPgSpendOrg(t *testing.T, h *pgtest.Harness) (orgID, userID, teamID, age
 	orgID, userID, teamID = pgtest.SeedOrgWithUser(t, h, "spend-"+uuid.NewString()[:8])
 	agentID = uuid.New().String()
 	pgtest.MustExec(t, h.AdminDB, `INSERT INTO agents (id, org_id) VALUES ($1, $2)`, agentID, orgID)
-	// A blueprint + trigger event_handler so an autonomous run can carry a
-	// non-NULL trigger_id (conversations.trigger_id FK → event_handlers;
-	// the trigger's same-team FK → blueprints). The view passes
+	// A blueprint + an event_handler in automate so an autonomous run can
+	// carry a non-NULL trigger_id (conversations.trigger_id FK →
+	// event_handlers; the handler's same-team FK → blueprints). The view passes
 	// conversations.trigger_id straight through (TFAC-478).
 	blueprintID := uuid.New().String()
 	pgtest.MustExec(t, h.AdminDB,
@@ -259,8 +259,8 @@ func seedPgSpendOrg(t *testing.T, h *pgtest.Harness) (orgID, userID, teamID, age
 		blueprintID, orgID, teamID, userID)
 	triggerID = uuid.New().String()
 	pgtest.MustExec(t, h.AdminDB,
-		`INSERT INTO event_handlers (id, org_id, team_id, creator_user_id, kind, event_type, blueprint_id, breaker_threshold, min_autonomy_suitability)
-		 VALUES ($1, $2, $3, $4, 'trigger', 'github:pr:ci_check_failed', $5, 3, 0.5)`,
+		`INSERT INTO event_handlers (id, org_id, team_id, creator_user_id, mode, event_type, name, blueprint_id, breaker_threshold, min_autonomy_suitability)
+		 VALUES ($1, $2, $3, $4, 'automate', 'github:pr:ci_check_failed', 'Spend', $5, 3, 0.5)`,
 		triggerID, orgID, teamID, userID, blueprintID)
 	return
 }

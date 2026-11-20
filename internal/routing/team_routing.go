@@ -415,21 +415,21 @@ func handlerTeamID(h domain.EventHandler) string {
 	if h.TeamID != "" {
 		return h.TeamID
 	}
-	routerLog.Warn("handler has no team_id, falling back to LocalDefaultTeamID; check that EventHandlerStore.Seed was called with a real teamID", "handler_id", h.ID, "kind", h.Kind)
+	routerLog.Warn("handler has no team_id, falling back to LocalDefaultTeamID; check that EventHandlerStore.Seed was called with a real teamID", "handler_id", h.ID, "mode", h.Mode)
 	return runmode.LocalDefaultTeamID
 }
 
-// maxRuleDefaultPriority returns the highest default_priority across the
-// matched rules, defaulting to the 0.5 trigger-fallback when none carry one.
-// Used for the requested-party events (review_requested, mentioned), whose
-// owner/visibility teams come from the identity the event names rather than
-// the rule's team — so the per-owner-team teamRulePriorityScores can't supply
-// the priority; the matched rule(s) do.
-func maxRuleDefaultPriority(rules []domain.EventHandler) float64 {
-	s := 0.5
-	for _, rule := range rules {
-		if rule.DefaultPriority != nil && *rule.DefaultPriority > s {
-			s = *rule.DefaultPriority
+// maxDefaultPriority returns the highest default_priority across the matched
+// task-making handlers. Used for the events whose owner/visibility teams come
+// from an identity rather than the handler's team (the owner ladder, and the
+// requested-party events review_requested and mentioned) — so the
+// per-team teamRulePriorityScores can't supply the priority; the matched
+// handlers do. The router reaches it only with at least one handler.
+func maxDefaultPriority(taskMakers []domain.EventHandler) float64 {
+	var s float64
+	for i, h := range taskMakers {
+		if i == 0 || h.DefaultPriority > s {
+			s = h.DefaultPriority
 		}
 	}
 	return s
@@ -913,19 +913,19 @@ func (r *Router) jiraAssigneeUsers(ctx context.Context, orgID string, evt domain
 // ownerLadderRouting computes the visibility set, owner, firing order, and seed
 // priority for an owning-team-ladder event (author-centric GitHub or
 // assignee-centric Jira / Linear) from the ladder's (owner, ownerSet) result and the
-// matched rules. Both provider branches share it so the NULL-owner and
+// matched handlers. Both provider branches share it so the NULL-owner and
 // visibility-union semantics stay identical:
 //
 //   - visibility = {owner set} ∪ {teams whose matched handler set
 //     applies_to_unowned=true}. A flag-off handler gates creation + the owner's
 //     automation but never grants visibility on its own; a team widens
 //     visibility beyond ownership only by opting in with the explicit
-//     applies_to_unowned flag (TFAC-517 — the deliberate watch);
+//     applies_to_unowned flag;
 //   - ownerTeam is "" when the identity maps to multiple teams (or to none with
-//     a watch rule): the owner is unresolved, stored as NULL — resolving on the
+//     a watching handler): the owner is unresolved, stored as NULL — resolving on the
 //     fire or the first human claim;
-//   - firing order has three cases, all preserving the TFAC-514 no-steal
-//     invariant — a non-member watcher NEVER beats a member team to ownership:
+//   - firing order has three cases, all preserving the no-steal invariant —
+//     a non-member watcher NEVER beats a member team to ownership:
 //     1. resolved owner → orderedTeams = {owner}. Watchers see the card only.
 //     2. ambiguous MEMBER ownership (identity on multiple member teams) →
 //     orderedTeams = ownerSet ranked. Watchers are NOT candidates while any
@@ -933,28 +933,26 @@ func (r *Router) jiraAssigneeUsers(ctx context.Context, orgID string, evt domain
 //     consolidates the NULL owner onto itself.
 //     3. no member owns it (ownerSet empty — a truly external author:
 //     dependabot, renovate, an outside-fork contributor) → orderedTeams =
-//     the opted-in watcher teams ranked (TFAC-517). A watcher that set
-//     applies_to_unowned (on a rule OR a trigger) AND has a configured
-//     auto-delegation may now fire the orphan PR and consolidate ownership
-//     onto itself — the deliberate, eyes-open behavior that supersedes the
-//     TFAC-514 blanket "external never fires." A watcher whose opt-in is only
-//     a rule (no trigger) surfaces the card NULL-owned and nothing fires.
+//     the opted-in watcher teams ranked. A watcher that set
+//     applies_to_unowned on a handler in automate may fire the orphan PR and
+//     consolidate ownership onto itself, because it opted in to exactly
+//     that. A watcher whose handler is in watch surfaces the card NULL-owned
+//     and nothing fires.
 //
 // ok=false means the visibility set is empty (external identity, no watching
 // handler) → no task; the caller returns without creating one.
 //
-// matchedRules and matchedTriggers are both consumed for the watch set: the
-// applies_to_unowned reach flag is per-handler, so a trigger can opt a team into
-// orphan reach (and, since it's a trigger, firing) on its own — see
-// explicitWatchTeams. Priority ranking still reads default_priority off the rules
-// (triggers carry none; a trigger-only watcher falls back to the 0.5 default in
-// teamRulePriorityScores).
-func ownerLadderRouting(owner string, ownerSet []string, matchedRules, matchedTriggers []domain.EventHandler) (visibleTeams []string, ownerTeam string, orderedTeams []string, taskPriority float64, ok bool) {
+// taskMakers is every matched handler that makes a task. The
+// applies_to_unowned reach flag is per-handler, so an automating handler can
+// opt a team into orphan reach and firing on its own — see
+// explicitWatchTeams. Priority ranking reads default_priority off the same
+// handlers.
+func ownerLadderRouting(owner string, ownerSet []string, taskMakers []domain.EventHandler) (visibleTeams []string, ownerTeam string, orderedTeams []string, taskPriority float64, ok bool) {
 	vis := map[string]struct{}{}
 	for _, t := range ownerSet {
 		vis[t] = struct{}{}
 	}
-	watchTeams := explicitWatchTeams(matchedRules, matchedTriggers)
+	watchTeams := explicitWatchTeams(taskMakers)
 	for t := range watchTeams {
 		vis[t] = struct{}{}
 	}
@@ -973,48 +971,55 @@ func ownerLadderRouting(owner string, ownerSet []string, matchedRules, matchedTr
 		// (non-member, in vis via an applies_to_unowned handler but not in
 		// ownerSet) is NEVER an ownership candidate while a member team exists —
 		// otherwise a pure watcher could win the claim and consolidate itself as
-		// owner of a PR a member owns (the TFAC-514 no-steal invariant). Order
-		// ownerSet by the same signal the handler-team path uses — max matched-rule
+		// owner of a PR a member owns (the no-steal invariant). Order
+		// ownerSet by the same signal the handler-team path uses — max matched-handler
 		// DefaultPriority desc, then lowest team id — so the first member to win
 		// the exclusive claim is deterministic and the fire consolidates the NULL
 		// owner onto it (the firing transaction's owner consolidation).
-		orderedTeams = orderTeamsByRulePriority(setOf(ownerSet), matchedRules)
+		orderedTeams = orderTeamsByRulePriority(setOf(ownerSet), taskMakers)
 	default:
 		// No member owns it (ownerSet empty — a truly external author:
 		// dependabot, renovate, an outside-fork contributor). The orphan task's
 		// only claimants are the teams that explicitly opted into reaching
-		// unowned entities (an applies_to_unowned rule OR trigger) — they may now
-		// fire their configured auto-delegations and the first to claim
-		// consolidates ownership onto itself (TFAC-517, superseding the TFAC-514
-		// blanket "external never fires"). This runs ONLY when no member team is a
+		// unowned entities (an applies_to_unowned handler) — they may fire
+		// their configured auto-delegations and the first to claim consolidates
+		// ownership onto itself. This runs ONLY when no member team is a
 		// candidate, so the member-over-watcher invariant holds. Firing still
-		// requires a matched trigger + auto_delegate enabled downstream: a watcher
-		// whose opt-in is a trigger fires that trigger; a watcher whose opt-in is
-		// only a rule (no trigger) yields an empty teamTriggers and nothing fires —
-		// the card stays NULL-owned.
-		orderedTeams = orderTeamsByRulePriority(watchTeams, matchedRules)
+		// requires a matched handler in automate + auto_delegate enabled
+		// downstream: a watcher whose handler automates fires it; a watcher
+		// whose handler is in watch yields an empty teamTriggers and nothing
+		// fires — the card stays NULL-owned.
+		orderedTeams = orderTeamsByRulePriority(watchTeams, taskMakers)
 	}
-	return sortedKeys(vis), owner, orderedTeams, maxRuleDefaultPriority(matchedRules), true
+	return sortedKeys(vis), owner, orderedTeams, maxDefaultPriority(taskMakers), true
 }
 
 // teamRulePriorityScores computes, for each team in vis, the per-team ranking
 // signal for the deterministic firing order: the max DefaultPriority across that
-// team's matched rules, falling back to the 0.5 trigger-default when the team
-// contributed only triggers (no rule carries a priority). Built in a SINGLE pass
-// over matchedRules so handlerTeamID — which logs a warning on a legacy/fixture
-// empty team_id — runs once per rule, never once per sort comparison (a
-// comparator calling it would log O(n log n) times per event). Shared by the
-// handler-team path (resolveTeamRouting) and the ambiguous owner-ladder path
-// (orderTeamsByRulePriority) so both rank teams the same way.
-func teamRulePriorityScores(vis map[string]struct{}, matchedRules []domain.EventHandler) map[string]float64 {
+// team's matched task-making handlers, and 0 for a team in vis with none (an
+// owner-ladder team the identity is on whose own handlers did not match).
+// Built in a SINGLE pass over taskMakers so handlerTeamID — which logs a
+// warning on a legacy/fixture empty team_id — runs once per handler, never
+// once per sort comparison (a comparator calling it would log O(n log n) times
+// per event). Shared by the handler-team path (resolveTeamRouting) and the
+// ambiguous owner-ladder path (orderTeamsByRulePriority) so both rank teams the
+// same way.
+func teamRulePriorityScores(vis map[string]struct{}, taskMakers []domain.EventHandler) map[string]float64 {
 	scores := make(map[string]float64, len(vis))
-	for t := range vis {
-		scores[t] = 0.5
+	matched := make(map[string]bool, len(vis))
+	for _, h := range taskMakers {
+		tid := handlerTeamID(h)
+		if _, in := vis[tid]; !in {
+			continue
+		}
+		if !matched[tid] || h.DefaultPriority > scores[tid] {
+			scores[tid] = h.DefaultPriority
+			matched[tid] = true
+		}
 	}
-	for _, rule := range matchedRules {
-		tid := handlerTeamID(rule)
-		if cur, ok := scores[tid]; ok && rule.DefaultPriority != nil && *rule.DefaultPriority > cur {
-			scores[tid] = *rule.DefaultPriority
+	for t := range vis {
+		if !matched[t] {
+			scores[t] = 0
 		}
 	}
 	return scores
@@ -1034,13 +1039,14 @@ func orderTeamsByScores(teams []string, scores map[string]float64) []string {
 }
 
 // orderTeamsByRulePriority orders a visibility set into the deterministic firing
-// order (max matched-rule DefaultPriority desc, ties broken by lowest team id).
+// order (max matched-handler DefaultPriority desc, ties broken by lowest team
+// id).
 // It mirrors the handler-team path's ranking (resolveTeamRouting) so an
 // ambiguous owner-ladder task (NULL owner, multiple visible teams) fires in the
 // same order a multi-team handler-team task would — the first team wins the
 // exclusive claim and consolidates the owner via the fire.
-func orderTeamsByRulePriority(vis map[string]struct{}, matchedRules []domain.EventHandler) []string {
-	return orderTeamsByScores(sortedKeys(vis), teamRulePriorityScores(vis, matchedRules))
+func orderTeamsByRulePriority(vis map[string]struct{}, taskMakers []domain.EventHandler) []string {
+	return orderTeamsByScores(sortedKeys(vis), teamRulePriorityScores(vis, taskMakers))
 }
 
 // latestActiveOwnedTaskTeam returns the owning team of the most recently
@@ -1077,24 +1083,19 @@ func (r *Router) latestActiveOwnedTaskTeam(ctx context.Context, orgID, entityID 
 // widen an owner-ladder task's visibility beyond the entity owner. A flag-off
 // handler gates creation and the owner's automation but never grants visibility
 // on its own, so the scoping stays the owner unless a team deliberately opts in
-// with this explicit per-handler flag (TFAC-517 — replacing the prior
-// source==user heuristic).
+// with this explicit per-handler flag.
 //
-// It is a per-HANDLER flag, not a rule-only one: both kinds create tasks, so the
-// reach concept applies to triggers too. Pass every matched handler group (rules
-// AND triggers); a trigger that opts in lets a team configure orphan reach +
-// auto-delegation entirely on the prompts page, no companion rule needed. A
-// watcher always gets visibility; it gains firing rights only in
-// ownerLadderRouting's external branch (ownerSet empty, no member owner), never
-// while any member team is an ownership candidate (the TFAC-514 no-steal
-// invariant).
-func explicitWatchTeams(handlerGroups ...[]domain.EventHandler) map[string]struct{} {
+// It is a per-HANDLER flag on every handler that makes a task, watch and
+// automate alike: an automating handler that opts in lets a team configure
+// orphan reach and auto-delegation in one handler. A watcher always gets
+// visibility; it gains firing rights only in ownerLadderRouting's external
+// branch (ownerSet empty, no member owner), never while any member team is an
+// ownership candidate (the no-steal invariant).
+func explicitWatchTeams(taskMakers []domain.EventHandler) map[string]struct{} {
 	out := map[string]struct{}{}
-	for _, group := range handlerGroups {
-		for _, h := range group {
-			if h.AppliesToUnowned {
-				out[handlerTeamID(h)] = struct{}{}
-			}
+	for _, h := range taskMakers {
+		if h.AppliesToUnowned {
+			out[handlerTeamID(h)] = struct{}{}
 		}
 	}
 	return out

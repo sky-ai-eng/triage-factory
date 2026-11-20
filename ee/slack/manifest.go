@@ -88,7 +88,10 @@ type slackManifestBotUser struct {
 }
 
 type slackManifestOAuth struct {
-	Scopes slackManifestScopes `json:"scopes"`
+	// RedirectURLs is set only for the deployment's app, which installs
+	// through OAuth; an org's own app is connected with pasted tokens.
+	RedirectURLs []string            `json:"redirect_urls,omitempty"`
+	Scopes       slackManifestScopes `json:"scopes"`
 }
 
 type slackManifestScopes struct {
@@ -119,10 +122,14 @@ type slackManifestEventSubs struct {
 // stays defensive rather than emitting a trailing separator).
 func slackManifestName(orgName string) string {
 	if orgName == "" {
-		return "Triage Factory"
+		return deploymentSlackAppName
 	}
 	return fmt.Sprintf("Triage Factory (%s)", orgName)
 }
+
+// deploymentSlackAppName is the deployment app's display name. It serves
+// every org, so it names none.
+const deploymentSlackAppName = "Triage Factory"
 
 // slackWebhookPath is the URL shape ee/slack's manifest advertises for the
 // events_api transport; ee/slack/webhook.go's handleWebhook is mounted at
@@ -132,15 +139,39 @@ func slackWebhookPath(orgID string) string {
 	return "/api/webhooks/slack/" + orgID
 }
 
+// deploymentWebhookPath is the deployment app's Events API endpoint, which
+// names no org because the app serves every org. The route is mounted as a
+// literal so scripts/api-tree.sh, which reads route strings from the AST,
+// lists it; TestDeploymentManifestURLsAreMounted keeps the two equal.
+const deploymentWebhookPath = "/api/webhooks/slack"
+
 // buildSlackManifest renders the manifest for one (org, transport) pair.
 // publicURL is the deployment's external base (ExtensionAPI.PublicURL());
 // callers must reject an empty publicURL for transport=events_api before
 // calling this (buildSlackManifest itself has no HTTP-status concept) — see
 // handleManifest's 409.
 func buildSlackManifest(orgName, transport, publicURL, orgID string) slackManifest {
+	return newSlackManifest(slackManifestName(orgName), transport, publicURL+slackWebhookPath(orgID))
+}
+
+// buildDeploymentSlackManifest renders the manifest an operator creates the
+// deployment's Slack app from. It differs from an org's own in naming no org
+// and in registering the install ceremony's callback, which serves every org.
+// The files under docs/users/self-hosting/deployment-integrations/ are its
+// output for the documentation's placeholder URL, pinned by manifest_test.go.
+func buildDeploymentSlackManifest(transport, publicURL string) slackManifest {
+	m := newSlackManifest(deploymentSlackAppName, transport, publicURL+deploymentWebhookPath)
+	m.OAuthConfig.RedirectURLs = []string{publicURL + installCallbackPath}
+	return m
+}
+
+// newSlackManifest renders what every Triage Factory Slack app has in common.
+// requestURL is the Events API endpoint, and is used only when transport is
+// transportEventsAPI.
+func newSlackManifest(name, transport, requestURL string) slackManifest {
 	m := slackManifest{
 		DisplayInformation: slackManifestDisplayInfo{
-			Name:            slackManifestName(orgName),
+			Name:            name,
 			Description:     slackManifestDescription,
 			LongDescription: slackManifestLongDescription,
 			BackgroundColor: slackManifestBackgroundColor,
@@ -173,7 +204,7 @@ func buildSlackManifest(orgName, transport, publicURL, orgID string) slackManife
 		enabled := true
 		m.Settings.SocketModeEnabled = &enabled
 	case transportEventsAPI:
-		m.Settings.EventSubscriptions.RequestURL = publicURL + slackWebhookPath(orgID)
+		m.Settings.EventSubscriptions.RequestURL = requestURL
 	}
 	return m
 }

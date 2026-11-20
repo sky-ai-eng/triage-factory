@@ -53,7 +53,7 @@ const (
 	FeatureGovernance Feature = "governance"
 
 	// FeatureSlack gates the Slack workspace-connect surface: the
-	// org_slack_workspaces store, the connect/disconnect/manifest routes in
+	// org_slack_connections store, the connect/disconnect/manifest routes in
 	// ee/slack, and (in follow-on leaves) event ingest. Every ee/slack route
 	// also 404s in local mode for now — the Slack store is Postgres-only (no
 	// SQLite backend), and local mode's org-context shim would otherwise let

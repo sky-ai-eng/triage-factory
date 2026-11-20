@@ -68,15 +68,15 @@ func setupFenceScenario(t *testing.T, database *sql.DB) (entityID string) {
 		t.Fatalf("create entity: %v", err)
 	}
 	createTestPrompt(t, database, domain.Prompt{ID: "p-fence", Name: "P", Body: "x", Source: "user"})
-	createTriggerForTestRouting(t, database, domain.EventHandler{
+	createHandlerForTestRouting(t, database, domain.EventHandler{
 		ID:                     "t-fence",
-		Kind:                   domain.EventHandlerKindTrigger,
+		Name:                   "t-fence",
+		DefaultPriority:        0.5,
+		Mode:                   domain.EventHandlerModeAutomate,
 		BlueprintID:            "p-fence",
-		TriggerType:            domain.TriggerTypeEvent,
 		EventType:              domain.EventGitHubPRCICheckFailed,
-		BreakerThreshold:       intPtr(4),
-		MinAutonomySuitability: floatPtr(0),
-		Enabled:                true,
+		BreakerThreshold:       4,
+		MinAutonomySuitability: 0,
 	})
 	return entity.ID
 }

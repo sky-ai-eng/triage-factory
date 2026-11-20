@@ -595,6 +595,11 @@ describe('UserSettingsPage — a refusal is shown, never swallowed', () => {
 
 describe('UserSettingsPage — create, and the secret shown once', () => {
   it('sends an absolute expires_at for a preset, never a duration, and strikes presets past the cap', async () => {
+    // The suite's clock advances 20ms at a time in real time, so an expiry
+    // compared to the millisecond would drift with a slow load. This test
+    // advances no timers, so it holds the date still and runs real ones.
+    vi.useRealTimers()
+    vi.useFakeTimers({ toFake: ['Date'], now: NOW })
     const made = token({ id: 't9', name: 'ci', token_prefix: 'tf_NEWNEWNE' })
     stub({
       ...BASE,

@@ -222,7 +222,7 @@ function BranchPicker({
               onChange={handleQueryChange}
               onKeyDown={handleKeyDown}
               placeholder={profile.default_branch || 'main'}
-              className="w-full bg-transparent px-2 py-1 text-ui text-ink-1 placeholder:text-ink-3/60 focus:outline-none"
+              className="w-full bg-transparent px-2 py-1 text-ui text-ink-1 placeholder:text-ink-3/60"
             />
           </div>
           <div className="max-h-56 overflow-y-auto py-1">

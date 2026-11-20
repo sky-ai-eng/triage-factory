@@ -315,7 +315,7 @@ export default function Marketplace() {
               value={sort}
               onChange={(e) => setSort(e.target.value as SortOrder)}
               aria-label="Sort listings"
-              className="text-body text-ink-2 bg-raised border border-line-1 rounded-full px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-warm/30 focus:border-warm/40 transition-colors"
+              className="text-body text-ink-2 bg-raised border border-line-1 rounded-full px-3 py-1.5 focus:ring-2 focus:ring-warm/30 focus:border-warm/40 transition-colors"
             >
               <option value="installs">Most installed</option>
               <option value="votes">Most recommended</option>

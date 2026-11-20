@@ -211,6 +211,15 @@ func rowToMessage(r domain.Message) (schemas.ChatMessage, error) {
 		}
 		return msg, nil
 
+	// A re-claim's system update. It is a message in the conversation rather
+	// than a change to the top-level system blocks, because the provider binds
+	// every earlier thinking block to those: an addition at the end leaves
+	// everything a block was produced under as it was. Where the provider has
+	// no mid-conversation system role, bifrost sends it as a user turn wrapped
+	// in a <system-reminder>, which is an addition at the end too.
+	case "system":
+		return schemas.ChatMessage{Role: schemas.ChatMessageRoleSystem, Content: content}, nil
+
 	default:
 		return schemas.ChatMessage{}, fmt.Errorf("unsupported role %q", r.Role)
 	}
@@ -265,6 +274,8 @@ func MessageToRow(msg schemas.ChatMessage) (domain.Message, error) {
 			}
 			row.ToolCalls = calls
 		}
+
+	case schemas.ChatMessageRoleSystem:
 
 	default:
 		return domain.Message{}, fmt.Errorf("unsupported role %q", msg.Role)
@@ -434,6 +445,8 @@ func elidedStub(r domain.Message) schemas.ChatMessage {
 			msg.ChatAssistantMessage = &schemas.ChatAssistantMessage{ToolCalls: calls}
 		}
 		return msg
+	case "system":
+		return schemas.ChatMessage{Role: schemas.ChatMessageRoleSystem, Content: content}
 	default:
 		return schemas.ChatMessage{Role: schemas.ChatMessageRoleUser, Content: content}
 	}

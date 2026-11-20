@@ -22,7 +22,7 @@ func softDeleteHandler(t *testing.T, database *sql.DB, id string) {
 	}
 }
 
-// TestRouter_SoftDeletedTrigger_NoLongerFires proves GetEnabledForEventSystem
+// TestRouter_SoftDeletedTrigger_NoLongerFires proves GetActiveForEventSystem
 // — the router's query — filters deleted_at IS NULL, so a soft-deleted
 // trigger stops firing immediately, with no need to wait for a poll cycle or
 // re-derive pass.
@@ -50,7 +50,7 @@ func TestRouter_SoftDeletedTrigger_NoLongerFires(t *testing.T) {
 	}
 
 	var triggerID string
-	if err := database.QueryRow(`SELECT id FROM event_handlers WHERE kind = 'trigger' AND event_type = ?`, domain.EventGitHubPRCICheckFailed).Scan(&triggerID); err != nil {
+	if err := database.QueryRow(`SELECT id FROM event_handlers WHERE mode = 'automate' AND event_type = ?`, domain.EventGitHubPRCICheckFailed).Scan(&triggerID); err != nil {
 		t.Fatalf("find seeded trigger: %v", err)
 	}
 	softDeleteHandler(t, database, triggerID)

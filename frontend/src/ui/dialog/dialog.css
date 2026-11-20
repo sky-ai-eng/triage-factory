@@ -293,6 +293,11 @@
   opacity: 0.88;
   color: var(--color-ground);
 }
+.dlg-btn.go:disabled,
+.dlg-btn.go:disabled:hover {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
 .dlg.bad .dlg-btn.go {
   color: var(--color-alarm);
   background: transparent;

@@ -23,10 +23,10 @@ import (
 // operational readiness bits. SQLite is N=1 (LocalDefaultOrgID).
 type PollReadinessStore interface {
 	// MarkRestarted resets readiness for (orgID, source): clears
-	// last_poll_at and stamps restarted_at=now(), so a completion from
-	// before this call (a stale pre-restart poll goroutine finishing late)
-	// can't incorrectly flip readiness back to true. Upserts — safe to call
-	// before any row exists.
+	// last_poll_at and stamps restarted_at=now(), so a completion whose poll
+	// started before this call (a stale pre-restart poll goroutine finishing
+	// late) can't flip readiness back to true. One with no start time can;
+	// see MarkPollComplete. Upserts — safe to call before any row exists.
 	//
 	// Exempt from the returned-row rule: fire-and-forget bookkeeping, same as
 	// MarkPollComplete.
@@ -37,7 +37,9 @@ type PollReadinessStore interface {
 	// completion whose startedAt precedes the last MarkRestarted call is
 	// ignored (a straggler from before the restart). A zero startedAt is
 	// always accepted — "unknown generation" fails open rather than
-	// stalling readiness forever. Upserts.
+	// stalling readiness forever — so a completion with no start time that
+	// lands after a restart counts as that restart's first poll, since it
+	// cannot be told apart from one. Upserts.
 	//
 	// Exempt from the returned-row rule: fire-and-forget bookkeeping. The row
 	// is a durable flag a later request read consults; the poll cycle that
@@ -47,6 +49,11 @@ type PollReadinessStore interface {
 	// Ready reports whether (orgID, source) has completed a poll cycle
 	// since its last restart (or was never explicitly restarted and has
 	// completed at least one poll ever). False, nil for an unknown pair.
+	//
+	// It compares no timestamps: which completion counts is decided when it
+	// is stored, so any stored completion is ready, including one stamped
+	// with the restart's own instant, which a clock that ticks coarsely
+	// produces.
 	Ready(ctx context.Context, orgID, source string) (bool, error)
 
 	// LastPollTimes returns each source's last completed poll time for the

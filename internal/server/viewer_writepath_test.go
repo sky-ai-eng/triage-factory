@@ -14,6 +14,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventing/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -36,12 +37,23 @@ type viewerRig struct {
 
 func newViewerRig(t *testing.T) *viewerRig {
 	t.Helper()
+	return newViewerRigWithTx(t, nil)
+}
+
+// newViewerRigWithTx is newViewerRig with its TxRunner passed through wrap
+// before the server is built, as newTestServerWithTx does for SQLite. A nil
+// wrap is newViewerRig.
+func newViewerRigWithTx(t *testing.T, wrap func(db.TxRunner) db.TxRunner) *viewerRig {
+	t.Helper()
 	runmode.SetForTest(t, runmode.ModeMulti)
 
 	h := pgtest.Shared(t)
 	h.Reset(t)
 
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	if wrap != nil {
+		stores.Tx = wrap(stores.Tx)
+	}
 	s := New(h.AdminDB, stores)
 
 	orgID, founder, teamID := pgtest.SeedOrgWithUser(t, h, "founder")
@@ -132,26 +144,81 @@ func assertViewOnly403(t *testing.T, rec *httptest.ResponseRecorder, what string
 	}
 }
 
-// TestViewer_EventHandlerCreate_Forbidden: a viewer POSTing a task rule 403s at
-// the acting-team gate; a member creates (201). Covers the event-handler gates
-// added alongside the RLS swap.
-func TestViewer_EventHandlerCreate_Forbidden(t *testing.T) {
+// TestViewer_EventHandlerWrites_TeamWriteGate: an event handler is gated by
+// team write alone. A member who is not a team admin creates one, another such
+// member changes and deletes it, and a viewer can do none of the three — the
+// create 403s at the acting-team gate, the PATCH and DELETE at the handler's
+// team. The routes run under the callers' claims on the RLS pool, so the
+// policies are held to the same rule.
+func TestViewer_EventHandlerWrites_TeamWriteGate(t *testing.T) {
 	r := newViewerRig(t)
 	// The create route refuses an event type whose source the org cannot
 	// produce, and that check runs with the rest of the body validation —
 	// before the role gate. Bind the credential so the request reaches the
 	// gate this test is about.
 	r.bindGitHubPAT(t)
-	body := map[string]any{"event_type": "github:pr:opened", "name": "my-rule"}
+	other := pgtest.SeedUser(t, r.h, "other")
+	pgtest.AddOrgMember(t, r.h, other, r.orgID, r.teamID, "member", "member")
 
-	rec := httptest.NewRecorder()
-	r.eh.handleEventHandlerCreateRule(rec, r.req(http.MethodPost, "/api/event-handlers/rules", r.viewer, body))
-	assertViewOnly403(t, rec, "viewer POST event-handler")
+	create := func(caller string) *httptest.ResponseRecorder {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		r.eh.handleEventHandlerCreate(rec, r.req(http.MethodPost, "/api/event-handlers", caller, map[string]any{
+			"event_type": "github:pr:opened", "name": "my-handler",
+		}))
+		return rec
+	}
+	patch := func(caller, id string, body map[string]any) *httptest.ResponseRecorder {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		req := r.req(http.MethodPatch, "/api/event-handlers/"+id, caller, body)
+		req.SetPathValue("id", id)
+		r.eh.handleEventHandlerUpdate(rec, req)
+		return rec
+	}
+	del := func(caller, id string) *httptest.ResponseRecorder {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		req := r.req(http.MethodDelete, "/api/event-handlers/"+id, caller, nil)
+		req.SetPathValue("id", id)
+		r.eh.handleEventHandlerDelete(rec, req)
+		return rec
+	}
 
-	rec = httptest.NewRecorder()
-	r.eh.handleEventHandlerCreateRule(rec, r.req(http.MethodPost, "/api/event-handlers/rules", r.member, body))
+	assertViewOnly403(t, create(r.viewer), "viewer POST event-handler")
+	rec := create(r.member)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("member POST event-handler: status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	var created domain.EventHandler
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil || created.ID == "" {
+		t.Fatalf("decode created handler: %v %s", err, rec.Body.String())
+	}
+	if created.CreatorUserID != r.member || created.TeamID != r.teamID {
+		t.Errorf("created %+v; want it on the team, naming the member who wrote it", created)
+	}
+
+	assertViewOnly403(t, patch(r.viewer, created.ID, map[string]any{"mode": domain.EventHandlerModeOff}), "viewer PATCH event-handler")
+	rec = patch(other, created.ID, map[string]any{"name": "renamed", "mode": domain.EventHandlerModeOff})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("another member PATCH event-handler: %d %s; want 200", rec.Code, rec.Body.String())
+	}
+	var patched domain.EventHandler
+	if err := json.Unmarshal(rec.Body.Bytes(), &patched); err != nil || patched.Name != "renamed" || patched.Mode != domain.EventHandlerModeOff {
+		t.Errorf("patched %+v, %v; want the new name, off", patched, err)
+	}
+
+	assertViewOnly403(t, del(r.viewer, created.ID), "viewer DELETE event-handler")
+	if rec := del(other, created.ID); rec.Code != http.StatusOK {
+		t.Errorf("another member DELETE event-handler: %d %s; want 200", rec.Code, rec.Body.String())
+	}
+	var gone *domain.EventHandler
+	if err := r.s.tx.WithReadTx(t.Context(), r.orgID, r.member, func(tx db.TxStores) error {
+		var e error
+		gone, e = tx.EventHandlers.Get(t.Context(), r.orgID, created.ID)
+		return e
+	}); err != nil || gone != nil {
+		t.Errorf("after the delete: %+v, %v; want no handler", gone, err)
 	}
 }
 

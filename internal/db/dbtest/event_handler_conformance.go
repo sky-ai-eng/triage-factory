@@ -3,6 +3,7 @@ package dbtest
 import (
 	"context"
 	"errors"
+	"maps"
 	"slices"
 	"strconv"
 	"testing"
@@ -17,8 +18,8 @@ import (
 // RunEventHandlerStoreConformance. The factory returns the wired
 // store + the orgID + the teamID Seed/Create should materialize into
 // (shipped handlers are team-scoped) + a seedBlueprints hook the harness
-// invokes before any test that creates trigger rows. Triggers FK to
-// blueprints on both (blueprint_id, org_id) AND the same-team
+// invokes before any test that creates a handler with a blueprint. A handler
+// FKs to blueprints on both (blueprint_id, org_id) AND the same-team
 // (blueprint_id, team_id), so the seeded blueprints must live on the
 // factory's teamID; each backend wires its own seeding shape. handlerID is
 // the raw slug resolver described at ShippedHandlerIDBySlug.
@@ -52,36 +53,39 @@ func handlerCopyBySlug(t *testing.T, store db.EventHandlerStore, handlerID Shipp
 }
 
 // BlueprintSeeder seeds blueprints into the harness DB at the given slugs so
-// trigger rows can reference them, and returns a slug→blueprint-id map. The
-// id is a random UUID per copy; callers resolve a trigger's blueprint slug to
+// handler rows can reference them, and returns a slug→blueprint-id map. The
+// id is a random UUID per copy; callers resolve a handler's blueprint slug to
 // the seeded id through this map (mirroring the seed order: prompts →
 // blueprints → EventHandlerStore.Seed).
 type BlueprintSeeder func(t *testing.T, slugs ...string) map[string]string
 
-// RunEventHandlerStoreConformance runs the shared assertion suite for
-// the unified rule + trigger store. What it covers:
-//
-//   - Seed inserts both rule and trigger ShippedEventHandlers rows,
-//     resolving each trigger's blueprint slug through the seeded map;
-//     re-seed is idempotent (ON CONFLICT on (org_id, team_id, system_slug)).
-//   - Create rejects mis-shaped writes per kind (rule with blueprint_id,
-//     trigger missing blueprint_id, etc.) — ValidateEventHandlerForCreate catches
-//     before the CHECK constraint does.
-//   - List with kind filter returns only matching rows; kind="" returns
-//     both.
-//   - GetEnabledForEvent returns enabled rows of both kinds ordered
-//     rule-before-trigger.
-//   - Delete removes a row from every read; Update changes mutable fields per kind via PATCH
-//   - Reorder updates sort_order on rules; silently skips trigger ids.
-//   - Promote atomically flips a rule to a trigger, clearing rule
-//     fields and populating trigger fields.
-//   - Every single-row write returns the row it persisted, and refuses an id
-//     no live handler answers to.
+// shippedBlueprintSlugs is every blueprint slug ShippedEventHandlers names.
+func shippedBlueprintSlugs() []string {
+	var out []string
+	for _, h := range db.ShippedEventHandlers {
+		if h.BlueprintID != "" && !slices.Contains(out, h.BlueprintID) {
+			out = append(out, h.BlueprintID)
+		}
+	}
+	return out
+}
+
+// newHandler is a valid user handler in mode on eventType, with every field
+// at the create route's default.
+func newHandler(mode, eventType, name, blueprintID string) domain.EventHandler {
+	return domain.EventHandler{
+		ID: uuid.New().String(), Mode: mode, EventType: eventType, Name: name,
+		DefaultPriority: 0.5, BreakerThreshold: 4, BlueprintID: blueprintID,
+	}
+}
+
+// RunEventHandlerStoreConformance runs the shared assertion suite for the
+// event handler store on one backend.
 func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFactory) {
 	t.Helper()
 
 	t.Run("every_single_row_write_returns_the_stored_row", func(t *testing.T) {
-		// The returned-row standard applied to each converted method in turn.
+		// The returned-row standard applied to each single-row write in turn.
 		// The property is one line — what the write handed back is what a point
 		// read finds — and AssertWriteReturnedStoredRow's doc covers what that
 		// stands in for (RETURNING semantics, RLS visibility on the update arm,
@@ -93,18 +97,13 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		}
 		bp := seedBlueprints(t, "system-ci-fix")["system-ci-fix"]
 
-		priority := 0.5
-		sortOrder := 1
-		ruleID := uuid.New().String()
-		created, err := store.Create(ctx, orgID, teamID, domain.EventHandler{
-			ID: ruleID, Kind: domain.EventHandlerKindRule,
-			EventType: domain.EventGitHubPRCICheckFailed, Enabled: true,
-			Name: "returned", DefaultPriority: &priority, SortOrder: &sortOrder,
-		})
+		h := newHandler(domain.EventHandlerModeWatch, domain.EventGitHubPRCICheckFailed, "returned", bp)
+		h.SortOrder = 1
+		created, err := store.Create(ctx, orgID, teamID, h)
 		if err != nil {
-			t.Fatalf("Create (rule): %v", err)
+			t.Fatalf("Create: %v", err)
 		}
-		AssertWriteReturnedStoredRow(t, "Create (rule)", created, read(ruleID))
+		AssertWriteReturnedStoredRow(t, "Create", created, read(h.ID))
 		// Source is forced to "user" by the statement, and the timestamps are
 		// server-stamped — three things the input struct never carried.
 		if created.Source != "user" || created.CreatedAt.IsZero() || created.UpdatedAt.IsZero() {
@@ -113,947 +112,404 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 
 		next := created
 		next.Name = "returned v2"
-		next.Enabled = false
+		next.Mode = domain.EventHandlerModeAutomate
 		updated, err := store.Update(ctx, orgID, next)
 		if err != nil {
 			t.Fatalf("Update: %v", err)
 		}
-		AssertWriteReturnedStoredRow(t, "Update", updated, read(ruleID))
+		AssertWriteReturnedStoredRow(t, "Update", updated, read(h.ID))
 
-		// Promote is the sharpest case for the standard: t describes the
-		// trigger half only, and the row is where the cleared rule-only
-		// columns show up.
-		breaker := 3
-		minAutonomy := 0.4
-		promoted, err := store.Promote(ctx, orgID, ruleID, domain.EventHandler{
-			Kind: domain.EventHandlerKindTrigger, BlueprintID: bp,
-			BreakerThreshold: &breaker, MinAutonomySuitability: &minAutonomy,
-		})
-		if err != nil {
-			t.Fatalf("Promote: %v", err)
-		}
-		AssertWriteReturnedStoredRow(t, "Promote", promoted, read(ruleID))
-		if promoted.Kind != domain.EventHandlerKindTrigger || promoted.Name != "" || promoted.DefaultPriority != nil {
-			t.Errorf("Promote returned %+v, want a trigger with the rule-only columns cleared", promoted)
-		}
-
-		other := seedBlueprints(t, "system-pr-review")["system-pr-review"]
-		retargeted, err := store.RetargetBlueprint(ctx, orgID, ruleID, other)
-		if err != nil {
-			t.Fatalf("RetargetBlueprint: %v", err)
-		}
-		AssertWriteReturnedStoredRow(t, "RetargetBlueprint", retargeted, read(ruleID))
-		if retargeted.BlueprintID != other {
-			t.Errorf("RetargetBlueprint returned blueprint %q, want %q", retargeted.BlueprintID, other)
-		}
-
-		// A miss is an error rather than a silent no-op, on every id-keyed
-		// write — that is what retires the rows-affected probes and the
-		// not-a-uuid early returns.
-		missing := uuid.New().String()
-		next.ID = missing
+		// A miss is an error rather than a silent no-op.
+		next.ID = uuid.New().String()
 		if _, err := store.Update(ctx, orgID, next); !errors.Is(err, db.ErrNoSuchEventHandler) {
 			t.Errorf("Update on a missing id: got %v, want db.ErrNoSuchEventHandler", err)
 		}
-		if _, err := store.RetargetBlueprint(ctx, orgID, missing, other); !errors.Is(err, db.ErrNoSuchEventHandler) {
-			t.Errorf("RetargetBlueprint on a missing id: got %v, want db.ErrNoSuchEventHandler", err)
-		}
-		// The row is a trigger now, so Promote's kind='rule' filter matches
-		// nothing — the same answer, because a caller holding only an id
-		// cannot tell "gone" from "wrong kind".
-		if _, err := store.Promote(ctx, orgID, ruleID, domain.EventHandler{
-			Kind: domain.EventHandlerKindTrigger, BlueprintID: bp,
-			BreakerThreshold: &breaker, MinAutonomySuitability: &minAutonomy,
-		}); !errors.Is(err, db.ErrNoSuchEventHandler) {
-			t.Errorf("Promote on a row that is already a trigger: got %v, want db.ErrNoSuchEventHandler", err)
-		}
 	})
 
-	t.Run("Seed_InsertsBothKinds", func(t *testing.T) {
+	t.Run("Seed_InsertsEveryShippedHandlerInItsMode", func(t *testing.T) {
 		store, orgID, teamID, seedBlueprints, handlerID := factory(t)
-		// Trigger rows in ShippedEventHandlers reference these blueprints.
-		ids := seedBlueprints(t,
-			"system-pr-review",
-			"system-conflict-resolution",
-			"system-ci-fix",
-			"system-jira-implement",
-			"system-linear-implement",
-			"system-fix-review-feedback",
-			"system-vulnerability-remediate",
-		)
+		ids := seedBlueprints(t, shippedBlueprintSlugs()...)
 		if err := store.Seed(context.Background(), orgID, teamID, ids); err != nil {
 			t.Fatalf("Seed: %v", err)
 		}
-		all, _, err := store.List(context.Background(), orgID, db.EventHandlerListFilter{}, db.ListOpts{Limit: 200})
-		if err != nil {
-			t.Fatalf("List: %v", err)
-		}
-		var rules, triggers int
-		for _, h := range all {
-			switch h.Kind {
-			case domain.EventHandlerKindRule:
-				rules++
-			case domain.EventHandlerKindTrigger:
-				triggers++
-			}
-		}
-		if rules == 0 {
-			t.Errorf("Seed produced 0 rule rows; want > 0")
-		}
-		if triggers == 0 {
-			t.Errorf("Seed produced 0 trigger rows; want > 0")
-		}
-		// Rules ship enabled unless marked Disabled, triggers disabled.
 		for _, shipped := range db.ShippedEventHandlers {
 			got := handlerCopyBySlug(t, store, handlerID, orgID, teamID, shipped.ID)
 			if got == nil {
 				t.Errorf("Seed left out shipped handler %s", shipped.ID)
 				continue
 			}
-			if want := shipped.Kind == domain.EventHandlerKindRule && !shipped.Disabled; got.Enabled != want {
-				t.Errorf("seeded %s enabled=%v, want %v", shipped.ID, got.Enabled, want)
+			want := ids[shipped.BlueprintID]
+			if got.Mode != shipped.Mode || got.SortOrder != shipped.SortOrder || got.BlueprintID != want ||
+				got.Name != shipped.Name || got.DefaultPriority != shipped.DefaultPriority ||
+				got.BreakerThreshold != shipped.BreakerThreshold || got.MinAutonomySuitability != shipped.MinAutonomySuitability {
+				t.Errorf("seeded %s = %+v; want the shipped row with blueprint %q", shipped.ID, got, want)
 			}
 		}
 	})
 
 	t.Run("Seed_IsIdempotent", func(t *testing.T) {
 		store, orgID, teamID, seedBlueprints, _ := factory(t)
-		ids := seedBlueprints(t,
-			"system-pr-review", "system-conflict-resolution", "system-ci-fix",
-			"system-jira-implement", "system-linear-implement", "system-fix-review-feedback",
-			"system-vulnerability-remediate",
-		)
+		ids := seedBlueprints(t, shippedBlueprintSlugs()...)
 		if err := store.Seed(context.Background(), orgID, teamID, ids); err != nil {
 			t.Fatalf("Seed #1: %v", err)
 		}
-		first, _, _ := store.List(context.Background(), orgID, db.EventHandlerListFilter{}, db.ListOpts{Limit: 200})
+		_, first, _ := store.List(context.Background(), orgID, db.EventHandlerListFilter{}, db.ListOpts{CountOnly: true})
 		if err := store.Seed(context.Background(), orgID, teamID, ids); err != nil {
 			t.Fatalf("Seed #2: %v", err)
 		}
-		second, _, _ := store.List(context.Background(), orgID, db.EventHandlerListFilter{}, db.ListOpts{Limit: 200})
-		if len(first) != len(second) {
-			t.Errorf("re-seed changed row count: first=%d second=%d", len(first), len(second))
+		_, second, _ := store.List(context.Background(), orgID, db.EventHandlerListFilter{}, db.ListOpts{CountOnly: true})
+		if first != len(db.ShippedEventHandlers) || second != first {
+			t.Errorf("handlers after Seed, Seed = %d, %d; want %d both times", first, second, len(db.ShippedEventHandlers))
 		}
 	})
 
-	t.Run("Create_Rule_RoundTrip", func(t *testing.T) {
-		store, orgID, teamID, _, _ := factory(t)
+	t.Run("Create_EachMode", func(t *testing.T) {
+		store, orgID, teamID, seedBlueprints, _ := factory(t)
 		ctx := context.Background()
-		priority := 0.75
-		sortOrder := 3
-		h := domain.EventHandler{
-			ID:              uuid.New().String(),
-			Kind:            domain.EventHandlerKindRule,
-			EventType:       domain.EventGitHubPRCICheckFailed,
-			Enabled:         true,
-			Name:            "my-rule",
-			DefaultPriority: &priority,
-			SortOrder:       &sortOrder,
+		bp := seedBlueprints(t, "p-each-mode")["p-each-mode"]
+		for _, mode := range domain.EventHandlerModes {
+			h := newHandler(mode, domain.EventGitHubPRCICheckFailed, "in "+mode, "")
+			if mode == domain.EventHandlerModeAutomate {
+				h.BlueprintID = bp
+			}
+			h.MinAutonomySuitability = 0.3
+			created, err := store.Create(ctx, orgID, teamID, h)
+			if err != nil {
+				t.Fatalf("Create in %s: %v", mode, err)
+			}
+			got, err := store.Get(ctx, orgID, created.ID)
+			if err != nil || got == nil {
+				t.Fatalf("Get %s handler: got=%v err=%v", mode, got, err)
+			}
+			if got.Mode != mode || got.Name != h.Name || got.BlueprintID != h.BlueprintID ||
+				got.MinAutonomySuitability != 0.3 || got.AppliesToUnowned {
+				t.Errorf("handler created in %s reads back %+v; want %+v", mode, got, h)
+			}
 		}
-		if _, err := store.Create(ctx, orgID, teamID, h); err != nil {
-			t.Fatalf("Create rule: %v", err)
+	})
+
+	t.Run("Create_RefusesAutomateWithoutBlueprint", func(t *testing.T) {
+		store, orgID, teamID, _, _ := factory(t)
+		h := newHandler(domain.EventHandlerModeAutomate, domain.EventGitHubPRCICheckFailed, "no blueprint", "")
+		if _, err := store.Create(context.Background(), orgID, teamID, h); err == nil {
+			t.Fatal("Create in automate with no blueprint succeeded; want an error")
 		}
-		got, err := store.Get(ctx, orgID, h.ID)
-		if err != nil || got == nil {
-			t.Fatalf("Get: got=%v err=%v", got, err)
-		}
-		if got.Kind != domain.EventHandlerKindRule {
-			t.Errorf("Kind=%q want rule", got.Kind)
-		}
-		if got.Name != "my-rule" {
-			t.Errorf("Name=%q want my-rule", got.Name)
-		}
-		if got.DefaultPriority == nil || *got.DefaultPriority != 0.75 {
-			t.Errorf("DefaultPriority=%v want 0.75", got.DefaultPriority)
-		}
-		if got.BlueprintID != "" {
-			t.Errorf("BlueprintID=%q; rule rows must have empty BlueprintID", got.BlueprintID)
+		if got, _ := store.Get(context.Background(), orgID, h.ID); got != nil {
+			t.Errorf("a refused Create left a row: %+v", got)
 		}
 	})
 
 	t.Run("AppliesToUnowned_RoundTripAndUpdate", func(t *testing.T) {
-		// The TFAC-517 routing-scope flag round-trips through Create + Get and
-		// flips through Update, on both backends. Default-false is asserted by
-		// the Create_Rule_RoundTrip row above (it never sets the field), so here
-		// we prove the true value persists and that Update can toggle it back.
 		store, orgID, teamID, _, _ := factory(t)
 		ctx := context.Background()
-		priority := 0.5
-		sortOrder := 0
-		h := domain.EventHandler{
-			ID:               uuid.New().String(),
-			Kind:             domain.EventHandlerKindRule,
-			EventType:        domain.EventGitHubPRCICheckFailed,
-			Enabled:          true,
-			Name:             "watch-rule",
-			DefaultPriority:  &priority,
-			SortOrder:        &sortOrder,
-			AppliesToUnowned: true,
-		}
+		h := newHandler(domain.EventHandlerModeWatch, domain.EventGitHubPRCICheckFailed, "watch-handler", "")
+		h.AppliesToUnowned = true
 		if _, err := store.Create(ctx, orgID, teamID, h); err != nil {
-			t.Fatalf("Create rule: %v", err)
+			t.Fatalf("Create: %v", err)
 		}
 		got, err := store.Get(ctx, orgID, h.ID)
-		if err != nil || got == nil {
-			t.Fatalf("Get: got=%v err=%v", got, err)
+		if err != nil || got == nil || !got.AppliesToUnowned {
+			t.Fatalf("Get after Create(applies_to_unowned) = %+v, %v; want the flag set", got, err)
 		}
-		if !got.AppliesToUnowned {
-			t.Errorf("AppliesToUnowned=%v after Create(true), want true", got.AppliesToUnowned)
-		}
-
-		// Update flips it off; the round-trip must reflect the new value.
 		got.AppliesToUnowned = false
 		if _, err := store.Update(ctx, orgID, *got); err != nil {
 			t.Fatalf("Update: %v", err)
 		}
-		got2, err := store.Get(ctx, orgID, h.ID)
-		if err != nil || got2 == nil {
-			t.Fatalf("Get after Update: got=%v err=%v", got2, err)
-		}
-		if got2.AppliesToUnowned {
-			t.Errorf("AppliesToUnowned=%v after Update(false), want false", got2.AppliesToUnowned)
+		if got, _ := store.Get(ctx, orgID, h.ID); got == nil || got.AppliesToUnowned {
+			t.Errorf("AppliesToUnowned after Update(false) = %+v; want false", got)
 		}
 	})
 
-	t.Run("Create_RuleDefaultsAppliesToUnownedFalse", func(t *testing.T) {
-		// A rule created without setting the flag must read back false — the
-		// "blanket reset for everyone" IS the column default (TFAC-517).
-		store, orgID, teamID, _, _ := factory(t)
-		ctx := context.Background()
-		priority := 0.5
-		sortOrder := 0
-		h := domain.EventHandler{
-			ID:              uuid.New().String(),
-			Kind:            domain.EventHandlerKindRule,
-			EventType:       domain.EventGitHubPRCICheckFailed,
-			Enabled:         true,
-			Name:            "default-rule",
-			DefaultPriority: &priority,
-			SortOrder:       &sortOrder,
-		}
-		if _, err := store.Create(ctx, orgID, teamID, h); err != nil {
-			t.Fatalf("Create rule: %v", err)
-		}
-		got, err := store.Get(ctx, orgID, h.ID)
-		if err != nil || got == nil {
-			t.Fatalf("Get: got=%v err=%v", got, err)
-		}
-		if got.AppliesToUnowned {
-			t.Errorf("AppliesToUnowned=%v on a rule that never set it, want false (default)", got.AppliesToUnowned)
-		}
-	})
-
-	t.Run("Create_Trigger_RoundTrip", func(t *testing.T) {
+	t.Run("Update_ModeOnly_KeepsEveryFieldAndDoesNotStamp", func(t *testing.T) {
 		store, orgID, teamID, seedBlueprints, _ := factory(t)
 		ctx := context.Background()
-		ids := seedBlueprints(t, "p-trigger-test")
-		blueprintID := ids["p-trigger-test"]
-		breaker := 2
-		minAutonomy := 0.5
-		h := domain.EventHandler{
-			ID:                     uuid.New().String(),
-			Kind:                   domain.EventHandlerKindTrigger,
-			BlueprintID:            blueprintID,
-			EventType:              domain.EventGitHubPRCICheckFailed,
-			Enabled:                true,
-			BreakerThreshold:       &breaker,
-			MinAutonomySuitability: &minAutonomy,
-		}
-		if _, err := store.Create(ctx, orgID, teamID, h); err != nil {
-			t.Fatalf("Create trigger: %v", err)
-		}
-		got, err := store.Get(ctx, orgID, h.ID)
-		if err != nil || got == nil {
-			t.Fatalf("Get: got=%v err=%v", got, err)
-		}
-		if got.Kind != domain.EventHandlerKindTrigger {
-			t.Errorf("Kind=%q want trigger", got.Kind)
-		}
-		if got.BlueprintID != blueprintID {
-			t.Errorf("BlueprintID=%q want %q", got.BlueprintID, blueprintID)
-		}
-		if got.BreakerThreshold == nil || *got.BreakerThreshold != 2 {
-			t.Errorf("BreakerThreshold=%v want 2", got.BreakerThreshold)
-		}
-		if got.DefaultPriority != nil {
-			t.Errorf("DefaultPriority=%v; trigger rows must have nil DefaultPriority", got.DefaultPriority)
-		}
-	})
-
-	// 0.3 and 0.7 have no exact single-precision form, so a column narrower
-	// than a float64 reads each back as a different number.
-	t.Run("Trigger_MinAutonomySuitability_ReadsBackAsWritten", func(t *testing.T) {
-		store, orgID, teamID, seedBlueprints, _ := factory(t)
-		ctx := context.Background()
-		blueprintID := seedBlueprints(t, "p-threshold-precision")["p-threshold-precision"]
-		breaker := 2
-		minAutonomy := 0.3
-		created, err := store.Create(ctx, orgID, teamID, domain.EventHandler{
-			ID:                     uuid.New().String(),
-			Kind:                   domain.EventHandlerKindTrigger,
-			BlueprintID:            blueprintID,
-			EventType:              domain.EventGitHubPRCICheckFailed,
-			Enabled:                true,
-			BreakerThreshold:       &breaker,
-			MinAutonomySuitability: &minAutonomy,
-		})
+		bp := seedBlueprints(t, "p-mode-only")["p-mode-only"]
+		pred := `{"author_id_in":["alice"]}`
+		h := newHandler(domain.EventHandlerModeWatch, domain.EventGitHubPRCICheckFailed, "mode only", bp)
+		h.ScopePredicateJSON, h.DefaultPriority, h.SortOrder, h.BreakerThreshold, h.MinAutonomySuitability = &pred, 0.8, 3, 2, 0.4
+		created, err := store.Create(ctx, orgID, teamID, h)
 		if err != nil {
-			t.Fatalf("Create trigger: %v", err)
+			t.Fatalf("Create: %v", err)
 		}
-		requireThreshold := func(step string, want float64) *domain.EventHandler {
-			t.Helper()
-			got, err := store.Get(ctx, orgID, created.ID)
-			if err != nil || got == nil {
-				t.Fatalf("Get after %s: got=%v err=%v", step, got, err)
-			}
-			if got.MinAutonomySuitability == nil {
-				t.Fatalf("MinAutonomySuitability after %s = nil, want exactly %v", step, want)
-			}
-			if *got.MinAutonomySuitability != want {
-				t.Errorf("MinAutonomySuitability after %s = %v, want exactly %v", step, *got.MinAutonomySuitability, want)
-			}
-			return got
-		}
-		got := requireThreshold("Create", 0.3)
-
-		raised := 0.7
-		got.MinAutonomySuitability = &raised
-		if _, err := store.Update(ctx, orgID, *got); err != nil {
-			t.Fatalf("Update trigger: %v", err)
-		}
-		requireThreshold("Update", 0.7)
-	})
-
-	t.Run("RetargetBlueprint_MovesTriggerPreservingRow", func(t *testing.T) {
-		store, orgID, teamID, seedBlueprints, _ := factory(t)
-		ctx := context.Background()
-		ids := seedBlueprints(t, "p-retarget-from", "p-retarget-to")
-		from, to := ids["p-retarget-from"], ids["p-retarget-to"]
-		breaker := 3
-		minAutonomy := 0.0
-		h := domain.EventHandler{
-			ID:                     uuid.New().String(),
-			Kind:                   domain.EventHandlerKindTrigger,
-			BlueprintID:            from,
-			EventType:              domain.EventGitHubPRCICheckFailed,
-			BreakerThreshold:       &breaker,
-			MinAutonomySuitability: &minAutonomy,
-		}
-		if _, err := store.Create(ctx, orgID, teamID, h); err != nil {
-			t.Fatalf("Create trigger: %v", err)
-		}
-		if _, err := store.RetargetBlueprint(ctx, orgID, h.ID, to); err != nil {
-			t.Fatalf("RetargetBlueprint: %v", err)
-		}
-		got, err := store.Get(ctx, orgID, h.ID)
-		if err != nil || got == nil {
-			t.Fatalf("Get after retarget: got=%v err=%v", got, err)
-		}
-		// Same row (id preserved), now pointing at the new blueprint, still a trigger.
-		if got.BlueprintID != to {
-			t.Errorf("BlueprintID=%q want %q (retarget must move it)", got.BlueprintID, to)
-		}
-		if got.Kind != domain.EventHandlerKindTrigger {
-			t.Errorf("Kind=%q want trigger (retarget must not change kind)", got.Kind)
-		}
-	})
-
-	t.Run("Create_RejectsRuleWithTriggerFields", func(t *testing.T) {
-		store, orgID, teamID, _, _ := factory(t)
-		ctx := context.Background()
-		priority := 0.5
-		sortOrder := 0
-		breaker := 4
-		h := domain.EventHandler{
-			ID:               uuid.New().String(),
-			Kind:             domain.EventHandlerKindRule,
-			EventType:        domain.EventGitHubPRCICheckFailed,
-			Name:             "bad-rule",
-			DefaultPriority:  &priority,
-			SortOrder:        &sortOrder,
-			BreakerThreshold: &breaker, // illegal: trigger-only field on a rule
-		}
-		if _, err := store.Create(ctx, orgID, teamID, h); err == nil {
-			t.Error("Create accepted a rule with trigger-only fields populated; want error")
-		}
-	})
-
-	t.Run("Create_RejectsTriggerWithoutBlueprintID", func(t *testing.T) {
-		store, orgID, teamID, _, _ := factory(t)
-		breaker := 4
-		minAutonomy := 0.0
-		h := domain.EventHandler{
-			ID:                     uuid.New().String(),
-			Kind:                   domain.EventHandlerKindTrigger,
-			EventType:              domain.EventGitHubPRCICheckFailed,
-			BreakerThreshold:       &breaker,
-			MinAutonomySuitability: &minAutonomy,
-			// BlueprintID intentionally empty.
-		}
-		if _, err := store.Create(context.Background(), orgID, teamID, h); err == nil {
-			t.Error("Create accepted a trigger with empty blueprint_id; want error")
-		}
-	})
-
-	t.Run("Create_RejectsTriggerWithName", func(t *testing.T) {
-		// Defense-in-depth: the per-kind CHECK constraint forbids
-		// kind='trigger' with a non-NULL name. ValidateEventHandlerForCreate
-		// rejects the same shape earlier so the user gets a clearer
-		// error than the SQL integrity-violation surface.
-		store, orgID, teamID, seedBlueprints, _ := factory(t)
-		ids := seedBlueprints(t, "p-name-on-trigger")
-		breaker := 4
-		minAutonomy := 0.0
-		h := domain.EventHandler{
-			ID:                     uuid.New().String(),
-			Kind:                   domain.EventHandlerKindTrigger,
-			BlueprintID:            ids["p-name-on-trigger"],
-			EventType:              domain.EventGitHubPRCICheckFailed,
-			BreakerThreshold:       &breaker,
-			MinAutonomySuitability: &minAutonomy,
-			Name:                   "shouldn't be here", // illegal on a trigger
-		}
-		if _, err := store.Create(context.Background(), orgID, teamID, h); err == nil {
-			t.Error("Create accepted a trigger with a non-empty name; want error")
-		}
-	})
-
-	t.Run("List_KindFilter", func(t *testing.T) {
-		store, orgID, teamID, seedBlueprints, _ := factory(t)
-		ctx := context.Background()
-		ids := seedBlueprints(t, "p-list-trigger")
-
-		priority := 0.5
-		sortOrder := 0
-		breaker := 4
-		minAutonomy := 0.0
-
-		rule := domain.EventHandler{
-			ID: uuid.New().String(), Kind: domain.EventHandlerKindRule,
-			EventType: domain.EventGitHubPRCICheckFailed,
-			Name:      "rule-1", DefaultPriority: &priority, SortOrder: &sortOrder, Enabled: true,
-		}
-		trig := domain.EventHandler{
-			ID: uuid.New().String(), Kind: domain.EventHandlerKindTrigger,
-			BlueprintID:            ids["p-list-trigger"],
-			EventType:              domain.EventGitHubPRCICheckFailed,
-			BreakerThreshold:       &breaker,
-			MinAutonomySuitability: &minAutonomy, Enabled: true,
-		}
-		if _, err := store.Create(ctx, orgID, teamID, rule); err != nil {
-			t.Fatalf("Create rule: %v", err)
-		}
-		if _, err := store.Create(ctx, orgID, teamID, trig); err != nil {
-			t.Fatalf("Create trig: %v", err)
-		}
-
-		rules, _, err := store.List(ctx, orgID, db.EventHandlerListFilter{Kind: domain.EventHandlerKindRule}, db.ListOpts{Limit: 200})
-		if err != nil {
-			t.Fatalf("List(rule): %v", err)
-		}
-		for _, h := range rules {
-			if h.Kind != domain.EventHandlerKindRule {
-				t.Errorf("List(kind=rule) returned a %q row", h.Kind)
-			}
-		}
-		triggers, _, err := store.List(ctx, orgID, db.EventHandlerListFilter{Kind: domain.EventHandlerKindTrigger}, db.ListOpts{Limit: 200})
-		if err != nil {
-			t.Fatalf("List(trigger): %v", err)
-		}
-		for _, h := range triggers {
-			if h.Kind != domain.EventHandlerKindTrigger {
-				t.Errorf("List(kind=trigger) returned a %q row", h.Kind)
-			}
-		}
-		all, allTotal, _ := store.List(ctx, orgID, db.EventHandlerListFilter{}, db.ListOpts{Limit: 200})
-		if allTotal != len(all) {
-			t.Errorf("total = %d but the page held %d rows", allTotal, len(all))
-		}
-		if len(all) < len(rules)+len(triggers) {
-			t.Errorf("List(\"\") returned %d rows; expected at least %d", len(all), len(rules)+len(triggers))
-		}
-	})
-
-	t.Run("GetEnabledForEvent_OrdersRulesBeforeTriggers", func(t *testing.T) {
-		store, orgID, teamID, seedBlueprints, _ := factory(t)
-		ctx := context.Background()
-		ids := seedBlueprints(t, "p-order-test")
-
-		priority := 0.5
-		sortOrder := 0
-		breaker := 4
-		minAutonomy := 0.0
-		eventType := domain.EventGitHubPRCICheckFailed
-
-		rule := domain.EventHandler{
-			ID: uuid.New().String(), Kind: domain.EventHandlerKindRule,
-			EventType: eventType,
-			Name:      "r", DefaultPriority: &priority, SortOrder: &sortOrder, Enabled: true,
-		}
-		trig := domain.EventHandler{
-			ID: uuid.New().String(), Kind: domain.EventHandlerKindTrigger,
-			BlueprintID:            ids["p-order-test"],
-			EventType:              eventType,
-			BreakerThreshold:       &breaker,
-			MinAutonomySuitability: &minAutonomy, Enabled: true,
-		}
-		_, _ = store.Create(ctx, orgID, teamID, trig) // trigger first to prove ordering isn't insert-order
-		_, _ = store.Create(ctx, orgID, teamID, rule)
-
-		got, err := store.GetEnabledForEvent(ctx, orgID, eventType)
-		if err != nil {
-			t.Fatalf("GetEnabledForEvent: %v", err)
-		}
-		if len(got) < 2 {
-			t.Fatalf("got %d rows; want >= 2", len(got))
-		}
-		// First rule index must come before first trigger index.
-		var firstRule, firstTrigger = -1, -1
-		for i, h := range got {
-			if h.Kind == domain.EventHandlerKindRule && firstRule == -1 {
-				firstRule = i
-			}
-			if h.Kind == domain.EventHandlerKindTrigger && firstTrigger == -1 {
-				firstTrigger = i
-			}
-		}
-		if firstRule == -1 || firstTrigger == -1 {
-			t.Fatalf("missing kind in result: firstRule=%d firstTrigger=%d", firstRule, firstTrigger)
-		}
-		if firstRule >= firstTrigger {
-			t.Errorf("rules must come before triggers; firstRule=%d firstTrigger=%d", firstRule, firstTrigger)
-		}
-	})
-
-	// A notify rule round-trips its name and audience, names its creator,
-	// refuses rule- and trigger-only fields, and reads after every rule and
-	// trigger on its event type.
-	t.Run("Notify_RoundTripUpdateAndOrdering", func(t *testing.T) {
-		store, orgID, teamID, seedBlueprints, _ := factory(t)
-		ctx := context.Background()
-		bp := seedBlueprints(t, "p-notify-order")["p-notify-order"]
-		eventType := domain.EventGitHubPRCICheckFailed
-		read := func(id string) func() (*domain.EventHandler, error) {
-			return func() (*domain.EventHandler, error) { return store.Get(ctx, orgID, id) }
-		}
-
-		notifyID := uuid.New().String()
-		created, err := store.Create(ctx, orgID, teamID, domain.EventHandler{
-			ID: notifyID, Kind: domain.EventHandlerKindNotify, EventType: eventType, Enabled: true,
-			Name: "CI failed on my PR", Audience: domain.NotifyAudienceCreator,
-		})
-		if err != nil {
-			t.Fatalf("Create (notify): %v", err)
-		}
-		AssertWriteReturnedStoredRow(t, "Create (notify)", created, read(notifyID))
-		if created.Kind != domain.EventHandlerKindNotify || created.Audience != domain.NotifyAudienceCreator ||
-			created.Name != "CI failed on my PR" || created.CreatorUserID == "" || created.Source != domain.EventHandlerSourceUser ||
-			created.DefaultPriority != nil || created.SortOrder != nil || created.BlueprintID != "" {
-			t.Errorf("Create (notify) returned %+v; want a user notify rule naming its creator, with no rule or trigger fields", created)
-		}
-
 		next := created
-		next.Name = "CI failed on the team's PRs"
-		next.Audience = domain.NotifyAudienceTeam
-		next.Enabled = false
+		next.Mode = domain.EventHandlerModeAutomate
 		updated, err := store.Update(ctx, orgID, next)
 		if err != nil {
-			t.Fatalf("Update (notify): %v", err)
+			t.Fatalf("Update: %v", err)
 		}
-		AssertWriteReturnedStoredRow(t, "Update (notify)", updated, read(notifyID))
-		if updated.Audience != domain.NotifyAudienceTeam || updated.Name != next.Name || updated.Enabled {
-			t.Errorf("Update (notify) returned %+v; want the new name, the team audience, disabled", updated)
+		if updated.Mode != domain.EventHandlerModeAutomate || updated.UserModified {
+			t.Errorf("after a mode-only Update: mode %q, user_modified %v; want automate, false", updated.Mode, updated.UserModified)
 		}
-
-		priority, sortOrder, breaker, minAutonomy := 0.5, 0, 4, 0.0
-		for name, bad := range map[string]domain.EventHandler{
-			"no audience":    {Name: "x"},
-			"other audience": {Name: "x", Audience: "org"},
-			"no name":        {Audience: domain.NotifyAudienceCreator},
-			"rule fields":    {Name: "x", Audience: domain.NotifyAudienceCreator, DefaultPriority: &priority, SortOrder: &sortOrder},
-			"trigger fields": {Name: "x", Audience: domain.NotifyAudienceCreator, BlueprintID: bp, BreakerThreshold: &breaker, MinAutonomySuitability: &minAutonomy},
-			"unowned watch":  {Name: "x", Audience: domain.NotifyAudienceCreator, AppliesToUnowned: true},
-		} {
-			bad.ID, bad.Kind, bad.EventType = uuid.New().String(), domain.EventHandlerKindNotify, eventType
-			if _, err := store.Create(ctx, orgID, teamID, bad); err == nil {
-				t.Errorf("Create (notify, %s) succeeded; want it refused", name)
-			}
-		}
-		if _, err := store.Create(ctx, orgID, teamID, domain.EventHandler{
-			ID: uuid.New().String(), Kind: domain.EventHandlerKindRule, EventType: eventType,
-			Name: "r", DefaultPriority: &priority, SortOrder: &sortOrder, Audience: domain.NotifyAudienceTeam,
-		}); err == nil {
-			t.Error("Create (rule with an audience) succeeded; want it refused")
-		}
-
-		next.Enabled = true
-		if _, err := store.Update(ctx, orgID, next); err != nil {
-			t.Fatalf("re-enable the notify rule: %v", err)
-		}
-		if _, err := store.Create(ctx, orgID, teamID, domain.EventHandler{
-			ID: uuid.New().String(), Kind: domain.EventHandlerKindTrigger, BlueprintID: bp, EventType: eventType,
-			BreakerThreshold: &breaker, MinAutonomySuitability: &minAutonomy, Enabled: true,
-		}); err != nil {
-			t.Fatalf("Create (trigger): %v", err)
-		}
-		if _, err := store.Create(ctx, orgID, teamID, domain.EventHandler{
-			ID: uuid.New().String(), Kind: domain.EventHandlerKindRule, EventType: eventType,
-			Name: "r", DefaultPriority: &priority, SortOrder: &sortOrder, Enabled: true,
-		}); err != nil {
-			t.Fatalf("Create (rule): %v", err)
-		}
-		got, err := store.GetEnabledForEvent(ctx, orgID, eventType)
-		if err != nil {
-			t.Fatalf("GetEnabledForEvent: %v", err)
-		}
-		var kinds []string
-		for _, h := range got {
-			if len(kinds) == 0 || kinds[len(kinds)-1] != h.Kind {
-				kinds = append(kinds, h.Kind)
-			}
-		}
-		if want := []string{domain.EventHandlerKindRule, domain.EventHandlerKindTrigger, domain.EventHandlerKindNotify}; !slices.Equal(kinds, want) {
-			t.Errorf("GetEnabledForEvent kinds in order = %v; want %v", kinds, want)
-		}
-		listed, total, err := store.List(ctx, orgID, db.EventHandlerListFilter{Kind: domain.EventHandlerKindNotify}, db.ListOpts{Limit: 50})
-		if err != nil || total != 1 || len(listed) != 1 || listed[0].ID != notifyID {
-			t.Errorf("List(kind=notify) = %+v (total %d), %v; want only the notify rule", listed, total, err)
+		if updated.Name != created.Name || updated.BlueprintID != bp || !db.PredicateJSONEqual(*updated.ScopePredicateJSON, pred) ||
+			updated.DefaultPriority != 0.8 || updated.SortOrder != 3 || updated.BreakerThreshold != 2 || updated.MinAutonomySuitability != 0.4 {
+			t.Errorf("a mode-only Update changed another field: %+v; want %+v but in automate", updated, created)
 		}
 	})
 
-	t.Run("List_AudienceAndCreatorFilters", func(t *testing.T) {
+	t.Run("Update_Blueprint_StampsUserModified", func(t *testing.T) {
 		store, orgID, teamID, seedBlueprints, _ := factory(t)
 		ctx := context.Background()
-		eventType := domain.EventGitHubPRCICheckFailed
-		notify := func(name, audience string) domain.EventHandler {
-			t.Helper()
-			h, err := store.Create(ctx, orgID, teamID, domain.EventHandler{
-				ID: uuid.New().String(), Kind: domain.EventHandlerKindNotify, EventType: eventType, Enabled: true,
-				Name: name, Audience: audience,
-			})
-			if err != nil {
-				t.Fatalf("Create (notify %s): %v", name, err)
-			}
-			return h
-		}
-		personal := notify("mine", domain.NotifyAudienceCreator)
-		team := notify("team", domain.NotifyAudienceTeam)
-		priority, sortOrder := 0.5, 0
-		rule, err := store.Create(ctx, orgID, teamID, domain.EventHandler{
-			ID: uuid.New().String(), Kind: domain.EventHandlerKindRule, EventType: eventType,
-			Name: "r", DefaultPriority: &priority, SortOrder: &sortOrder, Enabled: true,
-		})
+		ids := seedBlueprints(t, "p-stamp-a", "p-stamp-b")
+		created, err := store.Create(ctx, orgID, teamID, newHandler(domain.EventHandlerModeWatch, domain.EventGitHubPRCICheckFailed, "blueprint stamp", ids["p-stamp-a"]))
 		if err != nil {
-			t.Fatalf("Create (rule): %v", err)
+			t.Fatalf("Create: %v", err)
 		}
-		// Shipped rows have no creator; the creator filter leaves them out.
-		bps := seedBlueprints(t, "system-pr-review", "system-conflict-resolution", "system-ci-fix",
-			"system-jira-implement", "system-linear-implement", "system-fix-review-feedback",
-			"system-vulnerability-remediate")
-		if err := store.Seed(ctx, orgID, teamID, bps); err != nil {
-			t.Fatalf("Seed: %v", err)
+		next := created
+		next.BlueprintID = ids["p-stamp-b"]
+		updated, err := store.Update(ctx, orgID, next)
+		if err != nil {
+			t.Fatalf("Update: %v", err)
 		}
-
-		ids := func(t *testing.T, f db.EventHandlerListFilter) []string {
-			t.Helper()
-			rows, total, err := store.List(ctx, orgID, f, db.ListOpts{Limit: 200})
-			if err != nil {
-				t.Fatalf("List(%+v): %v", f, err)
-			}
-			if _, count, err := store.List(ctx, orgID, f, db.ListOpts{CountOnly: true}); err != nil || count != total {
-				t.Errorf("List(%+v) count-only = %d, %v; want the paged total %d", f, count, err, total)
-			}
-			out := make([]string, len(rows))
-			for i, h := range rows {
-				out[i] = h.ID
-			}
-			slices.Sort(out)
-			return out
-		}
-		sorted := func(in ...string) []string { slices.Sort(in); return in }
-		for name, tc := range map[string]struct {
-			f    db.EventHandlerListFilter
-			want []string
-		}{
-			"creator audience": {db.EventHandlerListFilter{Audience: domain.NotifyAudienceCreator}, []string{personal.ID}},
-			"team audience":    {db.EventHandlerListFilter{Audience: domain.NotifyAudienceTeam}, []string{team.ID}},
-			// Every handler the creator authored, of any kind, and none shipped.
-			"creator": {db.EventHandlerListFilter{CreatorUserID: personal.CreatorUserID}, sorted(personal.ID, team.ID, rule.ID)},
-			"creator's personal notify rules": {
-				db.EventHandlerListFilter{Kind: domain.EventHandlerKindNotify, Audience: domain.NotifyAudienceCreator, CreatorUserID: personal.CreatorUserID},
-				[]string{personal.ID},
-			},
-			"another creator":      {db.EventHandlerListFilter{CreatorUserID: uuid.New().String()}, []string{}},
-			"an audience on rules": {db.EventHandlerListFilter{Kind: domain.EventHandlerKindRule, Audience: domain.NotifyAudienceTeam}, []string{}},
-		} {
-			if got := ids(t, tc.f); !slices.Equal(got, tc.want) {
-				t.Errorf("%s: List = %v, want %v", name, got, tc.want)
-			}
+		if updated.BlueprintID != ids["p-stamp-b"] || !updated.UserModified {
+			t.Errorf("after a blueprint Update: blueprint %q, user_modified %v; want %q, true", updated.BlueprintID, updated.UserModified, ids["p-stamp-b"])
 		}
 	})
 
-	t.Run("Delete_RemovesRow", func(t *testing.T) {
+	t.Run("Update_StampsUserModifiedOnContentFields", func(t *testing.T) {
 		store, orgID, teamID, _, _ := factory(t)
 		ctx := context.Background()
-		priority, sortOrder := 0.5, 0
-		h := domain.EventHandler{
-			ID: uuid.New().String(), Kind: domain.EventHandlerKindRule,
-			EventType: domain.EventGitHubPRCICheckFailed,
-			Name:      "delete-me", DefaultPriority: &priority, SortOrder: &sortOrder, Enabled: true,
+		created, err := store.Create(ctx, orgID, teamID, newHandler(domain.EventHandlerModeWatch, domain.EventGitHubPRCICheckFailed, "content", ""))
+		if err != nil {
+			t.Fatalf("Create: %v", err)
 		}
+		next := created
+		next.SortOrder = 7
+		updated, err := store.Update(ctx, orgID, next)
+		if err != nil || updated.UserModified {
+			t.Fatalf("a sort_order-only Update = %+v, %v; want user_modified false", updated, err)
+		}
+		next = updated
+		next.Name = "content renamed"
+		if updated, err = store.Update(ctx, orgID, next); err != nil || !updated.UserModified {
+			t.Errorf("a name Update = %+v, %v; want user_modified true", updated, err)
+		}
+	})
+
+	t.Run("Update_ClearsBlueprint", func(t *testing.T) {
+		store, orgID, teamID, seedBlueprints, _ := factory(t)
+		ctx := context.Background()
+		bp := seedBlueprints(t, "p-clear")["p-clear"]
+		created, err := store.Create(ctx, orgID, teamID, newHandler(domain.EventHandlerModeWatch, domain.EventGitHubPRCICheckFailed, "clear", bp))
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		next := created
+		next.BlueprintID = ""
+		if updated, err := store.Update(ctx, orgID, next); err != nil || updated.BlueprintID != "" {
+			t.Errorf("Update clearing the blueprint = %+v, %v; want no blueprint", updated, err)
+		}
+		next.Mode = domain.EventHandlerModeAutomate
+		if _, err := store.Update(ctx, orgID, next); err == nil {
+			t.Error("Update into automate with no blueprint succeeded; want an error")
+		}
+	})
+
+	t.Run("Delete_LeavesARowNoReadReturns", func(t *testing.T) {
+		store, orgID, teamID, seedBlueprints, _ := factory(t)
+		ctx := context.Background()
+		bp := seedBlueprints(t, "p-delete")["p-delete"]
+		h := newHandler(domain.EventHandlerModeAutomate, domain.EventGitHubPRCICheckFailed, "deleted", bp)
 		if _, err := store.Create(ctx, orgID, teamID, h); err != nil {
 			t.Fatalf("Create: %v", err)
 		}
 		if err := store.Delete(ctx, orgID, h.ID); err != nil {
 			t.Fatalf("Delete: %v", err)
 		}
-		got, _ := store.Get(ctx, orgID, h.ID)
-		if got != nil {
-			t.Errorf("Get after Delete returned %+v; want nil", got)
+		if got, err := store.Get(ctx, orgID, h.ID); err != nil || got != nil {
+			t.Errorf("Get after Delete = (%v, %v); want (nil, nil)", got, err)
+		}
+		if got, err := store.GetSystem(ctx, orgID, h.ID); err != nil || got != nil {
+			t.Errorf("GetSystem after Delete = (%v, %v); want (nil, nil)", got, err)
+		}
+		listed, total, err := store.List(ctx, orgID, db.EventHandlerListFilter{}, db.ListOpts{Limit: 200})
+		if err != nil || total != 0 || len(listed) != 0 {
+			t.Errorf("List after Delete = %d rows, total %d, %v; want none", len(listed), total, err)
+		}
+		if active, err := store.GetActiveForEvent(ctx, orgID, h.EventType); err != nil || len(active) != 0 {
+			t.Errorf("GetActiveForEvent after Delete = %v, %v; want none", active, err)
+		}
+		if bound, err := store.ListForBlueprint(ctx, orgID, bp); err != nil || len(bound) != 0 {
+			t.Errorf("ListForBlueprint after Delete = %v, %v; want none", bound, err)
+		}
+		next := h
+		if _, err := store.Update(ctx, orgID, next); !errors.Is(err, db.ErrNoSuchEventHandler) {
+			t.Errorf("Update after Delete: got %v, want db.ErrNoSuchEventHandler", err)
 		}
 	})
 
-	t.Run("Promote_RuleToTrigger", func(t *testing.T) {
+	t.Run("List_OrderAndFilters", func(t *testing.T) {
 		store, orgID, teamID, seedBlueprints, _ := factory(t)
 		ctx := context.Background()
-		ids := seedBlueprints(t, "p-promote-target")
-
-		priority, sortOrder := 0.5, 0
-		ruleID := uuid.New().String()
-		if _, err := store.Create(ctx, orgID, teamID, domain.EventHandler{
-			ID: ruleID, Kind: domain.EventHandlerKindRule,
-			EventType: domain.EventGitHubPRCICheckFailed,
-			Name:      "promote-me", DefaultPriority: &priority, SortOrder: &sortOrder, Enabled: true,
-		}); err != nil {
-			t.Fatalf("Create rule: %v", err)
+		bp := seedBlueprints(t, "p-list")["p-list"]
+		// Created out of order: the list sorts by sort_order, then name.
+		rows := []domain.EventHandler{
+			newHandler(domain.EventHandlerModeAutomate, domain.EventGitHubPRCICheckFailed, "c", bp),
+			newHandler(domain.EventHandlerModeNotify, domain.EventGitHubPRReviewCommented, "b", ""),
+			newHandler(domain.EventHandlerModeWatch, domain.EventGitHubPRCICheckFailed, "a", ""),
+			newHandler(domain.EventHandlerModeOff, domain.EventGitHubPRReviewCommented, "d", bp),
 		}
-
-		breaker := 3
-		minAutonomy := 0.0
-		promoteTarget := ids["p-promote-target"]
-		_, err := store.Promote(ctx, orgID, ruleID, domain.EventHandler{
-			Kind:                   domain.EventHandlerKindTrigger,
-			BlueprintID:            promoteTarget,
-			BreakerThreshold:       &breaker,
-			MinAutonomySuitability: &minAutonomy,
-		})
-		if err != nil {
-			t.Fatalf("Promote: %v", err)
+		rows[0].SortOrder, rows[1].SortOrder, rows[2].SortOrder, rows[3].SortOrder = 1, 0, 1, 2
+		for _, h := range rows {
+			if _, err := store.Create(ctx, orgID, teamID, h); err != nil {
+				t.Fatalf("Create %s: %v", h.Name, err)
+			}
 		}
-		got, _ := store.Get(ctx, orgID, ruleID)
-		if got == nil || got.Kind != domain.EventHandlerKindTrigger {
-			t.Fatalf("Promote did not flip kind: got=%v", got)
+		names := func(f db.EventHandlerListFilter) []string {
+			t.Helper()
+			listed, total, err := store.List(ctx, orgID, f, db.ListOpts{Limit: 200})
+			if err != nil {
+				t.Fatalf("List(%+v): %v", f, err)
+			}
+			if total != len(listed) {
+				t.Errorf("List(%+v) total %d, %d rows", f, total, len(listed))
+			}
+			var out []string
+			for _, h := range listed {
+				out = append(out, h.Name)
+			}
+			return out
 		}
-		if got.BlueprintID != promoteTarget {
-			t.Errorf("BlueprintID=%q after promote", got.BlueprintID)
-		}
-		if got.Name != "" {
-			t.Errorf("Name=%q after promote; rule-only field must be cleared", got.Name)
-		}
-		if got.DefaultPriority != nil {
-			t.Errorf("DefaultPriority=%v after promote; want nil", got.DefaultPriority)
-		}
-	})
-
-	t.Run("Promote_RejectsTriggerSource", func(t *testing.T) {
-		store, orgID, teamID, seedBlueprints, _ := factory(t)
-		ctx := context.Background()
-		ids := seedBlueprints(t, "p-already-trigger")
-		blueprintID := ids["p-already-trigger"]
-
-		breaker := 4
-		minAutonomy := 0.0
-		trigID := uuid.New().String()
-		if _, err := store.Create(ctx, orgID, teamID, domain.EventHandler{
-			ID:                     trigID,
-			Kind:                   domain.EventHandlerKindTrigger,
-			BlueprintID:            blueprintID,
-			EventType:              domain.EventGitHubPRCICheckFailed,
-			BreakerThreshold:       &breaker,
-			MinAutonomySuitability: &minAutonomy, Enabled: true,
-		}); err != nil {
-			t.Fatalf("Create trigger: %v", err)
-		}
-		_, err := store.Promote(ctx, orgID, trigID, domain.EventHandler{
-			Kind:             domain.EventHandlerKindTrigger,
-			BlueprintID:      blueprintID,
-			BreakerThreshold: &breaker, MinAutonomySuitability: &minAutonomy,
-		})
-		if err == nil {
-			t.Error("Promote of a trigger row succeeded; want error")
+		yes, no := true, false
+		for _, c := range []struct {
+			filter db.EventHandlerListFilter
+			want   []string
+		}{
+			{db.EventHandlerListFilter{}, []string{"b", "a", "c", "d"}},
+			{db.EventHandlerListFilter{Modes: []string{domain.EventHandlerModeWatch, domain.EventHandlerModeAutomate}}, []string{"a", "c"}},
+			{db.EventHandlerListFilter{EventType: domain.EventGitHubPRReviewCommented}, []string{"b", "d"}},
+			{db.EventHandlerListFilter{HasBlueprint: &yes}, []string{"c", "d"}},
+			{db.EventHandlerListFilter{HasBlueprint: &no}, []string{"b", "a"}},
+		} {
+			if got := names(c.filter); !slices.Equal(got, c.want) {
+				t.Errorf("List(%+v) = %v; want %v", c.filter, got, c.want)
+			}
 		}
 	})
 
-	t.Run("Reorder_AppliesPositions", func(t *testing.T) {
+	t.Run("GetActiveForEvent_LeavesOutOff", func(t *testing.T) {
 		store, orgID, teamID, _, _ := factory(t)
 		ctx := context.Background()
-		priority := 0.5
-		ids := make([]string, 3)
-		for i := range ids {
-			sortOrder := i
-			h := domain.EventHandler{
-				ID: uuid.New().String(), Kind: domain.EventHandlerKindRule,
-				EventType: domain.EventGitHubPRCICheckFailed,
-				Name:      "position-" + strconv.Itoa(i), DefaultPriority: &priority,
-				SortOrder: &sortOrder, Enabled: true,
-			}
+		want := map[string]bool{}
+		for _, mode := range []string{domain.EventHandlerModeOff, domain.EventHandlerModeNotify, domain.EventHandlerModeWatch} {
+			h := newHandler(mode, domain.EventGitHubPRCICheckFailed, mode, "")
 			if _, err := store.Create(ctx, orgID, teamID, h); err != nil {
-				t.Fatalf("Create %d: %v", i, err)
+				t.Fatalf("Create %s: %v", mode, err)
 			}
-			ids[i] = h.ID
+			if mode != domain.EventHandlerModeOff {
+				want[h.ID] = true
+			}
 		}
+		active, err := store.GetActiveForEvent(ctx, orgID, domain.EventGitHubPRCICheckFailed)
+		if err != nil {
+			t.Fatalf("GetActiveForEvent: %v", err)
+		}
+		got := map[string]bool{}
+		for _, h := range active {
+			got[h.ID] = true
+		}
+		if !maps.Equal(got, want) {
+			t.Errorf("GetActiveForEvent = %v; want the notify and watch handlers %v", got, want)
+		}
+	})
 
-		// Reverse the list: each id's new sort_order is its index in what was
-		// submitted, so the whole order moves, not just the pair that swapped.
-		reversed := []string{ids[2], ids[1], ids[0]}
+	t.Run("DetachBlueprint_ClearsEveryHandlerAndMovesAutomateToWatch", func(t *testing.T) {
+		store, orgID, teamID, seedBlueprints, _ := factory(t)
+		ctx := context.Background()
+		ids := seedBlueprints(t, "p-detach", "p-detach-other")
+		automating := newHandler(domain.EventHandlerModeAutomate, domain.EventGitHubPRCICheckFailed, "automating", ids["p-detach"])
+		watching := newHandler(domain.EventHandlerModeOff, domain.EventGitHubPRReviewCommented, "off", ids["p-detach"])
+		other := newHandler(domain.EventHandlerModeAutomate, domain.EventGitHubPRCICheckFailed, "other", ids["p-detach-other"])
+		for _, h := range []domain.EventHandler{automating, watching, other} {
+			if _, err := store.Create(ctx, orgID, teamID, h); err != nil {
+				t.Fatalf("Create %s: %v", h.Name, err)
+			}
+		}
+		if err := store.DetachBlueprint(ctx, orgID, ids["p-detach"]); err != nil {
+			t.Fatalf("DetachBlueprint: %v", err)
+		}
+		for _, c := range []struct {
+			id, mode, blueprint string
+		}{
+			{automating.ID, domain.EventHandlerModeWatch, ""},
+			{watching.ID, domain.EventHandlerModeOff, ""},
+			{other.ID, domain.EventHandlerModeAutomate, ids["p-detach-other"]},
+		} {
+			got, err := store.Get(ctx, orgID, c.id)
+			if err != nil || got == nil {
+				t.Fatalf("Get %s: %v, %v", c.id, got, err)
+			}
+			if got.Mode != c.mode || got.BlueprintID != c.blueprint || got.UserModified {
+				t.Errorf("%s after DetachBlueprint: mode %q, blueprint %q, user_modified %v; want %q, %q, false",
+					got.Name, got.Mode, got.BlueprintID, got.UserModified, c.mode, c.blueprint)
+			}
+		}
+	})
+
+	t.Run("Reorder_RenumbersEveryModeWithoutStamping", func(t *testing.T) {
+		store, orgID, teamID, seedBlueprints, _ := factory(t)
+		ctx := context.Background()
+		bp := seedBlueprints(t, "p-reorder")["p-reorder"]
+		var ids []string
+		for i, mode := range domain.EventHandlerModes {
+			h := newHandler(mode, domain.EventGitHubPRCICheckFailed, "position-"+strconv.Itoa(i), bp)
+			h.SortOrder = i
+			if _, err := store.Create(ctx, orgID, teamID, h); err != nil {
+				t.Fatalf("Create %s: %v", mode, err)
+			}
+			ids = append(ids, h.ID)
+		}
+		reversed := slices.Clone(ids)
+		slices.Reverse(reversed)
 		if err := store.Reorder(ctx, orgID, reversed); err != nil {
 			t.Fatalf("Reorder: %v", err)
 		}
 		for want, id := range reversed {
 			got, err := store.Get(ctx, orgID, id)
-			if err != nil {
-				t.Fatalf("Get %s: %v", id, err)
+			if err != nil || got == nil {
+				t.Fatalf("Get %s: %v, %v", id, got, err)
 			}
-			if got == nil || got.SortOrder == nil || *got.SortOrder != want {
-				t.Errorf("id=%s sort_order=%v, want %d", id, got.SortOrder, want)
-			}
-		}
-	})
-
-	t.Run("Reorder_DoesNotStampUserModified", func(t *testing.T) {
-		store, orgID, teamID, _, _ := factory(t)
-		ctx := context.Background()
-		priority := 0.5
-		s0, s1 := 0, 1
-		h1 := domain.EventHandler{
-			ID: uuid.New().String(), Kind: domain.EventHandlerKindRule,
-			EventType: domain.EventGitHubPRCICheckFailed,
-			Name:      "reorder-a", DefaultPriority: &priority, SortOrder: &s0, Enabled: true,
-		}
-		h2 := domain.EventHandler{
-			ID: uuid.New().String(), Kind: domain.EventHandlerKindRule,
-			EventType: domain.EventGitHubPRCICheckFailed,
-			Name:      "reorder-b", DefaultPriority: &priority, SortOrder: &s1, Enabled: true,
-		}
-		if _, err := store.Create(ctx, orgID, teamID, h1); err != nil {
-			t.Fatalf("Create h1: %v", err)
-		}
-		if _, err := store.Create(ctx, orgID, teamID, h2); err != nil {
-			t.Fatalf("Create h2: %v", err)
-		}
-		if err := store.Reorder(ctx, orgID, []string{h2.ID, h1.ID}); err != nil {
-			t.Fatalf("Reorder: %v", err)
-		}
-		for _, id := range []string{h1.ID, h2.ID} {
-			got, _ := store.Get(ctx, orgID, id)
-			if got == nil || got.UserModified {
-				t.Errorf("id=%s UserModified=%v after Reorder; want false (sort_order is presentation order the user owns)", id, got != nil && got.UserModified)
+			if got.SortOrder != want || got.UserModified {
+				t.Errorf("%s after Reorder: sort_order %d, user_modified %v; want %d, false", got.Name, got.SortOrder, got.UserModified, want)
 			}
 		}
 	})
 
-	t.Run("Update_StampsUserModifiedOnlyWhenContentChanges", func(t *testing.T) {
-		store, orgID, teamID, _, _ := factory(t)
-		ctx := context.Background()
-		priority, sortOrder := 0.5, 0
-		h := domain.EventHandler{
-			ID: uuid.New().String(), Kind: domain.EventHandlerKindRule,
-			EventType: domain.EventGitHubPRCICheckFailed,
-			Name:      "update-stamp", DefaultPriority: &priority, SortOrder: &sortOrder, Enabled: true,
-		}
-		if _, err := store.Create(ctx, orgID, teamID, h); err != nil {
-			t.Fatalf("Create: %v", err)
-		}
-
-		// Update carrying enabled alongside unchanged content: no stamp.
-		got, _ := store.Get(ctx, orgID, h.ID)
-		got.Enabled = false
-		if _, err := store.Update(ctx, orgID, *got); err != nil {
-			t.Fatalf("Update (enabled-only): %v", err)
-		}
-		afterEnabledOnly, _ := store.Get(ctx, orgID, h.ID)
-		if afterEnabledOnly == nil || afterEnabledOnly.UserModified {
-			t.Fatalf("UserModified=%v after an enabled-only Update; want false", afterEnabledOnly != nil && afterEnabledOnly.UserModified)
-		}
-		// The bit has to have actually moved, or "no stamp" proves nothing:
-		// this is the write the rule and trigger switches perform.
-		if afterEnabledOnly.Enabled {
-			t.Error("Enabled=true after an Update carrying enabled=false")
-		}
-
-		// Update changing a content field: stamps.
-		afterEnabledOnly.Name = "update-stamp-renamed"
-		if _, err := store.Update(ctx, orgID, *afterEnabledOnly); err != nil {
-			t.Fatalf("Update (content change): %v", err)
-		}
-		afterContent, _ := store.Get(ctx, orgID, h.ID)
-		if afterContent == nil || !afterContent.UserModified {
-			t.Errorf("UserModified=%v after a content-changing Update; want true", afterContent != nil && afterContent.UserModified)
-		}
-	})
-
-	t.Run("Promote_StampsUserModified", func(t *testing.T) {
+	t.Run("ListForBlueprint_EveryMode", func(t *testing.T) {
 		store, orgID, teamID, seedBlueprints, _ := factory(t)
 		ctx := context.Background()
-		ids := seedBlueprints(t, "p-promote-stamp")
-		priority, sortOrder := 0.5, 0
-		ruleID := uuid.New().String()
-		if _, err := store.Create(ctx, orgID, teamID, domain.EventHandler{
-			ID: ruleID, Kind: domain.EventHandlerKindRule,
-			EventType: domain.EventGitHubPRCICheckFailed,
-			Name:      "promote-stamp", DefaultPriority: &priority, SortOrder: &sortOrder, Enabled: true,
-		}); err != nil {
-			t.Fatalf("Create rule: %v", err)
+		bp := seedBlueprints(t, "p-shared-blueprint")["p-shared-blueprint"]
+		want := map[string]bool{}
+		for _, mode := range domain.EventHandlerModes {
+			h := newHandler(mode, domain.EventGitHubPRCICheckFailed, mode, bp)
+			if _, err := store.Create(ctx, orgID, teamID, h); err != nil {
+				t.Fatalf("Create %s: %v", mode, err)
+			}
+			want[h.ID] = true
 		}
-		breaker := 3
-		minAutonomy := 0.0
-		if _, err := store.Promote(ctx, orgID, ruleID, domain.EventHandler{
-			Kind: domain.EventHandlerKindTrigger, BlueprintID: ids["p-promote-stamp"],
-			BreakerThreshold: &breaker, MinAutonomySuitability: &minAutonomy,
-		}); err != nil {
-			t.Fatalf("Promote: %v", err)
+		if _, err := store.Create(ctx, orgID, teamID, newHandler(domain.EventHandlerModeWatch, domain.EventGitHubPRCICheckFailed, "none", "")); err != nil {
+			t.Fatalf("Create without a blueprint: %v", err)
 		}
-		got, _ := store.Get(ctx, orgID, ruleID)
-		if got == nil || !got.UserModified {
-			t.Errorf("UserModified=%v after Promote; want true (a kind change is never sync-revertible)", got != nil && got.UserModified)
+		bound, err := store.ListForBlueprint(ctx, orgID, bp)
+		if err != nil {
+			t.Fatalf("ListForBlueprint: %v", err)
 		}
-	})
-
-	t.Run("RetargetBlueprint_StampsUserModified", func(t *testing.T) {
-		store, orgID, teamID, seedBlueprints, _ := factory(t)
-		ctx := context.Background()
-		ids := seedBlueprints(t, "p-retarget-stamp-from", "p-retarget-stamp-to")
-		breaker := 3
-		minAutonomy := 0.0
-		h := domain.EventHandler{
-			ID: uuid.New().String(), Kind: domain.EventHandlerKindTrigger,
-			BlueprintID: ids["p-retarget-stamp-from"], EventType: domain.EventGitHubPRCICheckFailed,
-			BreakerThreshold: &breaker, MinAutonomySuitability: &minAutonomy,
+		got := map[string]bool{}
+		for _, h := range bound {
+			got[h.ID] = true
 		}
-		if _, err := store.Create(ctx, orgID, teamID, h); err != nil {
-			t.Fatalf("Create trigger: %v", err)
-		}
-		if _, err := store.RetargetBlueprint(ctx, orgID, h.ID, ids["p-retarget-stamp-to"]); err != nil {
-			t.Fatalf("RetargetBlueprint: %v", err)
-		}
-		got, _ := store.Get(ctx, orgID, h.ID)
-		if got == nil || !got.UserModified {
-			t.Errorf("UserModified=%v after RetargetBlueprint; want true (a user-initiated retarget must survive sync)", got != nil && got.UserModified)
+		if !maps.Equal(got, want) {
+			t.Errorf("ListForBlueprint = %v; want the handler in every mode %v", got, want)
 		}
 	})
 
 	t.Run("Delete_SoftDeletesSystemRow_SlugStaysOccupiedAndInvisible", func(t *testing.T) {
 		store, orgID, teamID, seedBlueprints, handlerID := factory(t)
 		ctx := context.Background()
-		ids := seedBlueprints(t,
-			"system-pr-review", "system-conflict-resolution", "system-ci-fix",
-			"system-jira-implement", "system-linear-implement", "system-fix-review-feedback",
-			"system-vulnerability-remediate",
-		)
+		ids := seedBlueprints(t, shippedBlueprintSlugs()...)
 		if err := store.Seed(ctx, orgID, teamID, ids); err != nil {
 			t.Fatalf("Seed: %v", err)
 		}
-		const slug = "system-rule-ci-check-failed"
+		const slug = "system-handler-ci-check-failed"
 		before := handlerCopyBySlug(t, store, handlerID, orgID, teamID, slug)
 		if before == nil {
 			t.Fatalf("shipped handler %q missing before delete", slug)
@@ -1061,35 +517,9 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		if err := store.Delete(ctx, orgID, before.ID); err != nil {
 			t.Fatalf("Delete: %v", err)
 		}
-
-		if got, err := store.Get(ctx, orgID, before.ID); err != nil || got != nil {
-			t.Errorf("Get after soft-delete = (%v, %v); want (nil, nil)", got, err)
-		}
-		if got, err := store.GetSystem(ctx, orgID, before.ID); err != nil || got != nil {
-			t.Errorf("GetSystem after soft-delete = (%v, %v); want (nil, nil) — a soft-deleted trigger/rule must never resolve as live", got, err)
-		}
 		if got := handlerCopyBySlug(t, store, handlerID, orgID, teamID, slug); got != nil {
 			t.Errorf("shipped slug %q still resolves after soft-delete: %+v; want absent", slug, got)
 		}
-		all, _, err := store.List(ctx, orgID, db.EventHandlerListFilter{}, db.ListOpts{Limit: 200})
-		if err != nil {
-			t.Fatalf("List: %v", err)
-		}
-		for _, h := range all {
-			if h.ID == before.ID {
-				t.Errorf("soft-deleted handler %s leaked into List", h.ID)
-			}
-		}
-		enabled, err := store.GetEnabledForEvent(ctx, orgID, domain.EventGitHubPRCICheckFailed)
-		if err != nil {
-			t.Fatalf("GetEnabledForEvent: %v", err)
-		}
-		for _, h := range enabled {
-			if h.ID == before.ID {
-				t.Errorf("soft-deleted handler %s leaked into GetEnabledForEvent — it would still fire", h.ID)
-			}
-		}
-
 		// Never resurrect: re-seeding must not re-insert a row for the
 		// slug's occupied slot.
 		if err := store.Seed(ctx, orgID, teamID, ids); err != nil {
@@ -1097,48 +527,6 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		}
 		if got := handlerCopyBySlug(t, store, handlerID, orgID, teamID, slug); got != nil {
 			t.Errorf("shipped slug %q resolves after re-seed: %+v; want absent — re-seed must not resurrect a soft-deleted shipped row", slug, got)
-		}
-	})
-
-	t.Run("Delete_SoftDeletedSystemTrigger_FreesBlueprintSlotForANewTrigger", func(t *testing.T) {
-		store, orgID, teamID, seedBlueprints, handlerID := factory(t)
-		ctx := context.Background()
-		ids := seedBlueprints(t,
-			"system-pr-review", "system-conflict-resolution", "system-ci-fix",
-			"system-jira-implement", "system-linear-implement", "system-fix-review-feedback",
-			"system-vulnerability-remediate",
-		)
-		if err := store.Seed(ctx, orgID, teamID, ids); err != nil {
-			t.Fatalf("Seed: %v", err)
-		}
-		blueprintID := ids["system-ci-fix"]
-		shipped := handlerCopyBySlug(t, store, handlerID, orgID, teamID, "system-trigger-ci-fix")
-		if shipped == nil {
-			t.Fatal("shipped handler system-trigger-ci-fix missing before delete")
-		}
-
-		// Deleting the shipped (system_slug) trigger soft-deletes it — verify
-		// the dedup index doesn't keep the blueprint permanently claimed by the
-		// now-invisible row.
-		if err := store.Delete(ctx, orgID, shipped.ID); err != nil {
-			t.Fatalf("Delete shipped trigger: %v", err)
-		}
-		existing, err := store.ListForBlueprint(ctx, orgID, blueprintID)
-		if err != nil {
-			t.Fatalf("ListForBlueprint: %v", err)
-		}
-		if len(existing) != 0 {
-			t.Fatalf("ListForBlueprint after soft-delete = %d rows; want 0 (a spurious \"already triggered\" 409 otherwise)", len(existing))
-		}
-		breaker := 3
-		minAutonomy := 0.0
-		replacement := domain.EventHandler{
-			ID: uuid.New().String(), Kind: domain.EventHandlerKindTrigger,
-			BlueprintID: blueprintID, EventType: domain.EventGitHubPRCICheckFailed,
-			BreakerThreshold: &breaker, MinAutonomySuitability: &minAutonomy,
-		}
-		if _, err := store.Create(ctx, orgID, teamID, replacement); err != nil {
-			t.Fatalf("Create replacement trigger on the freed blueprint: %v", err)
 		}
 	})
 }

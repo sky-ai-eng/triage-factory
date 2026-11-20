@@ -138,6 +138,12 @@ type BlueprintPlanStep struct {
 	AllowedTools string `json:"allowed_tools"`
 	Model        string `json:"model"`
 	Brief        string `json:"brief"`
+	// TaskTitle is the task's title when the run was minted, which every
+	// step's mission names. Frozen with the rest of the plan so a step's
+	// instructions do not change when the pull request or issue is renamed.
+	// Empty on a plan frozen before titles were, which names the task's
+	// current title instead.
+	TaskTitle string `json:"task_title,omitempty"`
 }
 
 // Prompt reconstructs the *Prompt the dispatcher hands to MaterializeStepSkill
@@ -191,6 +197,14 @@ type BlueprintRun struct {
 	// the per-step conversations. Forward-only provenance — not read back into the run
 	// projection.
 	TriggeringEventID string `json:"triggering_event_id,omitempty"`
+	// ScopePredicateJSON is the predicate of the trigger that fired this run
+	// (blueprint_runs.scope_predicate_json), as the trigger row held it at
+	// the firing; empty when the trigger had none, and for a manual run. A
+	// trigger's breaker counts a run only while the trigger still holds this
+	// predicate. Written at mint and read only by the breaker's SQL, so like
+	// TriggeringEventID it is not in the run projection, and it is not on the
+	// wire.
+	ScopePredicateJSON string `json:"-"`
 	// ActorAgentID is the agents.id of the bot executing this blueprint run
 	// (blueprint_runs.actor_agent_id). Resolved once at the
 	// delegation entry point — from the task's bot claim, or the org agent the

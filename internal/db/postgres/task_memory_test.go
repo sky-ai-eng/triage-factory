@@ -49,6 +49,14 @@ func TestTaskMemoryStore_Postgres(t *testing.T) {
 				t.Helper()
 				return roleForPgJoinRow(t, h, conversationID, entityID)
 			},
+			Age: func(t *testing.T, conversationID string, d time.Duration) {
+				t.Helper()
+				dbtest.MustUpdate(t, h.AdminDB, `
+					UPDATE conversation_memory SET
+						created_at = created_at - $2 * interval '1 microsecond',
+						updated_at = updated_at - $2 * interval '1 microsecond'
+					WHERE conversation_id = $1`, conversationID, d.Microseconds())
+			},
 			TeamID: firstTeamForOrg(t, h, orgID),
 		}
 		return stores.TaskMemory, orgID, seed

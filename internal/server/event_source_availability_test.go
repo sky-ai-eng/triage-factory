@@ -36,46 +36,30 @@ func firstError(t *testing.T, rec *httptest.ResponseRecorder) errorItem {
 }
 
 // TestEventHandlerCreate_UnconfiguredSourceRejected: an org with no Jira
-// credential cannot create a jira rule or trigger, since event_type is
-// immutable and the handler would wait for an event nothing can produce.
+// credential cannot create a jira handler, since event_type is immutable and
+// the handler would wait for an event nothing can produce.
 func TestEventHandlerCreate_UnconfiguredSourceRejected(t *testing.T) {
-	cases := map[string]struct {
-		path string
-		body map[string]any
-	}{
-		"rule": {"/api/event-handlers/rules", map[string]any{
-			"event_type":       domain.EventJiraIssueAssigned,
-			"name":             "jira rule",
-			"default_priority": 0.5,
-		}},
-		"trigger": {"/api/event-handlers/triggers", map[string]any{
-			"event_type":   domain.EventJiraIssueAssigned,
-			"blueprint_id": fixtureUUID("bp_jira"),
-		}},
-	}
-	for name, tc := range cases {
-		t.Run(name, func(t *testing.T) {
-			s := newTestServer(t)
-			unconfigureEventSources(t)
-			seedBlueprintForTrigger(t, s, fixtureUUID("bp_jira"))
+	s := newTestServer(t)
+	unconfigureEventSources(t)
 
-			rec := doJSON(t, s, http.MethodPost, tc.path, tc.body)
-			if rec.Code != http.StatusUnprocessableEntity {
-				t.Fatalf("status = %d, want 422; body=%s", rec.Code, rec.Body.String())
-			}
-			got := firstError(t, rec)
-			if got.Reason != "INVALID_FIELD" {
-				t.Errorf("reason = %q, want INVALID_FIELD", got.Reason)
-			}
-			if got.Field != "event_type" {
-				t.Errorf("field = %q, want event_type", got.Field)
-			}
-			// The message has to name the source and what is missing — the
-			// caller's next move is to go bind that credential.
-			if !strings.Contains(got.Message, "jira") || !strings.Contains(got.Message, "not configured") {
-				t.Errorf("message = %q, want it to name jira and what is missing", got.Message)
-			}
-		})
+	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers", map[string]any{
+		"event_type": domain.EventJiraIssueAssigned,
+		"name":       "jira handler",
+	})
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+	got := firstError(t, rec)
+	if got.Reason != "INVALID_FIELD" {
+		t.Errorf("reason = %q, want INVALID_FIELD", got.Reason)
+	}
+	if got.Field != "event_type" {
+		t.Errorf("field = %q, want event_type", got.Field)
+	}
+	// The message has to name the source and what is missing — the caller's
+	// next move is to go bind that credential.
+	if !strings.Contains(got.Message, "jira") || !strings.Contains(got.Message, "not configured") {
+		t.Errorf("message = %q, want it to name jira and what is missing", got.Message)
 	}
 }
 
@@ -87,7 +71,7 @@ func TestEventHandlerCreate_UnlicensedKeepsItsOwn403(t *testing.T) {
 	configureEventSources(t, s) // jira IS configured — only the licence is missing
 	gateJiraForTest(t)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/rules", map[string]any{
+	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers", map[string]any{
 		"event_type":       domain.EventJiraIssueAssigned,
 		"name":             "jira rule",
 		"default_priority": 0.5,
@@ -107,8 +91,8 @@ func TestEventHandlerList_SurfacesAHandlerWhoseSourceWentAway(t *testing.T) {
 	s := newTestServer(t)
 	configureEventSources(t, s)
 
-	ghRule := createUserRuleFor(t, s, domain.EventGitHubPROpened)
-	jiraRule := createUserRuleFor(t, s, domain.EventJiraIssueAssigned)
+	ghRule := createWatchHandlerFor(t, s, domain.EventGitHubPROpened)
+	jiraRule := createWatchHandlerFor(t, s, domain.EventJiraIssueAssigned)
 
 	before := listRowsByID(t, s)
 	if !before[ghRule].SourceAvailable || !before[jiraRule].SourceAvailable {

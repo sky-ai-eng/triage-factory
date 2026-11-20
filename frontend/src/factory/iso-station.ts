@@ -97,11 +97,11 @@ export interface StationHandle {
   setQueuedCount(n: number): void
   /** Show n conversation chips. n clamped to MAX_CONVERSATIONS. */
   setConversationCount(n: number): void
-  /** Update the lifetime counter rendered on the station's front-face
-   *  status screen. Diff-gated internally — calling with the same
-   *  value as last call is a no-op, so per-frame reconcilers can call
-   *  it cheaply. */
-  setLifetimeCount(n: number): void
+  /** Update the counter rendered on the station's front-face status
+   *  screen. Diff-gated internally — calling with the same value as
+   *  last call is a no-op, so per-frame reconcilers can call it
+   *  cheaply. */
+  setReachedCount(n: number): void
 }
 
 // ─── Tray fractions ─────────────────────────────────────────────────────────
@@ -793,7 +793,7 @@ export function buildStationMesh(
     panelCz,
   )
   // Per-station screen material. Carries a DynamicTexture rendered
-  // with the lifetime counter on its albedo + emissive channels.
+  // with the station's counter on its albedo + emissive channels.
   // Babylon's default Box UV mapping gives each face the full 0–1 UV
   // range, so whichever face of the thin screen plate is camera-facing
   // will display the text — no per-face UV gymnastics required.
@@ -824,7 +824,7 @@ export function buildStationMesh(
   // angles.
   const screenBgFill = '#15171c'
   const screenTextFill = '#a4f8ff'
-  // Monospaced stack to give the lifetime counter an LCD/scoreboard
+  // Monospaced stack to give the station's counter an LCD/scoreboard
   // feel matching the rest of the factory's emissive readouts. SF Mono
   // ships on macOS, Cascadia/Consolas on Windows, plus JetBrains Mono
   // and Fira Code as common dev installs. 500 weight reads as a thin
@@ -835,7 +835,7 @@ export function buildStationMesh(
   const renderScreenText = (n: number) => {
     screenCtx.fillStyle = screenBgFill
     screenCtx.fillRect(0, 0, screenTexW, screenTexH)
-    const text = formatLifetimeCount(n)
+    const text = formatReachedCount(n)
     // Babylon's default Box UV mapping puts the canvas U axis along
     // the visible face's *vertical* edge, not its horizontal one — so
     // text drawn upright on the canvas ends up rotated 90° CW on the
@@ -869,7 +869,7 @@ export function buildStationMesh(
     screenCtx.restore()
     screenTex.update(true)
   }
-  let lifetimeValue = 0
+  let reachedValue = 0
   renderScreenText(0)
 
   const screenMat = new PBRMaterial(`status-screen-mat-${station.x}_${station.y}`, scene)
@@ -1192,9 +1192,9 @@ export function buildStationMesh(
     scanner.setEnabled(target > 0)
   }
 
-  const setLifetimeCount = (n: number) => {
-    if (lifetimeValue === n) return
-    lifetimeValue = n
+  const setReachedCount = (n: number) => {
+    if (reachedValue === n) return
+    reachedValue = n
     renderScreenText(n)
   }
 
@@ -1228,14 +1228,14 @@ export function buildStationMesh(
     id: station.id,
     setQueuedCount,
     setConversationCount,
-    setLifetimeCount,
+    setReachedCount,
   }
 }
 
-// formatLifetimeCount renders integers compactly so the inline label
+// formatReachedCount renders integers compactly so the inline label
 // stays legible past four digits. 0–999 verbatim, ≥1k formatted as
 // "1.2k" / "12k", ≥1m as "1.2M". Drops trailing ".0" for round numbers.
-function formatLifetimeCount(n: number): string {
+function formatReachedCount(n: number): string {
   if (n < 1000) return String(n)
   if (n < 10_000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k'
   if (n < 1_000_000) {

@@ -29,6 +29,17 @@ variables. `GITHUB_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`, and every `GH_` variable
 in Triage Factory's environment are removed before a delegated agent starts.
 Every other variable is passed through, including tokens under other names.
 
+An agent's `gh` doesn't pick up your own `gh` login, even when Triage Factory
+can't provide its own `gh` and the agent runs yours. The agent's `GH_TOKEN`
+holds a value that is not a credential, and so does its `GH_ENTERPRISE_TOKEN`
+when it runs your `gh`. GitHub answers that value with
+`HTTP 401: Bad credentials`. A script that reads `GH_TOKEN` gets the same
+answer, even for a public repository. If `gh` is your Git credential helper
+(`gh auth setup-git`), an agent's Git presents a value that is not a credential
+to any GitHub host its run's proxy doesn't cover. This keeps an agent from
+using your login by accident; it doesn't stop one that goes looking for it (see
+[Repositories an agent reaches](#repositories-an-agent-reaches)).
+
 The exception is Claude Code. Delegated agents can use your own Claude login,
 making use of your existing subscription. Choose under **Claude credentials**:
 

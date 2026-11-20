@@ -715,11 +715,16 @@ func (r *Router) fireDelegate(ctx context.Context, orgID string, task *domain.Ta
 // builder, so the gate and the fire check the same blueprint under the same
 // trigger type. fireDelegate documents each argument.
 func triggerDelegateOpts(orgID string, trigger domain.EventHandler, triggeringEventID, actorAgentID string, claim dbpkg.AgentClaimStamp, ownerTeamID string) delegate.DelegateOpts {
+	predicate := ""
+	if trigger.ScopePredicateJSON != nil {
+		predicate = *trigger.ScopePredicateJSON
+	}
 	return delegate.DelegateOpts{
 		OrgID:               orgID,
 		ExplicitBlueprintID: trigger.BlueprintID,
-		TriggerType:         "event",
+		TriggerType:         domain.TriggerTypeEvent,
 		TriggerID:           trigger.ID,
+		ScopePredicateJSON:  predicate,
 		TriggeringEventID:   triggeringEventID,
 		ActorAgentID:        actorAgentID,
 		TaskClaim:           claim,

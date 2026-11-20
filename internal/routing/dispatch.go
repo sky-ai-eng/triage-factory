@@ -268,14 +268,15 @@ func (r *Router) routeEvent(ctx context.Context, evt domain.Event, judgedAt *int
 	// is looked up once per event even when it appears in more than one of them.
 	scopeCache := teamScopeCache{}
 
-	// Match event_handlers (rules, triggers and notify rules) for this event.
-	matchedRules, matchedTriggers, matchedNotify, err := r.matchHandlers(ctx, orgID, evt, scopeCache)
+	// Match the event handlers for this event.
+	taskMakers, automating, notifying, err := r.matchHandlers(ctx, orgID, evt, scopeCache)
 	if err != nil {
 		disp.Disposition = events.DispositionError
 		return fmt.Errorf("match handlers: %w", err)
 	}
 
-	// Notify rules tell people about the event whether or not it makes a task.
+	// Notifying handlers tell people about the event whether or not it makes a
+	// task.
 	// They raise once the event has routed: an error below replays the event,
 	// and raising before it would tell people once per attempt. A raise never
 	// fails routing; the event's obligation is its tasks. An entity that closed
@@ -284,12 +285,13 @@ func (r *Router) routeEvent(ctx context.Context, evt domain.Event, judgedAt *int
 	closedUnderMint := false
 	defer func() {
 		if err == nil && !closedUnderMint && !again {
-			r.raiseNotifications(ctx, orgID, evt, *entity, matchedNotify, scopeCache)
+			r.raiseNotifications(ctx, orgID, evt, *entity, notifying, scopeCache)
 		}
 	}()
 
-	if len(matchedRules) == 0 && len(matchedTriggers) == 0 {
-		// Nothing matched — event is recorded but no task created.
+	if len(taskMakers) == 0 {
+		// Nothing that makes a task matched — event is recorded but no task
+		// created.
 		disp.Disposition = events.DispositionTasklessNoHandler
 		return nil
 	}
@@ -298,7 +300,7 @@ func (r *Router) routeEvent(ctx context.Context, evt domain.Event, judgedAt *int
 	// creation-seed priority. An error here is "could not find out who owns
 	// this" — distinct from the resolved no-owner outcome below, which is a
 	// real answer and consumes the event.
-	routing, ok, err := r.resolveTeamRouting(ctx, orgID, evt, entityID, matchedRules, matchedTriggers, scopeCache)
+	routing, ok, err := r.resolveTeamRouting(ctx, orgID, evt, entityID, taskMakers, automating, scopeCache)
 	if err != nil {
 		disp.Disposition = events.DispositionError
 		return fmt.Errorf("resolve owner: %w", err)
@@ -420,13 +422,14 @@ func (r *Router) routableEntity(ctx context.Context, orgID string, evt domain.Ev
 	return entity, true, nil
 }
 
-// matchHandlers queries the enabled event_handlers for the event type and
-// returns those whose scope predicate matches, split by kind. Rules and
-// triggers also pass the team↔scope gate here, in its open posture. Notify
-// rules are returned on their predicate alone: only routeEvent raises them,
-// and it applies the strict posture itself (raiseNotifications), so a caller
-// that discards them pays no tracking lookup for them. One query,
-// kind-discriminated locally — preserves the rules-before-triggers order the
+// matchHandlers queries the active event handlers for the event type and
+// returns those whose scope predicate matches, grouped by mode: the handlers
+// that make a task (watch and automate), the automating subset of those, and
+// the notifying ones. The task-making handlers pass the team↔scope gate here,
+// in its open posture. Notifying handlers are returned on their predicate
+// alone: only routeEvent raises them, and it applies the strict posture
+// itself (raiseNotifications), so a caller that discards them pays no
+// tracking lookup for them. One query, grouped locally, in the sort order the
 // store reads them in.
 //
 // Predicates are matched against the event's current view (events.Current):
@@ -437,11 +440,11 @@ func (r *Router) routableEntity(ctx context.Context, orgID string, evt domain.Ev
 // current view — and the caller must not read that as "queried fine, zero
 // handlers matched" (which would misreport an internal error as a legitimate
 // "nothing configured" outcome).
-func (r *Router) matchHandlers(ctx context.Context, orgID string, evt domain.Event, scopeCache teamScopeCache) (matchedRules, matchedTriggers, matchedNotify []domain.EventHandler, err error) {
+func (r *Router) matchHandlers(ctx context.Context, orgID string, evt domain.Event, scopeCache teamScopeCache) (taskMakers, automating, notifying []domain.EventHandler, err error) {
 	ctx, span := tracer.Start(ctx, "route.match")
 	defer span.End()
 
-	handlers, err := r.handlers.GetEnabledForEventSystem(ctx, orgID, evt.EventType)
+	handlers, err := r.handlers.GetActiveForEventSystem(ctx, orgID, evt.EventType)
 	if err != nil {
 		span.SetStatus(codes.Error, "query event_handlers")
 		routerLog.ErrorContext(ctx, "failed to query event_handlers", "event_type", evt.EventType, "error", err)
@@ -465,35 +468,35 @@ func (r *Router) matchHandlers(ctx context.Context, orgID string, evt domain.Eve
 		}
 		matched, err := matchPredicate(evt.EventType, predJSON, metadataJSON)
 		if err != nil {
-			routerLog.Error("event_handler predicate error", "handler_id", h.ID, "kind", h.Kind, "error", err)
+			routerLog.Error("event_handler predicate error", "handler_id", h.ID, "mode", h.Mode, "error", err)
 			continue
 		}
 		if !matched {
 			continue
 		}
-		if h.Kind == domain.EventHandlerKindNotify {
-			matchedNotify = append(matchedNotify, h)
+		if h.Notifies() {
+			notifying = append(notifying, h)
 			continue
 		}
-		// Team↔scope gate (repos / Jira projects): a team's
-		// handler only fires for events whose entity the team tracks. Dropped
-		// here so the team never enters the visibility set, its triggers never
-		// fire, and task_teams excludes it for free. System/org-union
-		// handlers (NULL team_id) skip the gate.
+		if !h.MakesTask() {
+			continue
+		}
+		// Team↔scope gate (repos / Jira projects): a team's handler only
+		// makes a task for events whose entity the team tracks. Dropped here
+		// so the team never enters the visibility set, its handlers never
+		// fire, and task_teams excludes it for free.
 		if !r.handlerScopeMatchesEvent(ctx, evt, h, scopeCache) {
 			continue
 		}
-		switch h.Kind {
-		case domain.EventHandlerKindRule:
-			matchedRules = append(matchedRules, h)
-		case domain.EventHandlerKindTrigger:
-			matchedTriggers = append(matchedTriggers, h)
+		taskMakers = append(taskMakers, h)
+		if h.Automates() {
+			automating = append(automating, h)
 		}
 	}
-	// The count is what passed the gate here; a notify rule passes its gate at
-	// raise time, so it is not counted as a match.
-	span.SetAttributes(telemetry.Count(len(matchedRules) + len(matchedTriggers)))
-	return matchedRules, matchedTriggers, matchedNotify, nil
+	// The count is what passed the gate here; a notifying handler passes its
+	// gate at raise time, so it is not counted as a match.
+	span.SetAttributes(telemetry.Count(len(taskMakers)))
+	return taskMakers, automating, notifying, nil
 }
 
 // eventRouting is the resolved team-routing for an event: which team owns the
@@ -549,17 +552,16 @@ type eventRouting struct {
 //
 // The matched handlers still gate whether a task is created and supply the
 // priority; the model only decides the team set + owner.
-func (r *Router) resolveTeamRouting(ctx context.Context, orgID string, evt domain.Event, entityID string, matchedRules, matchedTriggers []domain.EventHandler, scopeCache teamScopeCache) (eventRouting, bool, error) {
+func (r *Router) resolveTeamRouting(ctx context.Context, orgID string, evt domain.Event, entityID string, taskMakers, automating []domain.EventHandler, scopeCache teamScopeCache) (eventRouting, bool, error) {
 	ctx, span := tracer.Start(ctx, "route.own")
 	defer span.End()
 
-	// teamTriggers is model-independent: a team fires its matched triggers iff it
-	// lands in the model's orderedTeams. Grouped once, folded into whichever
-	// model resolved. Org-visibility handlers (team_id NULL) route to
-	// LocalDefaultTeamID via handlerTeamID; the Postgres store resolves that
-	// sentinel to the org's team.
+	// teamTriggers is model-independent: a team fires its matched automating
+	// handlers iff it lands in the model's orderedTeams. Grouped once, folded
+	// into whichever model resolved. A handler with no team_id routes to
+	// LocalDefaultTeamID via handlerTeamID.
 	teamTriggers := map[string][]domain.EventHandler{}
-	for _, h := range matchedTriggers {
+	for _, h := range automating {
 		teamTriggers[handlerTeamID(h)] = append(teamTriggers[handlerTeamID(h)], h)
 	}
 
@@ -570,11 +572,11 @@ func (r *Router) resolveTeamRouting(ctx context.Context, orgID string, evt domai
 	)
 	switch ownershipModelForEvent(evt.EventType) {
 	case events.OwnershipOwned:
-		routing, ok, err = r.resolveOwnedRouting(ctx, orgID, evt, entityID, matchedRules, matchedTriggers, scopeCache)
+		routing, ok, err = r.resolveOwnedRouting(ctx, orgID, evt, entityID, taskMakers, scopeCache)
 	case events.OwnershipRequestedParty:
-		routing, ok, err = r.resolveRequestedPartyRouting(ctx, orgID, evt, entityID, matchedRules, matchedTriggers, scopeCache)
+		routing, ok, err = r.resolveRequestedPartyRouting(ctx, orgID, evt, entityID, taskMakers, scopeCache)
 	default: // events.OwnershipPool, events.OwnershipUnrouted
-		routing, ok = resolvePoolRouting(matchedRules, matchedTriggers), true
+		routing, ok = resolvePoolRouting(taskMakers), true
 	}
 	if err != nil {
 		span.SetStatus(codes.Error, "resolve owner")
@@ -594,24 +596,20 @@ func (r *Router) resolveTeamRouting(ctx context.Context, orgID string, evt domai
 }
 
 // resolvePoolRouting is the handler-team grouping (OwnershipPool): every team with a
-// matched handler is a participant, the highest-priority team is the eagerly-
-// stamped owner, and triggers fire in priority-desc / id-asc order. Used for
-// unassigned team-pool events (jira:issue:available) and as the
-// requested-party fallback. It always resolves — resolveTeamRouting is only
-// reached with ≥1 matched handler, so the participant set is non-empty, and it
-// reads no store so it cannot fail. A team with only triggers contributes the
-// 0.5 trigger-fallback priority via teamRulePriorityScores. teamTriggers is
-// filled in by the caller.
-func resolvePoolRouting(matchedRules, matchedTriggers []domain.EventHandler) eventRouting {
+// matched task-making handler is a participant, the highest-priority team is
+// the eagerly-stamped owner, and automating handlers fire in priority-desc /
+// id-asc order. Used for unassigned team-pool events (jira:issue:available)
+// and as the requested-party fallback. It always resolves —
+// resolveTeamRouting is only reached with ≥1 matched task-making handler, so
+// the participant set is non-empty, and it reads no store so it cannot fail.
+// teamTriggers is filled in by the caller.
+func resolvePoolRouting(taskMakers []domain.EventHandler) eventRouting {
 	seen := map[string]struct{}{}
-	for _, h := range matchedRules {
-		seen[handlerTeamID(h)] = struct{}{}
-	}
-	for _, h := range matchedTriggers {
+	for _, h := range taskMakers {
 		seen[handlerTeamID(h)] = struct{}{}
 	}
 	allTeams := sortedKeys(seen)
-	scores := teamRulePriorityScores(seen, matchedRules)
+	scores := teamRulePriorityScores(seen, taskMakers)
 	orderedTeams := orderTeamsByScores(allTeams, scores)
 	ownerTeam := orderedTeams[0]
 	return eventRouting{
@@ -639,7 +637,7 @@ func resolvePoolRouting(matchedRules, matchedTriggers []domain.EventHandler) eve
 // has no lower tier left to be caught by. resolveSourceOwner is what makes that
 // contract a mechanism rather than a rule: a hook that returns empty without
 // claiming Unowned is refused, not believed.
-func (r *Router) resolveOwnedRouting(ctx context.Context, orgID string, evt domain.Event, entityID string, matchedRules, matchedTriggers []domain.EventHandler, scopeCache teamScopeCache) (eventRouting, bool, error) {
+func (r *Router) resolveOwnedRouting(ctx context.Context, orgID string, evt domain.Event, entityID string, taskMakers []domain.EventHandler, scopeCache teamScopeCache) (eventRouting, bool, error) {
 	var owner string
 	var ownerSet []string
 	var err error
@@ -663,7 +661,7 @@ func (r *Router) resolveOwnedRouting(ctx context.Context, orgID string, evt doma
 	if err != nil {
 		return eventRouting{}, false, err
 	}
-	vis, ownerTeam, ordered, priority, ok := ownerLadderRouting(owner, ownerSet, matchedRules, matchedTriggers)
+	vis, ownerTeam, ordered, priority, ok := ownerLadderRouting(owner, ownerSet, taskMakers)
 	return eventRouting{
 		ownerTeam:     ownerTeam,
 		visibleTeams:  vis,
@@ -689,13 +687,13 @@ func (r *Router) resolveOwnedRouting(ctx context.Context, orgID string, evt doma
 // team, and letting a failed lookup borrow it would consume the event with no
 // task at all. An archived team is dropped from the set, and a failed read of
 // whether one is archived errors for the same reason.
-func (r *Router) resolveRequestedPartyRouting(ctx context.Context, orgID string, evt domain.Event, entityID string, matchedRules, matchedTriggers []domain.EventHandler, scopeCache teamScopeCache) (eventRouting, bool, error) {
+func (r *Router) resolveRequestedPartyRouting(ctx context.Context, orgID string, evt domain.Event, entityID string, taskMakers []domain.EventHandler, scopeCache teamScopeCache) (eventRouting, bool, error) {
 	reqTeams, scoped, err := r.requestedPartyTeams(ctx, orgID, evt)
 	if err != nil {
 		return eventRouting{}, false, err
 	}
 	if !scoped {
-		return resolvePoolRouting(matchedRules, matchedTriggers), true, nil
+		return resolvePoolRouting(taskMakers), true, nil
 	}
 	reqTeams, err = r.liveTeams(ctx, orgID, reqTeams, scopeCache)
 	if err != nil {
@@ -710,7 +708,7 @@ func (r *Router) resolveRequestedPartyRouting(ctx context.Context, orgID string,
 		visibleTeams:  reqTeams,
 		orderedTeams:  reqTeams,
 		identityTeams: true,
-		taskPriority:  maxRuleDefaultPriority(matchedRules),
+		taskPriority:  maxDefaultPriority(taskMakers),
 	}, true, nil
 }
 
@@ -1075,7 +1073,7 @@ func (g *deferralGate) outcome(ctx context.Context, trigger domain.EventHandler)
 		return triggerFireNow, nil
 	}
 	if g.score != nil {
-		if *g.score >= *trigger.MinAutonomySuitability {
+		if *g.score >= trigger.MinAutonomySuitability {
 			return triggerFireNow, nil
 		}
 		return triggerSkip, nil
@@ -1100,7 +1098,7 @@ func (g *deferralGate) outcome(ctx context.Context, trigger domain.EventHandler)
 // deferredTrigger reports whether trigger waits on the task's score: a
 // min_autonomy_suitability above zero.
 func deferredTrigger(trigger domain.EventHandler) bool {
-	return derefFloatDefault(trigger.MinAutonomySuitability, 0) > 0
+	return trigger.MinAutonomySuitability > 0
 }
 
 // orgHasNoBackgroundModel reports whether the org's background jobs have no

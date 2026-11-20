@@ -8,7 +8,7 @@ import (
 // TestShippedPromptsParse ensures every shipped prompt has a unique,
 // non-empty system_slug, a name, a body, and the system source — and
 // leaves ID empty (the seeder mints a random UUID per team copy).
-// Drift here means the seeder or a trigger's prompt-slug reference dangles.
+// Drift here means the seeder or a shipped handler's slug reference dangles.
 func TestShippedPromptsParse(t *testing.T) {
 	seen := map[string]bool{}
 	for _, p := range Prompts() {
@@ -32,12 +32,12 @@ func TestShippedPromptsParse(t *testing.T) {
 }
 
 // TestShippedPromptSlugsStable guards the cross-file invariant that every
-// prompt slug referenced by a shipped trigger in db.ShippedEventHandlers
+// prompt slug referenced by a shipped handler in db.ShippedEventHandlers
 // resolves to a shipped prompt here. A typo or a renamed prompt would
 // otherwise only surface as an FK failure at seed time on a fresh install.
 //
 // We can't import internal/db (would be a cycle: db tests import this
-// package), so the trigger-side assertion lives in internal/db; here we
+// package), so the handler-side assertion lives in internal/db; here we
 // just pin the prompt slugs so a rename is a visible, reviewed diff.
 func TestShippedPromptSlugsStable(t *testing.T) {
 	want := map[string]bool{

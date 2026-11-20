@@ -56,9 +56,8 @@ func eventRowsOf(t *testing.T, stores db.Stores, orgID, admin, eventType string,
 	return out
 }
 
-// TestMulti_EventRaise runs against Postgres. A team rule tells its team's
-// members; a personal rule tells its creator, unless the creator has left the
-// rule's team or a matched team rule's team already reaches them. A condition
+// TestMulti_EventRaise runs against Postgres. Each matched rule tells its
+// team's members, and a team with no members is told nothing. A condition
 // coalesces quietly, a notice resurfaces, and the close phase's resolve
 // reaches every audience of the key.
 func TestMulti_EventRaise(t *testing.T) {
@@ -66,13 +65,12 @@ func TestMulti_EventRaise(t *testing.T) {
 	h.Reset(t)
 	ctx := context.Background()
 	orgID, owner, _ := pgtest.SeedOrgWithUser(t, h, "notify-event")
-	infra, web := pgtest.SeedTeam(t, h, orgID, "infra"), pgtest.SeedTeam(t, h, orgID, "web")
-	alice, bob, carol, dave := pgtest.SeedUser(t, h, "alice"), pgtest.SeedUser(t, h, "bob"), pgtest.SeedUser(t, h, "carol"), pgtest.SeedUser(t, h, "dave")
+	infra, web, empty := pgtest.SeedTeam(t, h, orgID, "infra"), pgtest.SeedTeam(t, h, orgID, "web"), pgtest.SeedTeam(t, h, orgID, "empty")
+	alice, bob, carol := pgtest.SeedUser(t, h, "alice"), pgtest.SeedUser(t, h, "bob"), pgtest.SeedUser(t, h, "carol")
 	pgtest.AddOrgMember(t, h, alice, orgID, infra, "member", "admin")
 	pgtest.AddOrgMember(t, h, bob, orgID, infra, "member", "member")
 	pgtest.MustExec(t, h.AdminDB, `INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'member')`, bob, web)
 	pgtest.AddOrgMember(t, h, carol, orgID, web, "member", "member")
-	pgtest.AddOrgMember(t, h, dave, orgID, web, "member", "member")
 
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	entity, _, err := stores.Entities.FindOrCreateSystem(ctx, orgID, domain.ProviderGitHub, "https://github.com", "acme/widgets#18", "", "pr",
@@ -84,26 +82,22 @@ func TestMulti_EventRaise(t *testing.T) {
 	install(t, Backend{Tx: stores.Tx, Notifications: stores.Notifications, Orgs: stores.Orgs, Hub: hub, Events: testEvent})
 
 	rules := []EventRule{
-		{HandlerID: "h-infra", TeamID: infra, Name: "Infra CI", Audience: domain.NotifyAudienceTeam},
-		// bob is on Infra, whose team row reaches him.
-		{HandlerID: "h-bob", TeamID: web, Name: "Bob's", Audience: domain.NotifyAudienceCreator, CreatorUserID: bob},
-		// carol's rule is on Infra, a team she is not on.
-		{HandlerID: "h-carol", TeamID: infra, Name: "Carol's", Audience: domain.NotifyAudienceCreator, CreatorUserID: carol},
-		{HandlerID: "h-dave", TeamID: web, Name: "Dave's", Audience: domain.NotifyAudienceCreator, CreatorUserID: dave},
-		{HandlerID: "h-dave-2", TeamID: web, Name: "Dave's second", Audience: domain.NotifyAudienceCreator, CreatorUserID: dave},
+		{HandlerID: "h-infra", TeamID: infra, Name: "Infra CI"},
+		{HandlerID: "h-web", TeamID: web, Name: "Web CI"},
+		{HandlerID: "h-empty", TeamID: empty, Name: "Nobody's"},
 	}
 	failed := EventRaise{EventID: "e1", EventType: domain.EventGitHubPRCICheckFailed, Source: "github", Entity: *entity, Condition: true, Rules: rules}
 	testEvent.Raise(ctx, orgID, failed)
 
-	got := eventRowsOf(t, stores, orgID, owner, domain.EventGitHubPRCICheckFailed, alice, bob, carol, dave)
+	got := eventRowsOf(t, stores, orgID, owner, domain.EventGitHubPRCICheckFailed)
 	byAudience := map[Recipient]domain.Notification{}
 	for _, n := range got {
 		byAudience[n.Audience] = n
 	}
 	infraRow := Recipient{Scope: domain.NotificationScopeTeam, Role: Members, TeamID: infra}
-	daveRow := Recipient{Scope: domain.NotificationScopeUser, UserID: dave}
-	if len(got) != 2 || byAudience[infraRow].Body != "Infra CI" || byAudience[daveRow].Body != "Dave's" {
-		t.Fatalf("rows = %+v; want Infra's members (its rule) and dave (his first rule), and no one else", got)
+	webRow := Recipient{Scope: domain.NotificationScopeTeam, Role: Members, TeamID: web}
+	if len(got) != 2 || byAudience[infraRow].Body != "Infra CI" || byAudience[webRow].Body != "Web CI" {
+		t.Fatalf("rows = %+v; want Infra's members and Web's, each naming its own rule, and no row for the empty team", got)
 	}
 	for _, n := range got {
 		if n.Lifecycle != domain.NotificationCondition || n.Priority != High || !n.Dismissible || n.EntityID != entity.ID ||
@@ -111,13 +105,13 @@ func TestMulti_EventRaise(t *testing.T) {
 			t.Errorf("row %+v; want a dismissible high condition about the entity, keyed by it", n)
 		}
 	}
-	if pings, want := hub.take(t), sorted(alice, bob, dave); !slices.Equal(pings, want) {
+	if pings, want := hub.take(t), sorted(alice, bob, carol); !slices.Equal(pings, want) {
 		t.Errorf("open pinged %v; want %v", pings, want)
 	}
 
 	testEvent.Raise(ctx, orgID, failed)
-	for _, n := range eventRowsOf(t, stores, orgID, owner, domain.EventGitHubPRCICheckFailed, alice, bob, carol, dave) {
-		if n.SeenCount != 2 || !n.EscalatedAt.Equal(n.FirstSeenAt) {
+	for _, n := range eventRowsOf(t, stores, orgID, owner, domain.EventGitHubPRCICheckFailed) {
+		if n.SeenCount != 2 || n.EscalatedSeenCount != 1 {
 			t.Errorf("a recurring condition = %+v; want it bumped and not resurfaced", n)
 		}
 	}
@@ -125,16 +119,16 @@ func TestMulti_EventRaise(t *testing.T) {
 		t.Errorf("a quiet bump pinged %v", pings)
 	}
 
-	commented := EventRaise{EventID: "e2", EventType: domain.EventGitHubPRReviewCommented, Source: "github", Entity: *entity, Rules: rules[3:4]}
+	commented := EventRaise{EventID: "e2", EventType: domain.EventGitHubPRReviewCommented, Source: "github", Entity: *entity, Rules: rules[1:2]}
 	testEvent.Raise(ctx, orgID, commented)
 	testEvent.Raise(ctx, orgID, commented)
-	notices := eventRowsOf(t, stores, orgID, owner, domain.EventGitHubPRReviewCommented, dave)
+	notices := eventRowsOf(t, stores, orgID, owner, domain.EventGitHubPRReviewCommented)
 	if len(notices) != 1 || notices[0].Lifecycle != domain.NotificationNotice || notices[0].ExpiresAt == nil ||
-		notices[0].SeenCount != 2 || !notices[0].EscalatedAt.After(notices[0].FirstSeenAt) {
+		notices[0].SeenCount != 2 || notices[0].EscalatedSeenCount != 2 {
 		t.Fatalf("notice rows = %+v; want one notice, resurfaced by its second event", notices)
 	}
-	if pings := hub.take(t); !slices.Equal(pings, []string{dave, dave}) {
-		t.Errorf("a notice and its resurfacing pinged %v; want dave twice", pings)
+	if pings, want := hub.take(t), sorted(bob, carol, bob, carol); !slices.Equal(pings, want) {
+		t.Errorf("a notice and its resurfacing pinged %v; want %v", pings, want)
 	}
 
 	targets, err := OpenEventConditions(ctx, orgID, entity.ID, []string{domain.EventGitHubPRCICheckFailed, domain.EventGitHubPRReviewCommented})
@@ -142,20 +136,44 @@ func TestMulti_EventRaise(t *testing.T) {
 		t.Fatalf("OpenEventConditions = %+v, %v; want only the CI condition", targets, err)
 	}
 	ResolveEvents(ctx, orgID, entity.ID, domain.EventGitHubPRCICheckPassed, targets)
-	for _, n := range eventRowsOf(t, stores, orgID, owner, domain.EventGitHubPRCICheckFailed, alice, bob, carol, dave) {
+	for _, n := range eventRowsOf(t, stores, orgID, owner, domain.EventGitHubPRCICheckFailed) {
 		if n.ResolvedAt == nil || n.ResolvedReason != domain.NotificationResolvedCleared ||
 			n.Resolution != "acme/widgets#18 cleared by "+domain.EventGitHubPRCICheckPassed {
 			t.Errorf("after ResolveEvents = %+v; want every audience's row cleared, naming the event that did", n)
 		}
 	}
-	if pings, want := hub.take(t), sorted(alice, bob, dave); !slices.Equal(pings, want) {
+	if pings, want := hub.take(t), sorted(alice, bob, carol); !slices.Equal(pings, want) {
 		t.Errorf("the resolve pinged %v; want %v", pings, want)
 	}
+}
 
-	// A raise whose rules reach nobody writes nothing.
-	testEvent.Raise(ctx, orgID, EventRaise{EventType: domain.EventGitHubPRConflicts, Source: "github", Entity: *entity, Rules: rules[2:3]})
-	if got := eventRowsOf(t, stores, orgID, owner, domain.EventGitHubPRConflicts, carol); len(got) != 0 {
-		t.Errorf("rows for a rule whose creator left its team = %+v; want none", got)
+// Two matched rules of one team write one row for the team's members, named
+// by the first.
+func TestMulti_EventRaise_TwoRulesOfOneTeamWriteOneRow(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	ctx := context.Background()
+	orgID, owner, _ := pgtest.SeedOrgWithUser(t, h, "notify-event-one-team")
+	infra := pgtest.SeedTeam(t, h, orgID, "infra")
+	alice := pgtest.SeedUser(t, h, "alice")
+	pgtest.AddOrgMember(t, h, alice, orgID, infra, "member", "member")
+
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	entity, _, err := stores.Entities.FindOrCreateSystem(ctx, orgID, domain.ProviderGitHub, "https://github.com", "acme/widgets#18", "", "pr",
+		"Retry the webhook", "https://github.com/acme/widgets/pull/18")
+	if err != nil {
+		t.Fatalf("create entity: %v", err)
+	}
+	install(t, Backend{Tx: stores.Tx, Notifications: stores.Notifications, Orgs: stores.Orgs, Hub: &hubRecorder{}, Events: testEvent})
+
+	testEvent.Raise(ctx, orgID, EventRaise{EventID: "e1", EventType: domain.EventGitHubPRCICheckFailed, Source: "github", Entity: *entity, Condition: true,
+		Rules: []EventRule{
+			{HandlerID: "h-first", TeamID: infra, Name: "First"},
+			{HandlerID: "h-second", TeamID: infra, Name: "Second"},
+		}})
+	got := eventRowsOf(t, stores, orgID, owner, domain.EventGitHubPRCICheckFailed)
+	if len(got) != 1 || got[0].Audience != (Recipient{Scope: domain.NotificationScopeTeam, Role: Members, TeamID: infra}) || got[0].Body != "First" {
+		t.Fatalf("rows = %+v; want one row for Infra's members, named by the first rule", got)
 	}
 }
 
@@ -175,13 +193,13 @@ func TestLocal_EventRaise(t *testing.T) {
 	}
 	testEvent.Raise(ctx, org, EventRaise{EventType: domain.EventGitHubPRReviewRequested, Source: "github", DedupKey: "user:1", Entity: *entity, Condition: true,
 		Rules: []EventRule{
-			{HandlerID: "h1", TeamID: team, Name: "Mine", Audience: domain.NotifyAudienceCreator, CreatorUserID: user},
-			{HandlerID: "h2", TeamID: team, Name: "The team's", Audience: domain.NotifyAudienceTeam},
+			{HandlerID: "h1", TeamID: team, Name: "First"},
+			{HandlerID: "h2", TeamID: team, Name: "Second"},
 		}})
 	got := eventRowsOf(t, stores, org, user, domain.EventGitHubPRReviewRequested)
 	if len(got) != 1 || got[0].Audience != (Recipient{Scope: domain.NotificationScopeUser, UserID: user}) ||
-		got[0].Body != "The team's" || got[0].Key != EventKey(entity.ID, "user:1") {
-		t.Fatalf("rows = %+v; want one row for the local user, keyed by the dedup key", got)
+		got[0].Body != "First" || got[0].Key != EventKey(entity.ID, "user:1") {
+		t.Fatalf("rows = %+v; want one row for the local user, named by the first rule and keyed by the dedup key", got)
 	}
 	if pings := hub.take(t); !slices.Equal(pings, []string{user}) {
 		t.Errorf("pinged %v; want the local user", pings)
@@ -194,6 +212,42 @@ func TestLocal_EventRaise(t *testing.T) {
 	got = eventRowsOf(t, stores, org, user, domain.EventGitHubPRReviewRequested)
 	if len(got) != 1 || got[0].Resolution != "acme/widgets#18 cleared by "+domain.EventGitHubPRReviewApproved {
 		t.Errorf("rows after ResolveEvents = %+v; want the row saying which event resolved it", got)
+	}
+}
+
+// A stored row's params may carry team_rule, which EventParams does not have:
+// its resolution still decodes them and describes it.
+func TestLocal_EventRowWithTeamRuleParamsResolves(t *testing.T) {
+	stores, hub, conn := localBackend(t)
+	ctx := context.Background()
+	org, user, team := runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID
+	if _, err := conn.Exec(`INSERT INTO org_event_sources (org_id, kind, base_url) VALUES (?, 'github', 'https://github.com')`, org); err != nil {
+		t.Fatalf("seed github host: %v", err)
+	}
+	entity, _, err := stores.Entities.FindOrCreateSystem(ctx, org, domain.ProviderGitHub, "https://github.com", "acme/widgets#22", "", "pr",
+		"Retry the webhook", "https://github.com/acme/widgets/pull/22")
+	if err != nil {
+		t.Fatalf("create entity: %v", err)
+	}
+	testEvent.Raise(ctx, org, EventRaise{EventType: domain.EventGitHubPRCICheckFailed, Source: "github", Entity: *entity, Condition: true,
+		Rules: []EventRule{{HandlerID: "h1", TeamID: team, Name: "Mine"}}})
+	hub.take(t)
+	if _, err := conn.Exec(`UPDATE notifications SET params = json_set(params, '$.team_rule', json('false')) WHERE entity_id = ?`, entity.ID); err != nil {
+		t.Fatalf("write team_rule into the row's params: %v", err)
+	}
+
+	targets, err := OpenEventConditions(ctx, org, entity.ID, []string{domain.EventGitHubPRCICheckFailed})
+	if err != nil || len(targets) != 1 {
+		t.Fatalf("OpenEventConditions = %+v, %v; want the CI condition", targets, err)
+	}
+	failures := failureCounter(t)
+	ResolveEvents(ctx, org, entity.ID, domain.EventGitHubPRCICheckPassed, targets)
+	got := eventRowsOf(t, stores, org, user, domain.EventGitHubPRCICheckFailed)
+	if len(got) != 1 || got[0].ResolvedAt == nil || got[0].Resolution != "acme/widgets#22 cleared by "+domain.EventGitHubPRCICheckPassed {
+		t.Errorf("rows after ResolveEvents = %+v; want the row resolved and described", got)
+	}
+	if got := failures()[eventLabel]; got != 0 {
+		t.Errorf("event failures = %d; want none", got)
 	}
 }
 
@@ -214,17 +268,17 @@ func TestLocal_EventRowOutlivesItsLinkAndItsEntity(t *testing.T) {
 	}
 	linked := Event(EventSpec{Render: func(p EventParams, _ Recipient) Content {
 		return Content{Title: p.EntityKey, Body: p.RuleName, Actions: []Action{
-			Link("Open", External(p.EntityURL)), Link("Edit your rule", Routes.NotifyRule(p.HandlerID))}}
+			Link("Open", External(p.EntityURL)), Link("Open the event handler", Routes.EventHandler(p.HandlerID))}}
 	}, Resolved: testEventResolved})
 	linked.Raise(ctx, org, EventRaise{EventType: domain.EventGitHubPRCICheckFailed, Source: "github", Entity: *entity, Condition: true,
-		Rules: []EventRule{{HandlerID: "h1", TeamID: team, Name: "Mine", Audience: domain.NotifyAudienceCreator, CreatorUserID: user}}})
+		Rules: []EventRule{{HandlerID: "h1", TeamID: team, Name: "Mine"}}})
 	got := eventRowsOf(t, stores, org, user, domain.EventGitHubPRCICheckFailed)
 	if len(got) != 1 {
 		t.Fatalf("rows = %+v; want the row, without the link its entity cannot give", got)
 	}
 	actions, err := decodeActions(got[0].Actions)
-	if err != nil || len(actions) != 1 || actions[0].Label != "Edit your rule" {
-		t.Errorf("actions = %+v, %v; want only the rule link", actions, err)
+	if err != nil || len(actions) != 1 || actions[0].Label != "Open the event handler" {
+		t.Errorf("actions = %+v, %v; want only the handler link", actions, err)
 	}
 	hub.take(t)
 
@@ -267,10 +321,10 @@ func TestLocal_EventRaiseFailsOnUnreadableSettings(t *testing.T) {
 	}
 	linked := Event(EventSpec{Render: func(p EventParams, _ Recipient) Content {
 		return Content{Title: p.EntityKey, Body: p.RuleName, Actions: []Action{
-			Link("Open", External(p.EntityURL)), Link("Edit your rule", Routes.NotifyRule(p.HandlerID))}}
+			Link("Open", External(p.EntityURL)), Link("Open the event handler", Routes.EventHandler(p.HandlerID))}}
 	}, Resolved: testEventResolved})
 	linked.Raise(ctx, org, EventRaise{EventType: domain.EventGitHubPRCICheckFailed, Source: "github", Entity: *entity, Condition: true,
-		Rules: []EventRule{{HandlerID: "h1", TeamID: team, Name: "Mine", Audience: domain.NotifyAudienceCreator, CreatorUserID: user}}})
+		Rules: []EventRule{{HandlerID: "h1", TeamID: team, Name: "Mine"}}})
 	if got := eventRowsOf(t, stores, org, user, domain.EventGitHubPRCICheckFailed); len(got) != 0 {
 		t.Errorf("rows = %+v; want none while the host check cannot run", got)
 	}
@@ -294,7 +348,7 @@ func TestRunClosedEntitySweep_ResolvesOnStart(t *testing.T) {
 		t.Fatalf("create entity: %v", err)
 	}
 	testEvent.Raise(ctx, org, EventRaise{EventType: domain.EventGitHubPRCICheckFailed, Source: "github", Entity: *entity, Condition: true,
-		Rules: []EventRule{{HandlerID: "h1", TeamID: team, Name: "Mine", Audience: domain.NotifyAudienceCreator, CreatorUserID: user}}})
+		Rules: []EventRule{{HandlerID: "h1", TeamID: team, Name: "Mine"}}})
 	if got := eventRowsOf(t, stores, org, user, domain.EventGitHubPRCICheckFailed); len(got) != 1 {
 		t.Fatalf("rows = %+v; want the condition", got)
 	}

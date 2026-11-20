@@ -13,11 +13,11 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// createRepoRule creates a github:pr:opened rule scoped by repo_in and returns
+// createRepoRule creates a github:pr:opened handler scoped by repo_in and returns
 // the response.
 func createRepoRule(t *testing.T, s *Server, repoIn ...string) (int, map[string]any) {
 	t.Helper()
-	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/rules", map[string]any{
+	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers", map[string]any{
 		"event_type":      "github:pr:opened",
 		"name":            "scoped",
 		"scope_predicate": map[string]any{"repo_in": repoIn},
@@ -82,7 +82,7 @@ func TestEventHandlerRepoIn_CreateRefusesWhatTheTeamDoesNotTrack(t *testing.T) {
 	apiID := seedConfiguredRepo(t, s, "acme", "api")
 	otherID := seedUntrackedRepo(t, s, "acme", "other")
 	const unknownID = "00000000-0000-0000-0000-0000000000ff"
-	before := len(listEventHandlers(t, s, "rule"))
+	before := len(listEventHandlers(t, s))
 
 	code, got := createRepoRule(t, s, apiID, otherID, "acme/api", unknownID)
 	messages := repoInFaultMessages(t, code, got)
@@ -94,26 +94,8 @@ func TestEventHandlerRepoIn_CreateRefusesWhatTheTeamDoesNotTrack(t *testing.T) {
 			t.Errorf("fault %d = %q, want it to name %q", i, messages[i], want)
 		}
 	}
-	if after := len(listEventHandlers(t, s, "rule")); after != before {
-		t.Errorf("a refused create changed the rule count from %d to %d", before, after)
-	}
-}
-
-func TestEventHandlerRepoIn_CreateTriggerRefusesUntrackedRepos(t *testing.T) {
-	s := newTestServer(t)
-	configureEventSources(t, s)
-	seedBlueprintForTrigger(t, s, "p-repo-in")
-	otherID := seedUntrackedRepo(t, s, "acme", "other")
-
-	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/triggers", map[string]any{
-		"event_type":      "github:pr:opened",
-		"blueprint_id":    "p-repo-in",
-		"scope_predicate": map[string]any{"repo_in": []string{otherID}},
-	})
-	var got map[string]any
-	_ = json.Unmarshal(rec.Body.Bytes(), &got)
-	if messages := repoInFaultMessages(t, rec.Code, got); len(messages) != 1 {
-		t.Errorf("faults = %q, want one", messages)
+	if after := len(listEventHandlers(t, s)); after != before {
+		t.Errorf("a refused create changed the handler count from %d to %d", before, after)
 	}
 }
 
@@ -126,7 +108,7 @@ func TestEventHandlerRepoIn_PatchChecksOnlyAddedRepos(t *testing.T) {
 	webID := seedConfiguredRepo(t, s, "acme", "web")
 	code, created := createRepoRule(t, s, apiID)
 	if code != http.StatusCreated {
-		t.Fatalf("seed rule: %d: %v", code, created)
+		t.Fatalf("seed handler: %d: %v", code, created)
 	}
 	id := created["id"].(string)
 	untrackAllBut(t, s, domain.TeamGitHubRepo{Owner: "acme", Repo: "web"})
@@ -158,24 +140,6 @@ func TestEventHandlerRepoIn_PatchChecksOnlyAddedRepos(t *testing.T) {
 	}
 }
 
-func TestEventHandlerRepoIn_PromoteRefusesUntrackedRepos(t *testing.T) {
-	s := newTestServer(t)
-	configureEventSources(t, s)
-	seedBlueprintForTrigger(t, s, "p-promote-repo-in")
-	id := createUserRule(t, s)
-	otherID := seedUntrackedRepo(t, s, "acme", "other")
-
-	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/"+id+"/promote", map[string]any{
-		"blueprint_id":    "p-promote-repo-in",
-		"scope_predicate": map[string]any{"repo_in": []string{otherID}},
-	})
-	var got map[string]any
-	_ = json.Unmarshal(rec.Body.Bytes(), &got)
-	if messages := repoInFaultMessages(t, rec.Code, got); len(messages) != 1 {
-		t.Errorf("faults = %q, want one", messages)
-	}
-}
-
 // The predicate schema has no single-valued repo key, so a caller sending one
 // is told so rather than having it dropped.
 func TestEventHandlerRepoIn_RefusesRepoKey(t *testing.T) {
@@ -183,7 +147,7 @@ func TestEventHandlerRepoIn_RefusesRepoKey(t *testing.T) {
 	configureEventSources(t, s)
 	seedConfiguredRepo(t, s, "acme", "api")
 
-	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/rules", map[string]any{
+	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers", map[string]any{
 		"event_type":      "github:pr:opened",
 		"name":            "old shape",
 		"scope_predicate": map[string]any{"repo": "acme/api"},

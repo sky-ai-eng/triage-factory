@@ -80,6 +80,14 @@ type ClaimPredicateHarness struct {
 	// timestamps stop resolving, rather than only for what it does when they
 	// happen to.
 	CollapseClaimTimestamps func(t *testing.T, convID string)
+
+	// Age moves the stamps the retry budget orders a conversation's claims
+	// by d earlier: its queued_at, and its claims' claimed_at and
+	// released_at. Leases and waits stay, since they are deadlines rather
+	// than an order between writes. A subtest that counts a hand-back
+	// released after the claim that started its episode ages the claim
+	// first, so the count does not depend on the clock's resolution.
+	Age func(t *testing.T, convID string, d time.Duration)
 }
 
 // ClaimPredicateFactory builds a fresh harness per subtest.
@@ -131,7 +139,6 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 	}
 	mustClaim := func(t *testing.T, h ClaimPredicateHarness, convID string) *domain.Conversation {
 		t.Helper()
-		awaitClockTick()
 		got := claim(t, h)
 		if got == nil || got.ID != convID {
 			t.Fatalf("ClaimNextConversation = %+v, want conversation %s", got, convID)
@@ -157,7 +164,10 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 	// SetStoredStatus, so release itself does not need to agree with it.
 	release := func(t *testing.T, h ClaimPredicateHarness, orgID, convID, outcome string) {
 		t.Helper()
-		awaitClockTick()
+		// A claim that takes a row off its park starts the episode at its
+		// own instant, and the budget counts a hand-back released strictly
+		// after it, so the release has to come later on the clock too.
+		h.Age(t, convID, time.Second)
 		var err error
 		switch outcome {
 		case "requeued":

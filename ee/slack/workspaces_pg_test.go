@@ -15,21 +15,25 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
 
+	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
+	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/ttlcache"
 )
 
-// ---------- fake Slack API (auth.test + bots.info + apps.connections.open) ----------
+// ---------- fake Slack API (auth.test, bots.info, apps.connections.open, OAuth, and the channel calls) ----------
 
 type fakeSlackServer struct {
 	srv *httptest.Server
@@ -41,6 +45,37 @@ type fakeSlackServer struct {
 	authTestHits int
 	botsInfoHits int
 	openConnHits int
+
+	// oauthAccess answers oauth.v2.access by the code it is sent; an unstaged
+	// code answers invalid_code. oauthRequests records each exchange.
+	oauthAccess   map[string]map[string]any
+	oauthRequests []oauthAccessRequest
+	revokeHits    int
+
+	// scopes overrides, by bot token, the X-OAuth-Scopes auth.test answers
+	// with, which is otherwise every scope in slackBotScopes. authStatus
+	// answers auth.test for a bot token with that HTTP status and no body.
+	scopes     map[string]string
+	authStatus map[string]int
+
+	// public and memberOf answer conversations.list and users.conversations
+	// by bot token; truncate makes conversations.list claim another page for
+	// a token. listHits counts conversations.list calls. joins records each
+	// conversations.join as "<bot token> <channel>", and joinFail fails one
+	// for a channel with its error code.
+	public   map[string][]map[string]any
+	memberOf map[string][]map[string]any
+	truncate map[string]bool
+	listHits int
+	joins    []string
+	joinFail map[string]string
+}
+
+// oauthAccessRequest is one oauth.v2.access call as the fake received it.
+type oauthAccessRequest struct {
+	ClientID, ClientSecret string
+	BasicAuth              bool
+	Form                   url.Values
 }
 
 func newFakeSlackServer(t *testing.T) *fakeSlackServer {
@@ -49,17 +84,68 @@ func newFakeSlackServer(t *testing.T) *fakeSlackServer {
 		authTest: map[string]map[string]any{},
 		botsInfo: map[string]map[string]any{},
 		openConn: map[string]map[string]any{},
+
+		oauthAccess: map[string]map[string]any{},
+
+		scopes:     map[string]string{},
+		authStatus: map[string]int{},
+		public:     map[string][]map[string]any{},
+		memberOf:   map[string][]map[string]any{},
+		truncate:   map[string]bool{},
+		joinFail:   map[string]string{},
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/auth.test", func(w http.ResponseWriter, r *http.Request) {
+		token := bearerToken(r)
 		f.mu.Lock()
 		f.authTestHits++
-		resp, ok := f.authTest[bearerToken(r)]
+		resp, ok := f.authTest[token]
+		scopes, scoped := f.scopes[token]
+		status := f.authStatus[token]
 		f.mu.Unlock()
+		if status != 0 {
+			w.WriteHeader(status)
+			return
+		}
 		if !ok {
 			resp = map[string]any{"ok": false, "error": "invalid_auth"}
 		}
+		if !scoped {
+			scopes = strings.Join(slackBotScopes, ",")
+		}
+		w.Header().Set("X-OAuth-Scopes", scopes)
 		writeSlackFakeJSON(w, resp)
+	})
+	mux.HandleFunc("/conversations.list", func(w http.ResponseWriter, r *http.Request) {
+		token := bearerToken(r)
+		f.mu.Lock()
+		f.listHits++
+		chans := f.public[token]
+		next := ""
+		if f.truncate[token] {
+			next = "more"
+		}
+		f.mu.Unlock()
+		writeSlackFakeJSON(w, map[string]any{"ok": true, "channels": chans, "response_metadata": map[string]any{"next_cursor": next}})
+	})
+	mux.HandleFunc("/users.conversations", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		chans := f.memberOf[bearerToken(r)]
+		f.mu.Unlock()
+		writeSlackFakeJSON(w, map[string]any{"ok": true, "channels": chans, "response_metadata": map[string]any{"next_cursor": ""}})
+	})
+	mux.HandleFunc("/conversations.join", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		channel := r.FormValue("channel")
+		f.mu.Lock()
+		f.joins = append(f.joins, bearerToken(r)+" "+channel)
+		code := f.joinFail[channel]
+		f.mu.Unlock()
+		if code != "" {
+			writeSlackFakeJSON(w, map[string]any{"ok": false, "error": code})
+			return
+		}
+		writeSlackFakeJSON(w, map[string]any{"ok": true})
 	})
 	mux.HandleFunc("/bots.info", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
@@ -80,6 +166,27 @@ func newFakeSlackServer(t *testing.T) *fakeSlackServer {
 			resp = map[string]any{"ok": true, "url": "wss://fake.slack.example/link/1"}
 		}
 		writeSlackFakeJSON(w, resp)
+	})
+	mux.HandleFunc("/oauth.v2.access", func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		id, secret, basic := r.BasicAuth()
+		f.mu.Lock()
+		f.oauthRequests = append(f.oauthRequests, oauthAccessRequest{ClientID: id, ClientSecret: secret, BasicAuth: basic, Form: r.PostForm})
+		resp, ok := f.oauthAccess[r.PostForm.Get("code")]
+		f.mu.Unlock()
+		if !ok {
+			resp = map[string]any{"ok": false, "error": "invalid_code"}
+		}
+		writeSlackFakeJSON(w, resp)
+	})
+	mux.HandleFunc("/auth.revoke", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		f.revokeHits++
+		f.mu.Unlock()
+		writeSlackFakeJSON(w, map[string]any{"ok": true, "revoked": true})
 	})
 	f.srv = httptest.NewServer(mux)
 	t.Cleanup(f.srv.Close)
@@ -128,6 +235,14 @@ func (f *fakeSlackServer) stageBotsInfoOK(botID, appID string) {
 	f.botsInfo[botID] = map[string]any{"ok": true, "bot": map[string]any{"id": botID, "app_id": appID}}
 }
 
+// stageBotName names the bot behind token in its bots.info response, which
+// must already be staged (stageConnectOK).
+func (f *fakeSlackServer) stageBotName(token, name string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.botsInfo[botIDForToken(token)]["bot"].(map[string]any)["name"] = name
+}
+
 // stageBotsInfoFail stages a failing bots.info response for botID.
 func (f *fakeSlackServer) stageBotsInfoFail(botID, reason string) {
 	f.mu.Lock()
@@ -141,6 +256,72 @@ func (f *fakeSlackServer) stageBotsInfoFail(botID, reason string) {
 func (f *fakeSlackServer) stageConnectOK(token, teamID, teamName, botUserID, appID, enterpriseID string) {
 	f.stageAuthTestOK(token, teamID, teamName, botUserID, enterpriseID)
 	f.stageBotsInfoOK(botIDForToken(token), appID)
+}
+
+// stageChannels sets what conversations.list (public) and users.conversations
+// (memberOf) answer for botToken.
+func (f *fakeSlackServer) stageChannels(botToken string, public, memberOf []map[string]any) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.public[botToken] = public
+	f.memberOf[botToken] = memberOf
+}
+
+// stageScopes sets the X-OAuth-Scopes auth.test answers for botToken.
+func (f *fakeSlackServer) stageScopes(botToken, scopes string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.scopes[botToken] = scopes
+}
+
+// stageAuthTestRejected makes auth.test refuse botToken (invalid_auth).
+func (f *fakeSlackServer) stageAuthTestRejected(botToken string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.authTest, botToken)
+	delete(f.scopes, botToken)
+}
+
+// stageAuthTestStatus makes auth.test answer botToken with status and no body.
+func (f *fakeSlackServer) stageAuthTestStatus(botToken string, status int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.authStatus[botToken] = status
+}
+
+// stageTruncated makes conversations.list claim another page for botToken.
+func (f *fakeSlackServer) stageTruncated(botToken string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.truncate[botToken] = true
+}
+
+// stageJoinFail fails conversations.join for channel with code.
+func (f *fakeSlackServer) stageJoinFail(channel, code string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.joinFail[channel] = code
+}
+
+// openConnCalls is how many apps.connections.open calls the fake has answered.
+func (f *fakeSlackServer) openConnCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.openConnHits
+}
+
+// listCalls is how many conversations.list calls the fake has answered.
+func (f *fakeSlackServer) listCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.listHits
+}
+
+// joined returns each conversations.join call, as "<bot token> <channel>".
+func (f *fakeSlackServer) joined() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.joins...)
 }
 
 // stageOpenConnFail stages a failing apps.connections.open response for token.
@@ -182,14 +363,27 @@ func newSlackWorkspaceRig(t *testing.T, publicURL string) *slackWorkspaceRig {
 		az:        az,
 		client:    slackHTTPClient,
 		publicURL: func() string { return publicURL },
+		stores:    stores,
+		channels: &channelsHandler{
+			tx: stores.Tx, stores: stores, az: az, client: slackHTTPClient,
+			candidates: ttlcache.New[slackCandidateSet](slackCandidatesTTL),
+		},
 	}
 	return &slackWorkspaceRig{t: t, h: h, stores: stores, hdl: hdl, fake: fake}
 }
 
-// req builds a request as callerID with the org + claims context set
-// directly (no cookie-session dance) and, for path-valued routes, the
-// {workspace_id} path value.
+// req builds a request as callerID to a route under orgID's path, with orgID
+// also the credential's active org, and, for path-valued routes, the
+// {workspace_id} path value. The claims and org context are set directly (no
+// cookie-session dance).
 func (r *slackWorkspaceRig) req(method, path, callerID, orgID, workspaceID string, body any) *http.Request {
+	r.t.Helper()
+	return r.reqActive(method, path, callerID, orgID, orgID, workspaceID, body)
+}
+
+// reqActive is req with the credential's active org named apart from the org
+// the path addresses.
+func (r *slackWorkspaceRig) reqActive(method, path, callerID, activeOrgID, pathOrgID, workspaceID string, body any) *http.Request {
 	r.t.Helper()
 	var rdr io.Reader = http.NoBody
 	if body != nil {
@@ -200,26 +394,69 @@ func (r *slackWorkspaceRig) req(method, path, callerID, orgID, workspaceID strin
 		rdr = bytes.NewReader(b)
 	}
 	req := httptest.NewRequest(method, path, rdr)
+	req.SetPathValue("org_id", pathOrgID)
 	if workspaceID != "" {
 		req.SetPathValue("workspace_id", workspaceID)
 	}
 	ctx := httpx.WithClaims(req.Context(), &verify.Claims{Subject: callerID})
-	ctx = httpx.WithOrgID(ctx, orgID)
+	ctx = httpx.WithOrgID(ctx, activeOrgID)
 	return req.WithContext(ctx)
 }
 
-// reqDelete builds a DELETE request for the composite
-// /api/slack/workspaces/{workspace_id}/{api_app_id} route — the row key is
-// no longer workspace_id alone.
+// connectionsPath is the path of orgID's connections collection.
+func connectionsPath(orgID string) string {
+	return "/api/orgs/" + orgID + "/slack/connections"
+}
+
+// importReq is a POST …/connections/import request as callerID with body.
+func (r *slackWorkspaceRig) importReq(callerID, orgID string, body any) *http.Request {
+	r.t.Helper()
+	return r.req(http.MethodPost, connectionsPath(orgID)+"/import", callerID, orgID, "", body)
+}
+
+// listReq is a POST …/connections/list request as callerID with body.
+func (r *slackWorkspaceRig) listReq(callerID, orgID string, body any) *http.Request {
+	r.t.Helper()
+	return r.req(http.MethodPost, connectionsPath(orgID)+"/list", callerID, orgID, "", body)
+}
+
+// manifestReq is a GET …/slack/manifest request as callerID for transport.
+func (r *slackWorkspaceRig) manifestReq(callerID, orgID, transport string) *http.Request {
+	r.t.Helper()
+	return r.req(http.MethodGet, "/api/orgs/"+orgID+"/slack/manifest?transport="+transport, callerID, orgID, "", nil)
+}
+
+// connectionReq is a request as callerID to one connection's route.
+func (r *slackWorkspaceRig) connectionReq(method, callerID, orgID, workspaceID, apiAppID string) *http.Request {
+	r.t.Helper()
+	req := r.req(method, connectionsPath(orgID)+"/"+workspaceID+"/"+apiAppID, callerID, orgID, workspaceID, nil)
+	req.SetPathValue("api_app_id", apiAppID)
+	return req
+}
+
+// reqDelete is a DELETE …/connections/{workspace_id}/{api_app_id} request.
 func (r *slackWorkspaceRig) reqDelete(callerID, orgID, workspaceID, apiAppID string) *http.Request {
 	r.t.Helper()
-	req := httptest.NewRequest(http.MethodDelete,
-		"/api/slack/workspaces/"+workspaceID+"/"+apiAppID, http.NoBody)
-	req.SetPathValue("workspace_id", workspaceID)
-	req.SetPathValue("api_app_id", apiAppID)
-	ctx := httpx.WithClaims(req.Context(), &verify.Claims{Subject: callerID})
-	ctx = httpx.WithOrgID(ctx, orgID)
-	return req.WithContext(ctx)
+	return r.connectionReq(http.MethodDelete, callerID, orgID, workspaceID, apiAppID)
+}
+
+// connectionList is the list route's envelope.
+type connectionList struct {
+	Items         []workspaceView `json:"items"`
+	NextPageToken string          `json:"next_page_token"`
+	TotalCount    *int            `json:"total_count"`
+}
+
+// listConnections reads orgID's first page of connections as callerID,
+// failing the test on anything but a 200.
+func (r *slackWorkspaceRig) listConnections(callerID, orgID string) []workspaceView {
+	r.t.Helper()
+	rec := httptest.NewRecorder()
+	r.hdl.handleList(rec, r.listReq(callerID, orgID, map[string]any{}))
+	if rec.Code != http.StatusOK {
+		r.t.Fatalf("list connections: status = %d (body=%s)", rec.Code, rec.Body.String())
+	}
+	return decodeBody[connectionList](r.t, rec).Items
 }
 
 func (r *slackWorkspaceRig) secretValue(orgID, key string) string {
@@ -233,6 +470,14 @@ func (r *slackWorkspaceRig) secretValue(orgID, key string) string {
 		r.t.Fatalf("read secret %s: %v", key, err)
 	}
 	return v
+}
+
+// derefTransport is v's transport, "" when it has none.
+func derefTransport(v workspaceView) string {
+	if v.Transport == nil {
+		return ""
+	}
+	return *v.Transport
 }
 
 func decodeBody[T any](t *testing.T, rec *httptest.ResponseRecorder) T {
@@ -253,14 +498,14 @@ func TestHandleList_EntitlementGate(t *testing.T) {
 	orgID, owner, _ := pgtest.SeedOrgWithUser(t, r.h, "slack-gate")
 
 	rec := httptest.NewRecorder()
-	r.hdl.handleList(rec, r.req(http.MethodGet, "/api/slack/workspaces", owner, orgID, "", nil))
+	r.hdl.handleList(rec, r.listReq(owner, orgID, map[string]any{}))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("licensed org: status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
 	}
 
 	entitlements.RegisterProvider(entitlements.Static())
 	rec2 := httptest.NewRecorder()
-	r.hdl.handleList(rec2, r.req(http.MethodGet, "/api/slack/workspaces", owner, orgID, "", nil))
+	r.hdl.handleList(rec2, r.listReq(owner, orgID, map[string]any{}))
 	if rec2.Code != http.StatusNotFound {
 		t.Fatalf("unlicensed org: status = %d, want 404", rec2.Code)
 	}
@@ -277,7 +522,7 @@ func TestHandleConnect_NonAdminIsForbidden(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	body := map[string]string{"bot_token": "xoxb-nonadmin", "app_token": "xapp-1"}
-	r.hdl.handleConnect(rec, r.req(http.MethodPost, "/api/slack/workspaces", member, orgID, "", body))
+	r.hdl.handleConnect(rec, r.importReq(member, orgID, body))
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 (non-admin); body=%s", rec.Code, rec.Body.String())
 	}
@@ -299,12 +544,12 @@ func TestHandleConnect_AppTokenOnly_Socket(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	body := map[string]string{"bot_token": "xoxb-socket", "app_token": "xapp-socket-1"}
-	r.hdl.handleConnect(rec, r.req(http.MethodPost, "/api/slack/workspaces", owner, orgID, "", body))
+	r.hdl.handleConnect(rec, r.importReq(owner, orgID, body))
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201 (body=%s)", rec.Code, rec.Body.String())
 	}
 	view := decodeBody[workspaceView](t, rec)
-	if view.WorkspaceID != "T0SOCKET1" || view.Transport != transportSocket || view.BotUserID != "U0BOT1" {
+	if view.WorkspaceID != "T0SOCKET1" || derefTransport(view) != transportSocket || view.BotUserID != "U0BOT1" {
 		t.Errorf("view = %+v; want workspace_id/transport/bot_user_id from auth.test", view)
 	}
 	if view.APIAppID != "A0SOCKET01" {
@@ -334,13 +579,13 @@ func TestHandleConnect_SigningSecretOnly_EventsAPI(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	body := map[string]string{"bot_token": "xoxb-events", "signing_secret": "shh-secret"}
-	r.hdl.handleConnect(rec, r.req(http.MethodPost, "/api/slack/workspaces", owner, orgID, "", body))
+	r.hdl.handleConnect(rec, r.importReq(owner, orgID, body))
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201 (body=%s)", rec.Code, rec.Body.String())
 	}
 	view := decodeBody[workspaceView](t, rec)
-	if view.Transport != transportEventsAPI {
-		t.Errorf("transport = %q; want events_api", view.Transport)
+	if derefTransport(view) != transportEventsAPI {
+		t.Errorf("transport = %q; want events_api", derefTransport(view))
 	}
 	if r.fake.openConnHits != 0 {
 		t.Errorf("apps.connections.open called %d times; want 0 (events_api never validates an app token)", r.fake.openConnHits)
@@ -358,7 +603,7 @@ func TestHandleConnect_BothCredentials_NoExplicitTransport_400(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	body := map[string]string{"bot_token": "xoxb-ambiguous", "signing_secret": "shh", "app_token": "xapp-1"}
-	r.hdl.handleConnect(rec, r.req(http.MethodPost, "/api/slack/workspaces", owner, orgID, "", body))
+	r.hdl.handleConnect(rec, r.importReq(owner, orgID, body))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 (body=%s)", rec.Code, rec.Body.String())
 	}
@@ -371,7 +616,7 @@ func TestHandleConnect_NeitherCredential_400(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	body := map[string]string{"bot_token": "xoxb-neither"}
-	r.hdl.handleConnect(rec, r.req(http.MethodPost, "/api/slack/workspaces", owner, orgID, "", body))
+	r.hdl.handleConnect(rec, r.importReq(owner, orgID, body))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 (body=%s)", rec.Code, rec.Body.String())
 	}
@@ -388,13 +633,13 @@ func TestHandleConnect_BothCredentials_ExplicitChoiceWins(t *testing.T) {
 	body := map[string]string{
 		"bot_token": "xoxb-explicit", "signing_secret": "shh", "app_token": "xapp-1", "transport": "events_api",
 	}
-	r.hdl.handleConnect(rec, r.req(http.MethodPost, "/api/slack/workspaces", owner, orgID, "", body))
+	r.hdl.handleConnect(rec, r.importReq(owner, orgID, body))
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201 (body=%s)", rec.Code, rec.Body.String())
 	}
 	view := decodeBody[workspaceView](t, rec)
-	if view.Transport != transportEventsAPI {
-		t.Errorf("transport = %q; want events_api (the explicit choice)", view.Transport)
+	if derefTransport(view) != transportEventsAPI {
+		t.Errorf("transport = %q; want events_api (the explicit choice)", derefTransport(view))
 	}
 }
 
@@ -407,16 +652,12 @@ func TestHandleConnect_AuthTestFailure_400(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	body := map[string]string{"bot_token": "xoxb-bad", "app_token": "xapp-1"}
-	r.hdl.handleConnect(rec, r.req(http.MethodPost, "/api/slack/workspaces", owner, orgID, "", body))
+	r.hdl.handleConnect(rec, r.importReq(owner, orgID, body))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 (body=%s)", rec.Code, rec.Body.String())
 	}
 
-	var list []map[string]any
-	rec2 := httptest.NewRecorder()
-	r.hdl.handleList(rec2, r.req(http.MethodGet, "/api/slack/workspaces", owner, orgID, "", nil))
-	_ = json.Unmarshal(rec2.Body.Bytes(), &list)
-	if len(list) != 0 {
+	if list := r.listConnections(owner, orgID); len(list) != 0 {
 		t.Errorf("workspaces after a failed auth.test = %v; want none persisted", list)
 	}
 }
@@ -431,7 +672,7 @@ func TestHandleConnect_AppTokenValidationFailure_400(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	body := map[string]string{"bot_token": "xoxb-badapp", "app_token": "xapp-badapp"}
-	r.hdl.handleConnect(rec, r.req(http.MethodPost, "/api/slack/workspaces", owner, orgID, "", body))
+	r.hdl.handleConnect(rec, r.importReq(owner, orgID, body))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 (body=%s)", rec.Code, rec.Body.String())
 	}
@@ -449,17 +690,176 @@ func TestHandleConnect_BotsInfoFailure_400(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	body := map[string]string{"bot_token": "xoxb-badbotsinfo", "app_token": "xapp-1"}
-	r.hdl.handleConnect(rec, r.req(http.MethodPost, "/api/slack/workspaces", owner, orgID, "", body))
+	r.hdl.handleConnect(rec, r.importReq(owner, orgID, body))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 (body=%s)", rec.Code, rec.Body.String())
 	}
 
-	list := httptest.NewRecorder()
-	r.hdl.handleList(list, r.req(http.MethodGet, "/api/slack/workspaces", owner, orgID, "", nil))
-	var got []workspaceView
-	_ = json.Unmarshal(list.Body.Bytes(), &got)
-	if len(got) != 0 {
+	if got := r.listConnections(owner, orgID); len(got) != 0 {
 		t.Errorf("workspaces after a failed bots.info = %v; want none persisted", got)
+	}
+}
+
+// TestHandleConnect_DeploymentAppToken_422: a bot token whose app is the
+// deployment's own Slack app is refused before any write, so a pasted-token
+// connection never holds the deployment app. A token from any other app
+// connects as before with a deployment app configured.
+func TestHandleConnect_DeploymentAppToken_422(t *testing.T) {
+	r := newSlackWorkspaceRig(t, "https://tf.example")
+	r.hdl.deployment = deploymentApp{
+		AppID:         "A0DEPLOYAPP",
+		ClientID:      "1234.5678",
+		ClientSecret:  "client-secret",
+		SigningSecret: "signing-secret",
+		Transport:     transportEventsAPI,
+	}
+	orgID, owner, _ := pgtest.SeedOrgWithUser(t, r.h, "slack-deployapp")
+	r.fake.stageConnectOK("xoxb-deploy", "T0DEPLOYWS", "Acme", "U0BOTDEPLOY", "A0DEPLOYAPP", "")
+	r.fake.stageConnectOK("xoxb-own", "T0DEPLOYWS", "Acme", "U0BOTOWN", "A0OWNAPP01", "")
+
+	rec := httptest.NewRecorder()
+	r.hdl.handleConnect(rec, r.importReq(owner, orgID, map[string]string{"bot_token": "xoxb-deploy", "signing_secret": "shh"}))
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422 (body=%s)", rec.Code, rec.Body.String())
+	}
+	errs := decodeBody[struct {
+		Errors []httpx.ErrorItem `json:"errors"`
+	}](t, rec).Errors
+	want := httpx.ErrorItem{
+		Reason:  httpx.ReasonInvalidField,
+		Message: "This bot token belongs to this deployment's Slack app. Connect it with Add to Slack instead.",
+		Field:   "bot_token",
+	}
+	if len(errs) != 1 || errs[0] != want {
+		t.Fatalf("errors = %+v; want [%+v]", errs, want)
+	}
+
+	if got := r.listConnections(owner, orgID); len(got) != 0 {
+		t.Errorf("workspaces after the refusal = %+v; want none", got)
+	}
+	for _, key := range []string{
+		"slack_ws_T0DEPLOYWS_A0DEPLOYAPP_bot_token",
+		"slack_ws_T0DEPLOYWS_A0DEPLOYAPP_signing_secret",
+	} {
+		if got := r.secretValue(orgID, key); got != "" {
+			t.Errorf("secret %s = %q after the refusal; want none stored", key, got)
+		}
+	}
+	if rows := r.auditRows(orgID); len(rows) != 0 {
+		t.Errorf("audit rows after the refusal = %+v; want none", rows)
+	}
+
+	own := httptest.NewRecorder()
+	r.hdl.handleConnect(own, r.importReq(owner, orgID, map[string]string{"bot_token": "xoxb-own", "signing_secret": "shh"}))
+	if own.Code != http.StatusCreated {
+		t.Fatalf("own app connect status = %d, want 201 (body=%s)", own.Code, own.Body.String())
+	}
+	if view := decodeBody[workspaceView](t, own); view.APIAppID != "A0OWNAPP01" {
+		t.Errorf("api_app_id = %q; want A0OWNAPP01", view.APIAppID)
+	}
+}
+
+// TestHandleConnect_RotatingToken_422: the expiring bot token of an app with
+// token rotation on is refused before any call to Slack, and nothing is
+// stored.
+func TestHandleConnect_RotatingToken_422(t *testing.T) {
+	r := newSlackWorkspaceRig(t, "https://tf.example")
+	orgID, owner, _ := pgtest.SeedOrgWithUser(t, r.h, "slack-rotating")
+	const token = "xoxe.xoxb-1-rotating"
+	r.fake.stageConnectOK(token, "T0ROTATE1", "Acme", "U0BOTROT", "A0ROTATE01", "")
+
+	rec := httptest.NewRecorder()
+	r.hdl.handleConnect(rec, r.importReq(owner, orgID, map[string]string{"bot_token": token, "signing_secret": "shh"}))
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422 (body=%s)", rec.Code, rec.Body.String())
+	}
+	errs := decodeBody[struct {
+		Errors []httpx.ErrorItem `json:"errors"`
+	}](t, rec).Errors
+	if len(errs) != 1 || errs[0].Reason != httpx.ReasonInvalidField || errs[0].Field != "bot_token" ||
+		!strings.Contains(errs[0].Message, "token rotation") {
+		t.Fatalf("errors = %+v; want one INVALID_FIELD on bot_token naming token rotation", errs)
+	}
+	if r.fake.authTestHits != 0 || r.fake.botsInfoHits != 0 {
+		t.Errorf("auth.test called %d times, bots.info %d; want neither", r.fake.authTestHits, r.fake.botsInfoHits)
+	}
+
+	if got := r.listConnections(owner, orgID); len(got) != 0 {
+		t.Errorf("connections after the refusal = %+v; want none", got)
+	}
+	if got := r.secretValue(orgID, "slack_ws_T0ROTATE1_A0ROTATE01_bot_token"); got != "" {
+		t.Errorf("bot token stored = %q; want none", got)
+	}
+	if rows := r.auditRows(orgID); len(rows) != 0 {
+		t.Errorf("audit rows after the refusal = %+v; want none", rows)
+	}
+}
+
+// TestHandleConnect_TokenShape: a bot token or app-level token of the wrong
+// shape (422), and a missing bot token (400), are refused by field before any
+// call to Slack, every fault in one response. Slack is staged to accept each
+// token, so a refusal can only come from the shape check.
+func TestHandleConnect_TokenShape(t *testing.T) {
+	const (
+		userToken     = "xoxp-1-user"
+		botToken      = "xoxb-1-bot"
+		signingSecret = "8f14e45fceea167a5a36dedd4bea2543"
+		appToken      = "xapp-1-app"
+	)
+	type fault struct{ reason, field, mentions string }
+	botFault := fault{httpx.ReasonInvalidField, "bot_token", "Bot User OAuth Token"}
+	appFault := fault{httpx.ReasonInvalidField, "app_token", "App-Level Tokens"}
+	missingBot := fault{httpx.ReasonMissingField, "bot_token", "bot_token is required"}
+	for _, tc := range []struct {
+		name   string
+		body   map[string]string
+		status int
+		want   []fault
+	}{
+		{"user token as bot token", map[string]string{"bot_token": userToken, "app_token": appToken}, http.StatusUnprocessableEntity, []fault{botFault}},
+		{"signing secret as app token", map[string]string{"bot_token": botToken, "app_token": signingSecret}, http.StatusUnprocessableEntity, []fault{appFault}},
+		{"both wrong", map[string]string{"bot_token": userToken, "app_token": signingSecret}, http.StatusUnprocessableEntity, []fault{botFault, appFault}},
+		{"no bot token", map[string]string{"app_token": appToken}, http.StatusBadRequest, []fault{missingBot}},
+		{"no bot token, wrong app token", map[string]string{"app_token": signingSecret}, http.StatusBadRequest, []fault{missingBot, appFault}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newSlackWorkspaceRig(t, "https://tf.example")
+			orgID, owner, _ := pgtest.SeedOrgWithUser(t, r.h, "slack-token-shape")
+			for _, tok := range []string{userToken, botToken} {
+				r.fake.stageConnectOK(tok, "T0SHAPE01", "Acme", "U0BOTSHAPE", "A0SHAPE001", "")
+			}
+
+			rec := httptest.NewRecorder()
+			r.hdl.handleConnect(rec, r.importReq(owner, orgID, tc.body))
+			if rec.Code != tc.status {
+				t.Fatalf("status = %d, want %d (body=%s)", rec.Code, tc.status, rec.Body.String())
+			}
+			errs := decodeBody[struct {
+				Errors []httpx.ErrorItem `json:"errors"`
+			}](t, rec).Errors
+			if len(errs) != len(tc.want) {
+				t.Fatalf("errors = %+v; want %d", errs, len(tc.want))
+			}
+			for i, want := range tc.want {
+				if errs[i].Reason != want.reason || errs[i].Field != want.field || !strings.Contains(errs[i].Message, want.mentions) {
+					t.Errorf("errors[%d] = %+v; want %s on %s naming %q", i, errs[i], want.reason, want.field, want.mentions)
+				}
+			}
+			for _, err := range errs {
+				for _, tok := range []string{userToken, signingSecret} {
+					if strings.Contains(err.Message, tok) {
+						t.Errorf("message %q echoes a submitted credential", err.Message)
+					}
+				}
+			}
+			if r.fake.authTestHits != 0 || r.fake.botsInfoHits != 0 || r.fake.openConnHits != 0 {
+				t.Errorf("auth.test called %d times, bots.info %d, apps.connections.open %d; want none",
+					r.fake.authTestHits, r.fake.botsInfoHits, r.fake.openConnHits)
+			}
+			if got := r.listConnections(owner, orgID); len(got) != 0 {
+				t.Errorf("connections after the refusal = %+v; want none", got)
+			}
+		})
 	}
 }
 
@@ -479,15 +879,13 @@ func TestHandleConnect_AppBoundToOtherOrg_SameWorkspace_409Generic(t *testing.T)
 	r.fake.stageConnectOK("xoxb-b", "T0SHARED9", "Acme", "U0BOTB", "A0SHARED09", "")
 
 	recA := httptest.NewRecorder()
-	r.hdl.handleConnect(recA, r.req(http.MethodPost, "/api/slack/workspaces", ownerA, orgA, "",
-		map[string]string{"bot_token": "xoxb-a", "app_token": "xapp-a"}))
+	r.hdl.handleConnect(recA, r.importReq(ownerA, orgA, map[string]string{"bot_token": "xoxb-a", "app_token": "xapp-a"}))
 	if recA.Code != http.StatusCreated {
 		t.Fatalf("org A connect status = %d, want 201 (body=%s)", recA.Code, recA.Body.String())
 	}
 
 	recB := httptest.NewRecorder()
-	r.hdl.handleConnect(recB, r.req(http.MethodPost, "/api/slack/workspaces", ownerB, orgB, "",
-		map[string]string{"bot_token": "xoxb-b", "app_token": "xapp-b"}))
+	r.hdl.handleConnect(recB, r.importReq(ownerB, orgB, map[string]string{"bot_token": "xoxb-b", "app_token": "xapp-b"}))
 	if recB.Code != http.StatusConflict {
 		t.Fatalf("org B connect status = %d, want 409 (body=%s)", recB.Code, recB.Body.String())
 	}
@@ -510,15 +908,13 @@ func TestHandleConnect_AppBoundToOtherOrg_DifferentWorkspace_409Generic(t *testi
 	r.fake.stageConnectOK("xoxb-d", "T0WORKSPCB", "Beta", "U0BOTD", "A0CROSSWS1", "")
 
 	recA := httptest.NewRecorder()
-	r.hdl.handleConnect(recA, r.req(http.MethodPost, "/api/slack/workspaces", ownerA, orgA, "",
-		map[string]string{"bot_token": "xoxb-c", "app_token": "xapp-c"}))
+	r.hdl.handleConnect(recA, r.importReq(ownerA, orgA, map[string]string{"bot_token": "xoxb-c", "app_token": "xapp-c"}))
 	if recA.Code != http.StatusCreated {
 		t.Fatalf("org A connect status = %d, want 201 (body=%s)", recA.Code, recA.Body.String())
 	}
 
 	recB := httptest.NewRecorder()
-	r.hdl.handleConnect(recB, r.req(http.MethodPost, "/api/slack/workspaces", ownerB, orgB, "",
-		map[string]string{"bot_token": "xoxb-d", "app_token": "xapp-d"}))
+	r.hdl.handleConnect(recB, r.importReq(ownerB, orgB, map[string]string{"bot_token": "xoxb-d", "app_token": "xapp-d"}))
 	if recB.Code != http.StatusConflict {
 		t.Fatalf("org B connect status = %d, want 409 (different workspace, same app id; body=%s)", recB.Code, recB.Body.String())
 	}
@@ -542,15 +938,13 @@ func TestHandleConnect_TwoAppsOneWorkspace_HappyPath(t *testing.T) {
 	r.fake.stageConnectOK("xoxb-eval", "T0SHAREDWS", "Acme", "U0BOTEVAL", "A0EVALAPP1", "")
 
 	recProd := httptest.NewRecorder()
-	r.hdl.handleConnect(recProd, r.req(http.MethodPost, "/api/slack/workspaces", ownerProd, orgProd, "",
-		map[string]string{"bot_token": "xoxb-prod", "app_token": "xapp-prod"}))
+	r.hdl.handleConnect(recProd, r.importReq(ownerProd, orgProd, map[string]string{"bot_token": "xoxb-prod", "app_token": "xapp-prod"}))
 	if recProd.Code != http.StatusCreated {
 		t.Fatalf("prod org connect status = %d, want 201 (body=%s)", recProd.Code, recProd.Body.String())
 	}
 
 	recEval := httptest.NewRecorder()
-	r.hdl.handleConnect(recEval, r.req(http.MethodPost, "/api/slack/workspaces", ownerEval, orgEval, "",
-		map[string]string{"bot_token": "xoxb-eval", "app_token": "xapp-eval"}))
+	r.hdl.handleConnect(recEval, r.importReq(ownerEval, orgEval, map[string]string{"bot_token": "xoxb-eval", "app_token": "xapp-eval"}))
 	if recEval.Code != http.StatusCreated {
 		t.Fatalf("eval org connect status = %d, want 201 — a different app in the same workspace must NOT conflict (body=%s)",
 			recEval.Code, recEval.Body.String())
@@ -565,18 +959,12 @@ func TestHandleConnect_TwoAppsOneWorkspace_HappyPath(t *testing.T) {
 		t.Fatalf("both rows carry api_app_id %q; want distinct app ids", prodView.APIAppID)
 	}
 
-	listProd := httptest.NewRecorder()
-	r.hdl.handleList(listProd, r.req(http.MethodGet, "/api/slack/workspaces", ownerProd, orgProd, "", nil))
-	var gotProd []workspaceView
-	_ = json.Unmarshal(listProd.Body.Bytes(), &gotProd)
+	gotProd := r.listConnections(ownerProd, orgProd)
 	if len(gotProd) != 1 || gotProd[0].APIAppID != "A0PRODAPP1" {
 		t.Errorf("prod org list = %+v; want exactly its own app row", gotProd)
 	}
 
-	listEval := httptest.NewRecorder()
-	r.hdl.handleList(listEval, r.req(http.MethodGet, "/api/slack/workspaces", ownerEval, orgEval, "", nil))
-	var gotEval []workspaceView
-	_ = json.Unmarshal(listEval.Body.Bytes(), &gotEval)
+	gotEval := r.listConnections(ownerEval, orgEval)
 	if len(gotEval) != 1 || gotEval[0].APIAppID != "A0EVALAPP1" {
 		t.Errorf("eval org list = %+v; want exactly its own app row", gotEval)
 	}
@@ -591,22 +979,20 @@ func TestHandleConnect_LeaveBlankKeepsExisting(t *testing.T) {
 	r.fake.stageConnectOK("xoxb-keep", "T0KEEPBLANK", "Acme", "U0BOT7", "A0KEEPBLNK", "")
 
 	first := httptest.NewRecorder()
-	r.hdl.handleConnect(first, r.req(http.MethodPost, "/api/slack/workspaces", owner, orgID, "",
-		map[string]string{"bot_token": "xoxb-keep", "signing_secret": "first-secret"}))
+	r.hdl.handleConnect(first, r.importReq(owner, orgID, map[string]string{"bot_token": "xoxb-keep", "signing_secret": "first-secret"}))
 	if first.Code != http.StatusCreated {
 		t.Fatalf("first connect status = %d (body=%s)", first.Code, first.Body.String())
 	}
 
 	// Re-submit: same bot token, signing_secret left blank.
 	second := httptest.NewRecorder()
-	r.hdl.handleConnect(second, r.req(http.MethodPost, "/api/slack/workspaces", owner, orgID, "",
-		map[string]string{"bot_token": "xoxb-keep"}))
+	r.hdl.handleConnect(second, r.importReq(owner, orgID, map[string]string{"bot_token": "xoxb-keep"}))
 	if second.Code != http.StatusOK {
 		t.Fatalf("re-submit status = %d, want 200 (idempotent update; body=%s)", second.Code, second.Body.String())
 	}
 	view := decodeBody[workspaceView](t, second)
-	if view.Transport != transportEventsAPI {
-		t.Errorf("transport after blank re-submit = %q; want events_api (kept)", view.Transport)
+	if derefTransport(view) != transportEventsAPI {
+		t.Errorf("transport after blank re-submit = %q; want events_api (kept)", derefTransport(view))
 	}
 	if got := r.secretValue(orgID, "slack_ws_T0KEEPBLANK_A0KEEPBLNK_signing_secret"); got != "first-secret" {
 		t.Errorf("signing secret after blank re-submit = %q; want first-secret (kept, unchanged)", got)
@@ -624,8 +1010,7 @@ func TestHandleDelete_RemovesRowAndSecretKeyset(t *testing.T) {
 	r.fake.stageConnectOK("xoxb-delete", "T0DELETE1", "Acme", "U0BOT8", "A0DELETE01", "")
 
 	connect := httptest.NewRecorder()
-	r.hdl.handleConnect(connect, r.req(http.MethodPost, "/api/slack/workspaces", owner, orgID, "",
-		map[string]string{"bot_token": "xoxb-delete", "app_token": "xapp-delete"}))
+	r.hdl.handleConnect(connect, r.importReq(owner, orgID, map[string]string{"bot_token": "xoxb-delete", "app_token": "xapp-delete"}))
 	if connect.Code != http.StatusCreated {
 		t.Fatalf("connect status = %d (body=%s)", connect.Code, connect.Body.String())
 	}
@@ -646,11 +1031,7 @@ func TestHandleDelete_RemovesRowAndSecretKeyset(t *testing.T) {
 		}
 	}
 
-	list := httptest.NewRecorder()
-	r.hdl.handleList(list, r.req(http.MethodGet, "/api/slack/workspaces", owner, orgID, "", nil))
-	var got []workspaceView
-	_ = json.Unmarshal(list.Body.Bytes(), &got)
-	if len(got) != 0 {
+	if got := r.listConnections(owner, orgID); len(got) != 0 {
 		t.Errorf("workspaces after delete = %v; want none", got)
 	}
 }
@@ -683,8 +1064,7 @@ func TestHandleDelete_OtherAppInSameWorkspace_Untouched(t *testing.T) {
 		{ownerEval, orgEval, "xoxb-iso-eval", "xapp-iso-eval"},
 	} {
 		rec := httptest.NewRecorder()
-		r.hdl.handleConnect(rec, r.req(http.MethodPost, "/api/slack/workspaces", c.ownerID, c.orgID, "",
-			map[string]string{"bot_token": c.token, "app_token": c.appToken}))
+		r.hdl.handleConnect(rec, r.importReq(c.ownerID, c.orgID, map[string]string{"bot_token": c.token, "app_token": c.appToken}))
 		if rec.Code != http.StatusCreated {
 			t.Fatalf("connect(%s) status = %d, want 201 (body=%s)", c.orgID, rec.Code, rec.Body.String())
 		}
@@ -696,10 +1076,7 @@ func TestHandleDelete_OtherAppInSameWorkspace_Untouched(t *testing.T) {
 		t.Fatalf("delete status = %d, want 200 (body=%s)", del.Code, del.Body.String())
 	}
 
-	listEval := httptest.NewRecorder()
-	r.hdl.handleList(listEval, r.req(http.MethodGet, "/api/slack/workspaces", ownerEval, orgEval, "", nil))
-	var gotEval []workspaceView
-	_ = json.Unmarshal(listEval.Body.Bytes(), &gotEval)
+	gotEval := r.listConnections(ownerEval, orgEval)
 	if len(gotEval) != 1 || gotEval[0].APIAppID != "A0ISOEVAL1" {
 		t.Errorf("eval org's row after deleting prod's app = %+v; want untouched", gotEval)
 	}
@@ -717,7 +1094,7 @@ func TestHandleManifest_EventsAPI_NoPublicURL_409(t *testing.T) {
 	orgID, owner, _ := pgtest.SeedOrgWithUser(t, r.h, "slack-manifest-nourl")
 
 	rec := httptest.NewRecorder()
-	r.hdl.handleManifest(rec, r.req(http.MethodGet, "/api/slack/manifest?transport=events_api", owner, orgID, "", nil))
+	r.hdl.handleManifest(rec, r.manifestReq(owner, orgID, "events_api"))
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409 (body=%s)", rec.Code, rec.Body.String())
 	}
@@ -729,7 +1106,7 @@ func TestHandleManifest_Socket_OK(t *testing.T) {
 	orgID, owner, _ := pgtest.SeedOrgWithUser(t, r.h, "slack-manifest-socket")
 
 	rec := httptest.NewRecorder()
-	r.hdl.handleManifest(rec, r.req(http.MethodGet, "/api/slack/manifest?transport=socket", owner, orgID, "", nil))
+	r.hdl.handleManifest(rec, r.manifestReq(owner, orgID, "socket"))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
 	}
@@ -749,7 +1126,7 @@ func TestHandleManifest_EventsAPI_OK(t *testing.T) {
 	orgID, owner, _ := pgtest.SeedOrgWithUser(t, r.h, "slack-manifest-events")
 
 	rec := httptest.NewRecorder()
-	r.hdl.handleManifest(rec, r.req(http.MethodGet, "/api/slack/manifest?transport=events_api", owner, orgID, "", nil))
+	r.hdl.handleManifest(rec, r.manifestReq(owner, orgID, "events_api"))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
 	}
@@ -769,8 +1146,98 @@ func TestHandleManifest_BadTransport_400(t *testing.T) {
 	orgID, owner, _ := pgtest.SeedOrgWithUser(t, r.h, "slack-manifest-bad")
 
 	rec := httptest.NewRecorder()
-	r.hdl.handleManifest(rec, r.req(http.MethodGet, "/api/slack/manifest?transport=carrier-pigeon", owner, orgID, "", nil))
+	r.hdl.handleManifest(rec, r.manifestReq(owner, orgID, "carrier-pigeon"))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+}
+
+// ---------- one active connection per workspace ----------
+
+// connectAs posts a connect for bot token token (and app token xapp-<token>)
+// as owner of orgID.
+func (r *slackWorkspaceRig) connectAs(owner, orgID, token string) *httptest.ResponseRecorder {
+	r.t.Helper()
+	rec := httptest.NewRecorder()
+	r.hdl.handleConnect(rec, r.importReq(owner, orgID, map[string]string{"bot_token": token, "app_token": "xapp-" + token}))
+	return rec
+}
+
+// TestHandleConnect_FirstConnectionLandsActive: the first connection in a
+// workspace is the org's own app, active, named for its bot; reconnecting it
+// (a rotation) keeps it active and takes the bot's current name.
+func TestHandleConnect_FirstConnectionLandsActive(t *testing.T) {
+	r := newSlackWorkspaceRig(t, "https://tf.example")
+	orgID, owner, _ := pgtest.SeedOrgWithUser(t, r.h, "slack-first-active")
+	r.fake.stageConnectOK("xoxb-first", "T0FIRST01", "Acme", "U0BOT", "A0FIRST001", "")
+	r.fake.stageBotName("xoxb-first", "triage-bot")
+
+	rec := r.connectAs(owner, orgID, "xoxb-first")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("connect status = %d, want 201 (body=%s)", rec.Code, rec.Body.String())
+	}
+	view := decodeBody[workspaceView](t, rec)
+	if view.Source != slackstore.SourceOrg || !view.Active || view.AppName != "triage-bot" {
+		t.Errorf("connect response = %+v; want source org, active, app_name triage-bot", view)
+	}
+
+	r.fake.stageBotName("xoxb-first", "triage-bot (renamed)")
+	rec = r.connectAs(owner, orgID, "xoxb-first")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reconnect status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	view = decodeBody[workspaceView](t, rec)
+	if !view.Active || view.AppName != "triage-bot (renamed)" {
+		t.Errorf("reconnect response = %+v; want still active, with the new app_name", view)
+	}
+	stored, err := slackstore.FromStores(r.stores).Connections.GetByWorkspaceAppSystem(r.t.Context(), "T0FIRST01", "A0FIRST001")
+	if err != nil || stored == nil {
+		t.Fatalf("read the connection: %v (%v)", stored, err)
+	}
+	if !stored.Active || stored.AppName != "triage-bot (renamed)" {
+		t.Errorf("stored connection = %+v; want active, app_name triage-bot (renamed)", stored)
+	}
+}
+
+// TestHandleConnect_SecondAppInWorkspace_LandsInactive: a different app
+// connected into a workspace where the org already has an active connection
+// is stored inactive and answered as a normal import, and the active one is
+// unchanged; connecting the second app again keeps it inactive.
+func TestHandleConnect_SecondAppInWorkspace_LandsInactive(t *testing.T) {
+	r := newSlackWorkspaceRig(t, "https://tf.example")
+	orgID, owner, _ := pgtest.SeedOrgWithUser(t, r.h, "slack-second-app")
+	r.fake.stageConnectOK("xoxb-one", "T0SECOND1", "Acme", "U0BOTONE", "A0SECOND01", "")
+	r.fake.stageConnectOK("xoxb-two", "T0SECOND1", "Acme", "U0BOTTWO", "A0SECOND02", "")
+
+	if rec := r.connectAs(owner, orgID, "xoxb-one"); rec.Code != http.StatusCreated {
+		t.Fatalf("first connect status = %d, want 201 (body=%s)", rec.Code, rec.Body.String())
+	}
+	conns := slackstore.FromStores(r.stores).Connections
+	before, err := conns.ActiveForWorkspaceSystem(r.t.Context(), orgID, "T0SECOND1")
+	if err != nil || before == nil {
+		t.Fatalf("active connection after the first connect = %+v (%v)", before, err)
+	}
+
+	rec := r.connectAs(owner, orgID, "xoxb-two")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("second app status = %d, want 201 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if view := decodeBody[workspaceView](t, rec); view.APIAppID != "A0SECOND02" || view.Active {
+		t.Errorf("second app response = %+v; want A0SECOND02, inactive", view)
+	}
+	if v := r.secretValue(orgID, integrations.SlackConnectionKeysFor("T0SECOND1", "A0SECOND02").BotToken); v != "xoxb-two" {
+		t.Errorf("second app's bot token = %q; want xoxb-two stored", v)
+	}
+	after, err := conns.ActiveForWorkspaceSystem(r.t.Context(), orgID, "T0SECOND1")
+	if err != nil || after == nil || after.APIAppID != "A0SECOND01" || !after.UpdatedAt.Equal(before.UpdatedAt) {
+		t.Errorf("active connection = %+v (%v); want A0SECOND01 untouched", after, err)
+	}
+
+	rec = r.connectAs(owner, orgID, "xoxb-two")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reconnect status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if view := decodeBody[workspaceView](t, rec); view.Active {
+		t.Errorf("reconnect response = %+v; want still inactive", view)
 	}
 }

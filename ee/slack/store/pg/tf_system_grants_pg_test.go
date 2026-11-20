@@ -36,7 +36,7 @@ func TestTfSystem_SlackProviderReads(t *testing.T) {
 
 	seed := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	mustWithUser(t, seed, ctx, orgID, userID, func(tx db.TxStores) error {
-		return slackstore.FromTx(tx).Workspaces.Upsert(ctx, testWorkspace(orgID, workspaceID))
+		return upsertActiveConnection(ctx, tx, testWorkspace(orgID, workspaceID))
 	})
 	channel, err := slackstore.FromStores(seed).Channels.EnsureSystem(ctx, orgID, workspaceID, channelID, "general")
 	if err != nil {
@@ -67,10 +67,16 @@ func TestTfSystem_SlackProviderReads(t *testing.T) {
 	if _, err := sys.Channels.FindOrCreateThreadSystem(ctx, orgID, channelID, "1700000000.000100", "thread", "", ""); err != nil {
 		t.Errorf("Channels.FindOrCreateThreadSystem (slack_channels + entities grants): %v", err)
 	}
-	if _, err := sys.Workspaces.GetByWorkspaceAppSystem(ctx, workspaceID, apiAppID); err != nil {
-		t.Errorf("Workspaces.GetByWorkspaceAppSystem (org_slack_workspaces grant): %v", err)
+	if _, err := sys.Connections.GetByWorkspaceAppSystem(ctx, workspaceID, apiAppID); err != nil {
+		t.Errorf("Connections.GetByWorkspaceAppSystem (org_slack_connections grant): %v", err)
 	}
-	if _, err := sys.Workspaces.ListAllSystem(ctx); err != nil {
-		t.Errorf("Workspaces.ListAllSystem (org_slack_workspaces grant): %v", err)
+	if _, err := sys.Connections.ActiveForWorkspaceSystem(ctx, orgID, workspaceID); err != nil {
+		t.Errorf("Connections.ActiveForWorkspaceSystem (org_slack_connections grant): %v", err)
+	}
+	if _, err := sys.Connections.ListForOrgSystem(ctx, orgID); err != nil {
+		t.Errorf("Connections.ListForOrgSystem (org_slack_connections grant): %v", err)
+	}
+	if _, err := sys.Connections.ListAllSystem(ctx); err != nil {
+		t.Errorf("Connections.ListAllSystem (org_slack_connections grant): %v", err)
 	}
 }

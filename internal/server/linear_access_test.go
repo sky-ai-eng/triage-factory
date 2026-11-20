@@ -632,7 +632,7 @@ func TestLinearCredential_MultiMode_AdminGate(t *testing.T) {
 func TestLinearSource_PauseAndCreateGate(t *testing.T) {
 	r := newLinearAccessRig(t)
 	createRule := func() int {
-		return doJSON(t, r.s, http.MethodPost, "/api/event-handlers/rules", map[string]any{
+		return doJSON(t, r.s, http.MethodPost, "/api/event-handlers", map[string]any{
 			"event_type":       domain.EventLinearIssueAssigned,
 			"name":             "linear rule",
 			"default_priority": 0.5,

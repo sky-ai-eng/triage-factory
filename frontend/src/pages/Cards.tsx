@@ -9,7 +9,7 @@ import { useOrgHref } from '../hooks/useOrgHref'
 import { useTeamFilter, useTeams } from '../hooks/useTeams'
 import { usePagedList } from '../hooks/usePagedList'
 import { TASK_LIST_PATH, queueListBody } from '../lib/taskList'
-import { Bell, SlidersHorizontal } from 'lucide-react'
+import { SlidersHorizontal } from 'lucide-react'
 import EventBadge from '../components/EventBadge'
 import SourceBadge from '../components/SourceBadge'
 import RequestedReviewerBadge from '../components/RequestedReviewerBadge'
@@ -18,7 +18,6 @@ import PackageFacts from '../components/PackageFacts'
 import PromptPicker from '../components/PromptPicker'
 import ClaimTeamConfirm from '../components/board/ClaimTeamConfirm'
 import TaskRulesPanel from '../components/TaskRulesPanel'
-import NotifyRulesPanel from '../components/NotifyRulesPanel'
 import TeamScopeSelect from '../components/TeamScopeSelect'
 import { snoozeUntilFromPreset } from '../lib/snooze'
 import { NO_CLAIM_TEAM, resolveClaimTeam } from '../lib/claimTeam'
@@ -72,10 +71,12 @@ export default function Cards() {
     teamOptions?: string[]
   } | null>(null)
   const [rulesOpen, setRulesOpen] = useState(false)
-  // A notification links to a task rule as ?rule=…: the rules panel opens on
-  // that rule's editor, and the link is dropped when the panel closes.
+  // A notification links to an event handler as ?rule=…: the panel opens on
+  // that handler's editor, and the link is dropped when the panel closes.
+  // Stored notifications also link as ?notify_rule=…, which opens the handler
+  // the same way.
   const [params, setParams] = useSearchParams()
-  const linkedRule = params.get('rule')
+  const linkedRule = params.get('rule') ?? params.get('notify_rule')
   const rulesPanelOpen = rulesOpen || linkedRule !== null
   const closeRules = useCallback(() => {
     setRulesOpen(false)
@@ -83,45 +84,13 @@ export default function Cards() {
       (prev) => {
         const next = new URLSearchParams(prev)
         next.delete('rule')
-        return next
-      },
-      { replace: true },
-    )
-  }, [setParams])
-  const toggleRules = () => (rulesPanelOpen ? closeRules() : setRulesOpen(true))
-  // Notify rules sit beside task rules, linked as ?notify_rule=… the same way.
-  const [notifyOpen, setNotifyOpen] = useState(false)
-  const linkedNotifyRule = params.get('notify_rule')
-  const notifyPanelOpen = notifyOpen || linkedNotifyRule !== null
-  const closeNotify = useCallback(() => {
-    setNotifyOpen(false)
-    setParams(
-      (prev) => {
-        const next = new URLSearchParams(prev)
         next.delete('notify_rule')
         return next
       },
       { replace: true },
     )
   }, [setParams])
-  const toggleNotify = () => (notifyPanelOpen ? closeNotify() : setNotifyOpen(true))
-  const notifyButton = (
-    <button
-      onClick={toggleNotify}
-      className={`flex items-center gap-1.5 text-ui font-medium px-3 py-1.5 rounded-full border transition-colors ${
-        notifyPanelOpen
-          ? 'bg-warm/10 text-warm border-warm/20'
-          : 'text-ink-3 border-line-1 hover:text-ink-2'
-      }`}
-      title="Notify rules"
-    >
-      <Bell size={14} />
-      <span>Notify</span>
-    </button>
-  )
-  const notifyPanel = (
-    <NotifyRulesPanel open={notifyPanelOpen} onClose={closeNotify} openRuleId={linkedNotifyRule} />
-  )
+  const toggleRules = () => (rulesPanelOpen ? closeRules() : setRulesOpen(true))
   const hasFetched = useRef(false)
   const navigate = useNavigate()
   const orgHref = useOrgHref()
@@ -365,15 +334,13 @@ export default function Cards() {
                 ? 'bg-warm/10 text-warm border-warm/20'
                 : 'text-ink-3 border-line-1 hover:text-ink-2'
             }`}
-            title="Task rules"
+            title="Event handlers"
           >
             <SlidersHorizontal size={14} />
-            <span>Rules</span>
+            <span>Handlers</span>
           </button>
-          {notifyButton}
         </div>
         <TaskRulesPanel open={rulesPanelOpen} onClose={closeRules} openRuleId={linkedRule} />
-        {notifyPanel}
       </div>
     )
   }
@@ -394,12 +361,11 @@ export default function Cards() {
                 ? 'bg-warm/10 text-warm border-warm/20'
                 : 'text-ink-3 border-line-1 hover:text-ink-2'
             }`}
-            title="Task rules"
+            title="Event handlers"
           >
             <SlidersHorizontal size={14} />
-            <span>Rules</span>
+            <span>Handlers</span>
           </button>
-          {notifyButton}
         </div>
 
         {/* Card stack */}
@@ -514,7 +480,6 @@ export default function Cards() {
       />
 
       <TaskRulesPanel open={rulesPanelOpen} onClose={closeRules} openRuleId={linkedRule} />
-      {notifyPanel}
     </>
   )
 }

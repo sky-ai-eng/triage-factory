@@ -326,7 +326,9 @@ func RunMemoryAttemptStoreConformance(t *testing.T, mk MemoryAttemptStoreFactory
 			domain.MemoryAttemptFailed, domain.MemoryAttemptErrProviderBackoff, "slow down", "", 6, 0); err != nil {
 			t.Fatalf("CompleteAttemptSystem: %v", err)
 		}
-		awaitClockTick()
+		// Begun back to back, the two could share a started_at, which the
+		// read leaves to the id.
+		seed.AgeAttempt(t, first.ID, time.Minute)
 		second, err := store.BeginAttemptSystem(ctx, orgID, convID)
 		if err != nil {
 			t.Fatalf("second BeginAttemptSystem: %v", err)

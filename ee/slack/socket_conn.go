@@ -14,14 +14,13 @@ import (
 	slackws "github.com/coder/websocket"
 	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
-	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 )
 
 // socketEnvelope is Slack's Socket Mode envelope shape: hello carries only
 // type; events_api carries envelope_id + payload (the same event_callback
 // JSON the webhook receives, unmarshaled below into slackEventEnvelope);
 // disconnect carries reason. Aliased ws import (slackws) avoids colliding
-// with this package's pervasive use of "ws" as a slackstore.Workspace
+// with this package's pervasive use of "ws" as a slackstore.Connection
 // variable name.
 type socketEnvelope struct {
 	Type       string          `json:"type"`
@@ -40,12 +39,18 @@ type socketEnvelope struct {
 
 // appConnection is one running Socket Mode connection: a goroutine (run,
 // started by socketManager.startConn) plus the mutex-guarded status/sightings
-// the reconciler's diff and GET /api/slack/workspaces read as a snapshot.
+// the reconciler's diff and the connection reads read as a snapshot.
 // Disposable, never repaired — run's loop tears the whole connection down on
 // any error and dials fresh; there is no in-place recovery.
 type appConnection struct {
 	appID string
-	orgID string // the app's org (app->one-org, TFAC-533) — captured once at start
+	orgID string // the org an org's own app belongs to, captured once at start; "" on the deployment app's
+
+	// deployment marks the deployment's own app, whose envelopes are for
+	// whichever org holds the workspace's row (deliverDeploymentEvent). It
+	// dials with appToken, from the environment, and has no appTokenRef.
+	deployment bool
+	appToken   string
 
 	cancel context.CancelFunc // stops just this connection, independent of its siblings
 	done   chan struct{}      // closed when run returns
@@ -176,6 +181,12 @@ func (c *appConnection) run(ctx context.Context, stores db.Stores, pipeline *ing
 			// status so this doesn't read as an ordinary transient outage.
 			c.recordFailure(stateAuthFailed, err)
 			wait = socketBackoffCap
+			if c.deployment {
+				// The operator's to fix, and the log is the only place the
+				// deployment's socket reports to them.
+				slackLog.Error("slack socket mode: Slack rejected the deployment Slack app's app-level token; set "+envSlackAppToken+" to an app-level token with the connections:write scope",
+					"app", c.appID, "error", err, "retry_in", wait.String())
+			}
 		case err != nil:
 			// Logged here (not just recorded onto status): an error-driven
 			// reconnect is otherwise invisible in the logs, which show only the
@@ -211,12 +222,15 @@ func (c *appConnection) run(ctx context.Context, stores db.Stores, pipeline *ing
 // returns a non-nil err (ctx cancellation errors are discarded by the caller,
 // which checks ctx.Err() itself).
 func (c *appConnection) serveOnce(ctx context.Context, stores db.Stores, pipeline *ingestPipeline, client *http.Client) (connectedAt time.Time, err error) {
-	appToken, err := stores.Secrets.GetSystem(ctx, c.orgID, c.tokenRef())
-	if err != nil {
-		return time.Time{}, fmt.Errorf("read app token: %w", err)
-	}
-	if appToken == "" {
-		return time.Time{}, errors.New("app token not configured")
+	appToken := c.appToken
+	if !c.deployment {
+		appToken, err = stores.Secrets.GetSystem(ctx, c.orgID, c.tokenRef())
+		if err != nil {
+			return time.Time{}, fmt.Errorf("read app token: %w", err)
+		}
+		if appToken == "" {
+			return time.Time{}, errors.New("app token not configured")
+		}
 	}
 
 	url, err := slackConnectionsOpen(ctx, client, slackAppCaller(c.orgID, c.appID), appToken)
@@ -379,9 +393,11 @@ func ackEnvelope(ctx context.Context, conn *slackws.Conn, envelopeID string) err
 }
 
 // processEventsAPIEnvelope is the boundary both transports share, mirroring
-// webhook.go's handleWebhook/handleEventCallback step for step: resolve the
-// (team_id, api_app_id) row, gate on entitlement (an app removal passes),
-// run the shared pipeline.
+// webhook.go's handlers step for step: resolve the (team_id, api_app_id)
+// row, gate on entitlement (an app removal passes), run the shared pipeline.
+// The deployment app's connection resolves its row through
+// deliverDeploymentEvent, as POST /api/webhooks/slack does, since its
+// envelopes are for every org that connected through it.
 // Returns whether the caller should ack — true for every "nothing more to
 // do here" case (malformed/mismatched envelope, unconnected workspace,
 // cross-org anomaly, lapsed entitlement) exactly like the webhook's
@@ -421,8 +437,19 @@ func (c *appConnection) processEventsAPIEnvelope(ctx context.Context, stores db.
 		return true
 	}
 
+	if c.deployment {
+		// No sighting for a workspace with no row: the deployment's app is
+		// left installed wherever TF refused an install, so that is expected.
+		if err := pipeline.deliverDeploymentEvent(ctx, c.appID, payload, inner); err != nil {
+			slackLog.Error("slack socket mode: deployment app delivery failed", "app", c.appID, "error", err)
+			return false
+		}
+		c.setLastEvent(socketNow())
+		return true
+	}
+
 	bundle := slackstore.FromStores(stores)
-	ws, err := bundle.Workspaces.GetByWorkspaceAppSystem(ctx, payload.TeamID, payload.APIAppID)
+	ws, err := bundle.Connections.GetByWorkspaceAppSystem(ctx, payload.TeamID, payload.APIAppID)
 	if err != nil {
 		slackLog.Error("slack socket mode: resolve workspace failed", "app", c.appID, "error", err)
 		return false // transient — worth a redelivery retry
@@ -449,15 +476,7 @@ func (c *appConnection) processEventsAPIEnvelope(ctx context.Context, stores db.
 			"app", c.appID, "workspace_org", ws.OrgID, "connection_org", c.orgID)
 		return true
 	}
-	if !removesConnection(inner.Type) && !entitlements.For(ws.OrgID).Has(entitlements.FeatureSlack) {
-		// Dormancy: an entitlement lapse mid-connection race. The reconciler
-		// takes the whole connection down within a tick; until then, drop
-		// silently — same as the webhook's ackEmpty for a lapsed org. An
-		// app removal passes (removesConnection).
-		return true
-	}
-
-	if err := pipeline.handleEventCallback(ctx, *ws, newInboundMention(payload, inner)); err != nil {
+	if err := pipeline.deliverForConnection(ctx, *ws, payload, inner); err != nil {
 		slackLog.Error("slack socket mode: pipeline error", "app", c.appID, "error", err)
 		return false
 	}

@@ -3,6 +3,7 @@ package postgres_test
 import (
 	"database/sql"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -17,11 +18,14 @@ import (
 func TestEntityKey_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
-	dbtest.RunEntityKeyConformance(t, func(t *testing.T) (db.EntityStore, string) {
+	dbtest.RunEntityKeyConformance(t, func(t *testing.T) (db.EntityStore, string, func(*testing.T, string, time.Time)) {
 		t.Helper()
 		h.Reset(t)
 		orgID, _ := seedPgEntityOrg(t, h)
-		return stores.Entities, orgID
+		return stores.Entities, orgID, func(t *testing.T, entityID string, at time.Time) {
+			t.Helper()
+			dbtest.MustUpdate(t, h.AdminDB, `UPDATE entities SET created_at = $1 WHERE org_id = $2 AND id = $3`, at.UTC(), orgID, entityID)
+		}
 	})
 }
 
@@ -35,9 +39,12 @@ func TestEntityKey_Postgres_Claims(t *testing.T) {
 	orgID, userID := seedPgEntityOrg(t, h)
 	if err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
 		store := pgstore.NewForTx(tx, pgtest.SecretKey).Entities
-		dbtest.RunEntityKeyConformance(t, func(t *testing.T) (db.EntityStore, string) {
+		dbtest.RunEntityKeyConformance(t, func(t *testing.T) (db.EntityStore, string, func(*testing.T, string, time.Time)) {
 			t.Helper()
-			return store, orgID
+			return store, orgID, func(t *testing.T, entityID string, at time.Time) {
+				t.Helper()
+				dbtest.MustUpdate(t, tx, `UPDATE entities SET created_at = $1 WHERE org_id = $2 AND id = $3`, at.UTC(), orgID, entityID)
+			}
 		})
 		return nil
 	}); err != nil {
@@ -132,6 +139,10 @@ func TestEntityIdentity_Postgres(t *testing.T) {
 				if _, err := h.AdminDB.Exec(`UPDATE entities SET external_id = NULL WHERE id = $1`, entityID); err != nil {
 					t.Fatalf("forget external id: %v", err)
 				}
+			},
+			SetCreatedAt: func(t *testing.T, entityID string, at time.Time) {
+				t.Helper()
+				dbtest.MustUpdate(t, h.AdminDB, `UPDATE entities SET created_at = $1 WHERE org_id = $2 AND id = $3`, at.UTC(), orgID, entityID)
 			},
 			Conversation: func(t *testing.T, suffix string) string {
 				t.Helper()

@@ -13,28 +13,20 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// eventHandlerStore is the unified Postgres impl of db.EventHandlerStore.
-// Replaces taskRuleStore + triggerStore from the prior stores.
+// eventHandlerStore is the Postgres impl of db.EventHandlerStore.
 //
-// Per-kind fields are nullable on the column level; the per-kind CHECK
-// constraints on event_handlers enforce the shape pair (rule populates
-// name/default_priority/sort_order, trigger populates blueprint_id/
-// breaker_threshold/min_autonomy_suitability). This impl branches on
-// the row's Kind where the SQL diverges.
-//
-// # Pool split (unchanged from the predecessor stores)
+// # Pool split
 //
 //   - app   — tf_app, RLS-active. Every CRUD method runs here.
 //   - admin — supabase_admin, BYPASSRLS. Seed runs here because the
-//     event_handlers_insert / event_handlers_update RLS policies gate
-//     on creator_user_id = tf.current_user_id() (or admin-on-org for
-//     UPDATE); boot-time Seed has no JWT claims and would otherwise
-//     fail the WITH CHECK on every shipped row.
+//     event_handlers_insert RLS policy gates on
+//     creator_user_id = tf.current_user_id() and on team write; boot-time
+//     Seed has no JWT claims and would otherwise fail the WITH CHECK on
+//     every shipped row.
 //
 // Inside WithTx both fields point at the same *sql.Tx, and inTx is
 // true. Seed inside WithTx is rejected: escaping to the admin pool
-// would break the caller's transaction scope (matches PromptStore +
-// the predecessor stores).
+// would break the caller's transaction scope (matches PromptStore).
 type eventHandlerStore struct {
 	app   queryer
 	admin queryer
@@ -54,20 +46,14 @@ func newTxEventHandlerStore(tx queryer) db.EventHandlerStore {
 
 var _ db.EventHandlerStore = (*eventHandlerStore)(nil)
 
-// pgEventHandlerColumns mirrors the unified row. Per-kind nullable
-// columns (name + default_priority + sort_order for rules; blueprint_id
-// + breaker_threshold + min_autonomy_suitability for triggers) are
-// scanned via sql.Null* and mapped to the domain type's pointer fields.
-const pgEventHandlerColumns = `id, kind, event_type, scope_predicate_json::text, enabled, source,
+// pgEventHandlerColumns is the row's projection, shared by every read and
+// every RETURNING.
+const pgEventHandlerColumns = `id, mode, event_type, scope_predicate_json::text, source,
        team_id, applies_to_unowned,
        name, default_priority, sort_order,
        blueprint_id, breaker_threshold, min_autonomy_suitability,
        user_modified, created_at, updated_at,
-       COALESCE(creator_user_id::text, ''), COALESCE(notify_audience, '')`
-
-// pgHandlerKindOrder orders the kinds rules, triggers, notify rules: the
-// router reads rules before triggers, and a list reads them in that order.
-const pgHandlerKindOrder = `CASE kind WHEN 'rule' THEN 0 WHEN 'trigger' THEN 1 ELSE 2 END`
+       COALESCE(creator_user_id::text, '')`
 
 func (s *eventHandlerStore) Seed(ctx context.Context, orgID, teamID string, blueprintIDsBySlug map[string]string) error {
 	if s.inTx {
@@ -76,86 +62,17 @@ func (s *eventHandlerStore) Seed(ctx context.Context, orgID, teamID string, blue
 	if teamID == "" {
 		return errors.New("postgres event_handlers Seed: teamID required (shipped handlers are team-scoped; caller threads the target team — local mode passes runmode.LocalDefaultTeamID, multi mode passes the new team's UUID on team creation)")
 	}
-	now := time.Now().UTC()
 	var inserted int64
 	for _, h := range db.ShippedEventHandlers {
-		var pred any
-		if h.Predicate != "" {
-			pred = h.Predicate
+		// The id is a random UUID per team copy and h.ID is the system_slug;
+		// re-seed dedupes on (org_id, team_id, system_slug) via ON CONFLICT.
+		blueprintID, resolved := db.ResolveShippedBlueprint(h, blueprintIDsBySlug)
+		plan := db.PlanHandlerSync(h, blueprintID, resolved, db.TeamHandlerRow{})
+		n, err := insertShippedHandlerPG(ctx, s.admin, orgID, teamID, h, plan, `ON CONFLICT (org_id, team_id, system_slug) DO NOTHING`)
+		if err != nil {
+			return fmt.Errorf("seed event_handler %s: %w", h.ID, err)
 		}
-
-		// System rows materialize as visibility='team' with team_id=teamID.
-		// event_handlers_system_has_no_creator allows creator_user_id NULL
-		// on source='system'. The id is a random UUID per team copy and h.ID
-		// is the system_slug; re-seed dedupes on (org_id, team_id,
-		// system_slug) via ON CONFLICT.
-		switch h.Kind {
-		case domain.EventHandlerKindRule:
-			res, err := s.admin.ExecContext(ctx, `
-				INSERT INTO event_handlers
-					(id, org_id, team_id, creator_user_id, kind, event_type,
-					 system_slug, scope_predicate_json, enabled, source,
-					 name, default_priority, sort_order,
-					 created_at, updated_at)
-				VALUES (
-					$1, $2, $3::uuid, NULL, 'rule', $4,
-					$5, $6::jsonb, $11, 'system',
-					$7, $8, $9,
-					$10, $10
-				)
-				ON CONFLICT (org_id, team_id, system_slug) DO NOTHING
-			`, uuid.New().String(), orgID, teamID, h.EventType,
-				h.ID, pred, h.Name, h.DefaultPriority, h.SortOrder, now, !h.Disabled)
-			if err != nil {
-				return fmt.Errorf("seed event_handler rule %s: %w", h.ID, err)
-			}
-			n, err := res.RowsAffected()
-			if err != nil {
-				return err
-			}
-			inserted += n
-
-		case domain.EventHandlerKindTrigger:
-			// Resolve the trigger's blueprint slug to this team's blueprint-copy
-			// UUID (phase-2 of the two-phase seed). A missing entry means
-			// the caller didn't seed the prompts first — fail loudly rather
-			// than write a dangling reference (the same-team FK would reject
-			// it anyway).
-			blueprintID, ok := blueprintIDsBySlug[h.BlueprintID]
-			if !ok || blueprintID == "" {
-				return fmt.Errorf("seed event_handler trigger %s: blueprint slug %q not found in blueprintIDsBySlug (seed prompts before handlers)", h.ID, h.BlueprintID)
-			}
-			// Trigger: blueprint_id + breaker_threshold +
-			// min_autonomy_suitability populated; rule-only columns NULL.
-			// Shipped triggers ship disabled (project convention —
-			// users opt in).
-			res, err := s.admin.ExecContext(ctx, `
-				INSERT INTO event_handlers
-					(id, org_id, team_id, creator_user_id, kind, event_type,
-					 system_slug, scope_predicate_json, enabled, source,
-					 blueprint_id, breaker_threshold, min_autonomy_suitability,
-					 created_at, updated_at)
-				VALUES (
-					$1, $2, $3::uuid, NULL, 'trigger', $4,
-					$5, $6::jsonb, FALSE, 'system',
-					$7, $8, $9,
-					$10, $10
-				)
-				ON CONFLICT (org_id, team_id, system_slug) DO NOTHING
-			`, uuid.New().String(), orgID, teamID, h.EventType,
-				h.ID, pred, blueprintID, h.BreakerThreshold, h.MinAutonomySuitability, now)
-			if err != nil {
-				return fmt.Errorf("seed event_handler trigger %s: %w", h.ID, err)
-			}
-			n, err := res.RowsAffected()
-			if err != nil {
-				return err
-			}
-			inserted += n
-
-		default:
-			return fmt.Errorf("seed event_handler %s: unknown kind %q", h.ID, h.Kind)
-		}
+		inserted += n
 	}
 	dbPgLog.Info("seeded event_handlers", "inserted", inserted, "existed", int64(len(db.ShippedEventHandlers))-inserted)
 	return nil
@@ -172,15 +89,9 @@ func (s *eventHandlerStore) List(ctx context.Context, orgID string, f db.EventHa
 		return []domain.EventHandler{}, total, nil
 	}
 
-	// Order: rules first (sort_order ASC, name ASC), then triggers, then
-	// notify rules (created_at DESC), with an id tiebreaker so ties can't
-	// reshuffle between pages.
 	q := `SELECT ` + pgEventHandlerColumns + `
 	      FROM event_handlers` + where + `
-	      ORDER BY ` + pgHandlerKindOrder + `,
-	               CASE WHEN kind = 'rule' THEN sort_order ELSE 0 END ASC,
-	               CASE WHEN kind = 'rule' THEN name ELSE '' END ASC,
-	               created_at DESC, id`
+	      ORDER BY sort_order ASC, name ASC, id ASC`
 	pageArgs := args
 	if opts.Limit > 0 {
 		q += fmt.Sprintf(" LIMIT $%d OFFSET $%d", len(args)+1, len(args)+2)
@@ -217,34 +128,27 @@ func getEventHandler(ctx context.Context, q queryer, orgID, id string) (*domain.
 	return &h, nil
 }
 
-func (s *eventHandlerStore) GetEnabledForEvent(ctx context.Context, orgID, eventType string) ([]domain.EventHandler, error) {
-	return getEnabledEventHandlers(ctx, s.app, orgID, eventType)
+func (s *eventHandlerStore) GetActiveForEvent(ctx context.Context, orgID, eventType string) ([]domain.EventHandler, error) {
+	return getActiveEventHandlers(ctx, s.app, orgID, eventType)
 }
 
-func (s *eventHandlerStore) GetEnabledForEventSystem(ctx context.Context, orgID, eventType string) ([]domain.EventHandler, error) {
-	return getEnabledEventHandlers(ctx, s.admin, orgID, eventType)
+func (s *eventHandlerStore) GetActiveForEventSystem(ctx context.Context, orgID, eventType string) ([]domain.EventHandler, error) {
+	return getActiveEventHandlers(ctx, s.admin, orgID, eventType)
 }
 
-// pgMatchableHandler is the WHERE fragment for a handler an event can match:
-// enabled, live, and on a team that isn't archived. It is shared with the task
-// list's rule order so that order counts exactly the handlers
-// GetEnabledForEvent returns.
-const pgMatchableHandler = `enabled = TRUE AND deleted_at IS NULL
+// pgActiveHandler is the WHERE fragment for a handler an event can match: not
+// off, live, and on a team that isn't archived. It is shared with the task
+// list's handler order so that order counts exactly the handlers
+// GetActiveForEvent returns.
+const pgActiveHandler = `mode <> 'off' AND deleted_at IS NULL
 	AND NOT EXISTS (SELECT 1 FROM teams tm WHERE tm.id = event_handlers.team_id AND tm.deleted_at IS NOT NULL)`
 
-func getEnabledEventHandlers(ctx context.Context, q queryer, orgID, eventType string) ([]domain.EventHandler, error) {
-	// Rules before triggers is the invariant the router relies on (same
-	// observable behavior as the pre-unification two-phase loop); notify
-	// rules come last. sort_order then breaks ties among rules; created_at
-	// DESC orders the rest. An archived team's handlers are left out (see the
-	// interface doc).
+func getActiveEventHandlers(ctx context.Context, q queryer, orgID, eventType string) ([]domain.EventHandler, error) {
 	rows, err := q.QueryContext(ctx, `
 		SELECT `+pgEventHandlerColumns+`
 		FROM event_handlers
-		WHERE org_id = $1 AND event_type = $2 AND `+pgMatchableHandler+`
-		ORDER BY `+pgHandlerKindOrder+`,
-		         CASE WHEN kind = 'rule' THEN sort_order ELSE 0 END ASC,
-		         created_at DESC, id
+		WHERE org_id = $1 AND event_type = $2 AND `+pgActiveHandler+`
+		ORDER BY sort_order ASC, id ASC
 	`, orgID, eventType)
 	if err != nil {
 		return nil, err
@@ -257,8 +161,8 @@ func (s *eventHandlerStore) ListForBlueprint(ctx context.Context, orgID, bluepri
 	rows, err := s.app.QueryContext(ctx, `
 		SELECT `+pgEventHandlerColumns+`
 		FROM event_handlers
-		WHERE org_id = $1 AND blueprint_id = $2 AND kind = 'trigger' AND deleted_at IS NULL
-		ORDER BY created_at DESC
+		WHERE org_id = $1 AND blueprint_id = $2 AND deleted_at IS NULL
+		ORDER BY created_at DESC, id
 	`, orgID, blueprintID)
 	if err != nil {
 		return nil, err
@@ -268,159 +172,123 @@ func (s *eventHandlerStore) ListForBlueprint(ctx context.Context, orgID, bluepri
 }
 
 func (s *eventHandlerStore) Create(ctx context.Context, orgID, teamID string, h domain.EventHandler) (domain.EventHandler, error) {
-	if err := db.ValidateEventHandlerForCreate(&h); err != nil {
+	if err := db.ValidateEventHandler(h); err != nil {
 		return domain.EventHandler{}, err
 	}
-	var pred any
-	if h.ScopePredicateJSON != nil {
-		pred = *h.ScopePredicateJSON
-	}
-
 	// team_id is the acting team the handler resolved for this request —
 	// no "first/any team in org" fallback. team_id is NOT NULL (the sole
-	// scoping signal; no visibility column) and the
-	// event_handlers_insert RLS gates on tf.user_in_team(team_id), so a
-	// real team here keeps the write valid. Empty is a handler bug, so
-	// reject it rather than write an invalid row.
+	// scoping signal) and the event_handlers_insert RLS gates on
+	// tf.user_can_write_team(team_id), so a real team here keeps the write
+	// valid. Empty is a handler bug, so reject it rather than write an
+	// invalid row.
 	if teamID == "" {
 		return domain.EventHandler{}, fmt.Errorf("postgres event_handlers Create: team_id required (handler must thread the resolved acting team from request context)")
 	}
 	// RETURNING projects the point read's column list, so the row handed back
 	// carries the creator identity the COALESCE resolved, the forced source
 	// and the stamped timestamps h never described.
-	switch h.Kind {
-	case domain.EventHandlerKindRule:
-		return scanEventHandlerRowPG(s.app.QueryRowContext(ctx, `
-			INSERT INTO event_handlers
-				(id, org_id, creator_user_id, team_id, kind, event_type,
-				 scope_predicate_json, enabled, source, applies_to_unowned,
-				 name, default_priority, sort_order,
-				 created_at, updated_at)
-			VALUES (
-				$1, $2,
-				COALESCE(tf.current_user_id(), (SELECT owner_user_id FROM orgs WHERE id = $2)),
-				$3::uuid,
-				'rule', $4,
-				$5::jsonb, $6, 'user', $7,
-				$8, $9, $10,
-				now(), now()
-			)
-			RETURNING `+pgEventHandlerColumns,
-			h.ID, orgID, teamID, h.EventType, pred, h.Enabled, h.AppliesToUnowned,
-			h.Name, derefFloat(h.DefaultPriority), derefInt(h.SortOrder)))
-
-	case domain.EventHandlerKindTrigger:
-		return scanEventHandlerRowPG(s.app.QueryRowContext(ctx, `
-			INSERT INTO event_handlers
-				(id, org_id, creator_user_id, team_id, kind, event_type,
-				 scope_predicate_json, enabled, source, applies_to_unowned,
-				 blueprint_id, breaker_threshold, min_autonomy_suitability,
-				 created_at, updated_at)
-			VALUES (
-				$1, $2,
-				COALESCE(tf.current_user_id(), (SELECT owner_user_id FROM orgs WHERE id = $2)),
-				$3::uuid,
-				'trigger', $4,
-				$5::jsonb, $6, 'user', $7,
-				$8, $9, $10,
-				now(), now()
-			)
-			RETURNING `+pgEventHandlerColumns,
-			h.ID, orgID, teamID, h.EventType, pred, h.Enabled, h.AppliesToUnowned,
-			h.BlueprintID, derefInt(h.BreakerThreshold), derefFloat(h.MinAutonomySuitability)))
-
-	case domain.EventHandlerKindNotify:
-		return scanEventHandlerRowPG(s.app.QueryRowContext(ctx, `
-			INSERT INTO event_handlers
-				(id, org_id, creator_user_id, team_id, kind, event_type,
-				 scope_predicate_json, enabled, source,
-				 name, notify_audience,
-				 created_at, updated_at)
-			VALUES (
-				$1, $2,
-				COALESCE(tf.current_user_id(), (SELECT owner_user_id FROM orgs WHERE id = $2)),
-				$3::uuid,
-				'notify', $4,
-				$5::jsonb, $6, 'user',
-				$7, $8,
-				now(), now()
-			)
-			RETURNING `+pgEventHandlerColumns,
-			h.ID, orgID, teamID, h.EventType, pred, h.Enabled,
-			h.Name, h.Audience))
-	}
-	return domain.EventHandler{}, fmt.Errorf("postgres event_handlers Create: unknown kind %q", h.Kind)
+	return scanEventHandlerRowPG(s.app.QueryRowContext(ctx, `
+		INSERT INTO event_handlers
+			(id, org_id, creator_user_id, team_id, mode, event_type,
+			 scope_predicate_json, source, applies_to_unowned,
+			 name, default_priority, sort_order,
+			 blueprint_id, breaker_threshold, min_autonomy_suitability,
+			 created_at, updated_at)
+		VALUES (
+			$1, $2,
+			COALESCE(tf.current_user_id(), (SELECT owner_user_id FROM orgs WHERE id = $2)),
+			$3::uuid,
+			$4, $5,
+			$6::jsonb, 'user', $7,
+			$8, $9, $10,
+			$11, $12, $13,
+			now(), now()
+		)
+		RETURNING `+pgEventHandlerColumns,
+		h.ID, orgID, teamID, h.Mode, h.EventType,
+		predicateArgPG(h.ScopePredicateJSON), h.AppliesToUnowned,
+		h.Name, h.DefaultPriority, h.SortOrder,
+		nullIfEmpty(h.BlueprintID), h.BreakerThreshold, h.MinAutonomySuitability))
 }
 
 func (s *eventHandlerStore) Update(ctx context.Context, orgID string, h domain.EventHandler) (domain.EventHandler, error) {
 	if !isValidUUID(h.ID) {
 		return domain.EventHandler{}, db.ErrNoSuchEventHandler
 	}
-	if err := db.ValidateEventHandlerForCreate(&h); err != nil {
+	if err := db.ValidateEventHandler(h); err != nil {
 		return domain.EventHandler{}, err
 	}
-	var pred any
-	if h.ScopePredicateJSON != nil {
-		pred = *h.ScopePredicateJSON
-	}
-
-	contentChanged, err := s.contentChanged(ctx, orgID, h)
+	cur, found, err := s.current(ctx, orgID, h.ID)
 	if err != nil {
 		return domain.EventHandler{}, err
 	}
-
-	switch h.Kind {
-	case domain.EventHandlerKindRule:
-		return scanUpdatedEventHandlerPG(s.app.QueryRowContext(ctx, `
-			UPDATE event_handlers
-			SET scope_predicate_json = $1::jsonb, enabled = $2, applies_to_unowned = $3,
-			    name = $4, default_priority = $5, sort_order = $6,
-			    user_modified = user_modified OR $7,
-			    updated_at = now()
-			WHERE org_id = $8 AND id = $9 AND kind = 'rule' AND deleted_at IS NULL
-			RETURNING `+pgEventHandlerColumns,
-			pred, h.Enabled, h.AppliesToUnowned, h.Name,
-			derefFloat(h.DefaultPriority), derefInt(h.SortOrder),
-			contentChanged,
-			orgID, h.ID))
-
-	case domain.EventHandlerKindTrigger:
-		// blueprint_id is immutable on trigger update — change requires
-		// RetargetBlueprint.
-		return scanUpdatedEventHandlerPG(s.app.QueryRowContext(ctx, `
-			UPDATE event_handlers
-			SET scope_predicate_json = $1::jsonb, enabled = $2, applies_to_unowned = $3,
-			    breaker_threshold = $4, min_autonomy_suitability = $5,
-			    user_modified = user_modified OR $6,
-			    updated_at = now()
-			WHERE org_id = $7 AND id = $8 AND kind = 'trigger' AND deleted_at IS NULL
-			RETURNING `+pgEventHandlerColumns,
-			pred, h.Enabled, h.AppliesToUnowned,
-			derefInt(h.BreakerThreshold), derefFloat(h.MinAutonomySuitability),
-			contentChanged,
-			orgID, h.ID))
-
-	case domain.EventHandlerKindNotify:
-		return scanUpdatedEventHandlerPG(s.app.QueryRowContext(ctx, `
-			UPDATE event_handlers
-			SET scope_predicate_json = $1::jsonb, enabled = $2,
-			    name = $3, notify_audience = $4,
-			    user_modified = user_modified OR $5,
-			    updated_at = now()
-			WHERE org_id = $6 AND id = $7 AND kind = 'notify' AND deleted_at IS NULL
-			RETURNING `+pgEventHandlerColumns,
-			pred, h.Enabled, h.Name, h.Audience,
-			contentChanged,
-			orgID, h.ID))
+	if !found {
+		return domain.EventHandler{}, db.ErrNoSuchEventHandler
 	}
-	return domain.EventHandler{}, fmt.Errorf("postgres event_handlers Update: unknown kind %q", h.Kind)
+	// The write is guarded on the blueprint read here, and attaches a
+	// different one only while it is live. The guard on blueprint_id is what
+	// holds under READ COMMITTED: an UPDATE that waited on a concurrent
+	// detach re-checks its WHERE against the detached row, while the EXISTS
+	// still reads the snapshot the statement began with, where a blueprint
+	// whose delete has not committed is live.
+	//
+	// So an attach holds the blueprint first, with the share lock
+	// BlueprintStore.GetForShare takes, and decides that it attaches from cur
+	// rather than from the caller's read: h composed from an older read of
+	// the row can attach a blueprint the caller believes the row already
+	// holds, and so does not hold itself. In a transaction the lock lasts
+	// until commit; outside one it is released before the UPDATE runs.
+	attaches := h.BlueprintID != "" && h.BlueprintID != cur.BlueprintID
+	if attaches {
+		var live int
+		err := s.app.QueryRowContext(ctx,
+			`SELECT 1 FROM blueprints WHERE org_id = $1 AND id = $2 AND deleted_at IS NULL FOR SHARE`,
+			orgID, h.BlueprintID).Scan(&live)
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.EventHandler{}, db.ErrEventHandlerBlueprintChanged
+		}
+		if err != nil {
+			return domain.EventHandler{}, fmt.Errorf("hold blueprint %s: %w", h.BlueprintID, err)
+		}
+	}
+	updated, err := scanUpdatedEventHandlerPG(s.app.QueryRowContext(ctx, `
+		UPDATE event_handlers
+		SET mode = $1, scope_predicate_json = $2::jsonb, applies_to_unowned = $3,
+		    name = $4, default_priority = $5, sort_order = $6,
+		    blueprint_id = $7, breaker_threshold = $8, min_autonomy_suitability = $9,
+		    user_modified = user_modified OR $10,
+		    updated_at = now()
+		WHERE org_id = $11 AND id = $12 AND deleted_at IS NULL
+		  AND blueprint_id IS NOT DISTINCT FROM $13::text
+		  AND (NOT $14::boolean OR EXISTS (SELECT 1 FROM blueprints b WHERE b.id = $7 AND b.deleted_at IS NULL))
+		RETURNING `+pgEventHandlerColumns,
+		h.Mode, predicateArgPG(h.ScopePredicateJSON), h.AppliesToUnowned,
+		h.Name, h.DefaultPriority, h.SortOrder,
+		nullIfEmpty(h.BlueprintID), h.BreakerThreshold, h.MinAutonomySuitability,
+		db.HandlerContentChanged(cur, h),
+		orgID, h.ID,
+		nullIfEmpty(cur.BlueprintID), attaches))
+	if errors.Is(err, db.ErrNoSuchEventHandler) {
+		if _, still, e := s.current(ctx, orgID, h.ID); e != nil {
+			return domain.EventHandler{}, e
+		} else if still {
+			return domain.EventHandler{}, db.ErrEventHandlerBlueprintChanged
+		}
+	}
+	return updated, err
+}
+
+// predicateArgPG binds a nil predicate as NULL.
+func predicateArgPG(p *string) any {
+	if p == nil {
+		return nil
+	}
+	return *p
 }
 
 // scanUpdatedEventHandlerPG decodes an id-keyed UPDATE … RETURNING. No row
-// scanned means no live handler answered the id under this statement's kind
-// filter — or that RLS hides whatever does — and both are
-// db.ErrNoSuchEventHandler, the answer these writes used to give silently as
-// zero rows affected.
+// scanned means no live handler answered the id — or that RLS hides whatever
+// does — and both are db.ErrNoSuchEventHandler.
 func scanUpdatedEventHandlerPG(row *sql.Row) (domain.EventHandler, error) {
 	h, err := scanEventHandlerRowPG(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -429,93 +297,35 @@ func scanUpdatedEventHandlerPG(row *sql.Row) (domain.EventHandler, error) {
 	return h, err
 }
 
-// contentChanged reports whether h's content fields (scope_predicate_json,
-// plus name/default_priority for a rule or breaker_threshold/
-// min_autonomy_suitability for a trigger) differ from the row's current
-// values — the user_modified stamping signal for Update. enabled and
-// sort_order are deliberately excluded (never content). A missing/deleted row
-// reports false; the caller's UPDATE affects 0 rows either way.
-func (s *eventHandlerStore) contentChanged(ctx context.Context, orgID string, h domain.EventHandler) (bool, error) {
-	var (
-		predNS        sql.NullString
-		nameNS        sql.NullString
-		defPriority   sql.NullFloat64
-		breakerNS     sql.NullInt64
-		minAutonomyNS sql.NullFloat64
-	)
+// current reads the content fields of the live handler id — what Update
+// compares h against to decide the user_modified stamp, and the blueprint its
+// write is guarded on — and whether there is one.
+func (s *eventHandlerStore) current(ctx context.Context, orgID, id string) (db.TeamHandlerRow, bool, error) {
+	var cur db.TeamHandlerRow
+	var pred, blueprintID sql.NullString
 	err := s.app.QueryRowContext(ctx, `
-		SELECT scope_predicate_json::text, name, default_priority, breaker_threshold, min_autonomy_suitability
+		SELECT scope_predicate_json::text, name, default_priority, blueprint_id, breaker_threshold, min_autonomy_suitability
 		FROM event_handlers WHERE org_id = $1 AND id = $2 AND deleted_at IS NULL
-	`, orgID, h.ID).Scan(&predNS, &nameNS, &defPriority, &breakerNS, &minAutonomyNS)
+	`, orgID, id).Scan(&pred, &cur.Name, &cur.DefaultPriority, &blueprintID, &cur.BreakerThreshold, &cur.MinAutonomySuitability)
 	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
+		return db.TeamHandlerRow{}, false, nil
 	}
 	if err != nil {
-		return false, err
+		return db.TeamHandlerRow{}, false, err
 	}
-	var newPred string
-	if h.ScopePredicateJSON != nil {
-		newPred = *h.ScopePredicateJSON
-	}
-	if !db.PredicateJSONEqual(predNS.String, newPred) {
-		return true, nil
-	}
-	switch h.Kind {
-	case domain.EventHandlerKindRule:
-		return nameNS.String != h.Name || defPriority.Float64 != derefFloat(h.DefaultPriority), nil
-	case domain.EventHandlerKindNotify:
-		return nameNS.String != h.Name, nil
-	case domain.EventHandlerKindTrigger:
-		return int(breakerNS.Int64) != derefInt(h.BreakerThreshold) || minAutonomyNS.Float64 != derefFloat(h.MinAutonomySuitability), nil
-	}
-	return false, nil
+	cur.Predicate, cur.BlueprintID = pred.String, blueprintID.String
+	return cur, true, nil
 }
 
-// Delete removes a handler. Two kinds of row soft-delete: a system_slug row
-// (shipped copy), so its (org_id, team_id, system_slug) slot stays occupied
-// for the sync's never-resurrect rule, and every trigger, because
-// conversations_trigger_id_org_id_fkey and blueprint_runs_trigger_fkey
-// reference it with no ON DELETE action. A user-created rule or notify rule
-// hard-deletes.
-//
-// Whether a trigger has run is not asked: RLS hides a run from everyone but
-// its creator, so the person deleting cannot see every row that references
-// the trigger.
+// Delete soft-deletes a handler by stamping deleted_at.
 func (s *eventHandlerStore) Delete(ctx context.Context, orgID, id string) error {
 	if !isValidUUID(id) {
 		return nil
 	}
-	var (
-		systemSlug sql.NullString
-		kind       string
-	)
-	switch err := s.app.QueryRowContext(ctx,
-		`SELECT system_slug, kind FROM event_handlers WHERE org_id = $1 AND id = $2 AND deleted_at IS NULL`, orgID, id,
-	).Scan(&systemSlug, &kind); {
-	case errors.Is(err, sql.ErrNoRows):
-		return nil // already gone; Delete is idempotent
-	case err != nil:
-		return err
-	}
-	if (systemSlug.Valid && systemSlug.String != "") || kind == domain.EventHandlerKindTrigger {
-		_, err := s.app.ExecContext(ctx,
-			`UPDATE event_handlers SET deleted_at = now() WHERE org_id = $1 AND id = $2 AND deleted_at IS NULL`,
-			orgID, id)
-		return err
-	}
-	_, err := s.app.ExecContext(ctx, `DELETE FROM event_handlers WHERE org_id = $1 AND id = $2`, orgID, id)
+	_, err := s.app.ExecContext(ctx,
+		`UPDATE event_handlers SET deleted_at = now() WHERE org_id = $1 AND id = $2 AND deleted_at IS NULL`,
+		orgID, id)
 	return err
-}
-
-func (s *eventHandlerStore) RetargetBlueprint(ctx context.Context, orgID, id, newBlueprintID string) (domain.EventHandler, error) {
-	if !isValidUUID(id) || !isValidUUID(newBlueprintID) {
-		return domain.EventHandler{}, db.ErrNoSuchEventHandler
-	}
-	return scanUpdatedEventHandlerPG(s.app.QueryRowContext(ctx, `
-		UPDATE event_handlers SET blueprint_id = $1, user_modified = TRUE, updated_at = now()
-		WHERE org_id = $2 AND id = $3 AND kind = 'trigger' AND deleted_at IS NULL
-		RETURNING `+pgEventHandlerColumns,
-		newBlueprintID, orgID, id))
 }
 
 func (s *eventHandlerStore) Reorder(ctx context.Context, orgID string, ids []string) error {
@@ -524,12 +334,9 @@ func (s *eventHandlerStore) Reorder(ctx context.Context, orgID string, ids []str
 			if !isValidUUID(id) {
 				continue
 			}
-			// kind='rule' filter ensures trigger IDs in the list are
-			// silently skipped — sort_order is rule-only by CHECK
-			// constraint and a trigger row's sort_order is NULL.
 			if _, err := tx.ExecContext(ctx, `
 				UPDATE event_handlers SET sort_order = $1, updated_at = now()
-				WHERE org_id = $2 AND id = $3 AND kind = 'rule' AND deleted_at IS NULL
+				WHERE org_id = $2 AND id = $3 AND deleted_at IS NULL
 			`, i, orgID, id); err != nil {
 				return err
 			}
@@ -538,39 +345,15 @@ func (s *eventHandlerStore) Reorder(ctx context.Context, orgID string, ids []str
 	})
 }
 
-func (s *eventHandlerStore) Promote(ctx context.Context, orgID string, id string, t domain.EventHandler) (domain.EventHandler, error) {
-	if !isValidUUID(id) {
-		return domain.EventHandler{}, db.ErrNoSuchEventHandler
-	}
-	if t.Kind != domain.EventHandlerKindTrigger {
-		return domain.EventHandler{}, errors.New("postgres event_handlers Promote: target kind must be 'trigger'")
-	}
-	if t.BlueprintID == "" || t.BreakerThreshold == nil || t.MinAutonomySuitability == nil {
-		return domain.EventHandler{}, errors.New("postgres event_handlers Promote: trigger fields required (blueprint_id, breaker_threshold, min_autonomy_suitability)")
-	}
-	var pred any
-	if t.ScopePredicateJSON != nil {
-		pred = *t.ScopePredicateJSON
-	}
-	// Single UPDATE: clear rule-only fields, populate trigger-only,
-	// flip kind. The per-kind CHECK constraints validate atomically —
-	// any mid-state would fail the rule_shape or trigger_shape check. A kind
-	// change is always a user modification — stamp unconditionally.
-	// The row is where a caller sees the cleared rule-only columns; t
-	// describes only the trigger half. No row scanned means the id named no
-	// live rule, which is what the rows-affected probe here used to report.
-	return scanUpdatedEventHandlerPG(s.app.QueryRowContext(ctx, `
+func (s *eventHandlerStore) DetachBlueprint(ctx context.Context, orgID, blueprintID string) error {
+	_, err := s.app.ExecContext(ctx, `
 		UPDATE event_handlers
-		SET kind = 'trigger',
-		    blueprint_id = $1, breaker_threshold = $2, min_autonomy_suitability = $3,
-		    name = NULL, default_priority = NULL, sort_order = NULL,
-		    scope_predicate_json = $4::jsonb,
-		    user_modified = TRUE,
+		SET blueprint_id = NULL,
+		    mode = CASE WHEN mode = 'automate' THEN 'watch' ELSE mode END,
 		    updated_at = now()
-		WHERE org_id = $5 AND id = $6 AND kind = 'rule' AND deleted_at IS NULL
-		RETURNING `+pgEventHandlerColumns,
-		t.BlueprintID, *t.BreakerThreshold, *t.MinAutonomySuitability,
-		pred, orgID, id))
+		WHERE org_id = $1 AND blueprint_id = $2 AND deleted_at IS NULL
+	`, orgID, blueprintID)
+	return err
 }
 
 // Sync brings teamID's unmodified copies of db.ShippedEventHandlers up to
@@ -603,19 +386,14 @@ func (s *eventHandlerStore) syncOne(ctx context.Context, conn *sql.DB, orgID, te
 		if err != nil {
 			return err
 		}
-
-		var resolvedBP string
-		var bpOK bool
-		if h.Kind == domain.EventHandlerKindTrigger {
-			resolvedBP, bpOK = blueprintIDsBySlug[h.BlueprintID]
-		}
-
-		plan := db.PlanHandlerSync(h, resolvedBP, bpOK, row)
+		blueprintID, resolved := db.ResolveShippedBlueprint(h, blueprintIDsBySlug)
+		plan := db.PlanHandlerSync(h, blueprintID, resolved, row)
 		switch plan.Action {
 		case db.HandlerInsert:
-			return insertHandlerPG(ctx, tx, orgID, teamID, h, plan)
+			_, err := insertShippedHandlerPG(ctx, tx, orgID, teamID, h, plan, "")
+			return err
 		case db.HandlerApply:
-			return applyHandlerPG(ctx, tx, orgID, row.ID, h.Kind, plan)
+			return applyHandlerPG(ctx, tx, orgID, row.ID, plan)
 		default:
 			return nil // HandlerSkip / HandlerEqual: nothing written, so the commit is a no-op
 		}
@@ -627,111 +405,79 @@ func (s *eventHandlerStore) syncOne(ctx context.Context, conn *sql.DB, orgID, te
 // when no row.
 func loadTeamHandlerRowPG(ctx context.Context, q queryer, orgID, teamID, slug string) (db.TeamHandlerRow, error) {
 	var (
-		id, blueprintID string
-		mod, del        bool
-		pred, name      sql.NullString
-		defPriority     sql.NullFloat64
-		breaker         sql.NullInt64
-		minAutonomy     sql.NullFloat64
+		row               db.TeamHandlerRow
+		pred, blueprintID sql.NullString
 	)
 	switch err := q.QueryRowContext(ctx, `
 		SELECT id, user_modified, (deleted_at IS NOT NULL),
 		       scope_predicate_json::text, name, default_priority,
-		       COALESCE(blueprint_id, ''), breaker_threshold, min_autonomy_suitability
+		       blueprint_id, breaker_threshold, min_autonomy_suitability
 		FROM event_handlers WHERE org_id = $1 AND team_id = $2::uuid AND system_slug = $3
-	`, orgID, teamID, slug).Scan(&id, &mod, &del, &pred, &name, &defPriority, &blueprintID, &breaker, &minAutonomy); {
+	`, orgID, teamID, slug).Scan(&row.ID, &row.UserModified, &row.Deleted, &pred, &row.Name, &row.DefaultPriority, &blueprintID, &row.BreakerThreshold, &row.MinAutonomySuitability); {
 	case errors.Is(err, sql.ErrNoRows):
 		return db.TeamHandlerRow{Exists: false}, nil
 	case err != nil:
 		return db.TeamHandlerRow{}, fmt.Errorf("read handler %s: %w", slug, err)
 	}
-	row := db.TeamHandlerRow{Exists: true, Deleted: del, UserModified: mod, ID: id, BlueprintID: blueprintID}
-	if pred.Valid {
-		row.Predicate = pred.String
-	}
-	if name.Valid {
-		row.Name = name.String
-	}
-	if defPriority.Valid {
-		row.DefaultPriority = defPriority.Float64
-	}
-	if breaker.Valid {
-		row.BreakerThreshold = int(breaker.Int64)
-	}
-	if minAutonomy.Valid {
-		row.MinAutonomySuitability = minAutonomy.Float64
-	}
+	row.Exists = true
+	row.Predicate, row.BlueprintID = pred.String, blueprintID.String
 	return row, nil
 }
 
-// insertHandlerPG inserts a brand-new team copy of a shipped handler,
-// honoring the shipped enabled convention (rules enabled unless marked
-// Disabled, triggers disabled) — matches Seed.
-func insertHandlerPG(ctx context.Context, q queryer, orgID, teamID string, h db.ShippedEventHandler, plan db.HandlerSyncPlan) error {
-	now := time.Now().UTC()
+// insertShippedHandlerPG inserts a team's copy of a shipped handler in its
+// shipped mode and sort order. onConflict is Seed's ON CONFLICT clause, which
+// leaves an existing copy alone, and empty for the sync, which has just read
+// that no row holds the slug. It reports the rows inserted.
+func insertShippedHandlerPG(ctx context.Context, q queryer, orgID, teamID string, h db.ShippedEventHandler, plan db.HandlerSyncPlan, onConflict string) (int64, error) {
 	var pred any
 	if plan.Predicate != "" {
 		pred = plan.Predicate
 	}
-	switch h.Kind {
-	case domain.EventHandlerKindRule:
-		_, err := q.ExecContext(ctx, `
-			INSERT INTO event_handlers
-				(id, org_id, team_id, creator_user_id, kind, event_type,
-				 system_slug, scope_predicate_json, enabled, source,
-				 name, default_priority, sort_order,
-				 created_at, updated_at)
-			VALUES (
-				$1, $2, $3::uuid, NULL, 'rule', $4,
-				$5, $6::jsonb, $11, 'system',
-				$7, $8, $9,
-				$10, $10
-			)
-		`, uuid.New().String(), orgID, teamID, h.EventType, h.ID, pred, plan.Name, plan.DefaultPriority, plan.SortOrder, now, !h.Disabled)
-		return err
-	case domain.EventHandlerKindTrigger:
-		_, err := q.ExecContext(ctx, `
-			INSERT INTO event_handlers
-				(id, org_id, team_id, creator_user_id, kind, event_type,
-				 system_slug, scope_predicate_json, enabled, source,
-				 blueprint_id, breaker_threshold, min_autonomy_suitability,
-				 created_at, updated_at)
-			VALUES (
-				$1, $2, $3::uuid, NULL, 'trigger', $4,
-				$5, $6::jsonb, FALSE, 'system',
-				$7, $8, $9,
-				$10, $10
-			)
-		`, uuid.New().String(), orgID, teamID, h.EventType, h.ID, pred, plan.BlueprintID, plan.BreakerThreshold, plan.MinAutonomySuitability, now)
-		return err
+	now := time.Now().UTC()
+	res, err := q.ExecContext(ctx, `
+		INSERT INTO event_handlers
+			(id, org_id, team_id, creator_user_id, mode, event_type,
+			 system_slug, scope_predicate_json, source,
+			 name, default_priority, sort_order,
+			 blueprint_id, breaker_threshold, min_autonomy_suitability,
+			 created_at, updated_at)
+		VALUES (
+			$1, $2, $3::uuid, NULL, $4, $5,
+			$6, $7::jsonb, 'system',
+			$8, $9, $10,
+			$11, $12, $13,
+			$14, $14
+		)
+		`+onConflict,
+		uuid.New().String(), orgID, teamID, plan.Mode, h.EventType,
+		h.ID, pred,
+		plan.Name, plan.DefaultPriority, plan.SortOrder,
+		nullIfEmpty(plan.BlueprintID), plan.BreakerThreshold, plan.MinAutonomySuitability,
+		now)
+	if err != nil {
+		return 0, err
 	}
-	return fmt.Errorf("postgres event_handlers Sync: insert: unknown kind %q", h.Kind)
+	return res.RowsAffected()
 }
 
-// applyHandlerPG rewrites an existing row's diverging content fields. Never
-// touches enabled or sort_order.
-func applyHandlerPG(ctx context.Context, q queryer, orgID, id string, kind string, plan db.HandlerSyncPlan) error {
+// applyHandlerPG rewrites an existing row's content fields. Never touches mode
+// or sort_order, and leaves blueprint_id alone when the plan does not write
+// it.
+func applyHandlerPG(ctx context.Context, q queryer, orgID, id string, plan db.HandlerSyncPlan) error {
 	var pred any
 	if plan.Predicate != "" {
 		pred = plan.Predicate
 	}
-	switch kind {
-	case domain.EventHandlerKindRule:
-		_, err := q.ExecContext(ctx, `
-			UPDATE event_handlers
-			SET scope_predicate_json = $1::jsonb, name = $2, default_priority = $3, updated_at = now()
-			WHERE org_id = $4 AND id = $5
-		`, pred, plan.Name, plan.DefaultPriority, orgID, id)
-		return err
-	case domain.EventHandlerKindTrigger:
-		_, err := q.ExecContext(ctx, `
-			UPDATE event_handlers
-			SET scope_predicate_json = $1::jsonb, blueprint_id = $2, breaker_threshold = $3, min_autonomy_suitability = $4, updated_at = now()
-			WHERE org_id = $5 AND id = $6
-		`, pred, plan.BlueprintID, plan.BreakerThreshold, plan.MinAutonomySuitability, orgID, id)
-		return err
-	}
-	return fmt.Errorf("postgres event_handlers Sync: apply: unknown kind %q", kind)
+	_, err := q.ExecContext(ctx, `
+		UPDATE event_handlers
+		SET scope_predicate_json = $1::jsonb, name = $2, default_priority = $3,
+		    blueprint_id = CASE WHEN $4::boolean THEN $5::text ELSE blueprint_id END,
+		    breaker_threshold = $6, min_autonomy_suitability = $7, updated_at = now()
+		WHERE org_id = $8 AND id = $9
+	`, pred, plan.Name, plan.DefaultPriority,
+		plan.WriteBlueprint, nullIfEmpty(plan.BlueprintID),
+		plan.BreakerThreshold, plan.MinAutonomySuitability, orgID, id)
+	return err
 }
 
 // buildListWhere composes the WHERE clause List's count and page share, so the
@@ -739,25 +485,27 @@ func applyHandlerPG(ctx context.Context, q queryer, orgID, id string, kind strin
 func (s *eventHandlerStore) buildListWhere(orgID string, f db.EventHandlerListFilter) (string, []any) {
 	args := []any{orgID}
 	where := ` WHERE org_id = $1 AND deleted_at IS NULL`
-	if f.Kind != "" {
-		args = append(args, f.Kind)
-		where += fmt.Sprintf(" AND kind = $%d", len(args))
+	if len(f.Modes) > 0 {
+		args = append(args, f.Modes)
+		where += fmt.Sprintf(" AND mode = ANY($%d)", len(args))
+	}
+	if f.EventType != "" {
+		args = append(args, f.EventType)
+		where += fmt.Sprintf(" AND event_type = $%d", len(args))
+	}
+	if f.HasBlueprint != nil {
+		if *f.HasBlueprint {
+			where += " AND blueprint_id IS NOT NULL"
+		} else {
+			where += " AND blueprint_id IS NULL"
+		}
 	}
 	if f.TeamID != "" {
-		// Prompts page narrowed to one team: that team's handlers. Every
-		// handler is team-owned (team_id NOT NULL, no org-visible tier), so
-		// this is a plain team filter. RLS still gates the row set; this
-		// narrows within it.
+		// Every handler is team-owned (team_id NOT NULL, no org-visible
+		// tier), so this is a plain team filter. RLS still gates the row set;
+		// this narrows within it.
 		args = append(args, f.TeamID)
 		where += fmt.Sprintf(" AND team_id = $%d", len(args))
-	}
-	if f.Audience != "" {
-		args = append(args, f.Audience)
-		where += fmt.Sprintf(" AND notify_audience = $%d", len(args))
-	}
-	if f.CreatorUserID != "" {
-		args = append(args, f.CreatorUserID)
-		where += fmt.Sprintf(" AND creator_user_id = $%d", len(args))
 	}
 	if len(f.GatedEventTypes) > 0 {
 		args = append(args, f.GatedEventTypes)
@@ -795,83 +543,24 @@ func scanEventHandlerRowPG(row *sql.Row) (domain.EventHandler, error) {
 	return scanEventHandlerFromAny(row.Scan)
 }
 
-// scanEventHandlerFromAny is the shared row decoder. Per-kind nullable
-// columns scan into sql.Null* / sql.NullString then map onto the
-// domain pointer fields; rule rows have NULL trigger-only fields and
-// vice versa.
+// scanEventHandlerFromAny is the shared row decoder.
 func scanEventHandlerFromAny(scanFn func(dst ...any) error) (domain.EventHandler, error) {
 	var h domain.EventHandler
-	var (
-		pred          sql.NullString
-		teamID        sql.NullString
-		nameNS        sql.NullString
-		defPriority   sql.NullFloat64
-		sortOrder     sql.NullInt64
-		blueprintID   sql.NullString
-		breakerNS     sql.NullInt64
-		minAutonomyNS sql.NullFloat64
-	)
+	var pred, blueprintID sql.NullString
 	if err := scanFn(
-		&h.ID, &h.Kind, &h.EventType, &pred, &h.Enabled, &h.Source,
-		&teamID, &h.AppliesToUnowned,
-		&nameNS, &defPriority, &sortOrder,
-		&blueprintID, &breakerNS, &minAutonomyNS,
+		&h.ID, &h.Mode, &h.EventType, &pred, &h.Source,
+		&h.TeamID, &h.AppliesToUnowned,
+		&h.Name, &h.DefaultPriority, &h.SortOrder,
+		&blueprintID, &h.BreakerThreshold, &h.MinAutonomySuitability,
 		&h.UserModified, &h.CreatedAt, &h.UpdatedAt,
-		&h.CreatorUserID, &h.Audience,
+		&h.CreatorUserID,
 	); err != nil {
 		return h, err
 	}
-	if teamID.Valid {
-		h.TeamID = teamID.String
-	}
+	h.BlueprintID = blueprintID.String
 	if pred.Valid {
 		s := pred.String
 		h.ScopePredicateJSON = &s
 	}
-	if nameNS.Valid {
-		h.Name = nameNS.String
-	}
-	if defPriority.Valid {
-		v := defPriority.Float64
-		h.DefaultPriority = &v
-	}
-	if sortOrder.Valid {
-		v := int(sortOrder.Int64)
-		h.SortOrder = &v
-	}
-	if blueprintID.Valid {
-		h.BlueprintID = blueprintID.String
-	}
-	if breakerNS.Valid {
-		v := int(breakerNS.Int64)
-		h.BreakerThreshold = &v
-	}
-	if minAutonomyNS.Valid {
-		v := minAutonomyNS.Float64
-		h.MinAutonomySuitability = &v
-	}
-	// TriggerType is not stored in event_handlers (v1 was always
-	// 'event'); set it on read so downstream code that still inspects
-	// h.TriggerType behaves identically to the pre-unification shape.
-	if h.Kind == domain.EventHandlerKindTrigger {
-		h.TriggerType = domain.TriggerTypeEvent
-	}
 	return h, nil
-}
-
-// derefFloat / derefInt unwrap nullable domain fields for INSERTs that
-// have already passed db.ValidateEventHandlerForCreate (guaranteed non-nil
-// for the kind's required fields).
-func derefFloat(p *float64) float64 {
-	if p == nil {
-		return 0
-	}
-	return *p
-}
-
-func derefInt(p *int) int {
-	if p == nil {
-		return 0
-	}
-	return *p
 }

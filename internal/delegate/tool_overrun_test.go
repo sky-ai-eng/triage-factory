@@ -116,6 +116,14 @@ func TestRestartableJail_EndOverrunCallStopsOnlyTheCallThatOverran(t *testing.T)
 	if handled, stopped := j.endOverrunCall(time.Minute, seen); !handled || stopped || c.jails[0].Exited() {
 		t.Errorf("a call begun after the overrun was seen: handled %v stopped %v, want handled and the jail left alone", handled, stopped)
 	}
+	// A call stamped with the very instant the watchdog looked, as a coarse
+	// clock stamps one begun just after, is not the call that overran.
+	j.mu.Lock()
+	began := j.inFlightSince
+	j.mu.Unlock()
+	if handled, stopped := j.endOverrunCall(time.Minute, began); !handled || stopped || c.jails[0].Exited() {
+		t.Errorf("a call begun the instant the overrun was seen: handled %v stopped %v, want handled and the jail left alone", handled, stopped)
+	}
 	if _, stopped := j.endOverrunCall(time.Minute, time.Now()); !stopped || !c.jails[0].Exited() {
 		t.Error("the call that overran was not ended by stopping its jail")
 	}

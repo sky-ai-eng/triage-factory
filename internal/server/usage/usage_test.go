@@ -258,8 +258,7 @@ func TestUsageEndpoints_Local(t *testing.T) {
 		if byUser := *resp.ByUser; len(byUser) != 1 || byUser[0].UserID != runmode.LocalDefaultUserID || !floatEq(byUser[0].Cost, 1.00) {
 			t.Errorf("/teams by_user = %+v, want the local user at 1.00", byUser)
 		}
-		// by_rule: the autonomous run's trigger, labeled with the blueprint name
-		// (triggers carry a NULL name, so we fall back to the blueprint).
+		// by_rule: the autonomous run's handler, labeled with its name.
 		if len(resp.ByRule) != 1 || resp.ByRule[0].RuleName != blueprintName || !floatEq(resp.ByRule[0].Cost, 0.25) {
 			t.Errorf("/teams by_rule = %+v, want one rule %q at 0.25", resp.ByRule, blueprintName)
 		}
@@ -297,7 +296,7 @@ func TestUsageEndpoints_Local(t *testing.T) {
 			t.Errorf("/org org_level = %+v, want system_overhead 0.05", resp.OrgLevel)
 		}
 		// by_rule: local mode (N=1) carries it on the org rollup too — the
-		// autonomous run's trigger, labeled by its blueprint (0.25).
+		// autonomous run's handler, labeled with its name (0.25).
 		if len(resp.ByRule) != 1 || resp.ByRule[0].RuleName != blueprintName || !floatEq(resp.ByRule[0].Cost, 0.25) {
 			t.Errorf("/org by_rule = %+v, want one rule %q at 0.25 (local mode)", resp.ByRule, blueprintName)
 		}
@@ -445,10 +444,12 @@ func seedUsageLocal(t *testing.T, s *localRig) (triggerID, blueprintName string)
 	exec(`INSERT INTO blueprints (id, name, org_id, team_id, creator_user_id) VALUES (?, ?, ?, ?, ?)`,
 		bpID, blueprintName, org, team, user)
 	triggerID = "trg-usage"
+	// The handler is named after its blueprint, as a create naming a
+	// blueprint and no name is, and by_rule reads the name off the handler.
 	exec(`INSERT INTO event_handlers
-			(id, org_id, team_id, creator_user_id, kind, event_type, blueprint_id, breaker_threshold, min_autonomy_suitability)
-		 VALUES (?, ?, ?, ?, 'trigger', 'github:pr:ci_check_failed', ?, 3, 0.5)`,
-		triggerID, org, team, user, bpID)
+			(id, org_id, team_id, creator_user_id, mode, name, event_type, blueprint_id, breaker_threshold, min_autonomy_suitability)
+		 VALUES (?, ?, ?, ?, 'automate', ?, 'github:pr:ci_check_failed', ?, 3, 0.5)`,
+		triggerID, org, team, user, blueprintName, bpID)
 
 	// SQLite canonical datetime text ('YYYY-MM-DD HH:MM:SS') so both the view's
 	// datetime() filter and the _time_format=sqlite scan round-trip cleanly.

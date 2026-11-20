@@ -214,9 +214,9 @@ func seedFakeEvent(t *testing.T, database *sql.DB) string {
 	return id
 }
 
-// seedFakeTrigger inserts a bare event_handlers trigger row (pointed at
+// seedFakeTrigger inserts a bare event_handlers row in automate (pointed at
 // conversationID's own already-seeded blueprint — reused rather than minting a
-// second one, satisfying the kind='trigger' CHECK's required fields) so
+// second one, satisfying the CHECK that automate has a blueprint) so
 // pending_firings.trigger_id's FK is satisfiable.
 func seedFakeTrigger(t *testing.T, database *sql.DB, conversationID string) string {
 	t.Helper()
@@ -227,8 +227,8 @@ func seedFakeTrigger(t *testing.T, database *sql.DB, conversationID string) stri
 	}
 	id := "trig-" + uuid.New().String()
 	if _, err := database.Exec(
-		`INSERT INTO event_handlers (id, kind, event_type, blueprint_id, breaker_threshold, min_autonomy_suitability, creator_user_id)
-		 VALUES (?, 'trigger', ?, ?, 4, 0, ?)`,
+		`INSERT INTO event_handlers (id, mode, event_type, name, blueprint_id, breaker_threshold, min_autonomy_suitability, creator_user_id)
+		 VALUES (?, 'automate', ?, 'fake trigger', ?, 4, 0, ?)`,
 		id, domain.EventGitHubPRCICheckFailed, blueprintID, runmode.LocalDefaultUserID,
 	); err != nil {
 		t.Fatalf("seed fake trigger: %v", err)

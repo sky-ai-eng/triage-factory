@@ -21,9 +21,8 @@ func testPromptStore(database *sql.DB) db.PromptStore {
 	return sqlitestore.New(database).Prompts
 }
 
-// testEventHandlerStore mirrors testPromptStore for trigger-touching
-// tests. Rules + triggers are unified into event_handlers;
-// trigger-shaped fixtures use kind='trigger' rows on this store.
+// testEventHandlerStore mirrors testPromptStore for tests that seed event
+// handlers.
 func testEventHandlerStore(database *sql.DB) db.EventHandlerStore {
 	if database == nil {
 		return nil
@@ -32,8 +31,8 @@ func testEventHandlerStore(database *sql.DB) db.EventHandlerStore {
 }
 
 // blueprintWrappingPromptForSkills creates a single-step user blueprint on the
-// local default team wrapping promptID and returns the blueprint id. A trigger
-// now FKs a same-team blueprint (not a prompt), so trigger fixtures wrap their
+// local default team wrapping promptID and returns the blueprint id. A handler
+// FKs a same-team blueprint (not a prompt), so handler fixtures wrap their
 // prompt here.
 func blueprintWrappingPromptForSkills(t *testing.T, database *sql.DB, promptID string) string {
 	t.Helper()
@@ -53,33 +52,26 @@ func blueprintWrappingPromptForSkills(t *testing.T, database *sql.DB, promptID s
 	return blueprintID
 }
 
-// createTriggerForTestSkills + getTriggerForTestSkills exercise the
-// trigger-shaped CRUD on EventHandlerStore. Used by importer_test.go. The
-// trigger's BlueprintID field is supplied holding a PROMPT id; this helper
-// wraps that prompt in a single-step team-A blueprint and rebinds BlueprintID
-// to the blueprint id so the same-team blueprint FK holds.
-func createTriggerForTestSkills(t *testing.T, database *sql.DB, trig domain.EventHandler) {
+// createHandlerForTestSkills + getHandlerForTestSkills exercise the CRUD on
+// EventHandlerStore. Used by importer_test.go. The handler's BlueprintID field
+// is supplied holding a PROMPT id; this helper wraps that prompt in a
+// single-step team blueprint and rebinds BlueprintID to the blueprint id so
+// the same-team blueprint FK holds.
+func createHandlerForTestSkills(t *testing.T, database *sql.DB, h domain.EventHandler) {
 	t.Helper()
-	trig.Kind = domain.EventHandlerKindTrigger
-	if trig.TriggerType == "" {
-		trig.TriggerType = domain.TriggerTypeEvent
+	if h.BlueprintID != "" {
+		h.BlueprintID = blueprintWrappingPromptForSkills(t, database, h.BlueprintID)
 	}
-	if trig.BlueprintID != "" {
-		trig.BlueprintID = blueprintWrappingPromptForSkills(t, database, trig.BlueprintID)
-	}
-	if _, err := testEventHandlerStore(database).Create(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, trig); err != nil {
-		t.Fatalf("createTriggerForTestSkills %s: %v", trig.ID, err)
+	if _, err := testEventHandlerStore(database).Create(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, h); err != nil {
+		t.Fatalf("createHandlerForTestSkills %s: %v", h.ID, err)
 	}
 }
 
-func getTriggerForTestSkills(t *testing.T, database *sql.DB, id string) *domain.EventHandler {
+func getHandlerForTestSkills(t *testing.T, database *sql.DB, id string) *domain.EventHandler {
 	t.Helper()
 	got, err := testEventHandlerStore(database).Get(context.Background(), runmode.LocalDefaultOrgID, id)
 	if err != nil {
-		t.Fatalf("getTriggerForTestSkills %s: %v", id, err)
+		t.Fatalf("getHandlerForTestSkills %s: %v", id, err)
 	}
 	return got
 }
-
-func intPtr(v int) *int           { return &v }
-func floatPtr(v float64) *float64 { return &v }

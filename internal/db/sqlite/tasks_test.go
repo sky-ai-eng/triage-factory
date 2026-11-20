@@ -308,9 +308,9 @@ func TestTaskRuleOrder_SQLite(t *testing.T) {
 				id := uuid.New().String()
 				if _, err := conn.ExecContext(t.Context(), `
 					INSERT INTO event_handlers
-						(id, org_id, team_id, creator_user_id, kind, event_type, enabled, source,
+						(id, org_id, team_id, creator_user_id, mode, event_type, source,
 						 name, default_priority, sort_order, created_at, updated_at)
-					VALUES (?, ?, ?, ?, 'rule', ?, 1, 'user', ?, 0.5, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+					VALUES (?, ?, ?, ?, 'watch', ?, 'user', ?, 0.5, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 				`, id, orgID, teamID, runmode.LocalDefaultUserID, eventType, "rule "+id[:8], sortOrder); err != nil {
 					t.Fatalf("seed rule on team %s: %v", teamID, err)
 				}
@@ -719,6 +719,14 @@ func TestTaskStore_SQLite_MemoryPendingConformance(t *testing.T) {
 					t.Fatalf("backdate ended_at of %s: %v", conversationID, err)
 				}
 			},
+			AgeAttempt: func(t *testing.T, attemptID string, age time.Duration) {
+				t.Helper()
+				at := time.Now().UTC().Add(-age)
+				dbtest.MustUpdate(t, conn, `
+					UPDATE conversation_memory_attempts
+					SET started_at = ?, completed_at = CASE WHEN completed_at IS NULL THEN NULL ELSE ? END
+					WHERE id = ?`, at, at, attemptID)
+			},
 			Conversation: func(t *testing.T, taskID, suffix string) string {
 				t.Helper()
 				convID := uuid.New().String()
@@ -751,8 +759,23 @@ func TestTaskRequestedReviewer_SQLite(t *testing.T) {
 // TestTaskLatestEvent_SQLite runs the LatestEventIDSystem suite against the
 // SQLite TaskStore.
 func TestTaskLatestEvent_SQLite(t *testing.T) {
-	dbtest.RunTaskLatestEventConformance(t, func(t *testing.T) (db.Stores, string, string) {
+	dbtest.RunTaskLatestEventConformance(t, func(t *testing.T) dbtest.TaskLatestEventFixture {
 		t.Helper()
-		return sqlitestore.New(openSQLiteForTest(t)), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID
+		conn := openSQLiteForTest(t)
+		return dbtest.TaskLatestEventFixture{
+			Stores: sqlitestore.New(conn),
+			OrgID:  runmode.LocalDefaultOrgID,
+			TeamID: runmode.LocalDefaultTeamID,
+			SetCreatedAt: func(t *testing.T, eventID string, at time.Time) {
+				t.Helper()
+				res, err := conn.Exec(`UPDATE events SET created_at = ? WHERE id = ?`, at.UTC(), eventID)
+				if err != nil {
+					t.Fatalf("set created_at: %v", err)
+				}
+				if n, _ := res.RowsAffected(); n != 1 {
+					t.Fatalf("set created_at: %d rows for event %s, want 1", n, eventID)
+				}
+			},
+		}
 	})
 }

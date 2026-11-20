@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'motion/react'
 import { X, Plus, GripVertical } from 'lucide-react'
-import * as Switch from '@radix-ui/react-switch'
 import {
   DndContext,
   closestCenter,
@@ -19,51 +18,53 @@ import {
 import { CSS } from '@dnd-kit/utilities'
 import EventBadge from './EventBadge'
 import TaskRuleEditor from './TaskRuleEditor'
-import type { RuleHandler } from '../types'
+import EventHandlerModeControl from './EventHandlerModeControl'
+import type { EventHandler, EventHandlerMode } from '../types'
 import { toast } from './Toast/toastStore'
 import { apiFetch, apiListAll } from '../lib/apiClient'
+import { eventHandlersListPath, hasBlueprint, updateEventHandler } from '../lib/eventHandlers'
 import { useEventSources } from '../hooks/useEventSources'
 import { sourceCannotFireNote, sourceKindOf } from '../lib/eventSources'
 
 interface TaskRulesPanelProps {
   open: boolean
   onClose: () => void
-  // openRuleId opens that rule's editor once the rules have loaded, as a link
-  // to it asks. Each linked id opens once, so a refetch after a save does not
-  // open it again.
+  // openRuleId opens that handler's editor once the handlers have loaded, as a
+  // link to it asks. Each linked id opens once, so a refetch after a save does
+  // not open it again.
   openRuleId?: string | null
 }
 
 export default function TaskRulesPanel({ open, onClose, openRuleId }: TaskRulesPanelProps) {
-  const [rules, setRules] = useState<RuleHandler[]>([])
+  const [rules, setRules] = useState<EventHandler[]>([])
   const [loading, setLoading] = useState(false)
-  const [editingRule, setEditingRule] = useState<RuleHandler | null>(null)
+  const [editingRule, setEditingRule] = useState<EventHandler | null>(null)
   const [creating, setCreating] = useState(false)
   const [refreshKey, setRefreshKey] = useState(0)
   const openedLink = useRef<string | null>(null)
 
   // distance:5 activation constraint means a drag only starts after 5px of
-  // pointer movement. Normal toggle/button clicks are press-and-release with
-  // negligible movement, so nested interactive controls (the enabled switch)
-  // work fine without special handling despite listeners being on the whole row.
+  // pointer movement. Normal clicks are press-and-release with negligible
+  // movement, so nested interactive controls (the mode control) work fine
+  // without special handling despite listeners being on the whole row.
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
 
-  // Fetch rules on open or after mutations. The synchronous setLoading
+  // Fetch handlers on open or after mutations. The synchronous setLoading
   // before fetch costs one extra render per panel-open — acceptable for
   // a settings panel that opens once per session — and the alternatives
   // (Suspense, data-fetching library) would require a broader refactor.
   useEffect(() => {
-    // A cleared link may be followed again, and should open its rule again.
+    // A cleared link may be followed again, and should open its handler again.
     if (!openRuleId) openedLink.current = null
     if (!open) return
     let cancelled = false
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoading(true)
 
-    // Walked to completion: the panel reorders rules by drag, and a reorder
-    // write must name the caller's ENTIRE visible rule set — a partial list
+    // Walked to completion: the panel reorders handlers by drag, and a reorder
+    // write must name the caller's ENTIRE visible handler set — a partial list
     // would submit a partial order.
-    apiListAll<RuleHandler>('/api/event-handlers/list', { kind: 'rule' })
+    apiListAll<EventHandler>(eventHandlersListPath(), {})
       .then((loaded) => {
         if (cancelled) return
         setRules(loaded)
@@ -72,7 +73,8 @@ export default function TaskRulesPanel({ open, onClose, openRuleId }: TaskRulesP
           openedLink.current = openRuleId
           const linked = loaded.find((r) => r.id === openRuleId)
           if (linked) setEditingRule(linked)
-          else toast.error('That task rule no longer exists, or belongs to a team you are not on.')
+          else
+            toast.error('That event handler no longer exists, or belongs to a team you are not on.')
         }
       })
       .catch(() => {
@@ -86,20 +88,16 @@ export default function TaskRulesPanel({ open, onClose, openRuleId }: TaskRulesP
 
   const refresh = useCallback(() => setRefreshKey((k) => k + 1), [])
 
-  // Inline enabled toggle — optimistic update + PATCH.
-  const toggleEnabled = useCallback(async (rule: RuleHandler) => {
-    const prev = rule.enabled
-    setRules((rs) => rs.map((r) => (r.id === rule.id ? { ...r, enabled: !prev } : r)))
+  // Inline mode control — optimistic update + PATCH.
+  const changeMode = useCallback(async (rule: EventHandler, mode: EventHandlerMode) => {
+    const prev = rule.mode
+    setRules((rs) => rs.map((r) => (r.id === rule.id ? { ...r, mode } : r)))
 
     try {
-      await apiFetch(`/api/event-handlers/${encodeURIComponent(rule.id)}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ enabled: !prev }),
-      })
+      await updateEventHandler(rule.id, { mode })
     } catch (err) {
-      setRules((rs) => rs.map((r) => (r.id === rule.id ? { ...r, enabled: prev } : r)))
-      toast.failed(err, 'Could not toggle the rule.')
+      setRules((rs) => rs.map((r) => (r.id === rule.id ? { ...r, mode: prev } : r)))
+      toast.failed(err, 'Could not change the mode.')
     }
   }, [])
 
@@ -115,7 +113,7 @@ export default function TaskRulesPanel({ open, onClose, openRuleId }: TaskRulesP
       setRules(reordered) // Optimistic
 
       try {
-        // ids must name the caller's ENTIRE visible rule set, in the new
+        // ids must name the caller's ENTIRE visible handler set, in the new
         // order — the server refuses a subset rather than applying half of it.
         await apiFetch('/api/event-handlers/reorder', {
           method: 'PUT',
@@ -123,7 +121,7 @@ export default function TaskRulesPanel({ open, onClose, openRuleId }: TaskRulesP
           body: JSON.stringify({ ids: reordered.map((r) => r.id) }),
         })
       } catch (err) {
-        toast.failed(err, 'Could not reorder the rules.')
+        toast.failed(err, 'Could not reorder the event handlers.')
         refresh() // Revert on failure
       }
     },
@@ -155,14 +153,14 @@ export default function TaskRulesPanel({ open, onClose, openRuleId }: TaskRulesP
           >
             {/* Header */}
             <div className="px-5 pt-5 pb-3 flex items-center justify-between shrink-0 border-b border-line-1">
-              <h2 className="text-column font-semibold text-ink-1">Task Rules</h2>
+              <h2 className="text-column font-semibold text-ink-1">Event handlers</h2>
               <div className="flex items-center gap-2">
                 <button
                   onClick={() => setCreating(true)}
                   className="flex items-center gap-1 text-ui font-semibold text-warm-ink bg-warm hover:bg-warm/90 px-3 py-1.5 rounded-full transition-colors"
                 >
                   <Plus size={14} />
-                  New Rule
+                  New handler
                 </button>
                 <button onClick={onClose} className="text-ink-3 hover:text-ink-2 transition-colors">
                   <X size={18} />
@@ -183,7 +181,7 @@ export default function TaskRulesPanel({ open, onClose, openRuleId }: TaskRulesP
               {!loading && rules.length === 0 && (
                 <div className="text-center py-12 px-4">
                   <p className="text-body text-ink-3">
-                    No rules yet. Create one to control what shows up in your queue.
+                    No event handlers yet. Create one to control what shows up in your queue.
                   </p>
                 </div>
               )}
@@ -203,7 +201,7 @@ export default function TaskRulesPanel({ open, onClose, openRuleId }: TaskRulesP
                         key={rule.id}
                         rule={rule}
                         onEdit={() => setEditingRule(rule)}
-                        onToggle={() => toggleEnabled(rule)}
+                        onModeChange={(mode) => changeMode(rule, mode)}
                       />
                     ))}
                   </SortableContext>
@@ -233,16 +231,16 @@ export default function TaskRulesPanel({ open, onClose, openRuleId }: TaskRulesP
   )
 }
 
-// --- Sortable rule row -----------------------------------------------------
+// --- Sortable handler row --------------------------------------------------
 
 function SortableRuleRow({
   rule,
   onEdit,
-  onToggle,
+  onModeChange,
 }: {
-  rule: RuleHandler
+  rule: EventHandler
   onEdit: () => void
-  onToggle: () => void
+  onModeChange: (mode: EventHandlerMode) => void
 }) {
   const { stateOf } = useEventSources()
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
@@ -256,10 +254,10 @@ function SortableRuleRow({
     zIndex: isDragging ? 10 : undefined,
   }
 
-  // A rule whose source can no longer produce events is shown, not hidden: the
-  // row is the reader's way to edit or delete it, and an unconfigured source is
-  // theirs to fix. What goes inert is the arming toggle — enabling a rule that
-  // cannot fire is a promise the factory can't keep.
+  // A handler whose source can no longer produce events is shown, not hidden:
+  // the row is the reader's way to edit or delete it, and an unconfigured
+  // source is theirs to fix. What goes inert is the mode control — turning on
+  // a handler that cannot fire is a promise the factory can't keep.
   const kind = sourceKindOf(rule.event_type)
   const unavailable = rule.source_available === false
   const reason = unavailable ? sourceCannotFireNote(kind, stateOf(kind)) : null
@@ -278,59 +276,56 @@ function SortableRuleRow({
       </div>
 
       {/* Row content — click to edit. min-w-0 on every flex-growing
-          ancestor so the truncate on the rule name actually fires; without
+          ancestor so the truncate on the handler name actually fires; without
           it, a long name (e.g. "Jira issue decomposition resolved (now
           actionable)") pushes the row wider than the 340px panel and
-          forces horizontal scroll. */}
-      <button
-        onClick={onEdit}
-        className="flex-1 min-w-0 text-left px-3 py-3 rounded-xl hover:bg-tint-2 transition-colors"
-      >
-        <div className="flex items-start justify-between gap-3 min-w-0">
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2 min-w-0">
-              <span
-                className={`text-body font-medium truncate min-w-0 ${
-                  rule.enabled && !unavailable ? 'text-ink-1' : 'text-ink-3 line-through'
-                }`}
-              >
-                {rule.name}
-              </span>
-              {rule.source === 'system' && (
-                <span className="text-label font-medium text-ink-3 bg-tint-3 px-1.5 py-0.5 rounded shrink-0">
-                  SYS
-                </span>
-              )}
-            </div>
-            <div className="mt-1">
-              <EventBadge eventType={rule.event_type} compact />
-            </div>
-            {reason && (
-              <p className="text-reported text-ink-3 mt-1 italic">
-                {reason} This rule can&rsquo;t fire.
-              </p>
-            )}
-            {rule.scope_predicate_json && (
-              <p className="text-reported text-ink-3 mt-1 truncate font-mono">
-                {formatPredicate(rule.scope_predicate_json)}
-              </p>
-            )}
-          </div>
-
-          {/* Enabled toggle */}
-          <div onClick={(e) => e.stopPropagation()} className="shrink-0 mt-0.5">
-            <Switch.Root
-              checked={rule.enabled}
-              onCheckedChange={onToggle}
-              disabled={unavailable}
-              title={reason ?? undefined}
-              className="relative w-8 h-[18px] rounded-full transition-colors data-[state=checked]:bg-warm data-[state=unchecked]:bg-line-2 cursor-pointer disabled:cursor-not-allowed disabled:opacity-40"
+          forces horizontal scroll. The mode control sits beside the edit
+          button rather than inside it, so each is its own control. */}
+      <div className="flex-1 min-w-0 rounded-xl hover:bg-tint-2 transition-colors">
+        <button onClick={onEdit} className="w-full min-w-0 text-left px-3 pt-3 pb-2">
+          <div className="flex items-center gap-2 min-w-0">
+            <span
+              className={`text-body font-medium truncate min-w-0 ${
+                rule.mode !== 'off' && !unavailable ? 'text-ink-1' : 'text-ink-3 line-through'
+              }`}
             >
-              <Switch.Thumb className="block w-[14px] h-[14px] rounded-full bg-raised shadow transition-transform data-[state=checked]:translate-x-[14px] data-[state=unchecked]:translate-x-[2px]" />
-            </Switch.Root>
+              {rule.name}
+            </span>
+            {rule.source === 'system' && (
+              <span className="text-label font-medium text-ink-3 bg-tint-3 px-1.5 py-0.5 rounded shrink-0">
+                SYS
+              </span>
+            )}
           </div>
+          <div className="mt-1">
+            <EventBadge eventType={rule.event_type} compact />
+          </div>
+          {reason && (
+            <p className="text-reported text-ink-3 mt-1 italic">
+              {reason} This handler can&rsquo;t fire.
+            </p>
+          )}
+          {rule.scope_predicate_json && (
+            <p className="text-reported text-ink-3 mt-1 truncate font-mono">
+              {formatPredicate(rule.scope_predicate_json)}
+            </p>
+          )}
+        </button>
+        {/* A press on the control is not the start of a drag. */}
+        <div
+          className="px-3 pb-3 cursor-default"
+          onPointerDown={(e) => e.stopPropagation()}
+          title={reason ?? undefined}
+        >
+          <EventHandlerModeControl
+            mode={rule.mode}
+            eventType={rule.event_type}
+            hasBlueprint={hasBlueprint(rule)}
+            onChange={onModeChange}
+            disabled={unavailable}
+          />
         </div>
-      </button>
+      </div>
     </div>
   )
 }

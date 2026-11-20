@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -61,7 +62,17 @@ func GetSecret(key string) (string, error) {
 	return b.get(key)
 }
 
-// PutSecret writes value under key in the active backend.
+// ErrSecretTooLarge is a value larger than the OS keychain holds: 2,560 bytes
+// in Windows Credential Manager, and about 3 KB on macOS, whose limit is 4,096
+// characters for the whole `security` command that carries the value. The
+// encrypted file backend has no limit, so the message names it as the fix,
+// and it says to enter the credentials again because a switch of backends
+// carries none of them across.
+var ErrSecretTooLarge = errors.New("this secret is too large for the OS keychain; to store it in the encrypted file backend instead, set " +
+	envSecretsBackend + "=file and " + EnvSecretEncryptionKey + ", restart Triage Factory, and enter your credentials again")
+
+// PutSecret writes value under key in the active backend. A value the OS
+// keychain refuses for its size is ErrSecretTooLarge.
 func PutSecret(key, value string) error {
 	b, err := resolveBackend()
 	if err != nil {
@@ -171,6 +182,60 @@ func resolveBackend() (secretBackend, error) {
 func InitLocalSecretBackend() error {
 	_, err := resolveBackend()
 	return err
+}
+
+// SweepKeychain best-effort deletes the given keys directly from the OS
+// keychain, bypassing the active-backend selection. cmd/uninstall uses it to
+// remove keychain entries regardless of which backend the running config
+// reads/writes: a box may still hold keychain rows from an earlier
+// keychain-backed run even while TF_SECRETS_BACKEND=file is set now. A no-op
+// when the keychain is unreachable — there's then nothing in it to remove, and
+// the file backend's bag lives under the state root, swept by uninstall's
+// data-dir wipe instead (so uninstall never needs TF_SECRET_ENCRYPTION_KEY).
+// Missing entries are not an error.
+func SweepKeychain(keys []string) error {
+	if !probeKeychain() {
+		return nil
+	}
+	for _, k := range keys {
+		if err := keyring.Delete(service, k); err != nil && err != keyring.ErrNotFound {
+			return fmt.Errorf("keychain delete %s: %w", k, err)
+		}
+	}
+	return nil
+}
+
+// keychainBackend stores secrets in the OS keychain via go-keyring. The desktop
+// default; selected whenever the keychain probe succeeds.
+type keychainBackend struct{}
+
+func (keychainBackend) get(key string) (string, error) {
+	val, err := keyring.Get(service, key)
+	if err == keyring.ErrNotFound {
+		return "", nil
+	}
+	return val, err
+}
+
+func (keychainBackend) put(key, value string) error {
+	return keychainSetError(key, value, keyring.Set(service, key, value))
+}
+
+// keychainSetError is put's answer for what keyring.Set returned, shared with
+// the size-limited keychain LimitKeychainForTest installs so a test reaches
+// the same mapping.
+func keychainSetError(key, value string, err error) error {
+	if errors.Is(err, keyring.ErrSetDataTooBig) {
+		return fmt.Errorf("keychain set %s (%d bytes): %w", key, len(value), ErrSecretTooLarge)
+	}
+	return err
+}
+
+func (keychainBackend) delete(key string) error {
+	if err := keyring.Delete(service, key); err != nil && err != keyring.ErrNotFound {
+		return fmt.Errorf("keychain delete %s: %w", key, err)
+	}
+	return nil
 }
 
 var backendLogOnce sync.Once

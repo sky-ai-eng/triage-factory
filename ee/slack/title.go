@@ -86,7 +86,7 @@ func NewTitleResolver(stores db.Stores) *TitleResolver {
 // entity only dispatches once (only the FIRST mention on a thread, the one
 // that creates the entity, triggers this; see ingest.go's handleEventCallback).
 // Callers should call this instead of spawning resolveTitle directly.
-func (r *TitleResolver) dispatch(ws slackstore.Workspace, ref threadTitleRef) {
+func (r *TitleResolver) dispatch(ws slackstore.Connection, ref threadTitleRef) {
 	key := ws.OrgID + "/" + ref.entityID
 	r.mu.Lock()
 	if r.inFlight == nil {
@@ -117,7 +117,7 @@ func (r *TitleResolver) dispatch(ws slackstore.Workspace, ref threadTitleRef) {
 // already on the entity whatever the author turns out to be, so the resolution
 // stops there rather than spending the author's round-trips to learn that the
 // write is redundant.
-func (r *TitleResolver) resolveTitle(ctx context.Context, ws slackstore.Workspace, ref threadTitleRef) {
+func (r *TitleResolver) resolveTitle(ctx context.Context, ws slackstore.Connection, ref threadTitleRef) {
 	ctx, cancel := context.WithTimeout(ctx, titleResolveTimeout)
 	defer cancel()
 
@@ -162,7 +162,7 @@ func (r *TitleResolver) resolveTitle(ctx context.Context, ws slackstore.Workspac
 // A root Slack attributes to no human — a bot post, which carries bot_id and
 // an empty user — has no author, and neither does a bot or deactivated
 // profile; each falls back rather than naming an app on the card.
-func (r *TitleResolver) resolveAuthorName(ctx context.Context, ws slackstore.Workspace, botToken string, ref threadTitleRef) string {
+func (r *TitleResolver) resolveAuthorName(ctx context.Context, ws slackstore.Connection, botToken string, ref threadTitleRef) string {
 	caller := slackBotCaller(ws.OrgID, ws.WorkspaceID, ws.APIAppID)
 	authorID := ref.mentionUser
 	if !ref.isRoot {

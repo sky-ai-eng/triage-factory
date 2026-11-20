@@ -30,7 +30,7 @@ func TestChannelInFaults(t *testing.T) {
 	track := func(team, admin string, channelIDs ...string) {
 		t.Helper()
 		rec := httptest.NewRecorder()
-		r.hdl.handlePut(rec, r.req(http.MethodPut, "/api/slack/teams/"+team+"/channels", admin, orgID, team,
+		r.hdl.handlePut(rec, r.req(http.MethodPut, "/api/teams/"+team+"/slack-channels", admin, orgID, team,
 			map[string]any{"channel_ids": channelIDs}))
 		if rec.Code != http.StatusOK {
 			t.Fatalf("track %v: status = %d (body=%s)", channelIDs, rec.Code, rec.Body.String())

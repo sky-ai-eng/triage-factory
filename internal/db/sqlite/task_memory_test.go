@@ -43,10 +43,29 @@ func TestTaskMemoryStore_SQLite(t *testing.T) {
 				t.Helper()
 				return roleForSQLiteJoinRow(t, conn, conversationID, entityID)
 			},
+			Age: func(t *testing.T, conversationID string, d time.Duration) {
+				t.Helper()
+				ageSQLiteConversationMemory(t, conn, conversationID, d)
+			},
 			TeamID: runmode.LocalDefaultTeamID,
 		}
 		return stores.TaskMemory, runmode.LocalDefaultOrgID, seed
 	})
+}
+
+// ageSQLiteConversationMemory moves the conversation's memory row's
+// created_at and updated_at d earlier, binding them from Go as the store does.
+func ageSQLiteConversationMemory(t *testing.T, conn *sql.DB, conversationID string, d time.Duration) {
+	t.Helper()
+	var created, updated time.Time
+	if err := conn.QueryRow(`SELECT created_at, updated_at FROM conversation_memory WHERE conversation_id = ?`, conversationID).
+		Scan(&created, &updated); err != nil {
+		t.Fatalf("read the memory row's stamps: %v", err)
+	}
+	if _, err := conn.Exec(`UPDATE conversation_memory SET created_at = ?, updated_at = ? WHERE conversation_id = ?`,
+		created.Add(-d).UTC(), updated.Add(-d).UTC(), conversationID); err != nil {
+		t.Fatalf("age the memory row: %v", err)
+	}
 }
 
 // TestTaskMemoryStore_SQLite_ReturnedRowConformance runs the returned-row

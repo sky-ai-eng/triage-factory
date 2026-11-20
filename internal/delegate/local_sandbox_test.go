@@ -114,8 +114,9 @@ func TestStartLocalSandbox_BuildsPlanAndDaemon(t *testing.T) {
 }
 
 // TestStartLocalSandbox_NoGHChannelBindsNoChannelDir pins that the gh-channel
-// bind tracks the channel, not the conversation: a run that never provisioned
-// one must not bind a directory that doesn't exist.
+// bind tracks a live channel, not the conversation: a run that never
+// provisioned one, or whose channel did not start, binds no channel dir back
+// through the mask.
 func TestStartLocalSandbox_NoGHChannelBindsNoChannelDir(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("the agenthost daemon a local sandbox serves is Linux-only")
@@ -127,14 +128,18 @@ func TestStartLocalSandbox_NoGHChannelBindsNoChannelDir(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	s.SetStores(db.Stores{})
 
-	sbx, err := s.startLocalSandbox("conv-8", "rk-8", worktree.RunRoot("rk-8"), nil, agenthost.ConversationInfo{ConversationID: "conv-8"}, nil)
-	if err != nil {
-		t.Fatalf("startLocalSandbox: %v", err)
-	}
-	defer func() { _ = sbx.Close() }()
-
-	if got := sbx.runSpec().GHChannelDir; got != "" {
-		t.Errorf("GHChannelDir = %q for a run with no channel, want empty", got)
+	for conversationID, gc := range map[string]*agentproc.GHChannelParams{
+		"conv-8":  nil,
+		"conv-8b": {ConfigDir: filepath.Join(paths.GHChannelDir("conv-8b"), "config")},
+	} {
+		sbx, err := s.startLocalSandbox(conversationID, "rk-8", worktree.RunRoot("rk-8"), gc, agenthost.ConversationInfo{ConversationID: conversationID}, nil)
+		if err != nil {
+			t.Fatalf("%s: startLocalSandbox: %v", conversationID, err)
+		}
+		if got := sbx.runSpec().GHChannelDir; got != "" {
+			t.Errorf("%s: GHChannelDir = %q for a run with no live channel, want empty", conversationID, got)
+		}
+		_ = sbx.Close()
 	}
 }
 

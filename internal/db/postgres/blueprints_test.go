@@ -41,6 +41,63 @@ func TestBlueprintStore_Postgres_Conformance(t *testing.T) {
 	})
 }
 
+// TestBlueprintStore_Postgres_LockConformance runs the locking reads'
+// conformance suite on the production pool split, under the claims of the
+// team's admin, so the row locks are taken through RLS as the routes take
+// them.
+func TestBlueprintStore_Postgres_LockConformance(t *testing.T) {
+	h := pgtest.Shared(t)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	dbtest.RunBlueprintLockConformance(t, func(t *testing.T) (db.Stores, string, string, string) {
+		h.Reset(t)
+		orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "blueprint-lock")
+		return stores, orgID, userID, teamID
+	})
+}
+
+// TestBlueprintStore_Postgres_LockingReadHidesAReadOnlyTeamsBlueprint: a
+// locking read takes the blueprints UPDATE policy as well as the SELECT one,
+// so a team viewer, who can Get the team's blueprint, locks nothing and reads
+// it as absent. That is why the handler routes take the lock only on a
+// blueprint of the handler's own team, which the caller can write.
+func TestBlueprintStore_Postgres_LockingReadHidesAReadOnlyTeamsBlueprint(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	ctx := t.Context()
+	orgID, adminID, teamID := pgtest.SeedOrgWithUser(t, h, "blueprint-lock-viewer")
+	viewerID := pgtest.SeedUser(t, h, "viewer")
+	pgtest.AddOrgMember(t, h, viewerID, orgID, teamID, "member", "viewer")
+
+	id := uuid.NewString()
+	if err := stores.Tx.WithTx(ctx, orgID, adminID, func(tx db.TxStores) error {
+		_, err := tx.Blueprints.Create(ctx, orgID, teamID, domain.Blueprint{ID: id, Name: "viewed", Source: "user"})
+		return err
+	}); err != nil {
+		t.Fatalf("seed blueprint: %v", err)
+	}
+
+	if err := stores.Tx.WithTx(ctx, orgID, viewerID, func(tx db.TxStores) error {
+		if b, err := tx.Blueprints.Get(ctx, orgID, id); err != nil || b == nil {
+			t.Fatalf("viewer Get = %+v, %v; want the blueprint", b, err)
+		}
+		for name, read := range map[string]func(context.Context, string, string) (*domain.Blueprint, error){
+			"GetForShare": tx.Blueprints.GetForShare, "GetForUpdate": tx.Blueprints.GetForUpdate,
+		} {
+			b, err := read(ctx, orgID, id)
+			if err != nil {
+				return fmt.Errorf("%s: %w", name, err)
+			}
+			if b != nil {
+				t.Errorf("viewer %s = %+v; want nil", name, b)
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("viewer transaction: %v", err)
+	}
+}
+
 // TestBlueprintStore_Postgres_RunWriteConformance runs the shared returned-row
 // suite for the blueprint_runs writes against the Postgres impl.
 func TestBlueprintStore_Postgres_RunWriteConformance(t *testing.T) {
@@ -624,9 +681,9 @@ func TestBlueprintStore_Postgres_FiredRunCreatorUnderRLS(t *testing.T) {
 	eventRunID := uuid.NewString()
 	triggerID := uuid.NewString()
 	pgtest.MustExec(t, h.AdminDB, `
-		INSERT INTO event_handlers (id, org_id, team_id, creator_user_id, kind, event_type, enabled, source,
+		INSERT INTO event_handlers (id, org_id, team_id, creator_user_id, mode, event_type, name, source,
 		                            blueprint_id, breaker_threshold, min_autonomy_suitability, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, 'trigger', $5, true, 'user', $6, 4, 0, now(), now())
+		VALUES ($1, $2, $3, $4, 'automate', $5, 'Firing', 'user', $6, 4, 0, now(), now())
 	`, triggerID, orgID, pgBlueprintTeam(t, h, blueprintID), userID, domain.EventGitHubPRCICheckFailed, blueprintID)
 	var eventID string
 	if err := h.AdminDB.QueryRow(`SELECT primary_event_id::text FROM tasks WHERE id = $1`, taskID).Scan(&eventID); err != nil {

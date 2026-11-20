@@ -44,6 +44,12 @@ export type DialogProps = {
   confirmHold?: number
   /** No confirm control at all: the dialog is only a reading, and Cancel is Close. */
   noConfirm?: boolean
+  /**
+   * The confirm control is shown and cannot be pressed, and Enter does nothing:
+   * the reading says what stands in the way. A dialog that opens disabled lands
+   * focus on Cancel, since a disabled control cannot take it.
+   */
+  confirmDisabled?: boolean
 }
 
 // Dialog — a decision the product cannot make for you.
@@ -78,6 +84,7 @@ export function Dialog({
   children = null,
   confirmHold = 0,
   noConfirm = false,
+  confirmDisabled = false,
 }: DialogProps) {
   const panelRef = useRef<HTMLDivElement | null>(null)
   const goRef = useRef<HTMLButtonElement | null>(null)
@@ -90,6 +97,11 @@ export function Dialog({
   // verbs that cannot be taken back — so it takes the same keyboard rules.
   const held = confirmHold > 0
   const bad = kind === 'destructive' || held
+
+  // Whether the confirm control could take focus when the dialog opened. Held
+  // for the whole open, so a control that becomes pressable later (a reading
+  // that finished loading) does not move focus from where the trap put it.
+  const [openedDisabled, setOpenedDisabled] = useState(confirmDisabled)
 
   // Tab containment, initial focus and focus return all come from the house
   // primitive rather than being hand-rolled here — the design bundle recommends
@@ -104,7 +116,7 @@ export function Dialog({
   // button is the exact hazard Hold exists to remove.
   useFocusTrap(panelRef, {
     active: open,
-    initialFocus: bad || noConfirm ? cancelRef : goRef,
+    initialFocus: bad || noConfirm || openedDisabled ? cancelRef : goRef,
   })
 
   // The trap moves focus onto a button the moment the dialog opens, and a
@@ -137,6 +149,7 @@ export function Dialog({
   if (open !== wasOpen) {
     setWasOpen(open)
     if (!open) setPhase('frame')
+    else setOpenedDisabled(confirmDisabled)
   }
 
   useEffect(() => {
@@ -182,7 +195,7 @@ export function Dialog({
       // exist. Same reasoning as the focus target above: the one verb in this
       // system that cannot be taken back is never a single keystroke away. Tab
       // to it and press it deliberately. A reading has nothing to confirm.
-      if (e.key === 'Enter' && !bad && !noConfirm) {
+      if (e.key === 'Enter' && !bad && !noConfirm && !confirmDisabled) {
         e.preventDefault()
         onConfirm?.()
       }
@@ -191,7 +204,7 @@ export function Dialog({
     // to close something else while this is the topmost layer.
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
-  }, [open, bad, noConfirm, onConfirm, onCancel])
+  }, [open, bad, noConfirm, confirmDisabled, onConfirm, onCancel])
 
   if (!open) return null
 
@@ -203,6 +216,7 @@ export function Dialog({
       type="button"
       className={'dlg-btn go' + (held ? ' held' : '')}
       ref={goRef}
+      disabled={confirmDisabled}
       onClick={held ? undefined : onConfirm}
     >
       {confirmLabel}

@@ -584,7 +584,7 @@ function stubChannelField(
 // The bodies the field sent the channel list.
 function channelListBodies(fetchMock: ReturnType<typeof stubChannelField>, team: string) {
   return fetchMock.mock.calls
-    .filter(([url]) => url === `/api/slack/teams/${team}/channels/list`)
+    .filter(([url]) => url === `/api/teams/${team}/slack-channels/list`)
     .map(([, init]) => JSON.parse(String(init?.body)) as ListBody)
 }
 

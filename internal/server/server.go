@@ -38,7 +38,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/avatars"
 	"github.com/sky-ai-eng/triage-factory/internal/server/blueprints"
 	"github.com/sky-ai-eng/triage-factory/internal/server/deliverables"
-	"github.com/sky-ai-eng/triage-factory/internal/server/factory"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/server/marketplace"
 	"github.com/sky-ai-eng/triage-factory/internal/server/models"
@@ -60,7 +59,7 @@ type Server struct {
 	teamAgents       db.TeamAgentStore       // re-checks team_agents.enabled on task-delegate / factory-delegate
 	users            db.UsersStore           // display_name + Jira binding on the user row; host-scoped GitHub identity via user_github_identities
 	blueprints       db.BlueprintStore       // used by event-handler + project test fixtures
-	tasks            db.TaskStore            // task lifecycle, claim, queue + factory snapshot reads
+	tasks            db.TaskStore            // task lifecycle, claim, queue
 	repos            db.RepositoryStore      // repositories CRUD for repos/settings handlers
 	events           db.EventStore           // events audit log Record/Latest for stock carry-over + factory drag-to-delegate
 	secrets          db.SecretStore          // canonical credential read/write path — local-mode keychain, multi-mode vault
@@ -930,6 +929,7 @@ func (s *Server) routes() {
 	s.registerOrgMemberRoutes()
 	s.registerInviteRoutes()
 	s.registerTaskRoutes()
+	s.registerEntityRoutes()
 	s.registerAgentRoutes()
 
 	// Websocket: wrapped via s.api so the handshake sees claims in
@@ -966,7 +966,6 @@ func (s *Server) routes() {
 			return s.deployCfg.publicURL
 		},
 	).Register(m)
-	factory.New(s.tx, func(t domain.Task) any { return taskToJSON(t) }).Register(m)
 	marketplace.New(s.tx, s.az).Register(m)
 	models.New(s.az, s.tx, func() models.Prober { return s.modelProber }).Register(m)
 	prompts.New(s.db, s.tx, s.az).Register(m)

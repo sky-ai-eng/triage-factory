@@ -23,11 +23,10 @@ func TestDelegate_EventPath_StampsTriggerIDOnStepRun(t *testing.T) {
 
 	// The firing trigger + the event instance it fired on (the fenced
 	// blueprint_run insert requires both).
-	breaker, minSuit := 3, 0.5
 	trigID := "trigprov-handler"
 	if _, err := stores.EventHandlers.Create(t.Context(), org, runmode.LocalDefaultTeamID, domain.EventHandler{
-		ID: trigID, Kind: domain.EventHandlerKindTrigger, EventType: domain.EventGitHubPRCICheckFailed,
-		BlueprintID: bpID, BreakerThreshold: &breaker, MinAutonomySuitability: &minSuit, Enabled: true,
+		ID: trigID, Mode: domain.EventHandlerModeAutomate, EventType: domain.EventGitHubPRCICheckFailed,
+		Name: "CI fix", DefaultPriority: 0.5, BlueprintID: bpID, BreakerThreshold: 3, MinAutonomySuitability: 0.5,
 	}); err != nil {
 		t.Fatalf("EventHandlers.Create: %v", err)
 	}
@@ -107,5 +106,62 @@ func TestDelegate_ManualPath_LeavesTriggerIDNull(t *testing.T) {
 	}
 	if trig.Valid {
 		t.Errorf("manual step-0 run trigger_id = %q, want NULL", trig.String)
+	}
+}
+
+// TestDelegate_RecordsTheTriggersPredicateOnTheEventPathAlone: an event
+// delegation records the firing trigger's predicate on its blueprint run, for
+// the trigger's breaker, and a manual one records none even when handed one,
+// as it records no triggering event: no trigger fired it.
+func TestDelegate_RecordsTheTriggersPredicateOnTheEventPathAlone(t *testing.T) {
+	database := newDelegateTestDB(t)
+	org := runmode.LocalDefaultOrgID
+	stores := sqlitestore.New(database)
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
+	const predicate = `{"author_id_in":["583231"]}`
+	recorded := func(t *testing.T, brID string) string {
+		t.Helper()
+		var got string
+		if err := database.QueryRow(`SELECT scope_predicate_json FROM blueprint_runs WHERE id = ?`, brID).Scan(&got); err != nil {
+			t.Fatalf("read the run's predicate: %v", err)
+		}
+		return got
+	}
+
+	task, bpID := delegatableFixture(t, database, "trigpred")
+	trigID := "trigpred-handler"
+	if _, err := stores.EventHandlers.Create(t.Context(), org, runmode.LocalDefaultTeamID, domain.EventHandler{
+		ID: trigID, Mode: domain.EventHandlerModeAutomate, EventType: domain.EventGitHubPRCICheckFailed,
+		Name: "CI fix", DefaultPriority: 0.5, BlueprintID: bpID, BreakerThreshold: 3,
+	}); err != nil {
+		t.Fatalf("EventHandlers.Create: %v", err)
+	}
+	eventID, err := stores.Events.Record(t.Context(), org, domain.Event{
+		EventType: domain.EventGitHubPRCICheckFailed, MetadataJSON: `{}`,
+	})
+	if err != nil {
+		t.Fatalf("record event: %v", err)
+	}
+	brID, err := s.Delegate(task, DelegateOpts{
+		OrgID: org, ExplicitBlueprintID: bpID,
+		TriggerType: "event", TriggerID: trigID, TriggeringEventID: eventID, ScopePredicateJSON: predicate,
+	})
+	if err != nil {
+		t.Fatalf("event Delegate: %v", err)
+	}
+	if got := recorded(t, brID); got != predicate {
+		t.Errorf("event run's predicate = %q, want %q", got, predicate)
+	}
+
+	manualTask, manualBP := delegatableFixture(t, database, "trigpred-man")
+	brID, err = s.Delegate(manualTask, DelegateOpts{
+		OrgID: org, ExplicitBlueprintID: manualBP,
+		TriggerType: "manual", CreatorUserID: runmode.LocalDefaultUserID, ScopePredicateJSON: predicate,
+	})
+	if err != nil {
+		t.Fatalf("manual Delegate: %v", err)
+	}
+	if got := recorded(t, brID); got != "" {
+		t.Errorf("manual run's predicate = %q, want none", got)
 	}
 }

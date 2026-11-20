@@ -1,9 +1,9 @@
 package slack
 
 // pgtest-backed suite for an app removal Slack reports (app_uninstalled, or
-// tokens_revoked naming a bot token): through either transport, the
-// connection's row and secrets are removed, licensed or not, unless the row
-// was connected again since.
+// tokens_revoked naming a bot token): through either transport, for an org's
+// own app or the deployment's, the connection's row and secrets are removed,
+// licensed or not, unless the row was connected again since.
 
 import (
 	"context"
@@ -18,6 +18,7 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 
 	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
@@ -32,6 +33,7 @@ const (
 type removalRig struct {
 	*slackWorkspaceRig
 	orgID, owner string
+	teamID       string
 	pipeline     *ingestPipeline
 	webhook      *webhookHandler
 	metrics      *sdkmetric.ManualReader
@@ -41,23 +43,24 @@ type removalRig struct {
 func newRemovalRig(t *testing.T) *removalRig {
 	t.Helper()
 	r := newSlackWorkspaceRig(t, "https://tf.example")
-	orgID, owner, _ := pgtest.SeedOrgWithUser(t, r.h, "slack-removal")
+	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "slack-removal")
 	bundle := slackstore.FromStores(r.stores)
 	stats, metrics := newTestStats()
 	published := &[]domain.Event{}
 	p := &ingestPipeline{
-		tx:         r.stores.Tx,
-		workspaces: bundle.Workspaces,
-		secrets:    r.stores.Secrets,
-		deliveries: bundle.Deliveries,
-		channels:   bundle.Channels,
-		publish:    func(_ context.Context, evt domain.Event) { *published = append(*published, evt) },
-		stats:      stats,
+		tx:          r.stores.Tx,
+		connections: bundle.Connections,
+		secrets:     r.stores.Secrets,
+		deliveries:  bundle.Deliveries,
+		channels:    bundle.Channels,
+		publish:     func(_ context.Context, evt domain.Event) { *published = append(*published, evt) },
+		stats:       stats,
 	}
 	return &removalRig{
 		slackWorkspaceRig: r,
 		orgID:             orgID,
 		owner:             owner,
+		teamID:            teamID,
 		pipeline:          p,
 		webhook:           &webhookHandler{stores: r.stores, pipeline: p, stats: stats},
 		metrics:           metrics,
@@ -77,27 +80,27 @@ func (r *removalRig) connect(workspaceID, botToken, transport string) {
 		body["transport"] = transportEventsAPI
 	}
 	rec := httptest.NewRecorder()
-	r.hdl.handleConnect(rec, r.req(http.MethodPost, "/api/slack/workspaces", r.owner, r.orgID, "", body))
+	r.hdl.handleConnect(rec, r.importReq(r.owner, r.orgID, body))
 	if rec.Code != http.StatusCreated && rec.Code != http.StatusOK {
 		r.t.Fatalf("connect %s: status = %d (body=%s)", workspaceID, rec.Code, rec.Body.String())
 	}
 }
 
-func (r *removalRig) row(workspaceID string) *slackstore.Workspace {
+func (r *removalRig) row(workspaceID string) *slackstore.Connection {
 	r.t.Helper()
-	ws, err := slackstore.FromStores(r.stores).Workspaces.GetByWorkspaceAppSystem(r.t.Context(), workspaceID, removalTestApp)
+	ws, err := slackstore.FromStores(r.stores).Connections.GetByWorkspaceAppSystem(r.t.Context(), workspaceID, removalTestApp)
 	if err != nil {
 		r.t.Fatalf("read workspace %s: %v", workspaceID, err)
 	}
 	return ws
 }
 
-// secretValues reads workspaceID's three secrets, in SlackWorkspaceKeysFor's
+// secretValues reads workspaceID's three secrets, in SlackConnectionKeysFor's
 // order (bot token, signing secret, app token).
 func (r *removalRig) secretValues(workspaceID string) []string {
 	r.t.Helper()
 	var out []string
-	for _, key := range integrations.SlackWorkspaceKeysFor(workspaceID, removalTestApp).All() {
+	for _, key := range integrations.SlackConnectionKeysFor(workspaceID, removalTestApp).All() {
 		v, err := r.stores.Secrets.GetSystem(r.t.Context(), r.orgID, key)
 		if err != nil {
 			r.t.Fatalf("read secret %s: %v", key, err)
@@ -254,7 +257,7 @@ func TestAppRemoval_Webhook_PredatesTheConnection_KeepsTheWorkspace(t *testing.T
 }
 
 // TestAppRemoval_ReconnectedAfterTheRead_KeepsTheWorkspace: a connect landing
-// between the receiver's read and the delete moves updated_at, so the
+// between the receiver's read and the delete moves connected_at, so the
 // reconnected row and the secrets it wrote stay.
 func TestAppRemoval_ReconnectedAfterTheRead_KeepsTheWorkspace(t *testing.T) {
 	r := newRemovalRig(t)
@@ -263,8 +266,8 @@ func TestAppRemoval_ReconnectedAfterTheRead_KeepsTheWorkspace(t *testing.T) {
 
 	r.connect("T0REMOVE1", "xoxb-reinstalled", transportEventsAPI)
 	current := r.row("T0REMOVE1")
-	if current == nil || current.UpdatedAt.Equal(stale.UpdatedAt) {
-		t.Fatalf("reconnect did not move updated_at: before %v, after %+v", stale.UpdatedAt, current)
+	if current == nil || current.ConnectedAt.Equal(stale.ConnectedAt) {
+		t.Fatalf("reconnect did not move connected_at: before %v, after %+v", stale.ConnectedAt, current)
 	}
 	before := r.secretValues("T0REMOVE1")
 
@@ -349,12 +352,12 @@ func TestAppRemoval_Socket_DisconnectsAndAcks(t *testing.T) {
 	}
 }
 
-type failingDeleteWorkspaces struct {
-	slackstore.WorkspaceStore
+type failingDeleteConnections struct {
+	slackstore.ConnectionStore
 	err error
 }
 
-func (f failingDeleteWorkspaces) DeleteSystem(context.Context, string, string, string, time.Time) (bool, error) {
+func (f failingDeleteConnections) DeleteSystem(context.Context, string, string, string, time.Time) (bool, error) {
 	return false, f.err
 }
 
@@ -364,7 +367,7 @@ func TestAppRemoval_Socket_FailedDeleteNotAcked(t *testing.T) {
 	r := newRemovalRig(t)
 	r.connect("T0REMOVE1", "xoxb-remove1", transportSocket)
 	before := r.secretValues("T0REMOVE1")
-	r.pipeline.workspaces = failingDeleteWorkspaces{WorkspaceStore: r.pipeline.workspaces, err: errors.New("boom")}
+	r.pipeline.connections = failingDeleteConnections{ConnectionStore: r.pipeline.connections, err: errors.New("boom")}
 
 	c := &appConnection{appID: removalTestApp, orgID: r.orgID, sightings: map[string]*sightingView{}}
 	env := socketEnvelope{
@@ -380,6 +383,94 @@ func TestAppRemoval_Socket_FailedDeleteNotAcked(t *testing.T) {
 	assertSecretsUnchanged(t, before, r.secretValues("T0REMOVE1"))
 	if got := r.outcomes(); got[outcomeError] != 1 {
 		t.Errorf("outcomes = %v; want one %q", got, outcomeError)
+	}
+}
+
+// connectDeployment writes an active connection through the deployment's app
+// in workspaceID directly, as the install that writes one is not built yet,
+// and stores its bot token, the one secret such a connection has.
+func (r *removalRig) connectDeployment(workspaceID, botToken string) {
+	r.t.Helper()
+	keys := integrations.SlackConnectionKeysFor(workspaceID, deployTestAppID)
+	if _, err := r.h.AdminDB.Exec(`
+		INSERT INTO org_slack_connections (
+			workspace_id, api_app_id, org_id, source, active, workspace_name, bot_user_id, bot_token_ref
+		) VALUES ($1, $2, $3, 'deployment', true, 'Acme', 'U0DEPBOT', $4)
+	`, workspaceID, deployTestAppID, r.orgID, keys.BotToken); err != nil {
+		r.t.Fatalf("insert deployment connection: %v", err)
+	}
+	if err := r.stores.Tx.WithTx(r.t.Context(), r.orgID, r.owner, func(tx db.TxStores) error {
+		return tx.Secrets.Put(r.t.Context(), r.orgID, keys.BotToken, botToken, "Slack bot token")
+	}); err != nil {
+		r.t.Fatalf("store deployment connection's bot token: %v", err)
+	}
+}
+
+// TestAppRemoval_DeploymentConnection: an app removal through the
+// deployment's app, over either transport and licensed or not, deletes the
+// connection's row and its bot token, and leaves the same org's connection
+// through the app in another workspace.
+func TestAppRemoval_DeploymentConnection(t *testing.T) {
+	for _, tr := range []string{transportEventsAPI, transportSocket} {
+		for _, licensed := range []bool{true, false} {
+			name := tr + "/licensed"
+			if !licensed {
+				name = tr + "/unlicensed"
+			}
+			t.Run(name, func(t *testing.T) {
+				r := newRemovalRig(t)
+				r.connectDeployment("T0DEPREM1", "xoxb-deployment-1")
+				r.connectDeployment("T0DEPREM2", "xoxb-deployment-2")
+				if !licensed {
+					entitlements.RegisterProvider(entitlements.Static())
+				}
+				botToken := func(workspaceID string) string {
+					t.Helper()
+					v, err := r.stores.Secrets.GetSystem(t.Context(), r.orgID, integrations.SlackConnectionKeysFor(workspaceID, deployTestAppID).BotToken)
+					if err != nil {
+						t.Fatalf("read bot token: %v", err)
+					}
+					return v
+				}
+				row := func(workspaceID string) *slackstore.Connection {
+					t.Helper()
+					ws, err := slackstore.FromStores(r.stores).Connections.GetByWorkspaceAppSystem(t.Context(), workspaceID, deployTestAppID)
+					if err != nil {
+						t.Fatalf("read connection: %v", err)
+					}
+					return ws
+				}
+
+				payload := eventCallbackPayload("T0DEPREM1", deployTestAppID, "Ev-deployment-removal", appUninstalledInner)
+				payload["event_time"] = time.Now().Unix()
+				switch tr {
+				case transportEventsAPI:
+					wh := &webhookHandler{stores: r.stores, pipeline: r.pipeline, deployment: eventsAPIDeploymentApp()}
+					if rec := postSignedDeployment(t, wh, payload); rec.Code != http.StatusOK {
+						t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+					}
+				case transportSocket:
+					c := &appConnection{appID: deployTestAppID, deployment: true, appToken: deployTestAppToken, sightings: map[string]*sightingView{}}
+					env := socketEnvelope{Type: "events_api", EnvelopeID: "env-1", Payload: mustJSON(t, payload)}
+					if !c.processEventsAPIEnvelope(t.Context(), r.stores, r.pipeline, env) {
+						t.Fatal("envelope not acked; want acked")
+					}
+				}
+
+				if ws := row("T0DEPREM1"); ws != nil {
+					t.Errorf("row after the removal = %+v; want deleted", ws)
+				}
+				if v := botToken("T0DEPREM1"); v != "" {
+					t.Errorf("bot token after the removal = %q; want deleted", v)
+				}
+				if row("T0DEPREM2") == nil || botToken("T0DEPREM2") != "xoxb-deployment-2" {
+					t.Error("the other workspace's connection or its bot token is gone; want both kept")
+				}
+				if got := r.outcomes(); got[outcomeDisconnected] != 1 || len(got) != 1 {
+					t.Errorf("outcomes = %v; want exactly one %q", got, outcomeDisconnected)
+				}
+			})
+		}
 	}
 }
 

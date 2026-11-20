@@ -26,7 +26,7 @@ type helperTier int
 
 const (
 	// tierPure is a small pure-Go helper with no SQL text and no driver row
-	// (derefFloat, nullIfEmpty). It could be shared and is duplicated only
+	// (nullIfEmpty, nullString). It could be shared and is duplicated only
 	// because each is low-value to hoist. This is the shrinking set.
 	tierPure helperTier = iota
 
@@ -68,8 +68,6 @@ const helperTierChoices = "tierPure (pure Go; the shrinking set, so sharing it i
 var identicalHelperRatchet = map[string]helperTier{
 	"buildDashboardTimeline": tierPure,
 	"claimOutcomeForStatus":  tierPure,
-	"derefFloat":             tierPure,
-	"derefInt":               tierPure,
 	"floatPtrFromNull":       tierPure,
 	"int64PtrFromNull":       tierPure,
 	"intPtrFromNull":         tierPure,
@@ -131,7 +129,6 @@ var identicalHelperRatchet = map[string]helperTier{
 	"newConversationQueueStore":          tierConstructor,
 	"newDashboardStore":                  tierConstructor,
 	"newEventStore":                      tierConstructor,
-	"newFactoryReadStore":                tierConstructor,
 	"newGitHubRefreshMarkStore":          tierConstructor,
 	"newModelAvailabilityStore":          tierConstructor,
 	"newRepositoryDependabotAccessStore": tierConstructor,

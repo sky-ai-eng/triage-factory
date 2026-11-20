@@ -181,51 +181,73 @@ func (c *dispositionCounter) count() int {
 
 // A firing names the first event queued for its (task, trigger); a later one
 // collapsed onto the row. The reroute routes the task's newest event, so the
-// new task and its run are about the situation as it last stood.
+// new task and its run are about the situation as it last stood. That holds
+// when the two events share a created_at, as a coarse clock makes them often:
+// the later insert is the newer.
 func TestFiringWorker_Reroute_RoutesTheTasksNewestEvent(t *testing.T) {
-	database := newTestDB(t)
-	stub := &stubDelegator{db: database}
-	router := firingRouter(database, stub)
-	entityID, taskID, queuedEventID := rerouteScenario(t, database, router)
-	st := sqlitestore.New(database)
-	tasks := testTaskStore(database)
+	for name, offset := range map[string]time.Duration{
+		"a_minute_later":      time.Minute,
+		"at_the_same_instant": 0,
+	} {
+		t.Run(name, func(t *testing.T) {
+			database := newTestDB(t)
+			stub := &stubDelegator{db: database}
+			router := firingRouter(database, stub)
+			entityID, taskID, queuedEventID := rerouteScenario(t, database, router)
+			st := sqlitestore.New(database)
+			tasks := testTaskStore(database)
 
-	bump := func(eventID string) {
-		t.Helper()
-		if err := tasks.RecordEventSystem(t.Context(), runmode.LocalDefaultOrgID, taskID, eventID, "bumped"); err != nil {
-			t.Fatalf("record bump: %v", err)
-		}
+			bump := func(eventID string) {
+				t.Helper()
+				if err := tasks.RecordEventSystem(t.Context(), runmode.LocalDefaultOrgID, taskID, eventID, "bumped"); err != nil {
+					t.Fatalf("record bump: %v", err)
+				}
+			}
+			bump(queuedEventID)
+			enqueueFiring(t, database, entityID, taskID, "trig-ci-a", queuedEventID)
+			newestEventID, err := st.Events.Record(context.Background(), runmode.LocalDefaultOrgID, ciFailedEvent(entityID, "aidan"))
+			if err != nil {
+				t.Fatalf("record newest event: %v", err)
+			}
+			at := time.Now().UTC()
+			stampEvent(t, database, queuedEventID, at)
+			stampEvent(t, database, newestEventID, at.Add(offset))
+			bump(newestEventID)
+			// The second admission collapses onto the first firing's row.
+			enqueueFiring(t, database, entityID, taskID, "trig-ci-a", newestEventID)
+
+			finishRunClosingTask(t, database, taskID)
+			drainOnce(t, router)
+
+			rows := firingsFor(t, database, entityID)
+			if len(rows) != 1 || rows[0].TriggeringEventID != queuedEventID {
+				t.Fatalf("firings = %+v, want the one row naming the first event", rows)
+			}
+			requireSkipped(t, rows[0], domain.PendingFiringSkipRerouted)
+			active, err := tasks.FindActiveByEntityAndType(context.Background(), runmode.LocalDefaultOrgID, entityID, domain.EventGitHubPRCICheckFailed)
+			if err != nil || len(active) != 1 {
+				t.Fatalf("expected 1 active CI task after the reroute, got %d (err=%v)", len(active), err)
+			}
+			var runEvent string
+			if err := database.QueryRow(`SELECT triggering_event_id FROM blueprint_runs WHERE task_id = ?`, active[0].ID).Scan(&runEvent); err != nil {
+				t.Fatalf("read the new task's run: %v", err)
+			}
+			if runEvent != newestEventID {
+				t.Errorf("the new task's run fired from event %s, want the task's newest event %s", runEvent, newestEventID)
+			}
+		})
 	}
-	bump(queuedEventID)
-	enqueueFiring(t, database, entityID, taskID, "trig-ci-a", queuedEventID)
-	newer := ciFailedEvent(entityID, "aidan")
-	newer.CreatedAt = time.Now().Add(time.Minute)
-	newestEventID, err := st.Events.Record(context.Background(), runmode.LocalDefaultOrgID, newer)
+}
+
+// stampEvent rewrites an event's created_at.
+func stampEvent(t *testing.T, database *sql.DB, eventID string, at time.Time) {
+	t.Helper()
+	res, err := database.Exec(`UPDATE events SET created_at = ? WHERE id = ?`, at, eventID)
 	if err != nil {
-		t.Fatalf("record newest event: %v", err)
+		t.Fatalf("stamp event %s: %v", eventID, err)
 	}
-	bump(newestEventID)
-	// The second admission collapses onto the first firing's row.
-	enqueueFiring(t, database, entityID, taskID, "trig-ci-a", newestEventID)
-
-	finishRunClosingTask(t, database, taskID)
-	drainOnce(t, router)
-
-	rows := firingsFor(t, database, entityID)
-	if len(rows) != 1 || rows[0].TriggeringEventID != queuedEventID {
-		t.Fatalf("firings = %+v, want the one row naming the first event", rows)
-	}
-	requireSkipped(t, rows[0], domain.PendingFiringSkipRerouted)
-	active, err := tasks.FindActiveByEntityAndType(context.Background(), runmode.LocalDefaultOrgID, entityID, domain.EventGitHubPRCICheckFailed)
-	if err != nil || len(active) != 1 {
-		t.Fatalf("expected 1 active CI task after the reroute, got %d (err=%v)", len(active), err)
-	}
-	var runEvent string
-	if err := database.QueryRow(`SELECT triggering_event_id FROM blueprint_runs WHERE task_id = ?`, active[0].ID).Scan(&runEvent); err != nil {
-		t.Fatalf("read the new task's run: %v", err)
-	}
-	if runEvent != newestEventID {
-		t.Errorf("the new task's run fired from event %s, want the task's newest event %s", runEvent, newestEventID)
+	if n, _ := res.RowsAffected(); n != 1 {
+		t.Fatalf("stamp event %s: %d rows, want 1", eventID, n)
 	}
 }
 

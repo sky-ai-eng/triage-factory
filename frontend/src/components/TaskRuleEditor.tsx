@@ -5,20 +5,27 @@ import PredicateEditor from './PredicateEditor'
 import EventTypeOptions from './EventTypeOptions'
 import Slider from './Slider'
 import TeamPicker from './TeamPicker'
-import type { RuleHandler, EventType } from '../types'
+import EventHandlerModeControl from './EventHandlerModeControl'
+import type { EventHandler, EventHandlerMode, EventType } from '../types'
 import { toast } from './Toast/toastStore'
 import { useTeams, pickerDefault, noteWrittenTeam } from '../hooks/useTeams'
 import { useEventSources } from '../hooks/useEventSources'
 import { sourceKindOf, sourceUnavailableReason } from '../lib/eventSources'
-import { handlersBase, rulesCreatePath } from '../lib/scope'
-import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
+import { apiJSON, httpErrorMessage } from '../lib/apiClient'
+import {
+  createEventHandler,
+  deleteEventHandler,
+  hasBlueprint,
+  updateEventHandler,
+  type EventHandlerFields,
+} from '../lib/eventHandlers'
 
 interface TaskRuleEditorProps {
   open: boolean
-  rule: RuleHandler | null // null = create mode
+  rule: EventHandler | null // null = create mode
   prefillEventType?: string
   prefillPredicate?: string // JSON string, for forgiving banner pre-fill
-  // When set (the single-team prompts page), a new rule is created under
+  // When set (the single-team prompts page), a new handler is created under
   // this team and the per-modal TeamPicker is replaced by a read-only
   // label. Empty / undefined keeps the modal's own write picker — the
   // standalone path (TaskRulesPanel on Cards) passes nothing and is
@@ -40,7 +47,6 @@ export default function TaskRuleEditor({
   onDeleted,
 }: TaskRuleEditorProps) {
   const isEdit = rule !== null
-  const base = handlersBase()
 
   // Form state
   const [eventType, setEventType] = useState('')
@@ -48,12 +54,12 @@ export default function TaskRuleEditor({
   const [predicate, setPredicate] = useState<Record<string, unknown>>({})
   const [priority, setPriority] = useState(0.5)
   const [sortOrder, setSortOrder] = useState(0)
-  const [enabled, setEnabled] = useState(true)
-  // applies_to_unowned — the explicit "watch" scope opt-in (TFAC-517).
+  const [mode, setMode] = useState<EventHandlerMode>('watch')
+  // applies_to_unowned — the explicit reach opt-in.
   const [appliesToUnowned, setAppliesToUnowned] = useState(false)
 
   // Which sources can actually reach this org — the picker offers no event a
-  // rule could never fire on, and the create route refuses one anyway.
+  // handler could never fire on, and the create route refuses one anyway.
   const { canProduce, stateOf } = useEventSources()
 
   // UI state
@@ -62,7 +68,7 @@ export default function TaskRuleEditor({
   const [deleting, setDeleting] = useState(false)
   const [error, setError] = useState('')
 
-  // Acting team — create mode only; a rule's team is immutable.
+  // Acting team — create mode only; a handler's team is immutable.
   // TeamPicker renders only at ≥2 teams; below that `team` stays '' and
   // the server resolves the sole team. Seeded when the panel opens, once
   // teams have loaded; teamsLoaded also gates the create submit so a
@@ -79,7 +85,7 @@ export default function TaskRuleEditor({
   // which point teams are loaded, so no cold-load gate is needed.
   const effectiveTeam = lockedTeamId || team
 
-  // Show the applies_to_unowned ("watch") toggle UNLESS the catalog explicitly
+  // Show the applies_to_unowned toggle UNLESS the catalog explicitly
   // marks this event inert (supports_watch === false — pool / requested-party).
   // Fail-open: if the catalog hasn't loaded yet or the fetch failed, the lookup
   // is undefined and we keep the toggle available rather than stranding the user
@@ -107,12 +113,12 @@ export default function TaskRuleEditor({
   useEffect(() => {
     if (!open) return
     if (rule) {
-      // Edit mode — populate from existing rule.
+      // Edit mode — populate from the existing handler.
       setEventType(rule.event_type)
       setName(rule.name)
       setPriority(rule.default_priority)
       setSortOrder(rule.sort_order)
-      setEnabled(rule.enabled)
+      setMode(rule.mode)
       setAppliesToUnowned(rule.applies_to_unowned)
       setOriginalPredicateJSON(rule.scope_predicate_json)
       if (rule.scope_predicate_json) {
@@ -130,7 +136,7 @@ export default function TaskRuleEditor({
       setName('')
       setPriority(0.5)
       setSortOrder(0)
-      setEnabled(true)
+      setMode('watch')
       setAppliesToUnowned(false)
       setOriginalPredicateJSON(null)
       if (prefillPredicate) {
@@ -170,11 +176,11 @@ export default function TaskRuleEditor({
 
       if (isEdit && rule) {
         // PATCH — build body with only changed fields.
-        const body: Record<string, unknown> = {}
+        const body: EventHandlerFields = {}
         if (name !== rule.name) body.name = name
         if (priority !== rule.default_priority) body.default_priority = priority
         if (sortOrder !== rule.sort_order) body.sort_order = sortOrder
-        if (enabled !== rule.enabled) body.enabled = enabled
+        if (mode !== rule.mode) body.mode = mode
         // The watch flag is sent only where the control is shown: the route
         // refuses true on an event type it cannot widen.
         if (!eventWatchInert && appliesToUnowned !== rule.applies_to_unowned)
@@ -186,32 +192,18 @@ export default function TaskRuleEditor({
         }
 
         if (Object.keys(body).length > 0) {
-          await apiFetch(`${base}/${encodeURIComponent(rule.id)}`, {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
-          })
+          await updateEventHandler(rule.id, body)
         }
       } else {
-        // POST — create. The route names the kind, so the body carries only
-        // rule fields; a trigger field here is rejected, not dropped.
-        const body: Record<string, unknown> = {
+        await createEventHandler({
           event_type: eventType,
           name: name.trim(),
+          mode,
           default_priority: priority,
           sort_order: sortOrder,
-          enabled,
           team_id: effectiveTeam,
-        }
-        if (!eventWatchInert) body.applies_to_unowned = appliesToUnowned
-        if (hasPredicate) {
-          body.scope_predicate = predicate
-        }
-
-        await apiFetch(rulesCreatePath(), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
+          ...(eventWatchInert ? {} : { applies_to_unowned: appliesToUnowned }),
+          ...(hasPredicate ? { scope_predicate: predicate } : {}),
         })
         if (effectiveTeam) noteWrittenTeam(effectiveTeam)
       }
@@ -220,7 +212,7 @@ export default function TaskRuleEditor({
     } catch (err: unknown) {
       const msg = httpErrorMessage(
         err,
-        isEdit ? 'Could not update the rule.' : 'Could not create the rule.',
+        isEdit ? 'Could not update the event handler.' : 'Could not create the event handler.',
       )
       setError(msg)
       toast.error(msg)
@@ -233,11 +225,10 @@ export default function TaskRuleEditor({
     predicate,
     priority,
     sortOrder,
-    enabled,
+    mode,
     appliesToUnowned,
     eventWatchInert,
     effectiveTeam,
-    base,
     isEdit,
     rule,
     originalPredicateJSON,
@@ -249,17 +240,17 @@ export default function TaskRuleEditor({
     setDeleting(true)
     setError('')
     try {
-      await apiFetch(`${base}/${encodeURIComponent(rule.id)}`, { method: 'DELETE' })
+      await deleteEventHandler(rule.id)
       onDeleted?.()
       onClose()
     } catch (err: unknown) {
-      const msg = httpErrorMessage(err, 'Could not delete the rule.')
+      const msg = httpErrorMessage(err, 'Could not delete the event handler.')
       setError(msg)
       toast.error(msg)
     } finally {
       setDeleting(false)
     }
-  }, [rule, base, onDeleted, onClose])
+  }, [rule, onDeleted, onClose])
 
   return (
     <AnimatePresence>
@@ -286,7 +277,7 @@ export default function TaskRuleEditor({
               {/* Header */}
               <div className="px-6 pt-5 pb-3 flex items-center justify-between shrink-0">
                 <h2 className="text-column font-semibold text-ink-1">
-                  {isEdit ? 'Edit Task Rule' : 'New Task Rule'}
+                  {isEdit ? 'Edit event handler' : 'New event handler'}
                 </h2>
                 <button onClick={onClose} className="text-ink-3 hover:text-ink-2 transition-colors">
                   <X size={18} />
@@ -295,7 +286,7 @@ export default function TaskRuleEditor({
 
               {/* Body — scrollable */}
               <div className="flex-1 overflow-y-auto px-6 py-4 space-y-5 min-h-0">
-                {/* Team (create mode only — a rule's team is immutable).
+                {/* Team (create mode only — a handler's team is immutable).
                     Locked to the page's active team on the single-team
                     prompts page; otherwise the modal's own write picker. */}
                 {!isEdit &&
@@ -320,16 +311,16 @@ export default function TaskRuleEditor({
                       setAppliesToUnowned(false) // Reset watch flag — the new event may not support it.
                     }}
                     disabled={isEdit}
-                    className="w-full px-3 py-2 rounded-lg border border-line-1 bg-raised text-body text-ink-1 focus:outline-none focus:border-warm/40 focus:ring-1 focus:ring-warm/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="w-full px-3 py-2 rounded-lg border border-line-1 bg-raised text-body text-ink-1 focus:border-warm/40 focus:ring-1 focus:ring-warm/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     <option value="">Select event type…</option>
                     {/* system: is bus-only and never routed. An unavailable
                         source is hidden for a different reason: its events
-                        cannot reach this org at all, so a rule bound to one
+                        cannot reach this org at all, so a handler bound to one
                         would wait forever. The row being EDITED is kept
                         regardless — event_type is immutable, so dropping it
-                        would blank the control on exactly the rule the reader
-                        opened to fix. */}
+                        would blank the control on exactly the handler the
+                        reader opened to fix. */}
                     <EventTypeOptions
                       eventTypes={eventTypes.filter(
                         (et) =>
@@ -343,10 +334,23 @@ export default function TaskRuleEditor({
                         sourceKindOf(eventType),
                         stateOf(sourceKindOf(eventType)),
                       )}{' '}
-                      This rule can&rsquo;t fire until it is.
+                      This handler can&rsquo;t fire until it is.
                     </p>
                   )}
                 </div>
+
+                {/* Mode */}
+                {eventType && (
+                  <div>
+                    <label className="block text-ui font-medium text-ink-2 mb-1.5">Mode</label>
+                    <EventHandlerModeControl
+                      mode={mode}
+                      eventType={eventType}
+                      hasBlueprint={rule !== null && hasBlueprint(rule)}
+                      onChange={setMode}
+                    />
+                  </div>
+                )}
 
                 {/* Name */}
                 <div>
@@ -356,7 +360,7 @@ export default function TaskRuleEditor({
                     value={name}
                     onChange={(e) => setName(e.target.value)}
                     placeholder="e.g. CI failures on my PRs"
-                    className="w-full px-3 py-2 rounded-lg border border-line-1 bg-raised text-body text-ink-1 placeholder:text-ink-3 focus:outline-none focus:border-warm/40 focus:ring-1 focus:ring-warm/20 transition-colors"
+                    className="w-full px-3 py-2 rounded-lg border border-line-1 bg-raised text-body text-ink-1 placeholder:text-ink-3 focus:border-warm/40 focus:ring-1 focus:ring-warm/20 transition-colors"
                   />
                 </div>
 
@@ -400,8 +404,8 @@ export default function TaskRuleEditor({
                   </div>
                 </div>
 
-                {/* Apply to unowned entities — the explicit "watch" scope
-                    opt-in (TFAC-517). Off by default; on it surfaces tasks for
+                {/* Apply to unowned entities — the explicit reach opt-in.
+                    Off by default; on it surfaces tasks for
                     entities outside the team (PRs/issues authored by anyone),
                     so it carries a deliberate eyes-open warning. Hidden for
                     event types the catalog marks inert (pool / requested-party
@@ -432,23 +436,21 @@ export default function TaskRuleEditor({
                           exit={{ opacity: 0, height: 0 }}
                           className="overflow-hidden text-reported leading-relaxed text-warm bg-warm/10 border border-warm/20 rounded-lg px-3 py-2 mt-2"
                         >
-                          This rule surfaces matching PRs and issues authored by anyone — including
-                          people on other teams and outside contributors — so expect significantly
-                          higher volume. If you also auto-delegate this event, the bot acts only on
-                          the ones no one in your Triage Factory org owns (e.g. dependabot or
-                          external contributors), never on a PR a member owns.
+                          This handler surfaces matching PRs and issues authored by anyone —
+                          including people on other teams and outside contributors — so expect
+                          significantly higher volume. If you also auto-delegate this event, the bot
+                          acts only on the ones no one in your Triage Factory org owns (e.g.
+                          dependabot or external contributors), never on a PR a member owns.
                         </motion.p>
                       )}
                     </AnimatePresence>
                   </div>
                 )}
-
-                {/* Enabled toggle removed — use the inline toggle in the rules list instead */}
               </div>
 
               {/* Footer */}
               <div className="px-6 py-4 border-t border-line-1 flex items-center shrink-0">
-                {/* Left: delete — only for user rules. System rules use the enabled toggle instead. */}
+                {/* Left: delete — only for user handlers. A shipped handler is turned off with its mode instead. */}
                 {isEdit && rule?.source !== 'system' && (
                   <button
                     onClick={handleDelete}

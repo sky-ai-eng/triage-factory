@@ -16,7 +16,7 @@ import {
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { Copy, FileText, Layers, MoreVertical, Trash2 } from 'lucide-react'
-import type { Blueprint, BlueprintStep, Prompt, TriggerHandler } from '../types'
+import type { Blueprint, BlueprintStep, EventHandler, Prompt } from '../types'
 import { toast } from './Toast/toastStore'
 import { apiFetch, apiJSON, apiListAll } from '../lib/apiClient'
 import { useFocusTrap } from '../hooks/useFocusTrap'
@@ -24,12 +24,14 @@ import { useEventSources } from '../hooks/useEventSources'
 import { sourceLabel } from '../lib/eventSources'
 import MarketplacePublishControl from './MarketplacePublishControl'
 import {
-  type BindingScope,
-  blueprintsBase,
-  promptsBase,
-  handlersBase,
-  triggersCreatePath,
-} from '../lib/scope'
+  DETACH_BEFORE_MERGE,
+  EVENT_ALREADY_RUNS_BLUEPRINT,
+  eventRunsBlueprint,
+  handlerForConnection,
+  planConnection,
+} from './bindingGraphConnection'
+import { type BindingScope, blueprintsBase, promptsBase, handlersBase } from '../lib/scope'
+import { createEventHandler, detachPatch, updateEventHandler } from '../lib/eventHandlers'
 
 interface EventType {
   id: string
@@ -40,14 +42,14 @@ interface EventType {
 }
 
 interface GraphProps {
-  // The editor scope: a single team's prompts+triggers. teamId '' means
+  // The editor scope: a single team's prompts and event handlers. teamId '' means
   // solo/local (the server resolves the sole team).
   scope: BindingScope
   // False until the scope resolves — a multi-team user can't post team_id:''
   // in the cold-load window (→ 400). The connect gesture no-ops while false.
   scopeReady: boolean
   onPromptClick?: (promptId: string) => void
-  onTriggerClick?: (trigger: TriggerHandler) => void
+  onTriggerClick?: (trigger: EventHandler) => void
   onTriggerDeleted?: (eventType: string, predicate?: string | null) => void
 }
 
@@ -105,10 +107,11 @@ function PromptNode({
       }}
       className="bg-raised backdrop-blur border border-line-1 rounded-lg px-3 py-2.5 min-w-[200px] max-w-[240px] shadow-float hover:border-warm/30 transition-all cursor-pointer"
     >
-      {/* Target (left): a prompt's single input — an event (it becomes a
-          blueprint's entry) OR an upstream step. Source (right): its single
-          step-output to the next step. The ≤1-in/≤1-out invariant is enforced
-          in onConnect, not by the handles (which would silently swallow). */}
+      {/* Target (left): a prompt's input — any number of events on a
+          blueprint's entry prompt, or one upstream step on every other prompt.
+          Source (right): its single step-output to the next step. The input
+          and output limits are enforced in onConnect, not by the handles
+          (which would silently swallow). */}
       <Handle
         type="target"
         position={Position.Left}
@@ -317,95 +320,6 @@ function saveLayout(key: string, layout: SavedLayout) {
   }
 }
 
-// --- Connection planning ---
-// Every connect gesture is resolved against blueprint membership (decision 5 —
-// always render/route from blueprint_id, never infer boxes from the live edge
-// graph) into one concrete plan, or a refusal with a user-facing reason. This
-// is the single place the linear + single-input invariant (decision 7) lives.
-
-type ConnPlan =
-  | { ok: false; reason: string }
-  // event → a blueprint's entry prompt: bind/replace a trigger.
-  | { ok: true; kind: 'trigger'; eventType: string; blueprintId: string }
-  // tail of one chain → entry of a trigger-less chain: atomic merge.
-  | { ok: true; kind: 'merge'; host: string; source: string }
-
-interface Membership {
-  // step-0 prompt id per blueprint (the event-edge target / chain entry).
-  firstPrompt: Record<string, string>
-  // ordered step prompt ids per blueprint.
-  steps: Record<string, string[]>
-  // prompt id → its owning blueprint (1:1 — prompts are copy-only).
-  promptToBlueprint: Record<string, string>
-  // blueprint ids that already have an event trigger.
-  triggered: Set<string>
-}
-
-function planConnection(c: Connection, m: Membership): ConnPlan {
-  const source = c.source ?? ''
-  const target = c.target ?? ''
-  if (!target.startsWith('p:')) {
-    return { ok: false, reason: 'A connection has to end on a prompt' }
-  }
-  const targetPid = target.slice(2)
-  const targetBp = m.promptToBlueprint[targetPid]
-  if (!targetBp) {
-    return { ok: false, reason: 'That prompt is not part of a blueprint' }
-  }
-  // A prompt takes a single input. The only free input slot is a chain's entry
-  // (step 0) that isn't already triggered — a mid-chain prompt already has its
-  // upstream step edge, a triggered entry already has its event.
-  const targetIsEntry = m.firstPrompt[targetBp] === targetPid
-  const targetTriggered = m.triggered.has(targetBp)
-  if (!targetIsEntry) {
-    return {
-      ok: false,
-      reason: 'That prompt already has an input — a step takes a single incoming edge',
-    }
-  }
-
-  if (source.startsWith('et:')) {
-    if (targetTriggered) {
-      return {
-        ok: false,
-        reason: 'This blueprint already has a trigger — a blueprint is fired by exactly one event',
-      }
-    }
-    return { ok: true, kind: 'trigger', eventType: source.slice(3), blueprintId: targetBp }
-  }
-
-  if (source.startsWith('p:')) {
-    const srcPid = source.slice(2)
-    const srcBp = m.promptToBlueprint[srcPid]
-    if (!srcBp) {
-      return { ok: false, reason: 'That prompt is not part of a blueprint' }
-    }
-    if (srcBp === targetBp) {
-      return { ok: false, reason: 'A blueprint can’t wire into itself' }
-    }
-    // A step has a single output: only a chain's tail (last step) has a free
-    // outgoing slot to extend onward.
-    const srcSteps = m.steps[srcBp] ?? []
-    const srcIsTail = srcSteps.length > 0 && srcSteps[srcSteps.length - 1] === srcPid
-    if (!srcIsTail) {
-      return {
-        ok: false,
-        reason: 'Only a blueprint’s last step can extend onward — a step has a single output',
-      }
-    }
-    // Merge absorbs the trigger-less downstream chain onto this tail.
-    if (targetTriggered) {
-      return {
-        ok: false,
-        reason: 'Detach the downstream blueprint’s trigger before merging it in',
-      }
-    }
-    return { ok: true, kind: 'merge', host: srcBp, source: targetBp }
-  }
-
-  return { ok: false, reason: 'Unsupported connection' }
-}
-
 // --- Duplication ---
 // Copies land at a fixed offset from their originals so a duplicate reads as a
 // distinct, unstacked copy (and a group duplicate keeps the selection's relative
@@ -522,7 +436,9 @@ function BindingGraphInner({
   const teamId = scope.teamId
   const [eventTypes, setEventTypes] = useState<EventType[]>([])
   const [prompts, setPrompts] = useState<Prompt[]>([])
-  const [triggers, setTriggers] = useState<TriggerHandler[]>([])
+  // triggers is the team's event handlers that reference a blueprint — the
+  // edges of the canvas, one per handler.
+  const [triggers, setTriggers] = useState<EventHandler[]>([])
   const [blueprints, setBlueprints] = useState<Blueprint[]>([])
   // blueprintFirstPrompt maps a blueprint id → its step-0 prompt id so an event
   // edge targets the entry of the blueprint it fires; blueprintSteps holds each
@@ -536,7 +452,7 @@ function BindingGraphInner({
   // Edge context menu (shift-click an edge). For a trigger edge it offers edit
   // (→ the trigger config panel) + remove; for a sequence edge, split-here.
   const [edgeMenu, setEdgeMenu] = useState<
-    | { x: number; y: number; kind: 'trigger'; trigger: TriggerHandler }
+    | { x: number; y: number; kind: 'trigger'; trigger: EventHandler }
     | { x: number; y: number; kind: 'sequence'; blueprintId: string; atStepIndex: number }
     | null
   >(null)
@@ -583,10 +499,11 @@ function BindingGraphInner({
     }
     return m
   }, [blueprintSteps])
-  const triggeredBlueprints = useMemo(
-    () => new Set(triggers.map((t) => t.blueprint_id)),
-    [triggers],
-  )
+  const triggerEvents = useMemo(() => {
+    const m: Record<string, string[]> = {}
+    for (const t of triggers) if (t.blueprint_id) (m[t.blueprint_id] ??= []).push(t.event_type)
+    return m
+  }, [triggers])
 
   // Refs so callbacks don't go stale.
   const triggersRef = useRef(triggers)
@@ -599,8 +516,8 @@ function BindingGraphInner({
   blueprintNamesRef.current = blueprintNames
   const promptToBlueprintRef = useRef(promptToBlueprint)
   promptToBlueprintRef.current = promptToBlueprint
-  const triggeredRef = useRef(triggeredBlueprints)
-  triggeredRef.current = triggeredBlueprints
+  const triggerEventsRef = useRef(triggerEvents)
+  triggerEventsRef.current = triggerEvents
   const nodesRef = useRef<Node[]>(nodes)
   nodesRef.current = nodes
   const onPromptClickRef = useRef(onPromptClick)
@@ -674,8 +591,8 @@ function BindingGraphInner({
         apiJSON<EventType[]>('/api/event-types'),
         apiListAll<Blueprint>(`${blueprintsBase()}/list`, teamFilter),
         apiListAll<Prompt>(`${promptsBase()}/list`, teamFilter),
-        apiListAll<TriggerHandler>(`${handlersBase()}/list`, {
-          kind: 'trigger',
+        apiListAll<EventHandler>(`${handlersBase()}/list`, {
+          has_blueprint: true,
           ...teamFilter,
         }),
         apiListAll<BlueprintStep>('/api/blueprint-steps/list', teamFilter),
@@ -722,7 +639,7 @@ function BindingGraphInner({
       setBlueprintSteps(stepsByBlueprint)
 
       const saved = layoutRef.current
-      const boundIds = new Set((tRes as TriggerHandler[]).map((t) => t.event_type))
+      const boundIds = new Set(tRes.map((t) => t.event_type))
       const active = new Set<string>()
       for (const id of Object.keys(saved.eventPositions)) active.add(id)
       for (const id of boundIds) active.add(id)
@@ -750,18 +667,16 @@ function BindingGraphInner({
     setDeleteConfirm(null)
   }, [teamId])
 
-  // Remove event from canvas
+  // Remove an event from the canvas: each of its handlers is detached from its
+  // blueprint, not deleted — the handler goes on making tasks, or whatever its
+  // mode says, without one.
   const removeEvent = useCallback(
     async (eventTypeId: string) => {
-      const toDelete = triggersRef.current.filter((t) => t.event_type === eventTypeId)
+      const toDetach = triggersRef.current.filter((t) => t.event_type === eventTypeId)
       try {
-        await Promise.all(
-          toDelete.map((t) =>
-            apiFetch(`${handlersBase()}/${encodeURIComponent(t.id)}`, { method: 'DELETE' }),
-          ),
-        )
+        await Promise.all(toDetach.map((t) => updateEventHandler(t.id, detachPatch(t))))
         // Drop the node + its saved position only once the backend confirms the
-        // triggers are gone — otherwise the canvas would diverge from the server.
+        // edges are gone — otherwise the canvas would diverge from the server.
         setActiveEventIds((prev) => {
           const next = new Set(prev)
           next.delete(eventTypeId)
@@ -809,7 +724,7 @@ function BindingGraphInner({
   )
 
   // Delete a whole blueprint (server soft-deletes the box + its copy-only step
-  // prompts and detaches the bound trigger). Core does the request + error toast
+  // prompts and detaches its triggers). Core does the request + error toast
   // only — no UI side effects, no refetch — so it composes inside a bulk batch
   // (one refetch at the end).
   const deleteBlueprintCore = useCallback(async (blueprintId: string): Promise<boolean> => {
@@ -885,7 +800,7 @@ function BindingGraphInner({
             }
           }
           if (orphaned) {
-            toast.info('Steps after a deleted prompt are now an untriggered blueprint.')
+            toast.info('Steps after a deleted prompt are now a separate blueprint.')
           }
         } finally {
           setDeleteConfirm(null)
@@ -1064,46 +979,51 @@ function BindingGraphInner({
     // Reconnection (rule 4) is enabled on the head (target) end only.
     const reconnectable: Edge['reconnectable'] = 'target'
     const triggerEdges: Edge[] = triggers
-      // Drop triggers whose blueprint has no resolvable entry prompt so we never
+      // Drop handlers whose blueprint has no resolvable entry prompt so we never
       // emit an edge pointing at a node that isn't on the canvas.
-      .filter(
-        (t) =>
-          activeEventIds.has(t.event_type) &&
-          blueprintFirstPrompt[t.blueprint_id] &&
-          presentPrompts.has(blueprintFirstPrompt[t.blueprint_id]),
-      )
-      .map((t) => ({
-        id: t.id,
-        source: `et:${t.event_type}`,
-        target: `p:${blueprintFirstPrompt[t.blueprint_id]}`,
-        type: 'default',
-        animated: t.enabled,
-        data: { kind: 'trigger' },
-        deletable: false,
-        reconnectable,
-        style: {
-          stroke: t.enabled ? 'var(--color-warm)' : 'var(--color-ink-3)',
-          strokeWidth: t.enabled ? 2 : 1,
-          strokeDasharray: t.enabled ? undefined : '5 5',
-          opacity: t.enabled ? 1 : 0.5,
-        },
-        markerEnd: {
-          type: MarkerType.ArrowClosed,
-          color: t.enabled ? 'var(--color-warm)' : 'var(--color-ink-3)',
-        },
-        label: t.enabled ? 'auto' : 'disabled',
-        labelStyle: {
-          fontSize: 9,
-          fill: t.enabled ? 'var(--color-warm)' : 'var(--color-ink-3)',
-          fontWeight: 600,
-        },
-        // The "auto"/"disabled" label text is already theme-aware (accent /
-        // text-tertiary), but the pill behind it must be too — a hardcoded
-        // white pill glares as a bright rectangle on the dark canvas, swamping
-        // the state it's meant to read out (TFAC-400). surface-raised is white
-        // in light mode (unchanged) and the dark raised surface in dark mode.
-        labelBgStyle: { fill: 'var(--color-raised)', fillOpacity: 0.8 },
-      }))
+      .flatMap((t) => {
+        const entry = t.blueprint_id ? blueprintFirstPrompt[t.blueprint_id] : undefined
+        return entry && activeEventIds.has(t.event_type) && presentPrompts.has(entry)
+          ? [{ t, entry }]
+          : []
+      })
+      .map(({ t, entry }) => {
+        // An edge runs when its handler automates; in any other mode the
+        // blueprint is attached and idle.
+        const runs = t.mode === 'automate'
+        return {
+          id: t.id,
+          source: `et:${t.event_type}`,
+          target: `p:${entry}`,
+          type: 'default',
+          animated: runs,
+          data: { kind: 'trigger' },
+          deletable: false,
+          reconnectable,
+          style: {
+            stroke: runs ? 'var(--color-warm)' : 'var(--color-ink-3)',
+            strokeWidth: runs ? 2 : 1,
+            strokeDasharray: runs ? undefined : '5 5',
+            opacity: runs ? 1 : 0.5,
+          },
+          markerEnd: {
+            type: MarkerType.ArrowClosed,
+            color: runs ? 'var(--color-warm)' : 'var(--color-ink-3)',
+          },
+          label: t.mode,
+          labelStyle: {
+            fontSize: 9,
+            fill: runs ? 'var(--color-warm)' : 'var(--color-ink-3)',
+            fontWeight: 600,
+          },
+          // The mode label text is already theme-aware (accent /
+          // text-tertiary), but the pill behind it must be too — a hardcoded
+          // white pill glares as a bright rectangle on the dark canvas,
+          // swamping the state it's meant to read out. surface-raised is white
+          // in light mode and the dark raised surface in dark mode.
+          labelBgStyle: { fill: 'var(--color-raised)', fillOpacity: 0.8 },
+        }
+      })
 
     const sequenceEdges: Edge[] = []
     for (const [bpId, ids] of Object.entries(blueprintSteps)) {
@@ -1214,8 +1134,8 @@ function BindingGraphInner({
   )
 
   // Connect: route the gesture (decision 7 enforcement lives in planConnection).
-  // event → entry prompt creates/updates a trigger; tail → trigger-less entry is
-  // an atomic merge. Both re-render from the resulting membership.
+  // event → entry prompt creates a trigger; tail → trigger-less entry is an
+  // atomic merge. Both re-render from the resulting membership.
   const onConnect = useCallback(
     async (connection: Connection) => {
       // Wait for the scope to resolve. Before /api/teams loads, teamId is ''
@@ -1228,7 +1148,7 @@ function BindingGraphInner({
         firstPrompt: firstPromptRef.current,
         steps: blueprintStepsRef.current,
         promptToBlueprint: promptToBlueprintRef.current,
-        triggered: triggeredRef.current,
+        triggerEvents: triggerEventsRef.current,
       })
       if (!plan.ok) {
         toast.error(plan.reason)
@@ -1236,20 +1156,11 @@ function BindingGraphInner({
       }
 
       if (plan.kind === 'trigger') {
-        const body: Record<string, unknown> = {
-          blueprint_id: plan.blueprintId,
-          event_type: plan.eventType,
-          team_id: teamId,
-        }
         try {
-          await apiFetch(triggersCreatePath(), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
-          })
+          await createEventHandler(handlerForConnection(plan, teamId))
           fetchAll()
         } catch (err) {
-          toast.failed(err, 'Could not create the trigger.')
+          toast.failed(err, 'Could not create the event handler.')
         }
         return
       }
@@ -1434,22 +1345,20 @@ function BindingGraphInner({
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [duplicateSelection, copySelection, pasteClipboard])
 
-  const doDeleteTrigger = useCallback(
-    async (triggerId: string) => {
+  // Remove a handler edge: the handler is detached from its blueprint, not
+  // deleted.
+  const doDetachTrigger = useCallback(
+    async (handlerId: string) => {
       await removeTriggerGuard.run(async () => {
-        // Capture trigger info before deletion for the forgiving banner callback.
-        const deleted = triggersRef.current.find((t) => t.id === triggerId)
+        const detached = triggersRef.current.find((t) => t.id === handlerId)
+        if (!detached) return
         try {
-          await apiFetch(`${handlersBase()}/${encodeURIComponent(triggerId)}`, {
-            method: 'DELETE',
-          })
+          await updateEventHandler(handlerId, detachPatch(detached))
           await fetchAll()
           // Notify parent so it can check coverage and show the forgiving banner.
-          if (deleted) {
-            onTriggerDeletedRef.current?.(deleted.event_type)
-          }
+          onTriggerDeletedRef.current?.(detached.event_type)
         } catch (err) {
-          toast.failed(err, 'Could not remove the trigger.')
+          toast.failed(err, 'Could not detach the event handler.')
         }
       })
     },
@@ -1476,20 +1385,16 @@ function BindingGraphInner({
   )
 
   // --- Edge reconnection (rule 4: drag an arrow's head onto a new target) ---
-  // Re-target lands on a free chain entry; drop-on-empty detaches.
+  // Re-target lands on a chain entry; drop-on-empty detaches.
 
-  // Re-point a trigger edge onto a different blueprint's entry: an in-place
-  // blueprint_id move that preserves the trigger row + its run history.
+  // Re-point a handler edge onto a different blueprint's entry: an in-place
+  // blueprint_id write that preserves the handler row + its run history.
   const doRetargetTrigger = useCallback(
-    async (triggerId: string, targetBlueprintId: string) => {
+    async (handlerId: string, targetBlueprintId: string) => {
       try {
-        await apiFetch(`${handlersBase()}/${encodeURIComponent(triggerId)}/retarget`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ blueprint_id: targetBlueprintId }),
-        })
+        await updateEventHandler(handlerId, { blueprint_id: targetBlueprintId })
       } catch (err) {
-        toast.failed(err, 'Could not move the trigger.')
+        toast.failed(err, 'Could not move the event handler.')
       } finally {
         fetchAll()
       }
@@ -1525,7 +1430,8 @@ function BindingGraphInner({
   }, [])
 
   // A reconnect drag landed on a handle. Resolve the edge kind + the new target,
-  // validate it's a free chain entry (≤1 input), and route to the right move.
+  // validate it's a chain entry the edge may land on, and route to the right
+  // move.
   // Setting the success flag first means a refused/no-op reconnect is never
   // mistaken for a drop-on-empty delete.
   //
@@ -1551,18 +1457,19 @@ function BindingGraphInner({
         toast.error('That prompt is not part of a blueprint')
         return
       }
-      // A valid re-target lands on a free chain entry: step 0 of a trigger-less
-      // blueprint (its head carries no inbound edge).
+      // A valid re-target lands on a chain entry (step 0): every other step
+      // already has its upstream edge.
       if (firstPromptRef.current[targetBp] !== tid) {
         toast.error('That prompt already has an input — a step takes a single incoming edge')
         return
       }
-      if (triggeredRef.current.has(targetBp)) {
-        toast.error('That blueprint already has a trigger — detach it first')
-        return
-      }
       const kind = (oldEdge.data as { kind?: string } | undefined)?.kind
       if (kind === 'trigger') {
+        // The handler keeps its event (the edge's source is `et:<event type>`).
+        if (eventRunsBlueprint(triggerEventsRef.current, oldEdge.source.slice(3), targetBp)) {
+          toast.error(EVENT_ALREADY_RUNS_BLUEPRINT)
+          return
+        }
         doRetargetTrigger(oldEdge.id, targetBp)
         return
       }
@@ -1572,6 +1479,10 @@ function BindingGraphInner({
           toast.error('A blueprint can’t wire into itself')
           return
         }
+        if ((triggerEventsRef.current[targetBp]?.length ?? 0) > 0) {
+          toast.error(DETACH_BEFORE_MERGE)
+          return
+        }
         doReconnectSequence(data.blueprintId, data.atStepIndex, targetBp)
       }
     },
@@ -1579,25 +1490,26 @@ function BindingGraphInner({
   )
 
   // A reconnect drag ended. If it didn't land on a handle (success still false),
-  // the user dropped the head on empty space → detach: a trigger edge removes
-  // the trigger, a sequence edge splits the blueprint at that point.
+  // the user dropped the head on empty space → detach: a handler edge detaches
+  // the handler from its blueprint, a sequence edge splits the blueprint at
+  // that point.
   const onReconnectEnd = useCallback(
     (_event: MouseEvent | TouchEvent, edge: Edge) => {
       if (edgeReconnectSuccessful.current) return
       const kind = (edge.data as { kind?: string } | undefined)?.kind
       if (kind === 'trigger') {
-        doDeleteTrigger(edge.id)
+        doDetachTrigger(edge.id)
       } else if (kind === 'sequence') {
         const data = edge.data as { blueprintId: string; atStepIndex: number }
         doSplit(data.blueprintId, data.atStepIndex)
       }
       edgeReconnectSuccessful.current = true
     },
-    [doDeleteTrigger, doSplit],
+    [doDetachTrigger, doSplit],
   )
 
-  // Click an edge: plain click on a trigger edge opens its config; shift-click
-  // any edge opens a contextual menu (trigger: edit/remove; sequence: split).
+  // Click an edge: plain click on a handler edge opens its config; shift-click
+  // any edge opens a contextual menu (handler: edit/detach; sequence: split).
   const onEdgeClick: EdgeMouseHandler = useCallback((event, edge) => {
     const mouseEvent = event as unknown as MouseEvent
     const kind = (edge.data as { kind?: string } | undefined)?.kind
@@ -1614,7 +1526,7 @@ function BindingGraphInner({
       }
       return
     }
-    // Trigger edge — resolve the backing trigger by edge id.
+    // Handler edge — resolve the backing handler by edge id.
     const trigger = triggersRef.current.find((t) => t.id === edge.id)
     if (!trigger) return
     if (event.shiftKey) {
@@ -1725,11 +1637,11 @@ function BindingGraphInner({
     [screenToFlowPosition],
   )
 
-  // Resolve the blueprint + its trigger for the details popup at click time so
-  // it always reflects the latest fetch.
-  const boxMenuTrigger = boxMenu
-    ? triggers.find((t) => t.blueprint_id === boxMenu.blueprintId)
-    : undefined
+  // Resolve the blueprint's triggers for the details popup at click time so it
+  // always reflects the latest fetch.
+  const boxMenuTriggers = boxMenu
+    ? triggers.filter((t) => t.blueprint_id === boxMenu.blueprintId)
+    : []
 
   const deleteSummary = deleteConfirm ? summarizeDeletePlan(deleteConfirm) : ''
   // Only warn about the split-into-untriggered-blueprint outcome when a selected
@@ -1819,17 +1731,17 @@ function BindingGraphInner({
                   }}
                   className="w-full text-left text-ui text-ink-2 hover:text-ink-1 hover:bg-tint-3 font-medium px-2.5 py-1.5 rounded-lg transition-colors"
                 >
-                  Edit trigger config
+                  Edit event handler
                 </button>
                 <button
                   onClick={async () => {
-                    await doDeleteTrigger(edgeMenu.trigger.id)
+                    await doDetachTrigger(edgeMenu.trigger.id)
                     setEdgeMenu(null)
                   }}
                   disabled={removeTriggerGuard.pending}
                   className="w-full text-left text-ui text-alarm hover:bg-alarm disabled:opacity-40 disabled:cursor-not-allowed font-medium px-2.5 py-1.5 rounded-lg transition-colors"
                 >
-                  {removeTriggerGuard.pending ? 'Removing…' : 'Remove trigger'}
+                  {removeTriggerGuard.pending ? 'Detaching…' : 'Detach from blueprint'}
                 </button>
               </>
             ) : (
@@ -1884,7 +1796,7 @@ function BindingGraphInner({
                   if (e.key === 'Enter') saveBoxName(boxMenu.blueprintId, boxNameDraft)
                 }}
                 disabled={renameGuard.pending}
-                className="flex-1 min-w-0 px-2 py-1 rounded-md border border-line-1 bg-raised text-ui text-ink-1 focus:outline-none focus:border-warm/40 focus:ring-1 focus:ring-warm/20 disabled:opacity-60 transition-colors"
+                className="flex-1 min-w-0 px-2 py-1 rounded-md border border-line-1 bg-raised text-ui text-ink-1 focus:border-warm/40 focus:ring-1 focus:ring-warm/20 disabled:opacity-60 transition-colors"
               />
               <button
                 onClick={() => saveBoxName(boxMenu.blueprintId, boxNameDraft)}
@@ -1917,16 +1829,25 @@ function BindingGraphInner({
               <Copy size={12} className="shrink-0" />
               Duplicate blueprint
             </button>
-            {boxMenuTrigger ? (
-              <button
-                onClick={() => {
-                  onTriggerClickRef.current?.(boxMenuTrigger)
-                  setBoxMenu(null)
-                }}
-                className="w-full text-left text-ui text-ink-2 hover:text-ink-1 hover:bg-tint-3 font-medium px-2.5 py-1.5 rounded-lg border border-line-1 transition-colors"
-              >
-                Edit trigger config
-              </button>
+            {boxMenuTriggers.length > 0 ? (
+              <div className="space-y-1.5">
+                {boxMenuTriggers.map((trigger) => (
+                  <button
+                    key={trigger.id}
+                    onClick={() => {
+                      onTriggerClickRef.current?.(trigger)
+                      setBoxMenu(null)
+                    }}
+                    className="w-full text-left text-ui text-ink-2 hover:text-ink-1 hover:bg-tint-3 font-medium px-2.5 py-1.5 rounded-lg border border-line-1 transition-colors"
+                  >
+                    Edit event handler
+                    <span className="block text-reported font-normal text-ink-3 truncate">
+                      {eventTypes.find((et) => et.id === trigger.event_type)?.label ??
+                        trigger.event_type}
+                    </span>
+                  </button>
+                ))}
+              </div>
             ) : (
               <p className="text-reported text-ink-3 leading-snug">
                 No trigger yet — wire an event to this blueprint’s first step to fire it.
@@ -1935,19 +1856,23 @@ function BindingGraphInner({
 
             {/* Marketplace publish/republish/delist (TFAC-536) — blueprints
                 publish whole. Multi-mode only (renders nothing in local
-                mode). Event-type suggestion comes from the blueprint's own
-                trigger, already loaded for the canvas. */}
+                mode). Event-type suggestions come from the blueprint's own
+                triggers, already loaded for the canvas. */}
             <div className="mt-2.5 pt-2.5 border-t border-line-1">
               <MarketplacePublishControl
                 kind="blueprint"
                 sourceId={boxMenu.blueprintId}
                 defaultName={blueprintNames[boxMenu.blueprintId] ?? ''}
-                suggestedEventTypes={boxMenuTrigger ? [boxMenuTrigger.event_type] : undefined}
+                suggestedEventTypes={
+                  boxMenuTriggers.length > 0
+                    ? [...new Set(boxMenuTriggers.map((t) => t.event_type))]
+                    : undefined
+                }
                 compact
               />
             </div>
             {/* Delete the whole blueprint — soft-deletes the box + its step
-                prompts and detaches the trigger server-side; the canvas refetch
+                prompts and detaches its triggers server-side; the canvas refetch
                 drops the box and its nodes. Two-stage so an accidental click in
                 the rename/duplicate menu can't destroy a blueprint: the confirm
                 names it and how many steps go with it. */}
@@ -2039,7 +1964,7 @@ function BindingGraphInner({
             </ul>
             <p className="text-reported text-ink-3 leading-snug mb-3">
               {deleteMightOrphan &&
-                'Deleting a prompt mid-blueprint splits the steps after it into a new untriggered blueprint. '}
+                'Deleting a prompt mid-blueprint splits the steps after it into a new, separate blueprint. '}
               This can’t be undone.
             </p>
             <div className="flex items-center justify-end gap-1.5">

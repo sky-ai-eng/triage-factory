@@ -272,6 +272,12 @@ type DelegateOpts struct {
 	// empty for manual. Recorded on the conversations row for audit.
 	TriggerID string
 
+	// ScopePredicateJSON is the predicate of the trigger that fired this
+	// run, as the trigger row stores it, empty when it has none; empty for
+	// manual. The run records it so the trigger's breaker counts only the
+	// runs fired under the predicate it holds now.
+	ScopePredicateJSON string
+
 	// TriggeringEventID is the event instance that fired this run, for
 	// event-triggered delegations; empty for manual. Server-side
 	// provenance like TriggerID — the router threads it from the event
@@ -388,6 +394,9 @@ type DelegationPlan struct {
 	// firstStepModel is step 0's model: its own pin, or the team default it
 	// inherits.
 	firstStepModel string
+	// predicate is the firing trigger's predicate, recorded on the run for
+	// its breaker; empty on the manual path.
+	predicate string
 }
 
 // PlanDelegation makes every check a delegation of task makes ahead of its
@@ -529,6 +538,7 @@ func (s *Spawner) PlanDelegation(task domain.Task, teamID string, opts DelegateO
 			AllowedTools: p.AllowedTools,
 			Model:        p.Model,
 			Brief:        st.Brief,
+			TaskTitle:    task.Title,
 		}
 	}
 	// Refuse a firing whose models this org cannot authenticate — a provider it
@@ -551,10 +561,13 @@ func (s *Spawner) PlanDelegation(task domain.Task, teamID string, opts DelegateO
 	// (triggering_event_id, trigger_id) unique index and could either trip a
 	// spurious UNIQUE violation or stamp misleading provenance. The DelegateOpts
 	// contract says manual never sets it, but pin that here rather than trust the
-	// caller — only the event path threads it onto the row.
-	triggeringEventID := ""
+	// caller — only the event path threads it onto the row. The trigger's
+	// predicate is pinned the same way: a manual run has no trigger whose
+	// breaker it could count toward.
+	triggeringEventID, predicate := "", ""
 	if triggerType == "event" {
 		triggeringEventID = opts.TriggeringEventID
+		predicate = opts.ScopePredicateJSON
 	}
 
 	return DelegationPlan{
@@ -563,6 +576,7 @@ func (s *Spawner) PlanDelegation(task domain.Task, teamID string, opts DelegateO
 		triggerType:       triggerType,
 		triggerID:         opts.TriggerID,
 		triggeringEventID: triggeringEventID,
+		predicate:         predicate,
 		creatorUserID:     creatorUserID,
 		actorAgentID:      opts.ActorAgentID,
 		taskClaim:         opts.TaskClaim,
@@ -597,12 +611,13 @@ func (s *Spawner) FireDelegation(plan DelegationPlan) (string, error) {
 	// filled in after setup.
 	blueprintRunID := uuid.New().String()
 	brRow := domain.BlueprintRun{
-		ID:                blueprintRunID,
-		BlueprintID:       plan.blueprint.ID,
-		TaskID:            plan.task.ID,
-		TriggerType:       domain.BlueprintTriggerType(plan.triggerType),
-		TriggerID:         plan.triggerID,
-		TriggeringEventID: plan.triggeringEventID,
+		ID:                 blueprintRunID,
+		BlueprintID:        plan.blueprint.ID,
+		TaskID:             plan.task.ID,
+		TriggerType:        domain.BlueprintTriggerType(plan.triggerType),
+		TriggerID:          plan.triggerID,
+		TriggeringEventID:  plan.triggeringEventID,
+		ScopePredicateJSON: plan.predicate,
 		// Freeze the executing bot at mint. Every step run inherits this onto
 		// conversations.actor_agent_id, so execution attribution is resolved once here
 		// rather than re-derived from the task claim per step (which is empty at
@@ -734,10 +749,11 @@ type sourceDocs struct {
 	notes string
 }
 
-// tools renders the <tools> section for the runtime that reads it, which
-// decides how the verbs are spelled and whether GitHub's are repeated there.
-func (d sourceDocs) tools(runtime agentprompt.Runtime) string {
-	return agentprompt.ToolsReferenceForSources(runtime, d.kinds)
+// toolParts are the <tools> section one source at a time, for the runtime
+// that reads it, which decides how the verbs are spelled and whether GitHub's
+// are repeated there. A re-claim compares them one by one.
+func (d sourceDocs) toolParts(runtime agentprompt.Runtime) []agentprompt.ToolsPart {
+	return agentprompt.ToolsReferenceParts(runtime, d.kinds)
 }
 
 // sourceDocsFor composes a run's sourceDocs from its source manifest: the

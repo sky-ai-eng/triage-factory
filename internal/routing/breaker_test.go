@@ -21,27 +21,30 @@ import (
 // apart, so the streak's order never rests on two rows sharing a timestamp.
 var breakerBase = time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
 
-// seedFinishedRun stages a blueprint run of blueprintID on taskID, finished
-// in status, started minute minutes after breakerBase, with one step
+// seedFinishedRun stages a blueprint run of trigger's blueprint on taskID,
+// finished in status, started minute minutes after breakerBase, with one step
 // conversation, and returns the conversation's id. triggerType is "event"
-// for a run a trigger fired and "manual" for one a person started.
-func seedFinishedRun(t *testing.T, database *sql.DB, taskID, blueprintID, triggerType, status string, minute int) string {
+// for a run trigger fired and "manual" for one a person started.
+func seedFinishedRun(t *testing.T, database *sql.DB, taskID string, trigger domain.EventHandler, triggerType, status string, minute int) string {
 	t.Helper()
+	blueprintID := trigger.BlueprintID
 	steps, err := sqlitestore.New(database).Blueprints.ListSteps(context.Background(), runmode.LocalDefaultOrgID, blueprintID)
 	if err != nil || len(steps) == 0 {
 		t.Fatalf("blueprint %s steps: %v (%d)", blueprintID, err, len(steps))
 	}
 	startedAt := breakerBase.Add(time.Duration(minute) * time.Minute)
-	var creator any
+	var creator, triggerID any
 	if triggerType == "manual" {
 		creator = runmode.LocalDefaultUserID
+	} else {
+		triggerID = trigger.ID
 	}
 	runID := uuid.New().String()
 	if _, err := database.Exec(`
-		INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, creator_user_id,
+		INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, trigger_id, creator_user_id,
 		                            status, worktree_path, step_plan, started_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?)
-	`, runID, blueprintID, taskID, triggerType, creator, status, "/tmp/wt-"+runID, startedAt); err != nil {
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, '[]', ?)
+	`, runID, blueprintID, taskID, triggerType, triggerID, creator, status, "/tmp/wt-"+runID, startedAt); err != nil {
 		t.Fatalf("seed %s %s run: %v", triggerType, status, err)
 	}
 	conversationID := uuid.New().String()
@@ -74,13 +77,8 @@ func trippedTrigger(t *testing.T, database *sql.DB) (entityID, taskID, eventID s
 		t.Fatalf("read trigger: %v", err)
 	}
 	trigger = *got
-	// A breaker keyed on the step prompt would count these runs only if the
-	// two shared an id, so the fixture keeps them apart.
-	if trigger.BlueprintID == "p-drain-1" {
-		t.Fatalf("the trigger's blueprint shares its step prompt's id; the test needs them apart")
-	}
 	for i := range 4 {
-		lastConversationID = seedFinishedRun(t, database, taskID, trigger.BlueprintID, "event", "failed", i)
+		lastConversationID = seedFinishedRun(t, database, taskID, trigger, "event", "failed", i)
 	}
 	return entityID, taskID, eventID, trigger, lastConversationID
 }
@@ -132,7 +130,7 @@ func TestBreaker_BelowTheThresholdNothingTrips(t *testing.T) {
 		t.Fatalf("read trigger: %v", err)
 	}
 	for i := range 3 {
-		seedFinishedRun(t, database, taskID, trigger.BlueprintID, "event", "failed", i)
+		seedFinishedRun(t, database, taskID, *trigger, "event", "failed", i)
 	}
 	enqueueFiring(t, database, entityID, taskID, triggerID, eventID)
 	drainOnce(t, drainRouter(database, sqlitestore.New(database).PendingFirings, &stubDelegator{db: database}))
@@ -177,10 +175,10 @@ func TestBreaker_AnEventStillReachesTheTasksLiveConversation(t *testing.T) {
 	rec := notifytest.Record(t)
 	entityID, task, trigger, activeConversationID := setupAbsorbScenario(t, database)
 	for i := range 4 {
-		seedFinishedRun(t, database, task.ID, trigger.BlueprintID, "event", "failed", i)
+		seedFinishedRun(t, database, task.ID, trigger, "event", "failed", i)
 	}
-	streak, err := sqlitestore.New(database).Tasks.BreakerStreakSystem(context.Background(), runmode.LocalDefaultOrgID, entityID, trigger.BlueprintID)
-	if err != nil || streak.Failures < derefIntDefault(trigger.BreakerThreshold, 0) {
+	streak, err := sqlitestore.New(database).Tasks.BreakerStreakSystem(context.Background(), runmode.LocalDefaultOrgID, entityID, trigger.ID)
+	if err != nil || streak.Failures < trigger.BreakerThreshold {
 		t.Fatalf("streak = %+v (%v), want the breaker holding for threshold %v", streak, err, trigger.BreakerThreshold)
 	}
 	secondEventID, err := sqlitestore.New(database).Events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
@@ -221,11 +219,11 @@ func TestBreaker_APersonsCompletedRunResetsIt(t *testing.T) {
 	rec.Active(t, runmode.LocalDefaultOrgID, kinds.BreakerTripped, key)
 
 	// A person's run that failed resets nothing.
-	seedFinishedRun(t, database, taskID, trigger.BlueprintID, "manual", "failed", 10)
+	seedFinishedRun(t, database, taskID, trigger, "manual", "failed", 10)
 	r.syncBreakers(context.Background())
 	rec.Active(t, runmode.LocalDefaultOrgID, kinds.BreakerTripped, key)
 
-	seedFinishedRun(t, database, taskID, trigger.BlueprintID, "manual", "completed", 11)
+	seedFinishedRun(t, database, taskID, trigger, "manual", "completed", 11)
 	r.syncBreakers(context.Background())
 	rec.Inactive(t, runmode.LocalDefaultOrgID, kinds.BreakerTripped)
 
@@ -242,8 +240,9 @@ func TestBreaker_APersonsCompletedRunResetsIt(t *testing.T) {
 	rec.Inactive(t, runmode.LocalDefaultOrgID, kinds.BreakerTripped)
 }
 
-// TestBreaker_TheSyncResolvesWhatTheGateNeverSees: turning the trigger off
-// fires nothing that would reach the gate, so the sync is what resolves it.
+// TestBreaker_TheSyncResolvesWhatTheGateNeverSees: moving the handler out of
+// automate fires nothing that would reach the gate, so the sync is what
+// resolves it.
 func TestBreaker_TheSyncResolvesWhatTheGateNeverSees(t *testing.T) {
 	database := newTestDB(t)
 	rec := notifytest.Record(t)
@@ -253,7 +252,7 @@ func TestBreaker_TheSyncResolvesWhatTheGateNeverSees(t *testing.T) {
 	drainOnce(t, r)
 	rec.Active(t, runmode.LocalDefaultOrgID, kinds.BreakerTripped)
 
-	setTriggerEnabledForTestRouting(t, database, trigger.ID, false)
+	setHandlerModeForTestRouting(t, database, trigger.ID, domain.EventHandlerModeWatch)
 	r.syncBreakers(context.Background())
 	rec.Inactive(t, runmode.LocalDefaultOrgID, kinds.BreakerTripped)
 }

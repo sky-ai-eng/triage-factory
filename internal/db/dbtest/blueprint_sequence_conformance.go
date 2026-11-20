@@ -85,6 +85,12 @@ type BlueprintSequenceScaffold struct {
 	// RunCurrentStep reads blueprint_runs.current_step_index — the pointer
 	// the claim gate drives, and the one an advance moves.
 	RunCurrentStep func(t *testing.T, blueprintRunID string) int
+	// SetTriggerPredicate writes a trigger's scope predicate as the API
+	// stores it, and returns the text the trigger row reads back as, which is
+	// what the router hands a firing.
+	SetTriggerPredicate func(t *testing.T, triggerID, predicate string) (stored string)
+	// RunPredicate reads blueprint_runs.scope_predicate_json.
+	RunPredicate func(t *testing.T, blueprintRunID string) string
 	// BackdateRunStartedAt rewrites blueprint_runs.started_at to `age` ago,
 	// so a run fired after it is newer by more than SQLite's whole-second
 	// column.
@@ -116,6 +122,44 @@ type BlueprintSequenceScaffold struct {
 func RunBlueprintSequenceConformance(t *testing.T, mk BlueprintSequenceFactory) {
 	t.Helper()
 	ctx := context.Background()
+
+	// The trigger's breaker counts a run only while the trigger holds the
+	// predicate the run recorded, so the event arm records what it is handed
+	// and the manual arm, whose run no trigger fired, records nothing.
+	t.Run("An_event_firing_records_its_trigger's_predicate", func(t *testing.T) {
+		store, sc := mk(t)
+		cases := []struct {
+			name      string
+			predicate string
+			manual    bool
+		}{
+			{"event_with_a_predicate", `{"author_id_in":["583231"]}`, false},
+			{"event_with_none", "", false},
+			{"manual", `{"author_id_in":["583231"]}`, true},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				taskID := sc.NewTask(t)
+				var br domain.BlueprintRun
+				want := ""
+				if tc.manual {
+					br = sc.ManualFiring(t, taskID)
+					br.ScopePredicateJSON = tc.predicate
+				} else {
+					br = sc.Firing(t, taskID)
+					want = sc.SetTriggerPredicate(t, br.TriggerID, tc.predicate)
+					br.ScopePredicateJSON = want
+				}
+				inserted, _, _, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br, db.AgentClaimStamp{}, "", sc.Step(br, 0))
+				if err != nil || !inserted {
+					t.Fatalf("CreateRunWithFirstStepSystem: inserted=%v err=%v", inserted, err)
+				}
+				if got := sc.RunPredicate(t, br.ID); got != want {
+					t.Errorf("recorded predicate = %q, want %q", got, want)
+				}
+			})
+		}
+	})
 
 	t.Run("Commits_the_owner_the_run_the_claim_and_the_step", func(t *testing.T) {
 		store, sc := mk(t)

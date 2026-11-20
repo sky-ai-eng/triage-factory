@@ -194,6 +194,33 @@ func (s *channelRegistryStore) ListForOrg(ctx context.Context, orgID string) ([]
 	return out, rows.Err()
 }
 
+func (s *channelRegistryStore) ListWatchedInWorkspaceSystem(ctx context.Context, orgID, workspaceID string) ([]slackstore.Channel, error) {
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT `+channelColumns+`
+		FROM slack_channels c
+		WHERE c.org_id = $1 AND c.workspace_id = $2
+			AND EXISTS (
+				SELECT 1 FROM team_slack_channels t
+				WHERE t.org_id = c.org_id AND t.slack_channel_id = c.id
+			)
+		ORDER BY c.name ASC, c.channel_id ASC, c.id ASC
+	`, orgID, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("list watched slack_channels: %w", err)
+	}
+	defer rows.Close()
+
+	out := []slackstore.Channel{}
+	for rows.Next() {
+		c, err := scanChannel(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan watched slack_channels: %w", err)
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
 // threadOrder is the thread lookup's preference among a thread's entities —
 // the active one (there is at most one), otherwise the most recently closed —
 // the order db.EntityStore's key lookup reads in.

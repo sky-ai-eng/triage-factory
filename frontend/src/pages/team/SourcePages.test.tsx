@@ -697,11 +697,13 @@ describe('Jira source page', () => {
   it('draws the fortnight beside the board, over the projects', async () => {
     stub(SETTINGS)
     render(<JiraSource {...BODY} />)
-    await waitFor(() => expect(screen.getByText('What each status means')).toBeInTheDocument())
+    // Waits on the board itself: a heading can render before the data the
+    // board is drawn from has arrived.
+    await waitFor(() => expect(document.querySelector('.sp-mapcol .sr-board')).not.toBeNull())
 
+    expect(screen.getByText('What each status means')).toBeInTheDocument()
     expect(screen.getByText('WHAT THE PROJECTS SENT')).toBeInTheDocument()
     expect(document.querySelector('.sp-listcol .sc')).not.toBeNull()
-    expect(document.querySelector('.sp-mapcol .sr-board')).not.toBeNull()
   })
 
   it('draws a skeleton board under what to do when nothing is watched', async () => {
@@ -891,9 +893,10 @@ describe('Jira source page', () => {
       ).toBeInTheDocument(),
     )
     // The stored configuration still renders — watched keys, the board's map —
-    // because the team's config is TF's data, not Jira's.
+    // because the team's config is TF's data, not Jira's. It can render after
+    // the off note does.
+    await waitFor(() => expect(screen.getByText('In Progress')).toBeInTheDocument())
     expect(screen.getAllByText('PLAT').length).toBeGreaterThan(0)
-    expect(screen.getByText('In Progress')).toBeInTheDocument()
 
     // No catalog page, no status vocabulary: both reads would just collect
     // refusals while the source is off.
@@ -1006,8 +1009,8 @@ describe('Jira source page', () => {
 })
 
 describe('Slack source page', () => {
-  const LIST = '/api/slack/teams/t1/channels/list'
-  const FACETS = '/api/slack/teams/t1/channels/facets'
+  const LIST = '/api/teams/t1/slack-channels/list'
+  const FACETS = '/api/teams/t1/slack-channels/facets'
   const ROWS = [
     {
       id: 'sc-1',
@@ -1275,7 +1278,7 @@ describe('Slack source page', () => {
     const fetchMock = stubSlack((body) => (body.tracked === true ? [ROWS[0], ROWS[1]] : ROWS))
     const puts = (): string[][] =>
       fetchMock.mock.calls
-        .filter(([path, init]) => path === '/api/slack/teams/t1/channels' && init?.method === 'PUT')
+        .filter(([path, init]) => path === '/api/teams/t1/slack-channels' && init?.method === 'PUT')
         .map(([, init]) => JSON.parse(String(init!.body)).channel_ids)
     render(<SlackSource {...BODY} />)
     await waitFor(() => expect(screen.getByText('#eng-general')).toBeInTheDocument())
@@ -1285,6 +1288,20 @@ describe('Slack source page', () => {
     expect(puts()[0]).toEqual(['C1', 'C2', 'C3'])
     // The set it wrote back is the tracked read's, not the page's.
     expect(listBodies(fetchMock).some((b) => b.tracked === true)).toBe(true)
+  })
+
+  it('claims a watched channel by setting is_primary on the team’s row of it', async () => {
+    const fetchMock = stubSlack((body) => (body.tracked === true ? [ROWS[0], ROWS[1]] : ROWS))
+    const writes = () =>
+      fetchMock.mock.calls
+        .filter(([, init]) => init?.method === 'PATCH' || init?.method === 'PUT')
+        .map(([path, init]) => [init!.method, path, JSON.parse(String(init!.body))])
+    render(<SlackSource {...BODY} />)
+    await waitFor(() => expect(screen.getByText('#oncall-platform')).toBeInTheDocument())
+
+    commitVerb('#oncall-platform', 'Claim as primary', 300)
+    await waitFor(() => expect(writes()).toHaveLength(1))
+    expect(writes()[0]).toEqual(['PATCH', '/api/teams/t1/slack-channels/C2', { is_primary: true }])
   })
 })
 

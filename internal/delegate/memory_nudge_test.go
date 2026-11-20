@@ -14,31 +14,31 @@ import (
 
 // memoryChat is a conversation a person works in, with helpers that write its
 // transcript and its memory the way a turn does, and ask the memory check.
+// The check compares the stamps on those writes, so the helpers stamp each
+// from the chat's own clock, a second after the one before, as a real
+// conversation's writes are seconds apart; the wall clock can give two writes
+// made back to back one instant.
 type memoryChat struct {
 	*interactiveFixture
-	t *testing.T
+	t     *testing.T
+	clock *time.Time
 }
 
 func newMemoryChat(t *testing.T, suffix string) memoryChat {
-	return memoryChat{interactiveFixture: newInteractiveFixture(t, suffix), t: t}
+	now := time.Now().UTC()
+	return memoryChat{interactiveFixture: newInteractiveFixture(t, suffix), t: t, clock: &now}
 }
 
-// awaitClockTick returns once the wall clock reads later than it did on entry.
-// The check counts the person's messages written strictly after an instant, and
-// the stores stamp rows with time.Now; a coarse clock (Windows ticks in
-// milliseconds) would give writes made back to back one instant, where a real
-// conversation's messages are seconds apart.
-func awaitClockTick() {
-	start := time.Now().Round(0)
-	for !time.Now().Round(0).After(start) {
-		time.Sleep(time.Millisecond)
-	}
+// tick is the instant of the chat's next write.
+func (c memoryChat) tick() time.Time {
+	*c.clock = c.clock.Add(time.Second)
+	return *c.clock
 }
 
 func (c memoryChat) insert(m domain.Message) {
 	c.t.Helper()
-	awaitClockTick()
 	m.ConversationID = c.conv.ID
+	m.CreatedAt = c.tick()
 	if _, err := c.stores.Conversations.InsertMessageSystem(context.Background(), runmode.LocalDefaultOrgID, &m); err != nil {
 		c.t.Fatalf("insert %s row %q: %v", m.Role, m.Content, err)
 	}
@@ -73,9 +73,26 @@ func (c memoryChat) nudged() {
 
 func (c memoryChat) remember(content string, source domain.MemorySource) {
 	c.t.Helper()
-	awaitClockTick()
-	if _, err := c.stores.TaskMemory.UpsertAgentMemorySystem(context.Background(), runmode.LocalDefaultOrgID, c.conv.ID, "", content, source); err != nil {
+	ctx := context.Background()
+	before, err := c.stores.TaskMemory.GetForConversationSystem(ctx, runmode.LocalDefaultOrgID, c.conv.ID)
+	if err != nil {
+		c.t.Fatalf("read the conversation's memory: %v", err)
+	}
+	mem, err := c.stores.TaskMemory.UpsertAgentMemorySystem(ctx, runmode.LocalDefaultOrgID, c.conv.ID, "", content, source)
+	if err != nil {
 		c.t.Fatalf("write the conversation's memory: %v", err)
+	}
+	// The store stamps the row, and a change of its content, from the wall
+	// clock; restamp them from the chat's.
+	at := c.tick()
+	switch {
+	case before == nil:
+		_, err = c.database.Exec(`UPDATE conversation_memory SET created_at = ?, updated_at = ? WHERE id = ?`, at, at, mem.ID)
+	case !mem.UpdatedAt.Equal(before.UpdatedAt):
+		_, err = c.database.Exec(`UPDATE conversation_memory SET updated_at = ? WHERE id = ?`, at, mem.ID)
+	}
+	if err != nil {
+		c.t.Fatalf("stamp the conversation's memory: %v", err)
 	}
 }
 

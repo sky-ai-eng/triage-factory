@@ -160,15 +160,20 @@ func TestClaimFence_ReleasedClaimRefusesEveryEngagementWrite(t *testing.T) {
 
 		resultRow := &domain.Message{Role: "user",
 			Subtype: domain.MessageSubtypeInjectionCompactionResult, Content: "summary"}
-		err = fx.store.CompactForClaimSystem(ctx, fx.orgID, fx.conversationID, fx.claimID, nil, resultRow, []int{int(spanID)})
+		err = fx.store.CompactForClaimSystem(ctx, fx.orgID, fx.conversationID, fx.claimID, nil, resultRow, []int{int(spanID)},
+			&domain.SystemBlocks{Prompt: "zombie prompt", Block: "zombie block"})
 		if !errors.Is(err, db.ErrClaimReleased) {
 			t.Fatalf("compact after reap = %v, want ErrClaimReleased", err)
 		}
-		// Nothing landed: the span is still active and no result row exists —
-		// a zombie must not rewrite the successor's window.
+		// Nothing landed: the span is still active, no result row exists, and
+		// the saved blocks are untouched — a zombie must not rewrite the
+		// successor's window or the prompt its next call sends.
 		msgs, err := fx.store.ListForAssemblySystem(ctx, fx.orgID, fx.conversationID)
 		if err != nil || len(msgs) != 1 || msgs[0].ID != int(spanID) {
 			t.Fatalf("assembly after refused compact = %+v (err %v), want the untouched span row", msgs, err)
+		}
+		if blocks, err := fx.store.SystemBlocksSystem(ctx, fx.orgID, fx.conversationID); err != nil || blocks.Prompt != "" || blocks.Block != "" {
+			t.Errorf("system blocks after refused compact = (%+v, %v), want none saved", blocks, err)
 		}
 	})
 
@@ -525,13 +530,18 @@ func TestClaimFence_ConversationWritersTakeTheReleaseOrder(t *testing.T) {
 			_, err := fx.store.SetSessionForClaimSystem(ctx, fx.orgID, fx.conversationID, fx.claimID, "sess-racing")
 			return err
 		}},
-		{"SetSystemBlock", func(fx fenceFixture) error {
-			_, err := fx.store.SetSystemBlockForClaimSystem(ctx, fx.orgID, fx.conversationID, fx.claimID, "block")
+		{"SetSystemBlocks", func(fx fenceFixture) error {
+			_, err := fx.store.SetSystemBlocksForClaimSystem(ctx, fx.orgID, fx.conversationID, fx.claimID, domain.SystemBlocks{Block: "block"})
 			return err
 		}},
 		{"SetWorktreePath", func(fx fenceFixture) error {
 			_, err := fx.store.SetWorktreePathForClaimSystem(ctx, fx.orgID, fx.conversationID, fx.claimID, "/tmp/triagefactory-runs/racing")
 			return err
+		}},
+		{"CompactSavingBlocks", func(fx fenceFixture) error {
+			return fx.store.CompactForClaimSystem(ctx, fx.orgID, fx.conversationID, fx.claimID, nil,
+				&domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionCompactionResult, Content: "summary"},
+				nil, &domain.SystemBlocks{Block: "block"})
 		}},
 	}
 	for _, w := range writers {
@@ -587,6 +597,57 @@ func TestClaimFence_ConversationWritersTakeTheReleaseOrder(t *testing.T) {
 				t.Fatal("writer never returned after the release committed")
 			}
 		})
+	}
+}
+
+// TestCompactForClaimSystem_ABlocksWriteThatFailsCommitsNothing: the blocks a
+// compaction carries are saved in its own transaction, so a save Postgres
+// refuses takes the result row, the flip and the re-seq back with it, and the
+// next claim reads back the blocks the engagement was sending. A NUL is the
+// refusal here: text cannot hold one, and SQLite stores it, which is why the
+// case is Postgres's alone.
+func TestCompactForClaimSystem_ABlocksWriteThatFailsCommitsNothing(t *testing.T) {
+	h := pgtest.Shared(t)
+	ctx := context.Background()
+	fx := newFenceFixture(t, h, "exec-compact-rollback")
+
+	launched := domain.SystemBlocks{Prompt: "shared", Block: "launched"}
+	if _, err := fx.store.SetSystemBlocksForClaimSystem(ctx, fx.orgID, fx.conversationID, fx.claimID, launched); err != nil {
+		t.Fatalf("SetSystemBlocksForClaimSystem: %v", err)
+	}
+	spanID, err := fx.store.InsertMessageForClaimSystem(ctx, fx.orgID, fx.claimID, &domain.Message{
+		ConversationID: fx.conversationID, Role: "assistant", Content: "history",
+	})
+	if err != nil {
+		t.Fatalf("insert span row: %v", err)
+	}
+	pending := false
+	queuedID, err := fx.store.InsertMessageForClaimSystem(ctx, fx.orgID, fx.claimID, &domain.Message{
+		ConversationID: fx.conversationID, Role: "user", Content: "queued", Delivered: &pending,
+	})
+	if err != nil {
+		t.Fatalf("insert queued row: %v", err)
+	}
+
+	resultRow := &domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionCompactionResult, Content: "summary"}
+	if err := fx.store.CompactForClaimSystem(ctx, fx.orgID, fx.conversationID, fx.claimID, nil, resultRow, []int{int(spanID)},
+		&domain.SystemBlocks{Prompt: "shared", Block: "recomposed\x00"}); err == nil {
+		t.Fatal("a compaction whose blocks Postgres cannot store committed")
+	}
+
+	msgs, err := fx.store.ListForAssemblySystem(ctx, fx.orgID, fx.conversationID)
+	if err != nil {
+		t.Fatalf("ListForAssemblySystem: %v", err)
+	}
+	if len(msgs) != 2 || msgs[0].ID != int(spanID) || msgs[1].ID != int(queuedID) || msgs[1].Seq != nil {
+		t.Fatalf("assembly after the failed commit = %+v, want the span row and the queued row exactly as they were", msgs)
+	}
+	got, err := fx.store.SystemBlocksSystem(ctx, fx.orgID, fx.conversationID)
+	if err != nil {
+		t.Fatalf("SystemBlocksSystem: %v", err)
+	}
+	if got.Prompt != launched.Prompt || got.Block != launched.Block {
+		t.Errorf("saved blocks after the failed commit = (%q, %q), want the launch's", got.Prompt, got.Block)
 	}
 }
 

@@ -144,7 +144,6 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		TeamAgents:               newTeamAgentStore(tx),
 		Users:                    users,
 		Tasks:                    newTaskStore(tx, tx),
-		Factory:                  newFactoryReadStore(tx),
 		TeamActivity:             newTeamActivityStore(tx),
 		TeamPRs:                  newTeamPRStore(tx),
 		Conversations:            newConversationStore(tx),

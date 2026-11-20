@@ -52,6 +52,42 @@ func (s systemSecretsReader) Get(ctx context.Context, orgID, key string) (string
 	return s.getter.GetSystem(ctx, orgID, key)
 }
 
+// NewBoundSecretsReader is NewSystemSecretsReader for a store that does not
+// itself record which providers an org bound. bound reports that record, and it
+// alone decides which providers are configured: the store is read only for the
+// material of a provider bound names.
+//
+// Local mode needs this because its two records have different scopes. The
+// settings row that records a bind belongs to one state root, while the
+// keychain holding the material is one bag per OS user, and can hold a key that
+// an earlier install or another state root left there. Read alone, the keychain
+// would run an org on that key while its settings say it runs on the host's
+// credentials. Multi mode's vault and settings rows are one database, written
+// in one transaction, so it reads the vault alone.
+//
+// A bound provider whose material is missing from the store fails the run,
+// naming the provider. Falling back to the host's credentials instead would
+// change who pays without anyone choosing it.
+func NewBoundSecretsReader(g SystemSecretGetter, bound func(ctx context.Context, orgID string) (map[string]bool, error)) SecretsReader {
+	return boundSecretsReader{systemSecretsReader: systemSecretsReader{getter: g}, bound: bound}
+}
+
+type boundSecretsReader struct {
+	systemSecretsReader
+	bound func(ctx context.Context, orgID string) (map[string]bool, error)
+}
+
+func (r boundSecretsReader) boundProviders(ctx context.Context, orgID string) (map[string]bool, error) {
+	return r.bound(ctx, orgID)
+}
+
+// bindingRecord is a SecretsReader that knows which providers an org bound,
+// apart from the material its store holds. The method is unexported so that
+// only this package's readers carry one.
+type bindingRecord interface {
+	boundProviders(ctx context.Context, orgID string) (map[string]bool, error)
+}
+
 // ErrNoCredentialsConfigured surfaces when multi-mode invokes Run
 // against an org with no Anthropic / Bedrock secret in vault. Typed
 // so the caller (delegate spawner, scorer, etc.) can decide whether
@@ -325,11 +361,12 @@ func isCredentialEnvKey(key string) bool {
 // model-blind global winner this replaced: it applies only where the caller
 // expressed no model at all, and a run always carries one.
 //
-// Local-mode behavior:
+// Local-mode behavior, where configured means bound in the org's settings
+// (NewBoundSecretsReader):
 //
 //   - empty OrgID, or an org with NO provider configured → returns an empty map.
-//     The subprocess inherits the host's env unchanged (preserves the existing
-//     "Claude Code subscription handles auth" flow and an ANTHROPIC_API_KEY
+//     The subprocess inherits the host's env unchanged (the "Use system Claude
+//     Code credentials" setting: a subscription login, or an ANTHROPIC_API_KEY
 //     exported in the operator's shell). The model is not consulted: an org
 //     that configured nothing has nothing to select between, and the host env is
 //     the credential.
@@ -445,7 +482,18 @@ func providerForRun(model string, configured map[string]bool) string {
 // an admin bound it, and internal/cred/llmcred mints against it per run. A caller that
 // only asked "is there a key" would read a role-mode org as unconfigured and send
 // its admin to connect something they already connected.
+//
+// A reader with a binding record of its own (NewBoundSecretsReader) answers
+// from that record, and the store is not probed.
 func configuredProviders(ctx context.Context, secrets SecretsReader, orgID string) (map[string]bool, error) {
+	if rec, ok := secrets.(bindingRecord); ok {
+		bound, err := rec.boundProviders(ctx, orgID)
+		if err != nil {
+			return nil, fmt.Errorf("read the providers org %s bound: %w", orgID, err)
+		}
+		return bound, nil
+	}
+
 	out := map[string]bool{}
 
 	apiKey, err := secrets.Get(ctx, orgID, secretAnthropicAPIKey)
@@ -507,8 +555,8 @@ func resolveCredentials(ctx context.Context, secrets SecretsReader, orgID, model
 		if multi {
 			return nil, fmt.Errorf("%w: SecretsReader is nil in multi mode", ErrNoCredentialsConfigured)
 		}
-		// Local with no SecretsReader plumbed (a test) — degrade to
-		// inherited-env subscription fallback.
+		// Local with no SecretsReader, which only a test builds: resolve as an
+		// org that bound nothing.
 		return map[string]string{}, nil
 	}
 
@@ -559,7 +607,7 @@ func anthropicEnv(ctx context.Context, secrets SecretsReader, orgID string) (map
 		return nil, fmt.Errorf("resolve anthropic_api_key: %w", err)
 	}
 	if apiKey == "" {
-		return nil, fmt.Errorf("%w: org %s has no anthropic_api_key in vault", ErrProviderNotConfigured, orgID)
+		return nil, fmt.Errorf("%w: org %s has Anthropic connected but no API key is stored for it — reconnect it in Settings → Claude credentials", ErrProviderNotConfigured, orgID)
 	}
 	env := map[string]string{"ANTHROPIC_API_KEY": apiKey}
 	baseURL, err := secrets.Get(ctx, orgID, secretAnthropicBaseURL)
@@ -611,7 +659,7 @@ func bedrockEnv(ctx context.Context, secrets SecretsReader, orgID, model string)
 			return nil, fmt.Errorf("resolve aws_secret_access_key: %w", err)
 		}
 		if accessKey == "" || secretKey == "" {
-			return nil, fmt.Errorf("%w: org %s has no usable Bedrock credential in vault (a role-mode org resolves through the STS minter, not here)", ErrProviderNotConfigured, orgID)
+			return nil, fmt.Errorf("%w: org %s has Bedrock connected but no usable credential is stored for it — reconnect it in Settings → Claude credentials", ErrProviderNotConfigured, orgID)
 		}
 		env["AWS_ACCESS_KEY_ID"] = accessKey
 		env["AWS_SECRET_ACCESS_KEY"] = secretKey

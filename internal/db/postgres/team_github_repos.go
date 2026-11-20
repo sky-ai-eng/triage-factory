@@ -289,7 +289,7 @@ func (s *teamGitHubReposStore) TracksRepositoryViewerScoped(ctx context.Context,
 	}
 	// Runs on the app pool so team_github_repos_select RLS auto-scopes the
 	// EXISTS to the caller's own team memberships — no team_id needed, same
-	// RLS-does-the-scoping trick as factoryGitHubRepoTrackedExists /
+	// RLS-does-the-scoping trick as githubRepoTrackedExists /
 	// jiraTeamProjectMembershipExists. The teams join binds org as
 	// defense-in-depth, and leaves out an archived team as repoTrackedByATeam
 	// does, so this answers for exactly the rows ListTeamScoped lists.

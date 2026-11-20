@@ -1,19 +1,22 @@
 package slack
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
-	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
@@ -104,10 +107,11 @@ func newInboundMention(envelope slackEventEnvelope, inner slackInnerEvent) inbou
 	return ev
 }
 
-// webhookHandler serves POST /api/webhooks/slack/{org_id} — the Events API
-// (webhook) transport for the shared ingest pipeline. Pre-auth: Slack has
-// no session, so every gate here (workspace resolution, entitlement,
-// signature) runs by hand inside the handler.
+// webhookHandler serves the Events API (webhook) transport for the shared
+// ingest pipeline on two routes: POST /api/webhooks/slack/{org_id} for an
+// org's own app, and POST /api/webhooks/slack for the deployment's app.
+// Pre-auth: Slack has no session, so every gate here (signature, workspace
+// resolution, entitlement) runs by hand inside the handler.
 type webhookHandler struct {
 	stores   db.Stores
 	pipeline *ingestPipeline
@@ -115,9 +119,18 @@ type webhookHandler struct {
 	// app_rate_limited notices); the per-delivery outcome counters live in
 	// the pipeline. Nil-safe, like the pipeline's optional collaborators.
 	stats *ingestStats
+	// deployment is the deployment's own Slack app, the zero app when there
+	// is none.
+	deployment deploymentApp
+	// mismatches and otherAppMismatches limit how often the deployment
+	// endpoint logs a delivery signed with another secret: one naming the
+	// deployment's app or none, and one naming another app.
+	mismatches         mismatchReport
+	otherAppMismatches mismatchReport
 }
 
-// handleWebhook mirrors the GitHub receiver's discipline
+// handleWebhook serves POST /api/webhooks/slack/{org_id}, for an org's own
+// app. It mirrors the GitHub receiver's discipline
 // (internal/server/github_webhooks.go): body cap, generic responses that
 // never disclose whether a team_id/api_app_id/org pairing exists, and a
 // real signature check before anything else runs.
@@ -128,33 +141,22 @@ type webhookHandler struct {
 //     missing api_app_id, or mismatched is a generic 200-empty (never
 //     discloses which org owns a workspace/app).
 //  2. Signature — verified against the workspace's stored signing secret;
-//     a workspace with no signing secret (a socket-transport connection)
-//     is rejected the same as a bad signature: this endpoint isn't for it.
+//     a connection with no signing secret (a socket-transport app, or any
+//     connection through the deployment's app) is rejected the same as a
+//     bad signature: this endpoint isn't for it.
 //     Deliberately BEFORE the entitlement check: only a caller already
 //     holding the workspace's signing secret (i.e. Slack itself) can ever
 //     reach past this point, so a 401-vs-200 split here can't be used as
 //     an entitlement oracle — an unsigned/forged request always gets 401
 //     regardless of whether the org's Slack feature happens to be
 //     licensed.
-//  3. Only past a verified signature does the payload's type get
-//     dispatched. The entitlement gate (TFAC-524's ack-and-drop dormancy
-//     contract) applies only to event_callback, not to url_verification —
-//     the handshake is proving the endpoint is live and correctly
-//     configured, not processing work, so a lapsed org can still complete
-//     it; a lapsed org's real (validly-signed) event deliveries get
-//     200-empty so Slack doesn't deactivate the subscription for
-//     persistent failures. An app removal passes the gate
-//     (removesConnection).
+//  3. Only past a verified signature does serveVerified dispatch the
+//     payload's type.
 func (h *webhookHandler) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	pathOrgID := r.PathValue("org_id")
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxSlackWebhookBody+1))
-	if err != nil {
-		httpx.BadRequest(w, "could not read request body")
-		return
-	}
-	if len(body) > maxSlackWebhookBody {
-		http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
+	body, ok := readSlackWebhookBody(w, r)
+	if !ok {
 		return
 	}
 
@@ -164,7 +166,7 @@ func (h *webhookHandler) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ws, err := slackstore.FromStores(h.stores).Workspaces.GetByWorkspaceAppSystem(r.Context(), envelope.TeamID, envelope.APIAppID)
+	ws, err := slackstore.FromStores(h.stores).Connections.GetByWorkspaceAppSystem(r.Context(), envelope.TeamID, envelope.APIAppID)
 	if err != nil {
 		httpx.InternalError(w, "slack-webhook", err)
 		return
@@ -179,21 +181,113 @@ func (h *webhookHandler) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if ws.SigningSecretRef == "" {
-		// A socket-transport workspace has no signing secret — this
-		// endpoint is not for it.
+		// A socket-transport connection and a connection through the
+		// deployment's app have no signing secret: this endpoint is not
+		// for them.
 		httpx.WriteUnauth(w)
 		return
 	}
+	// Every delivery from here on is counted by its verdict, because one org's
+	// refusals are its own app's configuration, while most orgs' at once are
+	// this deployment's: its secret store, a proxy that changes request bodies
+	// or headers, or this host's clock.
 	secret, err := h.stores.Secrets.GetSystem(r.Context(), ws.OrgID, ws.SigningSecretRef)
 	if err != nil {
+		h.stats.recordOrgDelivery(r.Context(), ws.APIAppID, orgDeliveryNoSecret)
 		httpx.InternalError(w, "slack-webhook", err)
 		return
 	}
-	if secret == "" || !validSlackSignature(secret, body, r.Header.Get("X-Slack-Request-Timestamp"), r.Header.Get("X-Slack-Signature")) {
+	if secret == "" {
+		h.stats.recordOrgDelivery(r.Context(), ws.APIAppID, orgDeliveryNoSecret)
+		httpx.WriteUnauth(w)
+		return
+	}
+	check := checkSlackSignature(secret, body, r.Header.Get("X-Slack-Request-Timestamp"), r.Header.Get("X-Slack-Signature"))
+	h.stats.recordOrgDelivery(r.Context(), ws.APIAppID, check.label())
+	if check != signatureValid {
 		httpx.WriteUnauth(w)
 		return
 	}
 
+	h.serveVerified(w, r, envelope, func(ctx context.Context, inner slackInnerEvent) error {
+		return h.pipeline.deliverForConnection(ctx, *ws, envelope, inner)
+	})
+}
+
+// handleDeploymentWebhook serves POST /api/webhooks/slack, for the
+// deployment's app when its transport is the Events API. The signature comes
+// first, before the body is parsed, because the signing secret is the
+// environment's and needs no row to find: a forged request gets a 401 and
+// learns nothing about which workspaces are connected.
+func (h *webhookHandler) handleDeploymentWebhook(w http.ResponseWriter, r *http.Request) {
+	if !h.deployment.Configured() || h.deployment.Transport != transportEventsAPI {
+		httpx.NotFound(w, "deployment Slack app Events API endpoint")
+		return
+	}
+
+	body, ok := readSlackWebhookBody(w, r)
+	if !ok {
+		return
+	}
+	// Every delivery is counted by its verdict, because a wrong signing
+	// secret and a clock more than five minutes off each refuse all of
+	// Slack's deliveries here, and Slack turns the app's events off within
+	// the hour.
+	check := checkSlackSignature(h.deployment.SigningSecret, body, r.Header.Get("X-Slack-Request-Timestamp"), r.Header.Get("X-Slack-Signature"))
+	h.stats.recordDeploymentDelivery(r.Context(), h.deployment.AppID, check)
+	switch check {
+	case signatureValid:
+	case signatureMismatch:
+		h.reportSignatureMismatch(r.Context(), body)
+		httpx.WriteUnauth(w)
+		return
+	default:
+		httpx.WriteUnauth(w)
+		return
+	}
+
+	var envelope slackEventEnvelope
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		httpx.BadRequest(w, "malformed payload")
+		return
+	}
+
+	h.serveVerified(w, r, envelope, func(ctx context.Context, inner slackInnerEvent) error {
+		return h.pipeline.deliverDeploymentEvent(ctx, h.deployment.AppID, envelope, inner)
+	})
+}
+
+// readSlackWebhookBody reads a delivery's body under maxSlackWebhookBody,
+// answering the request itself when it can't: 400 for a read failure, 413
+// over the cap.
+func readSlackWebhookBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxSlackWebhookBody+1))
+	if err != nil {
+		httpx.BadRequest(w, "could not read request body")
+		return nil, false
+	}
+	if len(body) > maxSlackWebhookBody {
+		httpx.WriteErrors(w, http.StatusRequestEntityTooLarge, httpx.ErrorItem{
+			Reason:  httpx.ReasonPayloadTooLarge,
+			Message: fmt.Sprintf("request body exceeds the %d-byte limit", maxSlackWebhookBody),
+		})
+		return nil, false
+	}
+	return body, true
+}
+
+// serveVerified answers a delivery whose signature both routes have checked,
+// the same way on each. deliver is the part that differs: it finds the
+// connection an event_callback is for and runs the event through the
+// pipeline, returning an error only for a failure Slack should redeliver.
+//
+// The entitlement gate is deliver's, and applies only to event_callback, not
+// to url_verification: the handshake proves the endpoint is live and
+// correctly configured, not processing work, so a lapsed org can still
+// complete it. A lapsed org's real (validly-signed) event deliveries get
+// 200-empty so Slack doesn't deactivate the subscription for persistent
+// failures.
+func (h *webhookHandler) serveVerified(w http.ResponseWriter, r *http.Request, envelope slackEventEnvelope, deliver func(context.Context, slackInnerEvent) error) {
 	// Past the signature: the delivery is authentically Slack's, so its
 	// retry marker is a trustworthy operational signal. X-Slack-Retry-Num > 0
 	// means an earlier attempt wasn't acked in time (or 5xxed) — sustained
@@ -202,16 +296,25 @@ func (h *webhookHandler) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	// this Warn is the line operators alert on.
 	if n, err := strconv.Atoi(r.Header.Get("X-Slack-Retry-Num")); err == nil && n > 0 {
 		slackLog.Warn("slack events api: delivery is a Slack retry — sustained retries precede Slack disabling the event subscription",
-			"workspace", ws.WorkspaceID, "app", ws.APIAppID,
+			"workspace", envelope.TeamID, "app", envelope.APIAppID,
 			"retry_num", n, "retry_reason", r.Header.Get("X-Slack-Retry-Reason"))
-		h.stats.recordRetry(r.Context(), ws.APIAppID, transportEventsAPI)
+		h.stats.recordRetry(r.Context(), envelope.APIAppID, transportEventsAPI)
 	}
 
 	switch envelope.Type {
 	case "url_verification":
 		httpx.WriteJSON(w, http.StatusOK, map[string]string{"challenge": envelope.Challenge})
 	case "event_callback":
-		h.handleEventCallback(w, r, *ws, envelope)
+		var inner slackInnerEvent
+		if err := json.Unmarshal(envelope.Event, &inner); err != nil {
+			httpx.BadRequest(w, "malformed event payload")
+			return
+		}
+		if err := deliver(r.Context(), inner); err != nil {
+			httpx.InternalError(w, "slack-webhook", err)
+			return
+		}
+		ackEmpty(w)
 	case "app_rate_limited":
 		// Slack exhausted this app's Events API budget (30k events per
 		// workspace per hour) and is DROPPING deliveries at the source —
@@ -222,33 +325,15 @@ func (h *webhookHandler) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		// with the message.* firehose this is the "volume outgrew the
 		// transport" signal that says move to Socket Mode or split apps.
 		slackLog.Warn("slack events api: app_rate_limited — Slack is dropping this app's event deliveries",
-			"workspace", ws.WorkspaceID, "app", ws.APIAppID,
+			"workspace", envelope.TeamID, "app", envelope.APIAppID,
 			"minute_rate_limited", envelope.MinuteRateLimited)
-		h.stats.recordRateLimited(r.Context(), ws.APIAppID)
+		h.stats.recordRateLimited(r.Context(), envelope.APIAppID)
 		ackEmpty(w)
 	default:
 		// Slack documents other envelope types this leaf has no use for —
 		// ack so Slack doesn't retry.
 		ackEmpty(w)
 	}
-}
-
-func (h *webhookHandler) handleEventCallback(w http.ResponseWriter, r *http.Request, ws slackstore.Workspace, envelope slackEventEnvelope) {
-	var inner slackInnerEvent
-	if err := json.Unmarshal(envelope.Event, &inner); err != nil {
-		httpx.BadRequest(w, "malformed event payload")
-		return
-	}
-
-	if !removesConnection(inner.Type) && !entitlements.For(ws.OrgID).Has(entitlements.FeatureSlack) {
-		ackEmpty(w)
-		return
-	}
-	if err := h.pipeline.handleEventCallback(r.Context(), ws, newInboundMention(envelope, inner)); err != nil {
-		httpx.InternalError(w, "slack-webhook", err)
-		return
-	}
-	ackEmpty(w)
 }
 
 // ackEmpty writes the generic 200 this receiver uses for every case that
@@ -260,34 +345,66 @@ func ackEmpty(w http.ResponseWriter) {
 	httpx.WriteJSON(w, http.StatusOK, map[string]string{})
 }
 
-// validSlackSignature verifies X-Slack-Signature against Slack's documented
-// v0 HMAC-SHA256 scheme (HMAC(signingSecret, "v0:"+timestamp+":"+body)) and
-// enforces the 5-minute replay window on X-Slack-Request-Timestamp.
-// Constant-time comparison, mirrors validWebhookSignature's GitHub
-// analogue (internal/server/github_webhooks.go).
-func validSlackSignature(secret string, body []byte, timestampHeader, sigHeader string) bool {
+// signatureCheck is the outcome of checking a request's Slack signature
+// against Slack's documented v0 HMAC-SHA256 scheme
+// (HMAC(signingSecret, "v0:"+timestamp+":"+body)) and the 5-minute replay
+// window on X-Slack-Request-Timestamp.
+type signatureCheck int
+
+const (
+	// signatureMalformed is a request Slack would not send: a header missing
+	// or unparseable, or a digest that is not SHA-256's length. It is the
+	// zero value, so a check left unset refuses.
+	signatureMalformed signatureCheck = iota
+	// signatureStale is a timestamp outside the replay window. Every
+	// delivery from Slack looks like this when this host's clock is off by
+	// more than the window, and so does a replay.
+	signatureStale
+	// signatureMismatch is a fresh, well-formed signature that secret does
+	// not produce. Every delivery Slack sends looks like this when the
+	// configured secret is not the app's, and so does a forgery.
+	signatureMismatch
+	signatureValid
+)
+
+// label is the check's verdict on slack.webhook.org.deliveries and
+// slack.webhook.deployment.deliveries.
+func (c signatureCheck) label() string {
+	switch c {
+	case signatureValid:
+		return "verified"
+	case signatureMismatch:
+		return "mismatch"
+	case signatureStale:
+		return "stale"
+	default:
+		return "malformed"
+	}
+}
+
+func checkSlackSignature(secret string, body []byte, timestampHeader, sigHeader string) signatureCheck {
 	if timestampHeader == "" || sigHeader == "" {
-		return false
+		return signatureMalformed
 	}
 	ts, err := strconv.ParseInt(timestampHeader, 10, 64)
 	if err != nil {
-		return false
+		return signatureMalformed
 	}
 	age := time.Since(time.Unix(ts, 0))
 	if age < 0 {
 		age = -age
 	}
 	if age > slackReplayWindow {
-		return false
+		return signatureStale
 	}
 
 	const prefix = "v0="
 	if !strings.HasPrefix(sigHeader, prefix) {
-		return false
+		return signatureMalformed
 	}
 	want, err := hex.DecodeString(strings.TrimPrefix(sigHeader, prefix))
-	if err != nil {
-		return false
+	if err != nil || len(want) != sha256.Size {
+		return signatureMalformed
 	}
 
 	mac := hmac.New(sha256.New, []byte(secret))
@@ -295,5 +412,87 @@ func validSlackSignature(secret string, body []byte, timestampHeader, sigHeader 
 	mac.Write([]byte(timestampHeader))
 	mac.Write([]byte(":"))
 	mac.Write(body)
-	return hmac.Equal(want, mac.Sum(nil))
+	if !hmac.Equal(want, mac.Sum(nil)) {
+		return signatureMismatch
+	}
+	return signatureValid
+}
+
+// The values of slack.webhook.signature.mismatches' names_app attribute: the
+// app a mismatched delivery's unverified body names.
+const (
+	mismatchNamesDeploymentApp = "deployment"
+	mismatchNamesOtherApp      = "other"
+	mismatchNamesNoApp         = "none"
+)
+
+// slackAppIDPattern is the shape of a Slack App ID, bounded so an unverified
+// body cannot put a long string in the log.
+var slackAppIDPattern = regexp.MustCompile(`^A[A-Z0-9]{2,31}$`)
+
+// reportSignatureMismatch counts, and logs at a limited rate, a delivery to
+// the deployment endpoint that TF_SLACK_SIGNING_SECRET did not sign. A wrong
+// secret fails every delivery here and nowhere else, before Slack turns the
+// app's event delivery off. So does another app whose request URL points
+// here, which is why the app the body names is reported: it is unverified,
+// so it tells the operator where to look and nothing acts on it. The lines
+// are warnings, not errors, because anyone can send a request that lands
+// here.
+func (h *webhookHandler) reportSignatureMismatch(ctx context.Context, body []byte) {
+	var named struct {
+		APIAppID string `json:"api_app_id"`
+	}
+	_ = json.Unmarshal(body, &named)
+	names := mismatchNamesNoApp
+	switch {
+	case named.APIAppID == "":
+	case named.APIAppID == h.deployment.AppID:
+		names = mismatchNamesDeploymentApp
+	case slackAppIDPattern.MatchString(named.APIAppID):
+		names = mismatchNamesOtherApp
+	}
+	h.stats.recordSignatureMismatch(ctx, h.deployment.AppID, names)
+
+	if names == mismatchNamesOtherApp {
+		if log, count := h.otherAppMismatches.record(time.Now()); log {
+			slackLog.Warn("slack: a delivery naming another Slack app reached the deployment Slack app's Events API endpoint; "+
+				"if these keep coming, that app's request URL points here: change it or delete the app",
+				"app_id", h.deployment.AppID, "delivery_app_id", named.APIAppID, "mismatches", count)
+		}
+		return
+	}
+	if log, count := h.mismatches.record(time.Now()); log {
+		slackLog.Warn("slack: a delivery to the deployment Slack app's Events API endpoint is not signed with "+envSlackSigningSecret+
+			"; if Slack's deliveries all fail this way, set it to the Signing Secret on the app's Basic Information page",
+			"app_id", h.deployment.AppID, "mismatches", count)
+	}
+}
+
+// signatureMismatchLogInterval is the least time between two logged
+// signature mismatches.
+const signatureMismatchLogInterval = time.Minute
+
+// mismatchReport decides which signature mismatches the deployment endpoint
+// logs: the first, then at most one an interval, each line counting the
+// mismatches since the one before. The endpoint answers anyone, and a forger
+// can produce a mismatch as readily as a wrong secret can, so a line per
+// request would let any caller write the log. The zero value is ready to use.
+type mismatchReport struct {
+	mu       sync.Mutex
+	logged   time.Time
+	unlogged int
+}
+
+// record counts a mismatch at now. It reports whether to log it and, if so,
+// how many mismatches the line covers, this one included.
+func (m *mismatchReport) record(now time.Time) (log bool, count int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.unlogged++
+	if !m.logged.IsZero() && now.Sub(m.logged) < signatureMismatchLogInterval {
+		return false, 0
+	}
+	count = m.unlogged
+	m.logged, m.unlogged = now, 0
+	return true, count
 }

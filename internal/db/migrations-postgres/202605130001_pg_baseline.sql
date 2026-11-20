@@ -387,9 +387,9 @@ $$;
 -- +goose StatementEnd
 
 
--- Whether target_team exists and is not archived. A select policy whose
--- creator arm grants a row without membership ANDs this in, so an archived
--- team's rows are hidden from the person who wrote them too.
+-- Whether target_team exists and is not archived. A select policy with an arm
+-- that grants a row without membership ANDs this in, so an archived team's
+-- rows stay hidden through that arm too.
 
 -- +goose StatementBegin
 CREATE FUNCTION tf.team_active(target_team uuid) RETURNS boolean
@@ -735,25 +735,25 @@ CREATE TABLE public.event_handlers (
     org_id uuid NOT NULL,
     creator_user_id uuid,
     team_id uuid NOT NULL,
-    kind text NOT NULL,
+    -- What a matching event does: off nothing, notify tells the team's
+    -- members, watch makes a task, automate makes a task and runs the
+    -- handler's blueprint on it.
+    mode text NOT NULL,
     event_type text NOT NULL,
     scope_predicate_json jsonb,
-    enabled boolean DEFAULT true NOT NULL,
     source text DEFAULT 'user'::text NOT NULL,
-    -- Per-rule routing scope. TRUE adds the rule's team to a task's visibility even
-    -- for entities the team doesn't own; FALSE keeps visibility riding ownership.
-    -- Routing gates explicitWatchTeams on this column, not on source.
+    -- Per-handler routing scope. TRUE adds the handler's team to a task's
+    -- visibility even for entities the team doesn't own; FALSE keeps visibility
+    -- riding ownership. Routing gates explicitWatchTeams on this column, not on
+    -- source.
     applies_to_unowned boolean DEFAULT false NOT NULL,
     system_slug text,
-    name text,
-    default_priority double precision,
-    sort_order integer,
+    name text NOT NULL,
+    default_priority double precision DEFAULT 0.5 NOT NULL,
+    sort_order integer DEFAULT 0 NOT NULL,
     blueprint_id text,
-    breaker_threshold integer,
-    min_autonomy_suitability double precision,
-    -- Notify-only: who a notify rule tells, its creator ('creator') or its
-    -- team's members ('team'). NULL for rules and triggers.
-    notify_audience text,
+    breaker_threshold integer DEFAULT 4 NOT NULL,
+    min_autonomy_suitability double precision DEFAULT 0 NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     -- As on prompts and blueprints: user_modified is the shipped-content sync's
@@ -761,16 +761,13 @@ CREATE TABLE public.event_handlers (
     -- (org_id, team_id, system_slug) occupied so sync never resurrects the row.
     user_modified boolean DEFAULT false NOT NULL,
     deleted_at timestamp with time zone,
-    CONSTRAINT event_handlers_kind_check CHECK ((kind = ANY (ARRAY['rule'::text, 'trigger'::text, 'notify'::text]))),
-    -- A notify rule is a person's or a team's, never shipped content, and tells
-    -- its audience about an event without touching tasks.
-    CONSTRAINT event_handlers_notify_shape CHECK (((kind <> 'notify'::text) OR ((blueprint_id IS NULL) AND (breaker_threshold IS NULL) AND (min_autonomy_suitability IS NULL) AND (default_priority IS NULL) AND (sort_order IS NULL) AND (name IS NOT NULL) AND (notify_audience = ANY (ARRAY['creator'::text, 'team'::text])) AND (source <> 'system'::text) AND (NOT applies_to_unowned)))),
-    CONSTRAINT event_handlers_notify_audience_kind CHECK (((kind = 'notify'::text) = (notify_audience IS NOT NULL))),
-    CONSTRAINT event_handlers_rule_shape CHECK (((kind <> 'rule'::text) OR ((blueprint_id IS NULL) AND (breaker_threshold IS NULL) AND (min_autonomy_suitability IS NULL) AND (name IS NOT NULL) AND (default_priority IS NOT NULL) AND (sort_order IS NOT NULL)))),
+    CONSTRAINT event_handlers_mode_check CHECK ((mode = ANY (ARRAY['off'::text, 'notify'::text, 'watch'::text, 'automate'::text]))),
+    -- A handler runs a blueprint only in automate, and keeps one it has in
+    -- every other mode.
+    CONSTRAINT event_handlers_automate_has_blueprint CHECK (((mode <> 'automate'::text) OR (blueprint_id IS NOT NULL))),
     -- source is app-validated, not CHECK-constrained, so new provenance values are
     -- addable without DDL. The creator pairing below tolerates any non-system source.
-    CONSTRAINT event_handlers_system_has_no_creator CHECK ((((source = 'system'::text) AND (creator_user_id IS NULL)) OR ((source <> 'system'::text) AND (creator_user_id IS NOT NULL)))),
-    CONSTRAINT event_handlers_trigger_shape CHECK (((kind <> 'trigger'::text) OR ((blueprint_id IS NOT NULL) AND (breaker_threshold IS NOT NULL) AND (min_autonomy_suitability IS NOT NULL) AND (default_priority IS NULL) AND (sort_order IS NULL) AND (name IS NULL))))
+    CONSTRAINT event_handlers_system_has_no_creator CHECK ((((source = 'system'::text) AND (creator_user_id IS NULL)) OR ((source <> 'system'::text) AND (creator_user_id IS NOT NULL))))
 );
 
 
@@ -782,7 +779,10 @@ CREATE TABLE public.events (
     dedup_key text DEFAULT ''::text NOT NULL,
     metadata_json jsonb,
     occurred_at timestamp with time zone,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    -- Insertion order, which breaks a created_at tie: two events can share a
+    -- timestamp, and id is a random UUID.
+    seq bigint GENERATED ALWAYS AS IDENTITY
 );
 
 
@@ -1358,15 +1358,16 @@ CREATE TABLE public.messages (
     -- The executor engagement that produced this row, for per-engagement token
     -- accounting. NULL outside any claim. Never read by assembly.
     claim_id uuid,
-    -- role is app-validated, no CHECK: 'assistant' | 'tool' | 'user'. Only rows
-    -- deviating from normal role behavior carry a subtype, so blank is a
-    -- person's own message. The vocabulary is owned in Go (see
+    -- role is app-validated, no CHECK: 'assistant' | 'tool' | 'user' |
+    -- 'system' (a re-claim's system update, always subtype 'system-update').
+    -- Only rows deviating from normal role behavior carry a subtype, so blank
+    -- is a person's own message. The vocabulary is owned in Go (see
     -- db.ConversationStore's transcript section and domain's MessageSubtype*
     -- constants): 'injection:steer', 'injection:executor-changed',
     -- 'injection:nudge', 'injection:output-limit',
     -- 'injection:compaction-request', 'injection:compaction-result',
     -- 'injection:memory', 'injection:task-context', 'injection:system-note',
-    -- 'system_note', 'stop-note'.
+    -- 'system_note', 'stop-note', 'system-update'.
     role text NOT NULL,
     content text,
     subtype text DEFAULT ''::text,
@@ -1480,17 +1481,22 @@ CREATE TABLE public.conversations (
     -- Nothing here writes it above zero, since a multi delegation mints
     -- runtime='native'; it keeps the row the shape SQLite's is.
     sdk_session_cost_usd double precision DEFAULT 0 NOT NULL,
-    -- This conversation's own system block (the run's facts, its verb
-    -- reference, its mission and its step addendum) as the launch composed it —
-    -- a fourth SDK resume coordinate beside sdk_session_id, worktree_path and
-    -- model. The SDK harness takes its append once and replays only the session
-    -- transcript afterwards, so a resumed turn is handed this string again
-    -- rather than a recomposition off today's prompt row. Block 1 is not stored:
-    -- agentprompt.Build is byte-identical for a fixed spec, so the resume
-    -- rebuilds it. Empty is a legal value (every section is optional), and every
-    -- row here is empty in practice — a multi delegation mints runtime='native',
-    -- whose loop re-sends its block on every request.
+    -- The system prompt this conversation's claims send, as its first claim
+    -- sent it: system_prompt is the shared framework prompt (block 1),
+    -- system_block the conversation's own block (block 2: the run's facts, its
+    -- verb reference, its mission and its step addendum), and system_parts the
+    -- parts both were composed from (domain.SystemParts). Every later claim
+    -- sends the two blocks back unchanged, because the provider binds each
+    -- thinking block to the system prompt it was produced under; a change to
+    -- either reaches the conversation as a system-update row, and a later
+    -- claim compares its own composition with system_parts or with that row's.
+    -- A native compaction drops every row a thinking block rides on, so it
+    -- saves the blocks the engagement composed in their place. Empty strings
+    -- are legal values (every section of block 2 is optional); system_parts is
+    -- NULL on a row that never recorded any.
+    system_prompt text DEFAULT ''::text NOT NULL,
     system_block text DEFAULT ''::text NOT NULL,
+    system_parts jsonb,
     worktree_path text,
     result_summary text,
     outcome text,
@@ -2166,19 +2172,13 @@ CREATE INDEX idx_entity_links_from_kind ON public.entity_links USING btree (from
 CREATE INDEX idx_entity_links_to_kind ON public.entity_links USING btree (to_entity_id, kind);
 
 
-CREATE INDEX idx_event_handlers_org_event_enabled ON public.event_handlers USING btree (org_id, event_type) WHERE (enabled = true);
+CREATE INDEX idx_event_handlers_org_event_active ON public.event_handlers USING btree (org_id, event_type) WHERE (mode <> 'off'::text);
 
 
-CREATE INDEX idx_event_handlers_org_kind ON public.event_handlers USING btree (org_id, kind);
+CREATE INDEX idx_event_handlers_org_mode ON public.event_handlers USING btree (org_id, mode);
 
 
 CREATE INDEX idx_event_handlers_blueprint ON public.event_handlers USING btree (org_id, blueprint_id) WHERE (blueprint_id IS NOT NULL);
-
-
--- At most one trigger per blueprint; blueprint_id IS NOT NULL already implies
--- kind='trigger'. deleted_at IS NULL frees the slot on soft delete.
-
-CREATE UNIQUE INDEX event_handlers_one_trigger_per_blueprint ON public.event_handlers USING btree (org_id, blueprint_id) WHERE (blueprint_id IS NOT NULL AND deleted_at IS NULL);
 
 
 CREATE INDEX idx_events_org_entity_created ON public.events USING btree (org_id, entity_id, created_at DESC);
@@ -2966,19 +2966,16 @@ CREATE POLICY entity_links_all ON public.entity_links USING (((org_id = tf.curre
 ALTER TABLE public.event_handlers ENABLE ROW LEVEL SECURITY;
 
 
--- A notify rule whose audience is the team is a team admin's to write; a
--- personal one is its creator's, or a team admin's. The server checks the same
--- before it writes.
-CREATE POLICY event_handlers_delete ON public.event_handlers FOR DELETE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id) AND ((kind <> 'notify'::text) OR tf.user_is_team_admin(team_id) OR ((notify_audience = 'creator'::text) AND (creator_user_id = tf.current_user_id())))));
+CREATE POLICY event_handlers_delete ON public.event_handlers FOR DELETE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id)));
 
 
-CREATE POLICY event_handlers_insert ON public.event_handlers FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id()) AND tf.user_can_write_team(team_id) AND ((kind <> 'notify'::text) OR tf.user_is_team_admin(team_id) OR ((notify_audience = 'creator'::text) AND (creator_user_id = tf.current_user_id())))));
+CREATE POLICY event_handlers_insert ON public.event_handlers FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id()) AND tf.user_can_write_team(team_id)));
 
 
-CREATE POLICY event_handlers_select ON public.event_handlers FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.team_active(team_id) AND ((creator_user_id = tf.current_user_id()) OR tf.user_in_team(team_id))));
+CREATE POLICY event_handlers_select ON public.event_handlers FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_in_team(team_id)));
 
 
-CREATE POLICY event_handlers_update ON public.event_handlers FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id) AND ((kind <> 'notify'::text) OR tf.user_is_team_admin(team_id) OR ((notify_audience = 'creator'::text) AND (creator_user_id = tf.current_user_id()))))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id) AND ((kind <> 'notify'::text) OR tf.user_is_team_admin(team_id) OR ((notify_audience = 'creator'::text) AND (creator_user_id = tf.current_user_id())))));
+CREATE POLICY event_handlers_update ON public.event_handlers FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id)));
 
 
 ALTER TABLE public.events ENABLE ROW LEVEL SECURITY;
@@ -3131,7 +3128,7 @@ CREATE POLICY prompts_delete ON public.prompts FOR DELETE USING (((org_id = tf.c
 CREATE POLICY prompts_insert ON public.prompts FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id()) AND tf.user_can_write_team(team_id)));
 
 
-CREATE POLICY prompts_select ON public.prompts FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.team_active(team_id) AND ((creator_user_id = tf.current_user_id()) OR tf.user_in_team(team_id))));
+CREATE POLICY prompts_select ON public.prompts FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_in_team(team_id)));
 
 
 CREATE POLICY prompts_update ON public.prompts FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id)));
@@ -3886,8 +3883,7 @@ ALTER TABLE public.blueprints ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY blueprints_select ON public.blueprints FOR SELECT
   USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)
-          AND tf.team_active(team_id)
-          AND ((creator_user_id = tf.current_user_id()) OR tf.user_in_team(team_id))));
+          AND tf.user_in_team(team_id)));
 CREATE POLICY blueprints_insert ON public.blueprints FOR INSERT
   WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id()) AND tf.user_can_write_team(team_id)));
 CREATE POLICY blueprints_update ON public.blueprints FOR UPDATE
@@ -3935,6 +3931,11 @@ CREATE TABLE public.blueprint_runs (
     -- The event instance that auto-fired this run; NULL for manual. The
     -- blueprint_run is the firing unit, so the replay fence lives here.
     triggering_event_id uuid,
+    -- The predicate of the trigger that fired this run, as the text of the
+    -- trigger's scope_predicate_json at the firing; '' when it had none, and
+    -- for manual runs. The trigger's breaker counts a run only while the
+    -- trigger's predicate still reads as this text.
+    scope_predicate_json text DEFAULT ''::text NOT NULL,
     -- The bot that executes this run, frozen at mint and inherited by every step
     -- conversation, so attribution survives a later task-claim change. Nullable:
     -- no org agent at mint, or the agent row was deleted (ON DELETE SET NULL).
@@ -5684,69 +5685,103 @@ REVOKE ALL ON public.seat_claims FROM PUBLIC;
 REVOKE ALL ON public.seat_claims FROM anon, authenticated, service_role;
 
 
--- org_slack_workspaces: the (Slack workspace, Slack app) <-> org bind, keyed on
--- Slack's workspace/team ID (their legacy naming, unrelated to TF teams) and the
--- app's api_app_id, which rides every event delivery. A workspace may host many
--- apps; a Slack app belongs to exactly one TF org across every workspace it is
--- installed in. api_app_id is not unique on its own, so no SQL constraint
--- expresses that second rule: the connect handler takes an advisory lock on
--- api_app_id (ee/slack WorkspaceStore.LockApp) and checks for a row under
--- another org in the same transaction. The PK violation is the backstop, mapped
--- to a 409 that never names the owning org.
+-- org_slack_connections: a Slack app connected to a TF org in one Slack
+-- workspace, keyed on Slack's workspace/team ID (their legacy naming, unrelated
+-- to TF teams) and the app's api_app_id, which rides every event delivery. The
+-- key makes one TF org per (workspace, app) install: Slack gives an app one
+-- install, one bot token and one event stream per workspace.
 --
--- transport is inferred at connect from which credentials were supplied; a row
--- may carry both signing_secret_ref and app_token_ref, so the one-ref-per-
--- transport pairing is an ee/slack invariant, not a CHECK. The *_ref columns are
--- org_secrets key names (internal/integrations.SlackWorkspaceKeysFor), never
--- credential values. Postgres-only; the SQLite store is a stub returning
--- ErrNotApplicableInLocal.
+-- source says whose app it is. An 'org' row is an app the org created itself:
+-- its transport and every credential ref are on the row, and a Slack app of
+-- this kind belongs to exactly one TF org across every workspace it is
+-- installed in. api_app_id is not unique on its own, so no SQL constraint
+-- expresses that rule: the connect handler takes an advisory lock on
+-- api_app_id (ee/slack ConnectionStore.LockApp) and checks for an org row under
+-- another org in the same transaction. A 'deployment' row is a connection
+-- through the app the deployment's operator configured: only its bot token is
+-- the org's; its transport, signing secret and app token are the operator's
+-- environment, which org_slack_connections_source_shape keeps off the row. For
+-- the deployment app, the key is the whole one-org-per-workspace rule.
+--
+-- An org may connect several apps in one workspace, and exactly one of them is
+-- active: outbound calls use it, and deliveries for the others are dropped.
+-- org_slack_connections_one_active is that rule.
+--
+-- connected_at is when the row's credential was last written: the first
+-- connect, and every connect, install or token rotation after it. Switching
+-- which connection is active leaves it as it was, and updated_at moves on any
+-- write. A removal Slack reports is about the token it revoked, so the removal
+-- handling compares its event time with connected_at, never updated_at.
+--
+-- The *_ref columns are org_secrets key names
+-- (internal/integrations.SlackConnectionKeysFor), never credential values.
+-- Postgres-only; the SQLite store is a stub returning ErrNotApplicableInLocal.
 
-CREATE TABLE public.org_slack_workspaces (
+CREATE TABLE public.org_slack_connections (
     workspace_id text NOT NULL,
     api_app_id text NOT NULL,
     org_id uuid NOT NULL REFERENCES public.orgs(id) ON DELETE CASCADE,
+    source text NOT NULL CHECK (source IN ('org', 'deployment')),
+    active boolean NOT NULL,
     workspace_name text NOT NULL DEFAULT '',
+    app_name text NOT NULL DEFAULT '',
     enterprise_id text,
-    transport text NOT NULL CHECK (transport IN ('socket', 'events_api')),
+    transport text CHECK (transport IN ('socket', 'events_api')),
     bot_user_id text NOT NULL DEFAULT '',
     bot_token_ref text NOT NULL,
     signing_secret_ref text,
     app_token_ref text,
     registered_by_user_id uuid REFERENCES public.users(id) ON DELETE SET NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
+    connected_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (workspace_id, api_app_id)
+    PRIMARY KEY (workspace_id, api_app_id),
+    -- A deployment row holding a transport or the app's secrets would be a
+    -- second source of truth beside the operator's environment; an org row
+    -- without a transport, or without its transport's secret, can receive
+    -- nothing. The org arm tests transport IS NOT NULL itself because a NULL
+    -- transport makes the comparisons NULL, which a CHECK passes.
+    CONSTRAINT org_slack_connections_source_shape CHECK (
+        (source = 'deployment' AND transport IS NULL
+            AND signing_secret_ref IS NULL AND app_token_ref IS NULL)
+        OR (source = 'org' AND transport IS NOT NULL AND (
+            (transport = 'events_api' AND signing_secret_ref IS NOT NULL)
+            OR (transport = 'socket' AND app_token_ref IS NOT NULL))))
 );
 
--- Serves the per-org list/count reads (ListForOrg) and the org_id FK.
-CREATE INDEX org_slack_workspaces_org_idx ON public.org_slack_workspaces (org_id);
+-- At most one active connection per (org, workspace).
+CREATE UNIQUE INDEX org_slack_connections_one_active
+    ON public.org_slack_connections (org_id, workspace_id) WHERE active;
 
-CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.org_slack_workspaces
+-- Serves the per-org list reads (ListForOrg) and the org_id FK.
+CREATE INDEX org_slack_connections_org_idx ON public.org_slack_connections (org_id);
+
+CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.org_slack_connections
     FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
 
-ALTER TABLE public.org_slack_workspaces ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.org_slack_connections ENABLE ROW LEVEL SECURITY;
 
 -- SELECT is member-visible (any org member may see what is connected); writes
--- are org-admin-only, since connecting a workspace is a credential gesture.
-CREATE POLICY org_slack_workspaces_select ON public.org_slack_workspaces FOR SELECT TO tf_app
+-- are org-admin-only, since connecting an app is a credential gesture.
+CREATE POLICY org_slack_connections_select ON public.org_slack_connections FOR SELECT TO tf_app
   USING ((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id));
 
-CREATE POLICY org_slack_workspaces_insert ON public.org_slack_workspaces FOR INSERT TO tf_app
+CREATE POLICY org_slack_connections_insert ON public.org_slack_connections FOR INSERT TO tf_app
   WITH CHECK ((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id));
 
-CREATE POLICY org_slack_workspaces_update ON public.org_slack_workspaces FOR UPDATE TO tf_app
+CREATE POLICY org_slack_connections_update ON public.org_slack_connections FOR UPDATE TO tf_app
   USING ((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id))
   WITH CHECK ((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id));
 
-CREATE POLICY org_slack_workspaces_delete ON public.org_slack_workspaces FOR DELETE TO tf_app
+CREATE POLICY org_slack_connections_delete ON public.org_slack_connections FOR DELETE TO tf_app
   USING ((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id));
 
 -- supabase_admin's default privileges auto-grant new public tables to
 -- anon/authenticated/service_role; strip them so only tf_app (under RLS) and the
 -- admin pool reach this table.
-REVOKE ALL ON public.org_slack_workspaces FROM PUBLIC;
-REVOKE ALL ON public.org_slack_workspaces FROM anon, authenticated, service_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON public.org_slack_workspaces TO tf_app;
+REVOKE ALL ON public.org_slack_connections FROM PUBLIC;
+REVOKE ALL ON public.org_slack_connections FROM anon, authenticated, service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.org_slack_connections TO tf_app;
 
 
 -- user_slack_identities: maps the Slack sender who @mentioned the bot to a TF
@@ -5762,7 +5797,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON public.org_slack_workspaces TO tf_app;
 -- display name audit rendering needs. source is 'auto_email' (today's only
 -- writer) or 'oidc' (reserved for Sign-in-with-Slack). The key omits api_app_id
 -- so two apps in one workspace share these rows; there is therefore no FK to
--- org_slack_workspaces, and disconnecting the last app leaves identity rows to
+-- org_slack_connections, and disconnecting the last app leaves identity rows to
 -- go stale. Postgres-only; the SQLite store returns ErrNotApplicableInLocal.
 CREATE TABLE public.user_slack_identities (
     workspace_id text NOT NULL,
@@ -6292,10 +6327,12 @@ REVOKE ALL ON public.leases FROM anon, authenticated, service_role;
 -- poll_readiness: org-scoped state for the "config took effect" announce toast
 -- and the /api/jira/stock readiness gate. Under the control/standby split the
 -- pod running the poller is not the one serving the request, so this must be
--- readable by every control pod. One row per (org_id, source), source is
--- 'github' or 'jira'. Ready = last_poll_at IS NOT NULL AND (restarted_at IS
--- NULL OR last_poll_at > restarted_at). announce_pending is a one-shot flag
--- consumed atomically so racing pods can't double-fire the toast.
+-- readable by every control pod. One row per (org_id, source). Ready =
+-- last_poll_at IS NOT NULL: a restart stamps restarted_at and nulls
+-- last_poll_at, and a completion is stored only when its poll started at or
+-- after restarted_at, or its start time is unknown. announce_pending is a
+-- one-shot flag consumed atomically so racing pods can't double-fire the
+-- toast.
 -- Store methods take an explicit orgID and run on the admin pool; the handler
 -- has already resolved and authorized the org from session claims.
 --
@@ -7279,6 +7316,9 @@ CREATE TABLE public.notifications (
     last_seen_at    timestamp with time zone NOT NULL,
     seen_count      integer DEFAULT 1 NOT NULL,
     escalated_at    timestamp with time zone NOT NULL,
+    -- seen_count as of escalated_at, which is how an upsert tells an
+    -- escalation from a bump in the same clock tick.
+    escalated_seen_count integer DEFAULT 1 NOT NULL,
     resolved_at     timestamp with time zone,
     resolved_reason text,
     -- Why the row resolved, in a sentence its kind renders. Written after
@@ -7292,6 +7332,7 @@ CREATE TABLE public.notifications (
     CONSTRAINT notifications_kind_check CHECK ((kind <> ''::text)),
     CONSTRAINT notifications_priority_check CHECK ((priority = ANY (ARRAY['urgent'::text, 'high'::text, 'low'::text]))),
     CONSTRAINT notifications_seen_count_check CHECK ((seen_count >= 1)),
+    CONSTRAINT notifications_escalated_seen_count_check CHECK (((escalated_seen_count >= 1) AND (escalated_seen_count <= seen_count))),
     CONSTRAINT notifications_resolved_reason_check CHECK ((resolved_reason = ANY (ARRAY['cleared'::text, 'source_off'::text, 'audience_removed'::text]))),
     CONSTRAINT notifications_audience_check CHECK ((
         ((audience_scope = 'org'::text) AND (audience_role = ANY (ARRAY['members'::text, 'admins'::text])) AND (team_id IS NULL) AND (user_id IS NULL))
@@ -7566,7 +7607,7 @@ GRANT SELECT ON TABLE public.system_llm_runs TO tf_system;
 GRANT SELECT ON TABLE public.team_slack_channels TO tf_system;
 GRANT SELECT ON TABLE public.slack_channels TO tf_system;
 GRANT SELECT ON TABLE public.slack_channel_id_changes TO tf_system;
-GRANT SELECT ON TABLE public.org_slack_workspaces TO tf_system;
+GRANT SELECT ON TABLE public.org_slack_connections TO tf_system;
 -- The executor's schema-compatibility assert reads this; no DDL, ever.
 GRANT SELECT ON TABLE public.goose_db_version TO tf_system;
 

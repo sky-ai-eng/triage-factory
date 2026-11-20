@@ -216,8 +216,10 @@ type Breaker struct {
 // nothing. It opens where the gate refuses a firing, and it is for the
 // trigger's team's members, any of whom can start the run that resets it. It
 // resolves when a run a person started on the entity completes, the entity
-// closes, or the trigger is turned off, deleted or given a threshold above the
-// count. One failed run is not a notification: the board shows it.
+// closes, or the trigger is turned off, deleted, given a threshold above the
+// count, given another scope filter, or pointed at another blueprint, since
+// the breaker counts only runs under the trigger's current filter and
+// blueprint. One failed run is not a notification: the board shows it.
 var BreakerTripped = notify.Condition(notify.ConditionSpec[Breaker]{
 	Name:        "routing.breaker_tripped",
 	Priority:    notify.Always(notify.High),
@@ -237,7 +239,7 @@ var BreakerTripped = notify.Condition(notify.ConditionSpec[Breaker]{
 			Title: "Automation stopped on " + subject,
 			Body: "This team's trigger for " + eventLabel(b.EventType) + " " + failed + " on " + subject +
 				", so Triage Factory no longer runs it there. Once a run someone starts on " + subject +
-				" completes, the trigger runs there again.",
+				" completes, or the trigger's scope filter changes, the trigger runs there again.",
 		}
 		if b.ConversationID != "" {
 			c.Actions = append(c.Actions, notify.Link("Open the last failed run", notify.Routes.RunStation(b.ConversationID)))
@@ -250,7 +252,8 @@ var BreakerTripped = notify.Condition(notify.ConditionSpec[Breaker]{
 			return noLongerApplies(r.Recipient)
 		}
 		return "The trigger runs on " + b.subject() + " again: a run someone started there completed, it closed, " +
-			"or the trigger was turned off, deleted, or given a higher breaker threshold."
+			"or the trigger was turned off, deleted, given a higher breaker threshold, given another scope filter, " +
+			"or pointed at another blueprint."
 	},
 	Example: Breaker{
 		TriggerID:      "00000000-0000-0000-0000-000000000004",

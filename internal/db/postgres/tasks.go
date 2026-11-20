@@ -130,15 +130,16 @@ func pgTaskTeamFilter(teamIDs []string, args []any) (string, []any) {
 }
 
 // pgTaskRuleOrderJoin mirrors the SQLite join of the same name: each task's
-// matching event_handler rule sort_order (the lowest, when several rules cover
-// the event type), so the list ordering can put "CI is broken" above "someone
-// asked for a review". The derived table is org-scoped so another org's rules
-// can't influence ordering — load-bearing in multi mode.
+// matching event handler sort_order (the lowest, when several handlers that
+// make a task cover the event type), so the list ordering can put "CI is
+// broken" above "someone asked for a review". The derived table is org-scoped
+// so another org's handlers can't influence ordering — load-bearing in multi
+// mode.
 const pgTaskRuleOrderJoin = `
 	LEFT JOIN (
 		SELECT org_id, event_type, MIN(sort_order) AS sort_order
 		FROM event_handlers
-		WHERE kind = 'rule' AND ` + pgMatchableHandler + `
+		WHERE mode IN ('watch', 'automate') AND ` + pgActiveHandler + `
 		GROUP BY org_id, event_type
 	) tr ON t.event_type = tr.event_type AND t.org_id = tr.org_id`
 
@@ -378,6 +379,15 @@ func pgTaskListWhere(orgID string, f db.TaskListFilter) (string, []any) {
 			clauses = append(clauses, "FALSE")
 		}
 	}
+	if len(f.EntityIDs) > 0 {
+		// The same drop-then-refuse as IDs: tasks.entity_id is a uuid column.
+		if ids := filterValidUUIDs(f.EntityIDs); len(ids) > 0 {
+			args = append(args, pgUUIDArray(ids))
+			clauses = append(clauses, fmt.Sprintf("t.entity_id = ANY($%d::uuid[])", len(args)))
+		} else {
+			clauses = append(clauses, "FALSE")
+		}
+	}
 	if f.OnlyUnclaimed {
 		clauses = append(clauses, "t.claimed_by_agent_id IS NULL AND t.claimed_by_user_id IS NULL")
 	}
@@ -555,43 +565,6 @@ func findActiveTasksByEntity(ctx context.Context, q queryer, orgID, entityID str
 		WHERE t.org_id = $1 AND t.entity_id = $2
 			AND t.status NOT IN ('done', 'dismissed')
 	`, orgID, entityID)
-}
-
-func (s *taskStore) ListActiveRefsForEntities(ctx context.Context, orgID string, entityIDs []string, teamIDs []string) ([]domain.PendingTaskRef, error) {
-	if len(entityIDs) == 0 {
-		return nil, nil
-	}
-	// Postgres has no comparable variable-bind cap to SQLite's 999/500;
-	// the array bind via lib/pq keeps the whole list in a single
-	// placeholder regardless of size, so no chunking is needed. The
-	// table is aliased t so the shared team-filter fragment (same
-	// RLS-mirroring predicate as Queued) applies — narrowing the refs to
-	// the selected teams keeps the station drawer in sync with a
-	// team-filtered entity belt.
-	args := []any{orgID, entityIDs}
-	teamClause, args := pgTaskTeamFilter(teamIDs, args)
-	rows, err := s.q.QueryContext(ctx, `
-		SELECT t.id, t.entity_id, t.event_type, t.dedup_key
-		FROM tasks t
-		WHERE t.org_id = $1
-			AND t.entity_id = ANY($2)
-			AND t.status NOT IN ('done', 'dismissed')`+teamClause+`
-		ORDER BY t.entity_id, t.event_type, t.created_at DESC
-	`, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	out := make([]domain.PendingTaskRef, 0, len(entityIDs))
-	for rows.Next() {
-		var ref domain.PendingTaskRef
-		if err := rows.Scan(&ref.ID, &ref.EntityID, &ref.EventType, &ref.DedupKey); err != nil {
-			return nil, err
-		}
-		out = append(out, ref)
-	}
-	return out, rows.Err()
 }
 
 func (s *taskStore) EntityIDsWithActiveTasks(ctx context.Context, orgID, source string) (map[string]struct{}, error) {
@@ -1435,7 +1408,7 @@ func (s *taskStore) LatestEventIDSystem(ctx context.Context, orgID, taskID strin
 		WHERE te.org_id = $1
 		  AND te.task_id = $2
 		  AND te.kind IN ('spawned', 'bumped', 'injected')
-		ORDER BY ev.created_at DESC, ev.id DESC
+		ORDER BY ev.created_at DESC, ev.seq DESC
 		LIMIT 1
 	`, orgID, taskID).Scan(&eventID)
 	if err == sql.ErrNoRows {
@@ -1445,6 +1418,29 @@ func (s *taskStore) LatestEventIDSystem(ctx context.Context, orgID, taskID strin
 		return "", err
 	}
 	return eventID, nil
+}
+
+func (s *taskStore) LatestEventAfterSystem(ctx context.Context, orgID, taskID, eventID string) (string, error) {
+	var latestID string
+	err := s.admin.QueryRowContext(ctx, `
+		SELECT te.event_id
+		FROM task_events te
+		JOIN events ev ON ev.org_id = te.org_id AND ev.id = te.event_id
+		JOIN events since ON since.org_id = te.org_id AND since.id = $3
+		WHERE te.org_id = $1
+		  AND te.task_id = $2
+		  AND te.kind IN ('spawned', 'bumped', 'injected')
+		  AND (ev.created_at, ev.seq) > (since.created_at, since.seq)
+		ORDER BY ev.created_at DESC, ev.seq DESC
+		LIMIT 1
+	`, orgID, taskID, eventID).Scan(&latestID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return latestID, nil
 }
 
 // MarkEventInjectedSystem flips the timeline row AND stamps the task's
@@ -1516,8 +1512,7 @@ func (s *taskStore) OwnerTeamForLatestTaskInTypesSystem(ctx context.Context, org
 		return "", nil
 	}
 	// Admin pool: the router has no JWT claims. event_type = ANY($3) binds
-	// the slice as a single array placeholder (pgx native), same shape as
-	// ListActiveRefsForEntities' entity-id array. The team_id IS NOT NULL
+	// the slice as a single array placeholder (pgx native). The team_id IS NOT NULL
 	// filter excludes unowned priors; the caller's omission of
 	// review_requested from eventTypes excludes review tasks.
 	var teamID sql.NullString
@@ -1934,12 +1929,28 @@ func reassignClaimToUser(ctx context.Context, q queryer, orgID, taskID, fromUser
 
 // --- Breaker ---
 
+// breakerRunOfHandlerSQL joins a blueprint_runs row to the trigger whose
+// breaker it counts toward: the trigger fired it, of the blueprint the
+// trigger runs now, under the predicate the trigger holds now. The run
+// records jsonb's text of the trigger's predicate, the empty string for
+// none, so the trigger's column is read as text the same way and its NULL is
+// read as the empty string.
+func breakerRunOfHandlerSQL(run, handler string) string {
+	return handler + `.org_id = ` + run + `.org_id
+		AND ` + handler + `.id = ` + run + `.trigger_id
+		AND ` + handler + `.blueprint_id = ` + run + `.blueprint_id
+		AND ` + run + `.scope_predicate_json = COALESCE(` + handler + `.scope_predicate_json::text, '')`
+}
+
 // breakerFailureSQL is a run, over the caller's aliases for a blueprint_runs
 // row and its task, that counts toward its trigger's breaker: event-fired,
 // failed or aborted, and with no run on the same entity that resets the
-// breaker started at or after it — a completed run of the same blueprint, or
-// a completed run a person started, of any blueprint. Its SQLite twin is the
-// same predicate without the org on the joins.
+// breaker started at or after it — a completed run of the same trigger,
+// blueprint and predicate, or a completed run a person started, of any
+// blueprint. The caller joins the run to its trigger with
+// breakerRunOfHandlerSQL, so the run's own blueprint and predicate are the
+// trigger's current ones. Its SQLite twin is the same predicate without the
+// org on the joins.
 func breakerFailureSQL(run, task string) string {
 	return run + `.trigger_type = 'event'
 		AND ` + run + `.status IN ('failed', 'aborted')
@@ -1949,11 +1960,13 @@ func breakerFailureSQL(run, task string) string {
 			WHERE ok.org_id = ` + run + `.org_id
 			  AND okt.entity_id = ` + task + `.entity_id
 			  AND ok.status = 'completed'
-			  AND (ok.trigger_type = 'manual' OR ok.blueprint_id = ` + run + `.blueprint_id)
+			  AND (ok.trigger_type = 'manual'
+			       OR (ok.trigger_id = ` + run + `.trigger_id AND ok.blueprint_id = ` + run + `.blueprint_id
+			           AND ok.scope_predicate_json = ` + run + `.scope_predicate_json))
 			  AND ok.started_at >= ` + run + `.started_at)`
 }
 
-func (s *taskStore) BreakerStreakSystem(ctx context.Context, orgID, entityID, blueprintID string) (domain.BreakerStreak, error) {
+func (s *taskStore) BreakerStreakSystem(ctx context.Context, orgID, entityID, triggerID string) (domain.BreakerStreak, error) {
 	var streak domain.BreakerStreak
 	var conversationID sql.NullString
 	err := s.admin.QueryRowContext(ctx, `
@@ -1962,12 +1975,13 @@ func (s *taskStore) BreakerStreakSystem(ctx context.Context, orgID, entityID, bl
 		         WHERE c.org_id = br.org_id AND c.blueprint_run_id = br.id
 		         ORDER BY c.started_at DESC, c.id DESC LIMIT 1)
 		FROM blueprint_runs br
+		JOIN event_handlers h ON `+breakerRunOfHandlerSQL("br", "h")+`
 		JOIN tasks t ON t.id = br.task_id AND t.org_id = br.org_id
-		WHERE br.org_id = $1 AND t.entity_id = $2 AND br.blueprint_id = $3
+		WHERE br.org_id = $1 AND t.entity_id = $2 AND h.id = $3
 		  AND `+breakerFailureSQL("br", "t")+`
 		ORDER BY br.started_at DESC, br.id DESC
 		LIMIT 1
-	`, orgID, entityID, blueprintID).Scan(&streak.Failures, &conversationID)
+	`, orgID, entityID, triggerID).Scan(&streak.Failures, &conversationID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.BreakerStreak{}, nil
 	}
@@ -1982,10 +1996,10 @@ func (s *taskStore) ListTrippedBreakersSystem(ctx context.Context, orgID string)
 	rows, err := s.admin.QueryContext(ctx, `
 		SELECT h.id::text, t.entity_id::text
 		FROM event_handlers h
-		JOIN blueprint_runs br ON br.org_id = h.org_id AND br.blueprint_id = h.blueprint_id
+		JOIN blueprint_runs br ON `+breakerRunOfHandlerSQL("br", "h")+`
 		JOIN tasks t ON t.id = br.task_id AND t.org_id = br.org_id
 		JOIN entities e ON e.id = t.entity_id AND e.org_id = t.org_id AND e.state = 'active'
-		WHERE h.org_id = $1 AND h.kind = 'trigger' AND h.enabled AND h.deleted_at IS NULL
+		WHERE h.org_id = $1 AND h.mode = 'automate' AND h.deleted_at IS NULL
 		  AND `+breakerFailureSQL("br", "t")+`
 		GROUP BY h.id, t.entity_id, h.breaker_threshold
 		HAVING COUNT(*) >= h.breaker_threshold

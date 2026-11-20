@@ -231,17 +231,22 @@ func (r *slackChannelsRig) req(method, path, callerID, orgID, teamID string, bod
 	return req.WithContext(ctx)
 }
 
-func (r *slackChannelsRig) reqPrimary(callerID, orgID, channelID string, body any) *http.Request {
+// reqPatch is a PATCH …/slack-channels/{channel_id} request on teamID's row
+// of channelID, as callerID.
+func (r *slackChannelsRig) reqPatch(callerID, orgID, teamID, channelID string, body any) *http.Request {
 	r.t.Helper()
-	b, err := json.Marshal(body)
-	if err != nil {
-		r.t.Fatalf("marshal body: %v", err)
-	}
-	req := httptest.NewRequest(http.MethodPost, "/api/slack/channels/"+channelID+"/primary", bytes.NewReader(b))
+	req := r.req(http.MethodPatch, "/api/teams/"+teamID+"/slack-channels/"+channelID, callerID, orgID, teamID, body)
 	req.SetPathValue("channel_id", channelID)
-	ctx := httpx.WithClaims(req.Context(), &verify.Claims{Subject: callerID})
-	ctx = httpx.WithOrgID(ctx, orgID)
-	return req.WithContext(ctx)
+	return req
+}
+
+// reqGet is a GET …/slack-channels/{channel_id} request on teamID's row of
+// channelID, as callerID.
+func (r *slackChannelsRig) reqGet(callerID, orgID, teamID, channelID string) *http.Request {
+	r.t.Helper()
+	req := r.req(http.MethodGet, "/api/teams/"+teamID+"/slack-channels/"+channelID, callerID, orgID, teamID, nil)
+	req.SetPathValue("channel_id", channelID)
+	return req
 }
 
 // seedWorkspace connects a Slack workspace for orgID with a bot token, so
@@ -254,7 +259,7 @@ func (r *slackChannelsRig) seedWorkspace(orgID, userID, workspaceID, botToken st
 		if err := tx.Secrets.Put(r.t.Context(), orgID, botTokenRef, botToken, "test bot token"); err != nil {
 			return err
 		}
-		return slackstore.FromTx(tx).Workspaces.Upsert(r.t.Context(), slackstore.Workspace{
+		return upsertActiveConnection(r.t.Context(), tx, slackstore.Connection{
 			WorkspaceID:        workspaceID,
 			APIAppID:           apiAppID,
 			OrgID:              orgID,
@@ -262,6 +267,7 @@ func (r *slackChannelsRig) seedWorkspace(orgID, userID, workspaceID, botToken st
 			Transport:          "socket",
 			BotUserID:          "U0BOT",
 			BotTokenRef:        botTokenRef,
+			AppTokenRef:        "slack_ws_" + workspaceID + "_" + apiAppID + "_app_token",
 			RegisteredByUserID: userID,
 		})
 	}); err != nil {
@@ -306,13 +312,13 @@ func decodeChannels(t *testing.T, rec *httptest.ResponseRecorder) channelsRespon
 // listReq is a POST .../channels/list request with body.
 func (r *slackChannelsRig) listReq(callerID, orgID, teamID string, body any) *http.Request {
 	r.t.Helper()
-	return r.req(http.MethodPost, "/api/slack/teams/"+teamID+"/channels/list", callerID, orgID, teamID, body)
+	return r.req(http.MethodPost, "/api/teams/"+teamID+"/slack-channels/list", callerID, orgID, teamID, body)
 }
 
 // facetsReq is a POST .../channels/facets request with body.
 func (r *slackChannelsRig) facetsReq(callerID, orgID, teamID string, body any) *http.Request {
 	r.t.Helper()
-	return r.req(http.MethodPost, "/api/slack/teams/"+teamID+"/channels/facets", callerID, orgID, teamID, body)
+	return r.req(http.MethodPost, "/api/teams/"+teamID+"/slack-channels/facets", callerID, orgID, teamID, body)
 }
 
 func decodeChannelList(t *testing.T, rec *httptest.ResponseRecorder) channelsListResponse {
@@ -390,7 +396,7 @@ func TestChannelsHandler_MemberPUT_Refused(t *testing.T) {
 	pgtest.AddOrgMember(t, r.h, member, orgID, teamID, "member", "member")
 
 	rec := httptest.NewRecorder()
-	r.hdl.handlePut(rec, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", member, orgID, teamID,
+	r.hdl.handlePut(rec, r.req(http.MethodPut, "/api/teams/"+teamID+"/slack-channels", member, orgID, teamID,
 		map[string]any{"channel_ids": []string{"C1"}}))
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 (member can't PUT); body=%s", rec.Code, rec.Body.String())
@@ -403,7 +409,7 @@ func TestChannelsHandler_TeamAdminPUT_OK(t *testing.T) {
 	r.listChannels(orgID, owner, "C1")
 
 	rec := httptest.NewRecorder()
-	r.hdl.handlePut(rec, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
+	r.hdl.handlePut(rec, r.req(http.MethodPut, "/api/teams/"+teamID+"/slack-channels", owner, orgID, teamID,
 		map[string]any{"channel_ids": []string{"C1"}}))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
@@ -432,7 +438,7 @@ func TestChannelsHandler_PUT_RejectsMalformedEntries(t *testing.T) {
 	r.listChannels(orgID, owner, "C0SHAPE01")
 
 	rec := httptest.NewRecorder()
-	r.hdl.handlePut(rec, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
+	r.hdl.handlePut(rec, r.req(http.MethodPut, "/api/teams/"+teamID+"/slack-channels", owner, orgID, teamID,
 		map[string]any{"channel_ids": []string{"", "general", "C0SHAPE01", "C0SHAPE01", "D0DIRECT1"}}))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 (body=%s)", rec.Code, rec.Body.String())
@@ -461,7 +467,7 @@ func TestChannelsHandler_PUT_RejectsMalformedEntries(t *testing.T) {
 	}
 
 	missing := httptest.NewRecorder()
-	r.hdl.handlePut(missing, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
+	r.hdl.handlePut(missing, r.req(http.MethodPut, "/api/teams/"+teamID+"/slack-channels", owner, orgID, teamID,
 		map[string]any{}))
 	if errs := decodeErrors(t, missing); missing.Code != http.StatusBadRequest || len(errs) != 1 || errs[0].Field != "channel_ids" || errs[0].Reason != httpx.ReasonMissingField {
 		t.Errorf("missing channel_ids: status %d, errors %+v; want 400 MISSING_FIELD channel_ids", missing.Code, errs)
@@ -478,7 +484,7 @@ func TestChannelsHandler_PUT_AddsOnlyChannelsAWorkspaceAnswersFor(t *testing.T) 
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "chan-put-gate")
 
 	none := httptest.NewRecorder()
-	r.hdl.handlePut(none, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
+	r.hdl.handlePut(none, r.req(http.MethodPut, "/api/teams/"+teamID+"/slack-channels", owner, orgID, teamID,
 		map[string]any{"channel_ids": []string{"C0LISTED1"}}))
 	if errs := decodeErrors(t, none); none.Code != http.StatusBadRequest || len(errs) != 1 || errs[0].Field != "channel_ids[0]" {
 		t.Errorf("no workspace connected: status %d, errors %+v; want 400 naming channel_ids[0]", none.Code, errs)
@@ -486,7 +492,7 @@ func TestChannelsHandler_PUT_AddsOnlyChannelsAWorkspaceAnswersFor(t *testing.T) 
 
 	r.listChannels(orgID, owner, "C0LISTED1")
 	rec := httptest.NewRecorder()
-	r.hdl.handlePut(rec, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
+	r.hdl.handlePut(rec, r.req(http.MethodPut, "/api/teams/"+teamID+"/slack-channels", owner, orgID, teamID,
 		map[string]any{"channel_ids": []string{"C0LISTED1", "C0UNKNOWN"}}))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 (body=%s)", rec.Code, rec.Body.String())
@@ -502,7 +508,7 @@ func TestChannelsHandler_PUT_AddsOnlyChannelsAWorkspaceAnswersFor(t *testing.T) 
 	}
 
 	ok := httptest.NewRecorder()
-	r.hdl.handlePut(ok, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
+	r.hdl.handlePut(ok, r.req(http.MethodPut, "/api/teams/"+teamID+"/slack-channels", owner, orgID, teamID,
 		map[string]any{"channel_ids": []string{"C0LISTED1"}}))
 	if ok.Code != http.StatusOK {
 		t.Fatalf("listed channel: status = %d, want 200 (body=%s)", ok.Code, ok.Body.String())
@@ -530,7 +536,7 @@ func TestChannelsHandler_PUT_LooksUpChannelsPastATruncatedListing(t *testing.T) 
 
 	put := func(ids ...string) *httptest.ResponseRecorder {
 		rec := httptest.NewRecorder()
-		r.hdl.handlePut(rec, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
+		r.hdl.handlePut(rec, r.req(http.MethodPut, "/api/teams/"+teamID+"/slack-channels", owner, orgID, teamID,
 			map[string]any{"channel_ids": ids}))
 		return rec
 	}
@@ -577,7 +583,7 @@ func TestChannelsHandler_PUTAndPrimary_RetiredIDActOnTheCurrentOne(t *testing.T)
 	r.listChannels(orgID, owner, "G0PUT0001")
 
 	first := httptest.NewRecorder()
-	r.hdl.handlePut(first, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
+	r.hdl.handlePut(first, r.req(http.MethodPut, "/api/teams/"+teamID+"/slack-channels", owner, orgID, teamID,
 		map[string]any{"channel_ids": []string{"G0PUT0001"}}))
 	if first.Code != http.StatusOK {
 		t.Fatalf("setup PUT status = %d (body=%s)", first.Code, first.Body.String())
@@ -587,7 +593,7 @@ func TestChannelsHandler_PUTAndPrimary_RetiredIDActOnTheCurrentOne(t *testing.T)
 	}
 
 	rec := httptest.NewRecorder()
-	r.hdl.handlePut(rec, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
+	r.hdl.handlePut(rec, r.req(http.MethodPut, "/api/teams/"+teamID+"/slack-channels", owner, orgID, teamID,
 		map[string]any{"channel_ids": []string{"G0PUT0001", "C0PUT0001"}}))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
@@ -603,7 +609,7 @@ func TestChannelsHandler_PUTAndPrimary_RetiredIDActOnTheCurrentOne(t *testing.T)
 	}
 
 	primary := httptest.NewRecorder()
-	r.hdl.handlePrimary(primary, r.reqPrimary(owner, orgID, "G0PUT0001", map[string]string{"team_id": teamID}))
+	r.hdl.handlePatch(primary, r.reqPatch(owner, orgID, teamID, "G0PUT0001", map[string]any{"is_primary": true}))
 	if primary.Code != http.StatusOK {
 		t.Fatalf("primary by the old id: status = %d, want 200 (body=%s)", primary.Code, primary.Body.String())
 	}
@@ -615,7 +621,7 @@ func TestChannelsHandler_ArchivedTeamPUT_Refused(t *testing.T) {
 	pgtest.MustExec(t, r.h.AdminDB, `UPDATE teams SET deleted_at = now() WHERE id = $1`, teamID)
 
 	rec := httptest.NewRecorder()
-	r.hdl.handlePut(rec, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
+	r.hdl.handlePut(rec, r.req(http.MethodPut, "/api/teams/"+teamID+"/slack-channels", owner, orgID, teamID,
 		map[string]any{"channel_ids": []string{"C1"}}))
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 (archived team); body=%s", rec.Code, rec.Body.String())
@@ -633,14 +639,14 @@ func TestChannelsHandler_Primary_NonOrgAdmin_Refused(t *testing.T) {
 	pgtest.AddOrgMember(t, r.h, member, orgID, teamID, "member", "member")
 
 	put := httptest.NewRecorder()
-	r.hdl.handlePut(put, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
+	r.hdl.handlePut(put, r.req(http.MethodPut, "/api/teams/"+teamID+"/slack-channels", owner, orgID, teamID,
 		map[string]any{"channel_ids": []string{"C1"}}))
 	if put.Code != http.StatusOK {
 		t.Fatalf("setup PUT status = %d (body=%s)", put.Code, put.Body.String())
 	}
 
 	rec := httptest.NewRecorder()
-	r.hdl.handlePrimary(rec, r.reqPrimary(member, orgID, "C1", map[string]string{"team_id": teamID}))
+	r.hdl.handlePatch(rec, r.reqPatch(member, orgID, teamID, "C1", map[string]any{"is_primary": true}))
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 (non-org-admin); body=%s", rec.Code, rec.Body.String())
 	}
@@ -662,7 +668,7 @@ func TestChannelsHandler_Primary_ArchivedDestinationTeam_Refused(t *testing.T) {
 
 	for _, teamID := range []string{team1, team2} {
 		rec := httptest.NewRecorder()
-		r.hdl.handlePut(rec, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
+		r.hdl.handlePut(rec, r.req(http.MethodPut, "/api/teams/"+teamID+"/slack-channels", owner, orgID, teamID,
 			map[string]any{"channel_ids": []string{"C1"}}))
 		if rec.Code != http.StatusOK {
 			t.Fatalf("PUT(%s) status = %d (body=%s)", teamID, rec.Code, rec.Body.String())
@@ -672,7 +678,7 @@ func TestChannelsHandler_Primary_ArchivedDestinationTeam_Refused(t *testing.T) {
 	// is a non-primary tracker — the scenario the archived-team guard must
 	// still refuse even though team1 isn't currently primary.
 	reassign := httptest.NewRecorder()
-	r.hdl.handlePrimary(reassign, r.reqPrimary(owner, orgID, "C1", map[string]string{"team_id": team2}))
+	r.hdl.handlePatch(reassign, r.reqPatch(owner, orgID, team2, "C1", map[string]any{"is_primary": true}))
 	if reassign.Code != http.StatusOK {
 		t.Fatalf("reassign to team2 status = %d (body=%s)", reassign.Code, reassign.Body.String())
 	}
@@ -680,7 +686,7 @@ func TestChannelsHandler_Primary_ArchivedDestinationTeam_Refused(t *testing.T) {
 	pgtest.MustExec(t, r.h.AdminDB, `UPDATE teams SET deleted_at = now() WHERE id = $1`, team1)
 
 	rec := httptest.NewRecorder()
-	r.hdl.handlePrimary(rec, r.reqPrimary(owner, orgID, "C1", map[string]string{"team_id": team1}))
+	r.hdl.handlePatch(rec, r.reqPatch(owner, orgID, team1, "C1", map[string]any{"is_primary": true}))
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 (archived destination team); body=%s", rec.Code, rec.Body.String())
 	}
@@ -706,7 +712,7 @@ func TestChannelsHandler_FirstTrack_SeedsDefaultBlueprint(t *testing.T) {
 	r.listChannels(orgID, owner, "C1")
 
 	rec := httptest.NewRecorder()
-	r.hdl.handlePut(rec, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
+	r.hdl.handlePut(rec, r.req(http.MethodPut, "/api/teams/"+teamID+"/slack-channels", owner, orgID, teamID,
 		map[string]any{"channel_ids": []string{"C1"}}))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
@@ -716,22 +722,23 @@ func TestChannelsHandler_FirstTrack_SeedsDefaultBlueprint(t *testing.T) {
 	if err := r.stor.Tx.WithTx(t.Context(), orgID, owner, func(tx db.TxStores) error {
 		var e error
 		handlers, _, e = tx.EventHandlers.List(t.Context(), orgID,
-			db.EventHandlerListFilter{Kind: domain.EventHandlerKindTrigger, TeamID: teamID}, db.ListOpts{Limit: 200})
+			db.EventHandlerListFilter{EventType: domain.EventSlackMessage, TeamID: teamID}, db.ListOpts{Limit: 200})
 		return e
 	}); err != nil {
 		t.Fatalf("list event handlers: %v", err)
 	}
-	var mention *domain.EventHandler
-	for i := range handlers {
-		if handlers[i].EventType == domain.EventSlackMessage {
-			mention = &handlers[i]
-		}
+	if len(handlers) != 1 {
+		t.Fatalf("slack:message handlers seeded = %d, want 1; handlers=%+v", len(handlers), handlers)
 	}
-	if mention == nil {
-		t.Fatalf("no slack:message trigger seeded; handlers=%+v", handlers)
+	mention := &handlers[0]
+	if mention.Mode != domain.EventHandlerModeAutomate {
+		t.Errorf("seeded handler mode = %q, want %q", mention.Mode, domain.EventHandlerModeAutomate)
 	}
-	if !mention.Enabled {
-		t.Errorf("seeded trigger Enabled = false, want true")
+	if mention.Name != "Slack assistant" {
+		t.Errorf("seeded handler name = %q, want %q", mention.Name, "Slack assistant")
+	}
+	if mention.DefaultPriority != 0.5 {
+		t.Errorf("seeded handler default_priority = %v, want 0.5", mention.DefaultPriority)
 	}
 	// jsonb round-trips through Postgres's own canonical formatting (e.g. a
 	// space after ":"), so compare decoded rather than as an exact string.
@@ -772,20 +779,20 @@ func TestChannelsHandler_FirstTrack_SeedsDefaultBlueprint(t *testing.T) {
 	}
 }
 
-func TestChannelsHandler_SecondPUT_NoDuplicateTrigger(t *testing.T) {
+func TestChannelsHandler_SecondPUT_NoDuplicateHandler(t *testing.T) {
 	r := newSlackChannelsRig(t)
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "chan-nodup")
 	r.listChannels(orgID, owner, "C1", "C2")
 
 	first := httptest.NewRecorder()
-	r.hdl.handlePut(first, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
+	r.hdl.handlePut(first, r.req(http.MethodPut, "/api/teams/"+teamID+"/slack-channels", owner, orgID, teamID,
 		map[string]any{"channel_ids": []string{"C1"}}))
 	if first.Code != http.StatusOK {
 		t.Fatalf("first PUT status = %d (body=%s)", first.Code, first.Body.String())
 	}
 
 	second := httptest.NewRecorder()
-	r.hdl.handlePut(second, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
+	r.hdl.handlePut(second, r.req(http.MethodPut, "/api/teams/"+teamID+"/slack-channels", owner, orgID, teamID,
 		map[string]any{"channel_ids": []string{"C1", "C2"}}))
 	if second.Code != http.StatusOK {
 		t.Fatalf("second PUT status = %d (body=%s)", second.Code, second.Body.String())
@@ -795,55 +802,38 @@ func TestChannelsHandler_SecondPUT_NoDuplicateTrigger(t *testing.T) {
 	if err := r.stor.Tx.WithTx(t.Context(), orgID, owner, func(tx db.TxStores) error {
 		var e error
 		handlers, _, e = tx.EventHandlers.List(t.Context(), orgID,
-			db.EventHandlerListFilter{Kind: domain.EventHandlerKindTrigger, TeamID: teamID}, db.ListOpts{Limit: 200})
+			db.EventHandlerListFilter{EventType: domain.EventSlackMessage, TeamID: teamID}, db.ListOpts{Limit: 200})
 		return e
 	}); err != nil {
 		t.Fatalf("list event handlers: %v", err)
 	}
-	count := 0
-	for _, h := range handlers {
-		if h.EventType == domain.EventSlackMessage {
-			count++
-		}
-	}
-	if count != 1 {
-		t.Errorf("slack:message triggers after second PUT = %d, want 1 (no duplicate)", count)
+	if len(handlers) != 1 {
+		t.Errorf("slack:message handlers after second PUT = %d, want 1 (no duplicate)", len(handlers))
 	}
 }
 
-func TestChannelsHandler_PreexistingTrigger_NoSeed(t *testing.T) {
+func TestChannelsHandler_PreexistingHandler_NoSeed(t *testing.T) {
 	r := newSlackChannelsRig(t)
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "chan-preexisting")
 	r.listChannels(orgID, owner, "C1")
 
-	// Team already configured its own slack:message trigger before ever
-	// tracking a channel.
-	promptID := "00000000-0000-0000-0000-0000000000c1"
-	blueprintID := "00000000-0000-0000-0000-0000000000c2"
+	// The team configured its own slack:message handler before ever tracking
+	// a channel, and turned it off. A handler in any mode is the team's
+	// answer to the event, so no default is seeded beside it.
+	preexistingID := "00000000-0000-0000-0000-0000000000c3"
 	if err := r.stor.Tx.WithTx(t.Context(), orgID, owner, func(tx db.TxStores) error {
-		if _, err := tx.Prompts.Create(t.Context(), orgID, teamID, domain.Prompt{ID: promptID, Name: "custom", Body: "custom body", Source: "user"}); err != nil {
-			return err
-		}
-		if _, err := tx.Blueprints.Create(t.Context(), orgID, teamID, domain.Blueprint{ID: blueprintID, Name: "custom", Source: "user"}); err != nil {
-			return err
-		}
-		if _, err := tx.Blueprints.ReplaceSteps(t.Context(), orgID, blueprintID, []string{promptID}, []string{""}); err != nil {
-			return err
-		}
-		threshold, minAutonomy := 5, 0.2
 		_, e := tx.EventHandlers.Create(t.Context(), orgID, teamID, domain.EventHandler{
-			ID: "00000000-0000-0000-0000-0000000000c3", Kind: domain.EventHandlerKindTrigger,
-			EventType: domain.EventSlackMessage, Enabled: true, Source: domain.EventHandlerSourceUser,
-			BlueprintID: blueprintID, TriggerType: domain.TriggerTypeEvent,
-			BreakerThreshold: &threshold, MinAutonomySuitability: &minAutonomy,
+			ID: preexistingID, Mode: domain.EventHandlerModeOff,
+			EventType: domain.EventSlackMessage, Source: domain.EventHandlerSourceUser,
+			Name: "custom", DefaultPriority: 0.5, BreakerThreshold: 5, MinAutonomySuitability: 0.2,
 		})
 		return e
 	}); err != nil {
-		t.Fatalf("seed pre-existing trigger: %v", err)
+		t.Fatalf("seed pre-existing handler: %v", err)
 	}
 
 	rec := httptest.NewRecorder()
-	r.hdl.handlePut(rec, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
+	r.hdl.handlePut(rec, r.req(http.MethodPut, "/api/teams/"+teamID+"/slack-channels", owner, orgID, teamID,
 		map[string]any{"channel_ids": []string{"C1"}}))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d (body=%s)", rec.Code, rec.Body.String())
@@ -853,19 +843,13 @@ func TestChannelsHandler_PreexistingTrigger_NoSeed(t *testing.T) {
 	if err := r.stor.Tx.WithTx(t.Context(), orgID, owner, func(tx db.TxStores) error {
 		var e error
 		handlers, _, e = tx.EventHandlers.List(t.Context(), orgID,
-			db.EventHandlerListFilter{Kind: domain.EventHandlerKindTrigger, TeamID: teamID}, db.ListOpts{Limit: 200})
+			db.EventHandlerListFilter{EventType: domain.EventSlackMessage, TeamID: teamID}, db.ListOpts{Limit: 200})
 		return e
 	}); err != nil {
 		t.Fatalf("list event handlers: %v", err)
 	}
-	count := 0
-	for _, h := range handlers {
-		if h.EventType == domain.EventSlackMessage {
-			count++
-		}
-	}
-	if count != 1 {
-		t.Errorf("slack:message triggers = %d, want 1 (pre-existing kept, no default seeded)", count)
+	if len(handlers) != 1 || handlers[0].ID != preexistingID {
+		t.Errorf("slack:message handlers = %+v, want only the pre-existing one (no default seeded)", handlers)
 	}
 }
 
@@ -875,7 +859,7 @@ func TestChannelsHandler_DefaultDeleted_NoReseed(t *testing.T) {
 	r.listChannels(orgID, owner, "C1", "C2")
 
 	first := httptest.NewRecorder()
-	r.hdl.handlePut(first, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
+	r.hdl.handlePut(first, r.req(http.MethodPut, "/api/teams/"+teamID+"/slack-channels", owner, orgID, teamID,
 		map[string]any{"channel_ids": []string{"C1"}}))
 	if first.Code != http.StatusOK {
 		t.Fatalf("first PUT status = %d (body=%s)", first.Code, first.Body.String())
@@ -884,7 +868,7 @@ func TestChannelsHandler_DefaultDeleted_NoReseed(t *testing.T) {
 	var seeded *domain.EventHandler
 	if err := r.stor.Tx.WithTx(t.Context(), orgID, owner, func(tx db.TxStores) error {
 		handlers, _, e := tx.EventHandlers.List(t.Context(), orgID,
-			db.EventHandlerListFilter{Kind: domain.EventHandlerKindTrigger, TeamID: teamID}, db.ListOpts{Limit: 200})
+			db.EventHandlerListFilter{EventType: domain.EventSlackMessage, TeamID: teamID}, db.ListOpts{Limit: 200})
 		if e != nil {
 			return e
 		}
@@ -895,20 +879,20 @@ func TestChannelsHandler_DefaultDeleted_NoReseed(t *testing.T) {
 		}
 		return nil
 	}); err != nil || seeded == nil {
-		t.Fatalf("find seeded trigger: %v (seeded=%v)", err, seeded)
+		t.Fatalf("find seeded handler: %v (seeded=%v)", err, seeded)
 	}
 
 	if err := r.stor.Tx.WithTx(t.Context(), orgID, owner, func(tx db.TxStores) error {
 		return tx.EventHandlers.Delete(t.Context(), orgID, seeded.ID)
 	}); err != nil {
-		t.Fatalf("delete seeded trigger: %v", err)
+		t.Fatalf("delete seeded handler: %v", err)
 	}
 
 	// The team is still tracking C1 (unchanged), so the prior set is
 	// non-empty — the empty->non-empty gate must not re-fire even though
 	// there's a new channel added.
 	second := httptest.NewRecorder()
-	r.hdl.handlePut(second, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
+	r.hdl.handlePut(second, r.req(http.MethodPut, "/api/teams/"+teamID+"/slack-channels", owner, orgID, teamID,
 		map[string]any{"channel_ids": []string{"C1", "C2"}}))
 	if second.Code != http.StatusOK {
 		t.Fatalf("second PUT status = %d (body=%s)", second.Code, second.Body.String())
@@ -918,19 +902,13 @@ func TestChannelsHandler_DefaultDeleted_NoReseed(t *testing.T) {
 	if err := r.stor.Tx.WithTx(t.Context(), orgID, owner, func(tx db.TxStores) error {
 		var e error
 		handlers, _, e = tx.EventHandlers.List(t.Context(), orgID,
-			db.EventHandlerListFilter{Kind: domain.EventHandlerKindTrigger, TeamID: teamID}, db.ListOpts{Limit: 200})
+			db.EventHandlerListFilter{EventType: domain.EventSlackMessage, TeamID: teamID}, db.ListOpts{Limit: 200})
 		return e
 	}); err != nil {
 		t.Fatalf("list event handlers: %v", err)
 	}
-	count := 0
-	for _, h := range handlers {
-		if h.EventType == domain.EventSlackMessage {
-			count++
-		}
-	}
-	if count != 0 {
-		t.Errorf("slack:message triggers after delete + re-PUT = %d, want 0 (no resurrection)", count)
+	if len(handlers) != 0 {
+		t.Errorf("slack:message handlers after delete + re-PUT = %d, want 0 (no resurrection)", len(handlers))
 	}
 }
 
@@ -942,7 +920,7 @@ func TestChannelsHandler_Primary_FirstTrackerDefault(t *testing.T) {
 	r.listChannels(orgID, owner, "C1")
 
 	rec := httptest.NewRecorder()
-	r.hdl.handlePut(rec, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
+	r.hdl.handlePut(rec, r.req(http.MethodPut, "/api/teams/"+teamID+"/slack-channels", owner, orgID, teamID,
 		map[string]any{"channel_ids": []string{"C1"}}))
 	got := decodeChannels(t, rec)
 	if len(got.Channels) != 1 || !got.Channels[0].IsPrimary {
@@ -959,14 +937,14 @@ func TestChannelsHandler_Primary_SecondTeamNonPrimary_ThenUntrackPromotesOldest(
 	pgtest.AddOrgMember(t, r.h, admin2, orgID, team2, "member", "admin")
 
 	rec1 := httptest.NewRecorder()
-	r.hdl.handlePut(rec1, r.req(http.MethodPut, "/api/slack/teams/"+team1+"/channels", owner, orgID, team1,
+	r.hdl.handlePut(rec1, r.req(http.MethodPut, "/api/teams/"+team1+"/slack-channels", owner, orgID, team1,
 		map[string]any{"channel_ids": []string{"C1"}}))
 	if rec1.Code != http.StatusOK {
 		t.Fatalf("team1 PUT status = %d (body=%s)", rec1.Code, rec1.Body.String())
 	}
 
 	rec2 := httptest.NewRecorder()
-	r.hdl.handlePut(rec2, r.req(http.MethodPut, "/api/slack/teams/"+team2+"/channels", admin2, orgID, team2,
+	r.hdl.handlePut(rec2, r.req(http.MethodPut, "/api/teams/"+team2+"/slack-channels", admin2, orgID, team2,
 		map[string]any{"channel_ids": []string{"C1"}}))
 	if rec2.Code != http.StatusOK {
 		t.Fatalf("team2 PUT status = %d (body=%s)", rec2.Code, rec2.Body.String())
@@ -978,7 +956,7 @@ func TestChannelsHandler_Primary_SecondTeamNonPrimary_ThenUntrackPromotesOldest(
 
 	// team1 untracks everything -> team2 (the oldest remaining tracker) is promoted.
 	rec3 := httptest.NewRecorder()
-	r.hdl.handlePut(rec3, r.req(http.MethodPut, "/api/slack/teams/"+team1+"/channels", owner, orgID, team1,
+	r.hdl.handlePut(rec3, r.req(http.MethodPut, "/api/teams/"+team1+"/slack-channels", owner, orgID, team1,
 		map[string]any{"channel_ids": []string{}}))
 	if rec3.Code != http.StatusOK {
 		t.Fatalf("team1 untrack status = %d (body=%s)", rec3.Code, rec3.Body.String())
@@ -1003,7 +981,7 @@ func TestChannelsHandler_Primary_ReassignHappyPath(t *testing.T) {
 
 	for _, teamID := range []string{team1, team2} {
 		rec := httptest.NewRecorder()
-		r.hdl.handlePut(rec, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
+		r.hdl.handlePut(rec, r.req(http.MethodPut, "/api/teams/"+teamID+"/slack-channels", owner, orgID, teamID,
 			map[string]any{"channel_ids": []string{"C1"}}))
 		if rec.Code != http.StatusOK {
 			t.Fatalf("PUT(%s) status = %d (body=%s)", teamID, rec.Code, rec.Body.String())
@@ -1011,9 +989,17 @@ func TestChannelsHandler_Primary_ReassignHappyPath(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	r.hdl.handlePrimary(rec, r.reqPrimary(owner, orgID, "C1", map[string]string{"team_id": team2}))
+	r.hdl.handlePatch(rec, r.reqPatch(owner, orgID, team2, "C1", map[string]any{"is_primary": true}))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("reassign status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if view := decodeBody[channelView](t, rec); view.ChannelID != "C1" || !view.IsPrimary {
+		t.Fatalf("PATCH answer = %+v; want C1 with team2 primary", view)
+	}
+	before := httptest.NewRecorder()
+	r.hdl.handleList(before, r.listReq(owner, orgID, team1, map[string]any{}))
+	if got := decodeChannelList(t, before); len(got.Items) != 1 || got.Items[0].IsPrimary {
+		t.Fatalf("team1's view after reassign = %+v; want no longer primary", got.Items)
 	}
 
 	list := httptest.NewRecorder()
@@ -1024,23 +1010,23 @@ func TestChannelsHandler_Primary_ReassignHappyPath(t *testing.T) {
 	}
 }
 
-func TestChannelsHandler_Primary_NonTrackingTeam_400(t *testing.T) {
+func TestChannelsHandler_Primary_NonTrackingTeam_404(t *testing.T) {
 	r := newSlackChannelsRig(t)
 	orgID, owner, team1 := pgtest.SeedOrgWithUser(t, r.h, "chan-primary-nontrack")
 	r.listChannels(orgID, owner, "C1")
 	team2 := pgtest.SeedTeam(t, r.h, orgID, "team2")
 
 	rec := httptest.NewRecorder()
-	r.hdl.handlePut(rec, r.req(http.MethodPut, "/api/slack/teams/"+team1+"/channels", owner, orgID, team1,
+	r.hdl.handlePut(rec, r.req(http.MethodPut, "/api/teams/"+team1+"/slack-channels", owner, orgID, team1,
 		map[string]any{"channel_ids": []string{"C1"}}))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("PUT status = %d (body=%s)", rec.Code, rec.Body.String())
 	}
 
 	primary := httptest.NewRecorder()
-	r.hdl.handlePrimary(primary, r.reqPrimary(owner, orgID, "C1", map[string]string{"team_id": team2}))
-	if primary.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400 (team2 never tracked C1); body=%s", primary.Code, primary.Body.String())
+	r.hdl.handlePatch(primary, r.reqPatch(owner, orgID, team2, "C1", map[string]any{"is_primary": true}))
+	if primary.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 (team2 never tracked C1); body=%s", primary.Code, primary.Body.String())
 	}
 }
 
@@ -1056,7 +1042,7 @@ func TestChannelsHandler_Merge_DedupPrecedence(t *testing.T) {
 	// C1: tracked by this team. C2: an unclaimed sighting (registry only).
 	// C3: a live Slack candidate only (never tracked or sighted).
 	put := httptest.NewRecorder()
-	r.hdl.handlePut(put, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
+	r.hdl.handlePut(put, r.req(http.MethodPut, "/api/teams/"+teamID+"/slack-channels", owner, orgID, teamID,
 		map[string]any{"channel_ids": []string{"C1"}}))
 	if put.Code != http.StatusOK {
 		t.Fatalf("PUT status = %d (body=%s)", put.Code, put.Body.String())
@@ -1106,7 +1092,7 @@ func TestChannelsHandler_Merge_SlackUnreachable_Warning(t *testing.T) {
 	r.fake.setChannels("xoxb-down", listedC1, listedC1)
 
 	put := httptest.NewRecorder()
-	r.hdl.handlePut(put, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
+	r.hdl.handlePut(put, r.req(http.MethodPut, "/api/teams/"+teamID+"/slack-channels", owner, orgID, teamID,
 		map[string]any{"channel_ids": []string{"C1"}}))
 	if put.Code != http.StatusOK {
 		t.Fatalf("PUT status = %d (body=%s)", put.Code, put.Body.String())
@@ -1114,14 +1100,14 @@ func TestChannelsHandler_Merge_SlackUnreachable_Warning(t *testing.T) {
 	r.fake.failConversationsList("xoxb-down")
 
 	keep := httptest.NewRecorder()
-	r.hdl.handlePut(keep, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
+	r.hdl.handlePut(keep, r.req(http.MethodPut, "/api/teams/"+teamID+"/slack-channels", owner, orgID, teamID,
 		map[string]any{"channel_ids": []string{"C1"}}))
 	if keep.Code != http.StatusOK {
 		t.Fatalf("PUT keeping the tracked set during the outage: status = %d, want 200 (body=%s)", keep.Code, keep.Body.String())
 	}
 
 	add := httptest.NewRecorder()
-	r.hdl.handlePut(add, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
+	r.hdl.handlePut(add, r.req(http.MethodPut, "/api/teams/"+teamID+"/slack-channels", owner, orgID, teamID,
 		map[string]any{"channel_ids": []string{"C1", "C2"}}))
 	if add.Code != http.StatusBadGateway {
 		t.Fatalf("PUT adding a channel during the outage: status = %d, want 502 (body=%s)", add.Code, add.Body.String())
@@ -1197,7 +1183,7 @@ func TestChannelsHandler_AutoJoin_PublicNonMember(t *testing.T) {
 	)
 
 	rec := httptest.NewRecorder()
-	r.hdl.handlePut(rec, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
+	r.hdl.handlePut(rec, r.req(http.MethodPut, "/api/teams/"+teamID+"/slack-channels", owner, orgID, teamID,
 		map[string]any{"channel_ids": []string{"C1"}}))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d (body=%s)", rec.Code, rec.Body.String())
@@ -1231,7 +1217,7 @@ func TestChannelsHandler_AutoJoin_Private_InviteRequiredWarning(t *testing.T) {
 	r.fake.failJoinWithCode("C1", "channel_not_found")
 
 	rec := httptest.NewRecorder()
-	r.hdl.handlePut(rec, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
+	r.hdl.handlePut(rec, r.req(http.MethodPut, "/api/teams/"+teamID+"/slack-channels", owner, orgID, teamID,
 		map[string]any{"channel_ids": []string{"C1"}}))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d (body=%s)", rec.Code, rec.Body.String())
@@ -1265,7 +1251,7 @@ func TestChannelsHandler_AutoJoin_JoinFailure_Warning_RowStillPersisted(t *testi
 	r.fake.failJoin("C1")
 
 	rec := httptest.NewRecorder()
-	r.hdl.handlePut(rec, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
+	r.hdl.handlePut(rec, r.req(http.MethodPut, "/api/teams/"+teamID+"/slack-channels", owner, orgID, teamID,
 		map[string]any{"channel_ids": []string{"C1"}}))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d (body=%s)", rec.Code, rec.Body.String())

@@ -307,6 +307,26 @@ func TestAccessChangeLabel(t *testing.T) {
 			change: domain.AccessChange{Action: domain.AccessActionAPITokenRevoked},
 			want:   "revoked API token (unnamed)",
 		},
+		{
+			name:   "slack switch names the workspace and both apps by bot name",
+			change: domain.AccessChange{Action: domain.AccessActionSlackConnectionActivated, DetailJSON: domain.AccessDetailSlackConnectionActivated("Acme Corp", "T01", "A01", "triage-bot", "A02", "acme-bot")},
+			want:   "switched the Slack workspace Acme Corp from triage-bot to acme-bot",
+		},
+		{
+			name:   "slack switch names an unnamed app by its id",
+			change: domain.AccessChange{Action: domain.AccessActionSlackConnectionActivated, DetailJSON: domain.AccessDetailSlackConnectionActivated("Acme Corp", "T01", "A01", "", "A02", "acme-bot")},
+			want:   "switched the Slack workspace Acme Corp from A01 to acme-bot",
+		},
+		{
+			name:   "slack activation into a workspace with no active app",
+			change: domain.AccessChange{Action: domain.AccessActionSlackConnectionActivated, DetailJSON: domain.AccessDetailSlackConnectionActivated("Acme Corp", "T01", "", "", "A02", "acme-bot")},
+			want:   "made acme-bot the active app in the Slack workspace Acme Corp",
+		},
+		{
+			name:   "slack switch with no detail still reads as English",
+			change: domain.AccessChange{Action: domain.AccessActionSlackConnectionActivated},
+			want:   "made another app the active app in a Slack workspace",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

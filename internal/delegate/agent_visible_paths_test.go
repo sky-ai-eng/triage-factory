@@ -36,7 +36,7 @@ func TestAgentVisibleCheckout_IsTheAgentSpelling(t *testing.T) {
 func TestBuildBlueprintStepWrapperPrompt_SkillPathIsTheAgentSpelling(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "runs", "task1")
 	prompt := buildBlueprintStepWrapperPrompt(
-		domain.Task{Title: "t"},
+		"t",
 		domain.BlueprintStep{StepIndex: 0, Brief: "do it"},
 		&domain.Prompt{Name: "p"},
 		"my-skill", agentproc.AgentVisibleRoot(root), 1, "",

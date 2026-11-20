@@ -115,16 +115,11 @@ often the WSL launcher. The resolved path is exported to the agent as
 `CLAUDE_CODE_GIT_BASH_PATH`. `TF_CLAUDE_BINARY` on Windows must be a regular
 `.exe` or `.js` file; there is no execute bit to check.
 
-### Claude session directory (`internal/worktree/claude_session_windows.go`)
+### Claude session directory (`internal/worktree/pathcase_windows.go`)
 
-Claude Code keeps a run's transcript in `~/.claude/projects/<encoded cwd>`. On
-Windows its encoding replaces every UTF-16 code unit outside `[A-Za-z0-9]` with
-`-` and keeps case. TF's old encoder replaced only `/` and `.`, so resume and
-cleanup missed the directory. For an encoded name over 200 characters Claude
-Code truncates and appends a hash TF does not reproduce, so TF returns a typed
-error (`ErrClaudeSessionNameTooLong`): crash-reclaim starts a fresh run,
-message-resume fails with a session-lost error, and cleanup is a no-op, each
-logged at WARN. The run root is under `os.TempDir()`, resolved through
+Claude Code keeps a run's transcript in `~/.claude/projects/<encoded cwd>`, and
+TF's encoder reproduces Claude Code's rule on every platform. The Windows part
+is the cwd itself: the run root is under `os.TempDir()`, resolved through
 `GetLongPathName` so the path TF passes as cwd matches what Claude Code
 realpaths (an 8.3 short temp path is common).
 
@@ -140,42 +135,12 @@ with inherited stdio and exits with its code (127 on start failure, as before).
 Windows byte-range locks are mandatory and block reads through other handles, so
 locking offset 0 would make the id file unreadable to anything but the holder.
 
-### Keychain chunking (`internal/auth/keychain_chunk.go`)
+### Secrets over the Credential Manager limit
 
-go-keyring refuses a Windows Credential Manager value over 2560 bytes. Values
-over the limit are split by bytes into `key#<gen>#1` to `key#<gen>#N`, where
-`<gen>` is a random 8-hex id per write. The base entry holds
-`tfchunks:v2:<gen>:<N>:<sha256 of the whole value>`. Records from the earlier
-layout (`tfchunks:v1:<N>:<digest>`, chunks `key#1` to `key#N`) still read and
-are replaced by the next write. A random id is used rather than one derived from
-the value so a re-write of the same value never reuses the names of the live
-chunks.
-
-Write order: record both the new and the previous generation in `key#orphans`,
-write every new chunk, write the base last (the commit), then delete the
-previous generation's chunks. A failed or interrupted write therefore leaves the
-previous value readable and removes only its own chunks, and a crash at any step
-leaves every generation it touched named in `key#orphans`, because chunk names
-are random and the keychain cannot be listed. A generation leaves the record
-only once its chunks are confirmed deleted. Failing to delete the previous
-generation is a WARN, not a failed put; the next write, delete or uninstall
-sweep retries it. Read reassembles the chunks and
-verifies the hash; on a missing chunk or a mismatch it re-reads the base once
-(a write in another process) and retries, then errors. A record with more than
-64 chunks is corrupt, and a value that would need more is refused at write time.
-Delete records the current generation in `key#orphans`, then removes the base,
-so a failure leaves the value readable, then the
-chunks it named (descending), then every generation in `key#orphans`, then the
-v1 names `key#1` to `key#64`, which is probed to the cap rather than stopping at
-the first gap. `SweepKeychain` (uninstall) uses the same delete, so it removes
-every generation, and a failure on one key does not stop the others. One mutex
-covers put, get and delete in a process. There is no cross-process lock (the
-keychain offers none), so one writer per key is assumed: two processes writing
-one key at once can leave it unreadable until the next write, and the hash check
-means a read never returns a wrong value. Values at or under the limit are stored
-exactly as before (their housekeeping failing is a WARN), and other platforms set
-the limit to 0 (off). The limit is a per-platform constant, and the tests run
-the logic on every OS.
+Windows Credential Manager refuses a value over 2560 bytes. TF answers such a
+secret with an error that names the file backend (`TF_SECRETS_BACKEND=file`),
+as it does on every platform whose keychain refuses a value, rather than
+splitting it across entries.
 
 ### Git environment (`internal/githooks/gitenv_windows.go`, `internal/worktree/gitenv_windows.go`)
 
@@ -224,17 +189,11 @@ user to delete the file by hand.
 - `filestore` rename retries briefly on a sharing violation, through
   `internal/fsutil.RenameReplace`, which the installer shares.
 
-### Line endings
-
-`.gitattributes` pins `eol=lf` for text. `go:embed` bytes must match on every
-platform, and the embedded hook scripts, `wrapper.mjs`, prompt blocks and seeds
-break under CRLF. Tests assert every embedded text asset has no `\r`, so a
-checkout with `autocrlf=true` cannot ship one.
-
 ### CI and release
 
 `test.yml` gains a `test-windows` job (build, vet, gotestsum, no `-race`, since
-the detector needs cgo). `goreleaser.yaml` builds windows amd64 and arm64 and
+the detector needs cgo). The runner's Docker daemon runs Windows containers
+only, so the container-backed suites skip there. `goreleaser.yaml` builds windows amd64 and arm64 and
 packs them as zips named `triagefactory_<version>_windows_<arch>.zip`; the brew
 formula sees only darwin and linux. `scripts/lint.sh` cross-builds
 `windows/amd64` and `windows/arm64` and finds `goimports.exe`.
@@ -251,17 +210,8 @@ formula sees only darwin and linux. `scripts/lint.sh` cross-builds
 - **Closing the job after `Wait` also kills background processes the agent left
   running.** This differs from Unix, where the process group can outlive the
   run. On Windows it is the wanted cleanup.
-- **No session-name hashing.** Reproducing Claude Code's hash would couple TF to
-  an undocumented detail that is easy to get wrong. A typed error and a WARN
-  say what happened, and the run degrades to a fresh start.
-- **Session encoding changed on Windows only.** Linux keeps its `/` and `.`
-  replacement so this change is byte-identical there, even though Claude Code
-  probably maps all non-alphanumerics on Linux too (see follow-ups).
 - **Bad `CLAUDE_CODE_GIT_BASH_PATH` is an error.** A silent fall-through to
   another bash hides the mistake.
-- **Chunks carry a hash and a generation.** A partial or interleaved write is
-  detected and surfaces as an error, not as a corrupt key, and a failed write
-  cannot damage the value it was replacing.
 - **State root unchanged.** Moving to `%LOCALAPPDATA%` would make Windows the one
   platform whose state is somewhere else, for no user benefit.
 - **Skipped tests.** A Windows skip carries a one-line reason. Permission-bit
@@ -278,8 +228,7 @@ formula sees only darwin and linux. `scripts/lint.sh` cross-builds
 - **Unsigned binary.** SmartScreen warns on first run. Antivirus products may
   also flag an unsigned Go binary that spawns processes.
 - **Long paths.** TF covers Git with `core.longpaths`, but other tools need the
-  Win32 `LongPathsEnabled` setting, and a long `TEMP` path disables session
-  resume (200-character limit).
+  Win32 `LongPathsEnabled` setting.
 - **Unsandboxed runs.** Windows has no local sandbox, so a run has the user's
   full access, including stored credentials, and the Claude Code tool allowlist
   is the only gate on what it runs. Documented, logged at WARN at boot, and not a
@@ -311,12 +260,6 @@ formula sees only darwin and linux. `scripts/lint.sh` cross-builds
 
 ## Follow-ups
 
-- **Linux session encoding.** Claude Code likely replaces every non-alphanumeric
-  character on Linux and macOS too, with the same 200-character rule. TF's
-  encoder replaces only `/` and `.` there, so a path containing any other
-  non-alphanumeric character (a space or an underscore, for example) can miss
-  the directory. Verify against the installed Claude Code on Linux and fix in a
-  separate change.
 - **Local sandbox on Windows.** There is no bubblewrap equivalent. A Job Object
   limits resources, not file access; an AppContainer or a restricted token
   would be the starting point.
@@ -330,13 +273,6 @@ formula sees only darwin and linux. `scripts/lint.sh` cross-builds
   bundle paths, so on Windows a consumer of `SSL_CERT_FILE` would trust only the
   injected leaf certificate and not the system roots. Moot while the gh channel
   is unavailable on Windows (decision 4); fix it before that channel is enabled.
-- **Same-tick re-raise.** `NotificationUpsertOf` can report a re-raise in the
-  same clock tick as an escalation when the clock is coarse, as the Windows
-  clock is.
-- **Same-tick ordering in conformance tests.** `sorts_by_resolved_at` in
-  `internal/db/dbtest/notification_conformance.go` writes three rows back to
-  back and expects distinct timestamps. It has not failed on Windows, but it has
-  the coarse-clock exposure the server-side sort test had.
 - **git-lfs in Linux test images.** `TestCaptureUncommitted_FetchedLFSFileStaysOut`
   in `internal/worktree` fails, rather than skipping, when `git-lfs` is not
   installed. This is not Windows-specific.

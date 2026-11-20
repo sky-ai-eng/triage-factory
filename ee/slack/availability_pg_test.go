@@ -44,13 +44,14 @@ func TestAvailability_ThreeWaySplit(t *testing.T) {
 
 			if tc.connected {
 				if err := stores.Tx.WithTx(t.Context(), orgID, owner, func(tx db.TxStores) error {
-					return slackstore.FromTx(tx).Workspaces.Upsert(t.Context(), slackstore.Workspace{
+					return upsertActiveConnection(t.Context(), tx, slackstore.Connection{
 						WorkspaceID:        "T0AVAIL",
 						APIAppID:           "A0AVAIL",
 						OrgID:              orgID,
 						WorkspaceName:      "Acme",
 						Transport:          "events_api",
 						BotUserID:          "U0BOT",
+						SigningSecretRef:   "slack_signing_secret",
 						RegisteredByUserID: owner,
 					})
 				}); err != nil {
@@ -89,9 +90,10 @@ func TestAvailability_KeysOnTheRowNotLiveSocketHealth(t *testing.T) {
 	orgID, owner, _ := pgtest.SeedOrgWithUser(t, h, "slack-webhook-only")
 
 	if err := stores.Tx.WithTx(t.Context(), orgID, owner, func(tx db.TxStores) error {
-		return slackstore.FromTx(tx).Workspaces.Upsert(t.Context(), slackstore.Workspace{
+		return upsertActiveConnection(t.Context(), tx, slackstore.Connection{
 			WorkspaceID: "T0HOOK", APIAppID: "A0HOOK", OrgID: orgID,
 			WorkspaceName: "Acme", Transport: "events_api", BotUserID: "U0BOT",
+			SigningSecretRef:   "slack_signing_secret",
 			RegisteredByUserID: owner,
 		})
 	}); err != nil {
@@ -147,13 +149,14 @@ func TestAvailabilitySystem_ThreeWaySplit(t *testing.T) {
 
 			if tc.connected {
 				if err := stores.Tx.WithTx(t.Context(), orgID, owner, func(tx db.TxStores) error {
-					return slackstore.FromTx(tx).Workspaces.Upsert(t.Context(), slackstore.Workspace{
+					return upsertActiveConnection(t.Context(), tx, slackstore.Connection{
 						WorkspaceID:        "T0SYS",
 						APIAppID:           "A0SYS",
 						OrgID:              orgID,
 						WorkspaceName:      "Acme",
 						Transport:          "events_api",
 						BotUserID:          "U0BOT",
+						SigningSecretRef:   "slack_signing_secret",
 						RegisteredByUserID: owner,
 					})
 				}); err != nil {

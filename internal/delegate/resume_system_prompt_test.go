@@ -3,6 +3,7 @@ package delegate
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -13,212 +14,45 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// launchBlock is the block 2 a GitHub PR step's launch composes — the same four
-// sections runAgent hands composeConversationSystemBlock, with the mission
-// caller-supplied so a test can watch a particular one survive.
-func launchBlock(mission string) string {
-	return composeConversationSystemBlock(
-		mission,
-		runContext("Repository: owner/repo\nPR: #7", "", "", "/work", "", "", "tfac/SKY-9", "https://tf.example/runs/r-1", "", ""),
-		agentprompt.GitHubToolsReference(),
-		agentprompt.NonTerminalCompletion(),
-	)
-}
+// A conversation keeps the two system blocks its first claim sent, because
+// the provider binds every thinking block to the system prompt it was produced
+// under. Every claim still composes both blocks from today's inputs, and a
+// change reaches the conversation as an update carrying the parts that
+// changed. A native conversation never takes the SDK's resume dispatch: a wake
+// and a crash re-claim both come back through the fresh-claim path, and it is
+// the conversation's task-context row, not a session id, that says whether the
+// claim opens it.
 
-// TestResumeAppend_IsTheLaunchAppendByteForByte is what this leaf is for. The
-// SDK harness is handed its append once and replays only the session transcript
-// afterwards, so a woken turn has to be handed the same string again — not one
-// that agrees with it, the same one.
+// TestNativeLaunch_SavesBothBlocksAndTheirParts is the write the rest rests
+// on. The launch composes both blocks and puts them on the row, with the parts
+// they were composed from, before the agent is handed anything.
 //
-// The launch stores block 2 and the resume reads it back; both then reach the
-// wire through sdkSystemPrompt, so the bytes are equal by construction rather
-// than by two composers being kept in step.
-func TestResumeAppend_IsTheLaunchAppendByteForByte(t *testing.T) {
-	database := newDelegateTestDB(t)
-	seedConversation(t, database, "r-append", "sess-append", "/tmp/wt-append")
-	claimID := markEngaged(t, database, "r-append")
-	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
-	ctx := context.Background()
-
-	block := launchBlock("review the pull request and leave a summary")
-	launchAppend := sdkSystemPrompt(agentprompt.SurfaceMachinist, block, "/bin/tf")
-	if fenced := s.persistSystemBlock(ctx, runmode.LocalDefaultOrgID, "r-append", claimID, block); fenced {
-		t.Fatal("persistSystemBlock reported the fence on a live claim")
-	}
-
-	resumeAppend := sdkSystemPrompt(agentprompt.SurfaceMachinist,
-		s.launchedSystemBlock(ctx, runmode.LocalDefaultOrgID, "r-append"), "/bin/tf")
-	if resumeAppend != launchAppend {
-		t.Errorf("the resume's append is not the launch's;\ngot:\n%s\n\nwant:\n%s", resumeAppend, launchAppend)
-	}
-	// Named explicitly rather than left to the byte comparison: the three things
-	// a resumed turn used to lose are the framework blocks, the mission and the
-	// step addendum, and a composer that dropped all three would still make the
-	// line above pass.
-	if !strings.HasPrefix(resumeAppend, frameworkBlocks(t)) {
-		t.Error("the resumed turn does not lead with the framework blocks")
-	}
-	if !strings.Contains(resumeAppend, "review the pull request and leave a summary") {
-		t.Error("the resumed turn carries no mission")
-	}
-	addendum := strings.TrimSpace(agentprompt.NonTerminalCompletion())
-	if addendum == "" {
-		t.Fatal("the SDK runtime composes no non-terminal addendum to look for")
-	}
-	if !strings.Contains(resumeAppend, addendum) {
-		t.Error("the resumed turn dropped the non-terminal step's addendum")
-	}
-}
-
-// TestResumeAppend_IsTheLaunchedMissionNotTodaysPromptRow is why the block is a
-// stored value rather than a recomposition. A prompt row is the org's to edit,
-// and a conversation parked for a week would otherwise wake under whatever it
-// says now — a mission nobody gave that conversation.
-func TestResumeAppend_IsTheLaunchedMissionNotTodaysPromptRow(t *testing.T) {
-	database := newDelegateTestDB(t)
-	seedConversation(t, database, "r-edited", "sess-edited", "/tmp/wt-edited")
-	claimID := markEngaged(t, database, "r-edited")
-	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
-	ctx := context.Background()
-
-	const launched = "review the pull request and leave a summary"
-	if fenced := s.persistSystemBlock(ctx, runmode.LocalDefaultOrgID, "r-edited", claimID, launchBlock(launched)); fenced {
-		t.Fatal("persistSystemBlock reported the fence on a live claim")
-	}
-
-	// The org rewrites the step's prompt while the conversation is parked.
-	const edited = "close the pull request without reading it"
-	if _, err := s.prompts.Update(ctx, runmode.LocalDefaultOrgID, "test-prompt", "T", edited, ""); err != nil {
-		t.Fatalf("edit the step prompt: %v", err)
-	}
-	if p, err := s.prompts.GetSystem(ctx, runmode.LocalDefaultOrgID, "test-prompt"); err != nil || p == nil || p.Body != edited {
-		t.Fatalf("the fixture's prompt edit did not land: %v %+v", err, p)
-	}
-
-	woke := sdkSystemPrompt(agentprompt.SurfaceMachinist, s.launchedSystemBlock(ctx, runmode.LocalDefaultOrgID, "r-edited"), "/bin/tf")
-	if !strings.Contains(woke, launched) {
-		t.Error("the resumed turn lost the mission its launch was given")
-	}
-	if strings.Contains(woke, edited) {
-		t.Error("the resumed turn picked up a mission edited after the launch")
-	}
-}
-
-// TestPersistSystemBlock_RefusedOnceTheEngagementIsFencedOut: the append is a
-// resume coordinate, so it takes the fence the other three take. A zombie whose
-// launch composed late must not leave its own mission on a row a successor is
-// driving — the successor's next wake would replay it.
-func TestPersistSystemBlock_RefusedOnceTheEngagementIsFencedOut(t *testing.T) {
-	database := newDelegateTestDB(t)
-	seedConversation(t, database, "r-fenced", "sess-fenced", "/tmp/wt-fenced")
-	zombie := markEngaged(t, database, "r-fenced")
-	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
-	ctx := context.Background()
-
-	if fenced := s.persistSystemBlock(ctx, runmode.LocalDefaultOrgID, "r-fenced", zombie, launchBlock("the launched mission")); fenced {
-		t.Fatal("persistSystemBlock reported the fence on a live claim")
-	}
-	if _, err := database.Exec(
-		`UPDATE claims SET released_at = CURRENT_TIMESTAMP, outcome = 'requeued' WHERE id = ?`, zombie); err != nil {
-		t.Fatalf("release the claim: %v", err)
-	}
-
-	if fenced := s.persistSystemBlock(ctx, runmode.LocalDefaultOrgID, "r-fenced", zombie, launchBlock("the zombie's mission")); !fenced {
-		t.Error("a released claim's system-block write was accepted; the successor's next wake would replay it")
-	}
-	got := s.launchedSystemBlock(ctx, runmode.LocalDefaultOrgID, "r-fenced")
-	if !strings.Contains(got, "the launched mission") || strings.Contains(got, "the zombie's mission") {
-		t.Errorf("the row moved under the fence;\n%s", got)
-	}
-}
-
-// TestLaunchedSystemBlock_DegradesToTheFrameworkBlocksAlone covers the two rows
-// that answer with nothing: one whose block really was empty, and one this
-// process cannot read. Neither refuses the turn — the agent keeps its session
-// and loses the mission for it, which is what every SDK resume did before the
-// column existed.
-func TestLaunchedSystemBlock_DegradesToTheFrameworkBlocksAlone(t *testing.T) {
-	database := newDelegateTestDB(t)
-	seedConversation(t, database, "r-empty", "sess-empty", "/tmp/wt-empty")
-	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
-	ctx := context.Background()
-
-	for _, conversationID := range []string{"r-empty", "r-does-not-exist"} {
-		if got := s.launchedSystemBlock(ctx, runmode.LocalDefaultOrgID, conversationID); got != "" {
-			t.Errorf("%s: launchedSystemBlock = %q, want the empty block", conversationID, got)
-		}
-		if got := sdkSystemPrompt(agentprompt.SurfaceMachinist, "", "/bin/tf"); got != frameworkBlocks(t) {
-			t.Errorf("%s: an empty block must compose the framework blocks alone;\n%s", conversationID, got)
-		}
-	}
-}
-
-// TestResumeSystemBlockRead_WritesNothing is the opening-rows gate from this
-// side. A resume mints no opening and delivers only the queued follow-up, so
-// the one thing this leaf adds to that path — a read of the launch's block —
-// must leave both the transcript and the queue exactly as it found them.
-func TestResumeSystemBlockRead_WritesNothing(t *testing.T) {
-	database := newDelegateTestDB(t)
-	seedConversation(t, database, "r-readonly", "sess-readonly", "/tmp/wt-readonly")
-	claimID := markEngaged(t, database, "r-readonly")
-	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
-	ctx := context.Background()
-	sink := newConversationSink(s, runmode.LocalDefaultOrgID, "r-readonly", claimID, "event", runmode.LocalDefaultUserID)
-
-	if _, err := s.openingTurnBlocks(ctx, sink, runmode.LocalDefaultOrgID, "r-readonly",
-		runmode.LocalDefaultUserID, openingTestMemories(), openingTestTaskContext); err != nil {
-		t.Fatalf("openingTurnBlocks: %v", err)
-	}
-	if fenced := s.persistSystemBlock(ctx, runmode.LocalDefaultOrgID, "r-readonly", claimID, launchBlock("the launched mission")); fenced {
-		t.Fatal("persistSystemBlock reported the fence on a live claim")
-	}
-	if _, err := s.conversations.InsertMessageSystem(ctx, runmode.LocalDefaultOrgID,
-		pendingUserInput("r-readonly", runmode.LocalDefaultUserID, "also update the README", domain.TurnSettings{})); err != nil {
-		t.Fatalf("queue the follow-up: %v", err)
-	}
-	before := len(allRows(t, s, "r-readonly"))
-
-	if got := s.launchedSystemBlock(ctx, runmode.LocalDefaultOrgID, "r-readonly"); !strings.Contains(got, "the launched mission") {
-		t.Fatalf("launchedSystemBlock = %q", got)
-	}
-
-	if got := len(allRows(t, s, "r-readonly")); got != before {
-		t.Errorf("rows after the resume's read = %d, want %d — a resume mints nothing", got, before)
-	}
-	pending := pendingRows(t, s, "r-readonly")
-	if len(pending) != 1 || pending[0].Content != "also update the README" {
-		t.Errorf("pending input = %+v, want the follow-up alone — that is all the resume delivers", pending)
-	}
-}
-
-// The native half of the same rule, and the two ways it differs from the SDK's.
-// A native conversation never takes the resume dispatch: a wake and a crash
-// re-claim both come back through the fresh-claim path, and the transcript they
-// find is the one the loop is about to replay. So the rule is stated per claim
-// rather than per path — a new step composes its own block 2, an opened
-// conversation replays the one its launch stamped — and it is the row, not a
-// session id, that says which of the two this claim is.
-
-// TestNativeLaunch_StampsBlockTwoOnTheRow is the write the rest of it rests on.
-// The launch composes block 2 and puts it on the row before the agent is handed
-// anything, so the bytes survive the engagement that composed them.
-//
-// Driven through runNativeAgent rather than the composer, because the stamp is
+// Driven through runNativeAgent rather than the composer, because the save is
 // the launch's and not the composition's: the tool host will not come up in a
-// test, and the row must already carry the block by the time it fails.
-func TestNativeLaunch_StampsBlockTwoOnTheRow(t *testing.T) {
+// test, and the row must already carry the blocks by the time it fails.
+func TestNativeLaunch_SavesBothBlocksAndTheirParts(t *testing.T) {
 	f := newLaunchFixture(t, "native-stamp")
 
 	if disp := f.runNative(t, "review the failing check"); disp.launchErr == nil {
-		t.Fatal("the fixture's tool host launched; this test needs the launch to fail after the stamp")
+		t.Fatal("the fixture's tool host launched; this test needs the launch to fail after the save")
 	}
 
-	stamped := f.storedSystemBlock(t)
-	if !strings.Contains(stamped, "review the failing check") {
-		t.Errorf("the stamped block carries no mission;\n%s", stamped)
+	saved := f.storedBlocks(t)
+	if saved.Prompt != agentprompt.Build(nativeSpec(agentprompt.SurfaceMachinist)) {
+		t.Error("the saved shared prompt is not the native machinist's framework blocks")
 	}
-	if !strings.Contains(stamped, "Branch naming convention") {
-		t.Errorf("the stamped block carries no run context;\n%s", stamped)
+	if !strings.Contains(saved.Block, "review the failing check") || !strings.Contains(saved.Block, "Branch naming convention") {
+		t.Errorf("the saved block 2 carries no mission or no run context;\n%s", saved.Block)
+	}
+	if saved.Parts == nil {
+		t.Fatal("the launch saved no parts; its next claim would have nothing to compare with")
+	}
+	sections := agentprompt.Sections(nativeSpec(agentprompt.SurfaceMachinist))
+	if len(saved.Parts.Shared) != len(sections) {
+		t.Errorf("saved %d shared parts, want one per framework block file (%d)", len(saved.Parts.Shared), len(sections))
+	}
+	if text, ok := partText(saved.Parts.Conversation, partBranchConvention); !ok || !strings.Contains(saved.Block, text) {
+		t.Errorf("the saved parts carry no branch convention line that block 2 renders (%q, %v)", text, ok)
 	}
 }
 
@@ -230,131 +64,327 @@ func TestNativeLaunch_ToolsAreTheNativeComposition(t *testing.T) {
 	text := f.s.buildNativeLaunchText(context.Background(), "", f.task(t), "triage the ticket", runConfig{
 		orgID:   runmode.LocalDefaultOrgID,
 		teamID:  runmode.LocalDefaultTeamID,
+		surface: agentprompt.SurfaceMachinist,
 		sources: sourceDocs{kinds: kinds},
 	}, "", claimReplay{})
-	if want := agentprompt.ToolsReferenceForSources(agentprompt.RuntimeNative, kinds); !strings.Contains(text.systemBlock, want) {
-		t.Errorf("the native block does not carry the native tools section;\n%s", text.systemBlock)
+	if want := agentprompt.ToolsReferenceForSources(agentprompt.RuntimeNative, kinds); !strings.Contains(text.system.sent.Block, want) {
+		t.Errorf("the native block does not carry the native tools section;\n%s", text.system.sent.Block)
 	}
 }
 
-// TestNativeReclaim_ReplaysTheStampedBlockByteForByte is the ticket. A native
-// conversation woken after a park keeps the transcript it built, so a block 2
-// composed afresh would change the model's own instructions mid-conversation —
-// and the input that moves under it here is a live one: the team's branch
-// convention, which an admin may rewrite while the run is parked.
-//
-// The assertion is byte equality, not agreement. Block 2 is what block 1's cache
-// breakpoint is measured against, so a block that merely says the same things in
-// different bytes still costs the conversation its warm prefix.
-func TestNativeReclaim_ReplaysTheStampedBlockByteForByte(t *testing.T) {
+// TestNativeReclaim_SendsTheBlocksItsFirstClaimSent is the ticket. A release
+// that changes a framework block, and a team that rewrites its branch
+// convention while the conversation is parked, both move what a claim
+// composes; the re-claim still sends the bytes its first claim sent, which
+// every earlier thinking block is bound to, and it rewrites nothing on the row.
+func TestNativeReclaim_SendsTheBlocksItsFirstClaimSent(t *testing.T) {
 	f := newLaunchFixture(t, "native-replay")
 	f.setBranchTemplate(t, "at-launch/<ticket-id>")
-
 	if disp := f.runNative(t, "review the failing check"); disp.launchErr == nil {
-		t.Fatal("the fixture's tool host launched; this test needs the launch to fail after the stamp")
+		t.Fatal("the fixture's tool host launched; this test needs the launch to fail after the save")
 	}
-	launched := f.storedSystemBlock(t)
-	if !strings.Contains(launched, "at-launch/<ticket-id>") {
-		t.Fatalf("the launch did not compose the team's branch convention;\n%s", launched)
-	}
-	// What the launch's own mint writes, and what makes this conversation an
-	// opened one for every claim after it.
 	f.open(t)
+	// The first claim ran an earlier release, whose identity block read
+	// differently.
+	launched := f.earlierRelease(t, "You are an earlier release's machinist.")
 
-	// The team rewrites its branch convention while the conversation is parked.
 	f.setBranchTemplate(t, "after-the-park/<ticket-id>")
-
 	replay := f.s.nativeClaimReplay(context.Background(), runmode.LocalDefaultOrgID, f.conv.ID)
 	if !replay.opened {
-		t.Fatal("an opened conversation read as fresh; the wake would compose a second block")
+		t.Fatal("an opened conversation read as fresh")
 	}
-	if replay.stampable {
-		t.Error("a wake with the launch's block in hand reported the row as writable")
+	system := f.nativeLaunchText(t, "review the failing check", "", replay).system
+	if system.sent.Prompt != launched.Prompt || system.sent.Block != launched.Block {
+		t.Errorf("the re-claim does not send the first claim's blocks;\nprompt equal: %v\nblock:\n%s", system.sent.Prompt == launched.Prompt, system.sent.Block)
 	}
-	woke := f.nativeLaunchText(t, "review the failing check", "", replay)
-	if woke.systemBlock != launched {
-		t.Errorf("the wake's block is not the launch's;\ngot:\n%s\n\nwant:\n%s", woke.systemBlock, launched)
+	if system.stamp {
+		t.Error("a re-claim with the first claim's blocks in hand would save over them")
 	}
-	// Named rather than left to the byte comparison, which a composer that
-	// dropped the section entirely would also satisfy.
-	if strings.Contains(woke.systemBlock, "after-the-park/<ticket-id>") {
-		t.Error("the wake picked up a branch convention set after the launch")
+	if system.current.Prompt != agentprompt.Build(nativeSpec(agentprompt.SurfaceMachinist)) {
+		t.Error("the re-claim did not compose today's framework blocks to compare with")
 	}
 
-	// And the second claim adds nothing to the row: the bytes it is running
-	// under are the ones already on it.
 	if disp := f.runNative(t, "review the failing check"); disp.launchErr == nil {
 		t.Fatal("the second claim's tool host launched")
 	}
-	if got := f.storedSystemBlock(t); got != launched {
-		t.Errorf("the re-claim rewrote the row;\ngot:\n%s\n\nwant:\n%s", got, launched)
+	if got := f.storedBlocks(t); got.Prompt != launched.Prompt || got.Block != launched.Block {
+		t.Error("the re-claim rewrote the row")
 	}
 }
 
-// TestNativeReclaim_KeepsTheManifestOnAHandedOffTree is the section that cannot
-// be recomposed at all. The knowledge manifest is rendered from what a launch
-// staged, and a launch stages nothing into a run tree that already belongs to
-// the sandbox identity — so a recomposing wake would not merely reword the
-// block, it would drop a section naming a tree the agent is still reading from.
-func TestNativeReclaim_KeepsTheManifestOnAHandedOffTree(t *testing.T) {
-	f := newLaunchFixture(t, "native-manifest")
-	const manifest = "Team knowledge is staged at _tfac/knowledge/team/private/runbook.md"
+// TestNativeReclaim_AChangeArrivesAsAnUpdateOfThatPartAlone: each of the
+// three kinds of change a parked conversation meets — the team's branch
+// convention, a release's verb reference, a release's framework block —
+// arrives as an update naming that part, with its current text, and nothing
+// else from either block.
+func TestNativeReclaim_AChangeArrivesAsAnUpdateOfThatPartAlone(t *testing.T) {
+	identity := agentprompt.Sections(nativeSpec(agentprompt.SurfaceMachinist))[0]
+	jira := agentprompt.ToolsReferenceParts(agentprompt.RuntimeNative, []string{"jira"})[0]
+	for _, tc := range []struct {
+		name   string
+		change func(*launchFixture, *testing.T)
+		key    string // the changed part's key
+		part   string // the name the update gives the part
+		holds  string // what the part's current text says
+	}{
+		{
+			name:   "the branch convention",
+			change: func(f *launchFixture, t *testing.T) { f.setBranchTemplate(t, "after-the-park/<ticket-id>") },
+			key:    partBranchConvention,
+			part:   conversationPartName(partBranchConvention),
+			holds:  "after-the-park/<ticket-id>",
+		},
+		{
+			name: "a verb reference",
+			change: func(f *launchFixture, t *testing.T) {
+				f.rewriteSavedPart(t, false, partToolsPrefix+"jira", "An earlier release's Jira verbs.")
+			},
+			key:   partToolsPrefix + "jira",
+			part:  conversationPartName(partToolsPrefix + "jira"),
+			holds: strings.TrimSpace(jira.Text),
+		},
+		{
+			name:   "the shared prompt",
+			change: func(f *launchFixture, t *testing.T) { f.earlierRelease(t, "You are an earlier release's machinist.") },
+			key:    identity.Path,
+			part:   sharedPartName(identity.Path),
+			holds:  identity.Text,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLaunchFixture(t, "native-change")
+			f.setBranchTemplate(t, "at-launch/<ticket-id>")
+			if disp := f.runNativeWith(t, "review the failing check", []string{"github", "jira"}); disp.launchErr == nil {
+				t.Fatal("the fixture's tool host launched")
+			}
+			f.open(t)
+			tc.change(f, t)
 
-	// The launch's staging pass, which returns the manifest it rendered.
-	launched := f.nativeLaunchText(t, "review the failing check", manifest, claimReplay{}).systemBlock
-	if !strings.Contains(launched, manifest) {
-		t.Fatalf("the launch composed no manifest;\n%s", launched)
-	}
-	if fenced := f.s.persistSystemBlock(context.Background(), runmode.LocalDefaultOrgID, f.conv.ID, f.conv.ClaimID, launched); fenced {
-		t.Fatal("persistSystemBlock reported the fence on a live claim")
-	}
-	f.open(t)
-
-	// The wake, on a tree handed off: nothing is staged, so the manifest this
-	// claim could render is empty. The replay is what keeps the section.
-	replay := f.s.nativeClaimReplay(context.Background(), runmode.LocalDefaultOrgID, f.conv.ID)
-	if got := f.nativeLaunchText(t, "review the failing check", "", replay).systemBlock; got != launched {
-		t.Errorf("the wake's block is not the launch's;\ngot:\n%s\n\nwant:\n%s", got, launched)
-	}
-	// The control: composing on that same empty manifest is what the wake used
-	// to do, and it is what loses the section.
-	if got := f.nativeLaunchText(t, "review the failing check", "", claimReplay{}).systemBlock; strings.Contains(got, manifest) {
-		t.Error("a composition on an empty manifest still named the staged tree; this test proves nothing")
+			replay := f.s.nativeClaimReplay(context.Background(), runmode.LocalDefaultOrgID, f.conv.ID)
+			system := f.nativeLaunchTextWith(t, "review the failing check", []string{"github", "jira"}, replay).system
+			update := system.update
+			if update == "" {
+				t.Fatal("the change produced no update")
+			}
+			if n := strings.Count(update, "<part "); n != 1 {
+				t.Errorf("the update gives %d parts, want the one that changed;\n%s", n, update)
+			}
+			current := append(append([]domain.SystemPart{}, system.current.Parts.Shared...), system.current.Parts.Conversation...)
+			changed := -1
+			for i, p := range current {
+				if p.Key == tc.key {
+					changed = i
+				}
+			}
+			if changed < 0 || !strings.Contains(current[changed].Text, tc.holds) {
+				t.Fatalf("the claim did not compose the change to %s", tc.part)
+			}
+			if !strings.Contains(update, updatePart(tc.part, current[changed].Text, true)) {
+				t.Errorf("the update does not give %s in its current text as a replacement;\n%s", tc.part, update)
+			}
+			for i, p := range current {
+				if i != changed && strings.Contains(update, p.Text) {
+					t.Errorf("the update carries %s, which did not change;\n%s", p.Key, update)
+				}
+			}
+			if strings.Contains(update, "review the failing check") {
+				t.Errorf("the update carries the mission, which is never compared;\n%s", update)
+			}
+			for _, p := range system.sent.Parts.Conversation {
+				if strings.Contains(update, goneLine(p.Key, conversationPartName(p.Key))) {
+					t.Errorf("the update withdraws %s, which nothing removed;\n%s", p.Key, update)
+				}
+			}
+			if got := system.systemUpdate(); got == nil || got.Content != update {
+				t.Fatal("the update is not what the engine is handed")
+			} else if parts, ok := partsFromMetadata(got.Metadata); !ok || parts.Shared[0].Text != identity.Text {
+				t.Error("the update row does not record the parts it brings the conversation to")
+			}
+		})
 	}
 }
 
-// TestNativeClaim_OpenedRowWithNoBlockComposesOnceAndStamps covers the rows that
-// predate the stamp. They are opened and hold nothing, and the answer for them is
-// the one a launch gets: compose live, once, and put it on the row — so the claim
-// after this one replays rather than composing a third time.
-func TestNativeClaim_OpenedRowWithNoBlockComposesOnceAndStamps(t *testing.T) {
-	f := newLaunchFixture(t, "native-legacy")
-	f.open(t)
-
-	replay := f.s.nativeClaimReplay(context.Background(), runmode.LocalDefaultOrgID, f.conv.ID)
-	if !replay.opened || replay.block != "" || !replay.stampable {
-		t.Fatalf("nativeClaimReplay = %+v, want an opened row with nothing to replay and nothing to lose", replay)
-	}
-
+// TestNativeReclaim_MatchingBlocksAddNoUpdate: a re-claim whose composition
+// matches what the conversation last received adds nothing, so its cached
+// prefix is the whole conversation.
+func TestNativeReclaim_MatchingBlocksAddNoUpdate(t *testing.T) {
+	f := newLaunchFixture(t, "native-same")
 	if disp := f.runNative(t, "review the failing check"); disp.launchErr == nil {
-		t.Fatal("the fixture's tool host launched; this test needs the launch to fail after the stamp")
+		t.Fatal("the fixture's tool host launched")
 	}
-	stamped := f.storedSystemBlock(t)
-	if !strings.Contains(stamped, "review the failing check") {
-		t.Errorf("the claim composed nothing onto the empty row;\n%s", stamped)
+	f.open(t)
+	replay := f.s.nativeClaimReplay(context.Background(), runmode.LocalDefaultOrgID, f.conv.ID)
+	system := f.nativeLaunchText(t, "review the failing check", "", replay).system
+	if system.update != "" || system.systemUpdate() != nil {
+		t.Errorf("a re-claim that composed what the conversation has adds an update;\n%s", system.update)
 	}
-	if next := f.s.nativeClaimReplay(context.Background(), runmode.LocalDefaultOrgID, f.conv.ID); next.block != stamped {
-		t.Errorf("the next claim would not replay what this one composed;\ngot:\n%s\n\nwant:\n%s", next.block, stamped)
+}
+
+// TestNativeReclaim_AnEditedMissionDoesNotReachTheConversation: a prompt row
+// is the org's to edit, and a conversation parked while it changed keeps the
+// mission it was given, with no update about it, so it is never handed a
+// mission nobody gave it.
+func TestNativeReclaim_AnEditedMissionDoesNotReachTheConversation(t *testing.T) {
+	f := newLaunchFixture(t, "native-edited")
+	const launched = "review the failing check"
+	if disp := f.runNative(t, launched); disp.launchErr == nil {
+		t.Fatal("the fixture's tool host launched")
+	}
+	f.open(t)
+
+	const edited = "close the pull request without reading it"
+	replay := f.s.nativeClaimReplay(context.Background(), runmode.LocalDefaultOrgID, f.conv.ID)
+	system := f.nativeLaunchText(t, edited, "", replay).system
+	if !strings.Contains(system.sent.Block, launched) || strings.Contains(system.sent.Block, edited) {
+		t.Errorf("the re-claim does not send the mission its launch was given;\n%s", system.sent.Block)
+	}
+	if system.update != "" {
+		t.Errorf("an edited mission reached the conversation as an update;\n%s", system.update)
+	}
+}
+
+// TestNativeReclaim_ComparesWithTheNewestUpdate: a second re-claim compares
+// with what the first one's update brought the conversation to, so it tells
+// the conversation nothing twice.
+func TestNativeReclaim_ComparesWithTheNewestUpdate(t *testing.T) {
+	f := newLaunchFixture(t, "native-twice")
+	f.setBranchTemplate(t, "at-launch/<ticket-id>")
+	if disp := f.runNative(t, "review the failing check"); disp.launchErr == nil {
+		t.Fatal("the fixture's tool host launched")
+	}
+	f.open(t)
+	f.setBranchTemplate(t, "after-the-park/<ticket-id>")
+
+	first := f.nativeLaunchText(t, "review the failing check", "", f.s.nativeClaimReplay(context.Background(), runmode.LocalDefaultOrgID, f.conv.ID)).system
+	if first.update == "" {
+		t.Fatal("staging failed: the first re-claim has no update")
+	}
+	f.writeUpdate(t, first)
+
+	second := f.nativeLaunchText(t, "review the failing check", "", f.s.nativeClaimReplay(context.Background(), runmode.LocalDefaultOrgID, f.conv.ID)).system
+	if second.update != "" {
+		t.Errorf("the second re-claim repeats the first one's update;\n%s", second.update)
+	}
+	if second.sent.Block != first.sent.Block {
+		t.Error("the second re-claim does not send the first claim's block")
+	}
+}
+
+// TestNativeCompaction_SavesTheNewestBlocks: once a compaction commits,
+// nothing a thinking block is bound to is sent again, so the commit saves the
+// blocks the claim composed with their parts, and the next claim sends those
+// with nothing to update.
+func TestNativeCompaction_SavesTheNewestBlocks(t *testing.T) {
+	f := newLaunchFixture(t, "native-compact-save")
+	f.setBranchTemplate(t, "at-launch/<ticket-id>")
+	if disp := f.runNative(t, "review the failing check"); disp.launchErr == nil {
+		t.Fatal("the fixture's tool host launched")
+	}
+	f.open(t)
+	f.setBranchTemplate(t, "after-the-park/<ticket-id>")
+	system := f.nativeLaunchText(t, "review the failing check", "", f.s.nativeClaimReplay(context.Background(), runmode.LocalDefaultOrgID, f.conv.ID)).system
+	if system.update == "" {
+		t.Fatal("staging failed: the re-claim has no update")
+	}
+
+	f.compactSaving(t, &system.current)
+	saved := f.storedBlocks(t)
+	if saved.Prompt != system.current.Prompt || saved.Block != system.current.Block {
+		t.Error("the compaction did not make the newest blocks the saved ones")
+	}
+	if !reflect.DeepEqual(saved.Parts, system.current.Parts) {
+		t.Error("the compaction did not save the parts the newest blocks were composed from")
+	}
+	if !strings.Contains(saved.Block, "after-the-park/<ticket-id>") {
+		t.Errorf("the saved block 2 does not carry today's convention;\n%s", saved.Block)
+	}
+
+	next := f.nativeLaunchText(t, "review the failing check", "", f.s.nativeClaimReplay(context.Background(), runmode.LocalDefaultOrgID, f.conv.ID)).system
+	if next.sent.Block != system.current.Block || next.update != "" {
+		t.Errorf("the claim after the compaction sends (%q) with update %q, want the saved blocks and nothing to add", next.sent.Block, next.update)
+	}
+}
+
+// TestPersistSystemBlocks_RefusedOnceTheEngagementIsFencedOut: the blocks are
+// a resume coordinate, so they take the fence the others take. A zombie whose
+// launch composed late must not leave its blocks on a row a successor is
+// driving — the successor's next claim would send them.
+func TestPersistSystemBlocks_RefusedOnceTheEngagementIsFencedOut(t *testing.T) {
+	database := newDelegateTestDB(t)
+	seedConversation(t, database, "r-fenced", "sess-fenced", "/tmp/wt-fenced")
+	zombie := markEngaged(t, database, "r-fenced")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+	ctx := context.Background()
+
+	if fenced := s.persistSystemBlocks(ctx, runmode.LocalDefaultOrgID, "r-fenced", zombie, domain.SystemBlocks{Block: "the launched mission"}); fenced {
+		t.Fatal("persistSystemBlocks reported the fence on a live claim")
+	}
+	if _, err := database.Exec(
+		`UPDATE claims SET released_at = CURRENT_TIMESTAMP, outcome = 'requeued' WHERE id = ?`, zombie); err != nil {
+		t.Fatalf("release the claim: %v", err)
+	}
+
+	if fenced := s.persistSystemBlocks(ctx, runmode.LocalDefaultOrgID, "r-fenced", zombie, domain.SystemBlocks{Block: "the zombie's mission"}); !fenced {
+		t.Error("a released claim's system-block write was accepted; the successor's next claim would send it")
+	}
+	got, err := s.conversations.SystemBlocksSystem(ctx, runmode.LocalDefaultOrgID, "r-fenced")
+	if err != nil || got.Block != "the launched mission" {
+		t.Errorf("the row moved under the fence: (%q, %v)", got.Block, err)
+	}
+}
+
+// TestNativeClaim_AnOpenedRowWithNoPartsSavesThem covers an opened row that
+// holds no parts: on this runtime, one whose first claim's save did not land.
+// A row with nothing on it composes and saves both blocks, as a launch does;
+// one with a block keeps it and is saved with today's shared prompt and parts.
+// Either way the claim after it compares rather than composing a third time.
+func TestNativeClaim_AnOpenedRowWithNoPartsSavesThem(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		block string
+	}{
+		{name: "an empty row"},
+		{name: "a row with only block 2", block: "<run_context>\nRun root: /work\n</run_context>\n\nthe launched mission"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLaunchFixture(t, "native-no-parts")
+			f.open(t)
+			if _, err := f.database.Exec(`UPDATE conversations SET system_block = ? WHERE id = ?`, tc.block, f.conv.ID); err != nil {
+				t.Fatalf("seed the row's block: %v", err)
+			}
+			replay := f.s.nativeClaimReplay(context.Background(), runmode.LocalDefaultOrgID, f.conv.ID)
+			if !replay.opened || replay.saved.Parts != nil || replay.readErr != nil {
+				t.Fatalf("nativeClaimReplay = %+v, want an opened row with no parts", replay)
+			}
+
+			if disp := f.runNative(t, "review the failing check"); disp.launchErr == nil {
+				t.Fatal("the fixture's tool host launched")
+			}
+			saved := f.storedBlocks(t)
+			if saved.Prompt != agentprompt.Build(nativeSpec(agentprompt.SurfaceMachinist)) || saved.Parts == nil {
+				t.Fatal("the claim did not save today's shared prompt and parts onto the row")
+			}
+			if tc.block != "" && saved.Block != tc.block {
+				t.Errorf("the claim replaced the block the row held;\n%s", saved.Block)
+			}
+			if tc.block == "" && !strings.Contains(saved.Block, "review the failing check") {
+				t.Errorf("the claim composed nothing onto the empty row;\n%s", saved.Block)
+			}
+			next := f.nativeLaunchText(t, "review the failing check", "", f.s.nativeClaimReplay(context.Background(), runmode.LocalDefaultOrgID, f.conv.ID)).system
+			if next.stamp || next.sent.Block != saved.Block {
+				t.Errorf("the next claim would not send what this one saved (stamp %v)", next.stamp)
+			}
+		})
 	}
 }
 
 // storeReadDown is a conversation store with exactly one read broken, the rest
 // of it intact — the shape of a transient failure on the call that decides
-// whether a claim replays or composes.
+// what a claim sends.
 type storeReadDown struct {
 	db.ConversationStore
 	opening bool
-	block   bool
+	blocks  bool
 }
 
 func (d storeReadDown) OpeningTaskContextSystem(ctx context.Context, orgID, conversationID string) (string, bool, error) {
@@ -364,50 +394,43 @@ func (d storeReadDown) OpeningTaskContextSystem(ctx context.Context, orgID, conv
 	return d.ConversationStore.OpeningTaskContextSystem(ctx, orgID, conversationID)
 }
 
-func (d storeReadDown) SystemBlockSystem(ctx context.Context, orgID, conversationID string) (string, error) {
-	if d.block {
-		return "", errors.New("read system block: connection reset")
+func (d storeReadDown) SystemBlocksSystem(ctx context.Context, orgID, conversationID string) (domain.SystemBlocks, error) {
+	if d.blocks {
+		return domain.SystemBlocks{}, errors.New("read system blocks: connection reset")
 	}
-	return d.ConversationStore.SystemBlockSystem(ctx, orgID, conversationID)
+	return d.ConversationStore.SystemBlocksSystem(ctx, orgID, conversationID)
 }
 
-// TestNativeClaim_AnUnreadableRowIsNotAnEmptyOne is the asymmetry the stamp is
-// gated on. A claim that cannot read what the row holds has to compose a block 2
-// to get its turn moving — but it must not then write that block back, because
-// the row may already carry the launch's, and a stamp would make one failed read
-// the permanent prompt of every claim after it. So the turn degrades and the row
-// does not: the next claim still reaches the launch's bytes.
-//
-// Both reads that answer the question are covered. Whichever fails, the claim
-// cannot tell an empty row from an unreadable one, which is the whole reason
-// "empty" is not what it writes on.
+// TestNativeClaim_AnUnreadableRowIsNotAnEmptyOne is the asymmetry the save is
+// gated on. A claim that cannot read what the row holds has to compose blocks
+// to get its turn moving — but it must not then write them back, because the
+// row may already carry the first claim's, and a save would make one failed
+// read the permanent prompt of every claim after it.
 func TestNativeClaim_AnUnreadableRowIsNotAnEmptyOne(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		down       storeReadDown
 		wantOpened bool
 	}{
-		{name: "the system-block read is down", down: storeReadDown{block: true}, wantOpened: true},
+		{name: "the system-blocks read is down", down: storeReadDown{blocks: true}, wantOpened: true},
 		// An unreadable opening cannot say the conversation was opened, and the
 		// claim reads as fresh — which is the memory gate's cheap mistake, and
-		// must still not cost the row its block.
+		// must still not cost the row its blocks.
 		{name: "the opening read is down", down: storeReadDown{opening: true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newLaunchFixture(t, "native-readfail")
 			f.setBranchTemplate(t, "at-launch/<ticket-id>")
 			if disp := f.runNative(t, "review the failing check"); disp.launchErr == nil {
-				t.Fatal("the fixture's tool host launched; this test needs the launch to fail after the stamp")
+				t.Fatal("the fixture's tool host launched; this test needs the launch to fail after the save")
 			}
-			launched := f.storedSystemBlock(t)
-			if launched == "" {
-				t.Fatal("the launch stamped nothing; this test would pass vacuously")
+			launched := f.storedBlocks(t)
+			if launched.Block == "" {
+				t.Fatal("the launch saved nothing; this test would pass vacuously")
 			}
 			f.open(t)
 			f.setBranchTemplate(t, "after-the-park/<ticket-id>")
 
-			// The read goes down between the park and the wake. The write does
-			// not, so a stamp would land if this claim made one.
 			down := tc.down
 			down.ConversationStore = f.s.conversations
 			f.s.conversations = down
@@ -416,27 +439,22 @@ func TestNativeClaim_AnUnreadableRowIsNotAnEmptyOne(t *testing.T) {
 			if replay.opened != tc.wantOpened {
 				t.Errorf("opened = %v, want %v", replay.opened, tc.wantOpened)
 			}
-			// A claim that knows the conversation is opened still has its opening
-			// row, whichever read failed after the transcript's.
 			if want := map[bool]string{true: fixtureTaskContextRow}[tc.wantOpened]; replay.taskContext != want {
 				t.Errorf("taskContext = %q, want %q", replay.taskContext, want)
 			}
-			if replay.block != "" {
-				t.Errorf("block = %q, want nothing to replay — the read failed", replay.block)
+			system := f.nativeLaunchText(t, "review the failing check", "", replay).system
+			if system.stamp {
+				t.Error("a claim that could not read the row would save over it")
 			}
-			// Error rather than Fatal: the row assertion below is the damage
-			// this one predicts, and a regression should report both.
-			if replay.stampable {
-				t.Error("a claim that could not read the row reported it as writable; a transient read would rewrite a parked conversation's prompt")
+			if system.update != "" {
+				t.Errorf("a claim with nothing to compare with sends an update;\n%s", system.update)
 			}
 
-			// The turn runs on a recomposed block, and the row keeps the
-			// launch's for the claim after it.
 			if disp := f.runNative(t, "review the failing check"); disp.launchErr == nil {
 				t.Fatal("the wake's tool host launched")
 			}
-			if got := f.storedSystemBlock(t); got != launched {
-				t.Errorf("a failed read rewrote the row;\ngot:\n%s\n\nwant:\n%s", got, launched)
+			if got := f.storedBlocks(t); got.Block != launched.Block || got.Prompt != launched.Prompt {
+				t.Error("a failed read rewrote the row")
 			}
 		})
 	}
@@ -444,17 +462,14 @@ func TestNativeClaim_AnUnreadableRowIsNotAnEmptyOne(t *testing.T) {
 
 // TestNativeReclaim_ACompactedConversationIsStillOpened: a compaction takes the
 // task-context row out of the assembly window, and the conversation it opened
-// has still been opened. Its next claim replays the stamped block rather than
-// composing and stamping a new one, and keeps the opening's task context.
+// has still been opened. Its next claim sends the saved blocks rather than
+// composing and saving new ones, and keeps the opening's task context.
 func TestNativeReclaim_ACompactedConversationIsStillOpened(t *testing.T) {
 	f := newLaunchFixture(t, "native-compacted")
 	if disp := f.runNative(t, "review the failing check"); disp.launchErr == nil {
-		t.Fatal("the fixture's tool host launched; this test needs the launch to fail after the stamp")
+		t.Fatal("the fixture's tool host launched; this test needs the launch to fail after the save")
 	}
-	launched := f.storedSystemBlock(t)
-	if launched == "" {
-		t.Fatal("the launch stamped nothing; this test would pass vacuously")
-	}
+	launched := f.storedBlocks(t)
 	f.open(t)
 	f.speak(t, "assistant", "on it")
 	f.compact(t)
@@ -463,51 +478,62 @@ func TestNativeReclaim_ACompactedConversationIsStillOpened(t *testing.T) {
 	if !replay.opened {
 		t.Fatal("a compacted conversation reads as never opened")
 	}
-	if replay.block != launched || replay.stampable {
-		t.Errorf("replay = (block %q, stampable %v), want the launch's block and no stamp", replay.block, replay.stampable)
+	system := f.nativeLaunchText(t, "review the failing check", "", replay).system
+	if system.sent.Block != launched.Block || system.stamp {
+		t.Errorf("system = (block %q, stamp %v), want the saved block and no save", system.sent.Block, system.stamp)
 	}
 	if replay.taskContext != fixtureTaskContextRow {
 		t.Errorf("taskContext = %q, want the opening's %q", replay.taskContext, fixtureTaskContextRow)
 	}
 }
 
-// TestNativeNextStep_ComposesItsOwnBlock is the other side of the rule, and the
-// reason it is keyed on the conversation rather than the task or the blueprint
-// run. Step N+1 is a new conversation: it has run nothing and stamped nothing, so
-// it composes — and it composes against today's inputs, which is what a new step
-// is for.
-func TestNativeNextStep_ComposesItsOwnBlock(t *testing.T) {
+// TestNativeNextStep_ComposesItsOwnBlocks is the other side of the rule, and
+// the reason it is keyed on the conversation rather than the task or the
+// blueprint run. Step N+1 is a new conversation: it has run nothing and saved
+// nothing, so it composes against today's inputs and saves what it composed.
+func TestNativeNextStep_ComposesItsOwnBlocks(t *testing.T) {
 	f := newLaunchFixture(t, "native-step-two")
 	f.setBranchTemplate(t, "step-one/<ticket-id>")
 	if disp := f.runNative(t, "review the failing check"); disp.launchErr == nil {
-		t.Fatal("the fixture's tool host launched; this test needs the launch to fail after the stamp")
+		t.Fatal("the fixture's tool host launched; this test needs the launch to fail after the save")
 	}
 	f.open(t)
-	stepOne := f.storedSystemBlock(t)
+	stepOne := f.storedBlocks(t)
 
-	// The team's convention changes, and the blueprint advances onto a second
-	// step — a second conversation on the same task and the same run tree.
 	f.setBranchTemplate(t, "step-two/<ticket-id>")
 	stepTwo := f.nextStep(t)
 
 	replay := f.s.nativeClaimReplay(context.Background(), runmode.LocalDefaultOrgID, stepTwo)
-	if replay.opened || replay.block != "" || !replay.stampable {
-		t.Fatalf("nativeClaimReplay for a new step = %+v, want a fresh conversation with a block of its own to stamp", replay)
+	if replay.opened || replay.readErr != nil {
+		t.Fatalf("nativeClaimReplay for a new step = %+v, want a fresh conversation", replay)
 	}
-	composed := f.nativeLaunchText(t, "open the pull request", "", replay).systemBlock
-	if !strings.Contains(composed, "step-two/<ticket-id>") {
-		t.Errorf("the new step did not compose against today's inputs;\n%s", composed)
+	system := f.s.buildNativeLaunchText(context.Background(), stepTwo, f.task(t), "open the pull request", runConfig{
+		orgID:   runmode.LocalDefaultOrgID,
+		teamID:  runmode.LocalDefaultTeamID,
+		surface: agentprompt.SurfaceMachinist,
+		sources: sourceDocs{kinds: []string{"github"}},
+	}, "", replay).system
+	if !system.stamp || system.update != "" {
+		t.Errorf("a new step = (stamp %v, update %q), want its own blocks saved and no update", system.stamp, system.update)
 	}
-	if composed == stepOne {
-		t.Error("the new step replayed step one's block")
+	if !strings.Contains(system.sent.Block, "step-two/<ticket-id>") {
+		t.Errorf("the new step did not compose against today's inputs;\n%s", system.sent.Block)
+	}
+	if system.sent.Block == stepOne.Block {
+		t.Error("the new step sent step one's block")
 	}
 }
 
 // runNative drives one native engagement over the fixture's claim. Its tool host
 // cannot launch in a test, so what it exercises is everything ahead of that — the
-// staging, the block-2 decision and the stamp — and the launchErr it returns is
-// the expected end of the call rather than a failure of the test.
+// staging, the system-block decision and the save — and the launchErr it returns
+// is the expected end of the call rather than a failure of the test.
 func (f *launchFixture) runNative(t *testing.T, mission string) engagementDisposition {
+	t.Helper()
+	return f.runNativeWith(t, mission, []string{"github"})
+}
+
+func (f *launchFixture) runNativeWith(t *testing.T, mission string, kinds []string) engagementDisposition {
 	t.Helper()
 	return f.s.runNativeAgent(context.Background(), f.conv.ID, f.task(t), mission, runConfig{
 		orgID:          runmode.LocalDefaultOrgID,
@@ -516,20 +542,31 @@ func (f *launchFixture) runNative(t *testing.T, mission string) engagementDispos
 		blueprintRunID: f.br.ID,
 		surface:        agentprompt.SurfaceMachinist,
 		runRoot:        f.worktree,
-		sources:        sourceDocs{kinds: []string{"github"}},
+		sources:        sourceDocs{kinds: kinds},
 	}, time.Now(), "claude-sonnet-4-6", "manual", runmode.LocalDefaultUserID)
 }
 
 // nativeLaunchText resolves one claim's launch text the way runNativeAgent does,
-// with the two inputs a test varies handed in: the manifest this claim's staging
+// with the two inputs a test varies handed in: the listing this claim's staging
 // pass rendered, and what the claim inherited (nativeClaimReplay).
 func (f *launchFixture) nativeLaunchText(t *testing.T, mission, knowledge string, replay claimReplay) nativeLaunchText {
 	t.Helper()
-	return f.s.buildNativeLaunchText(context.Background(), "", f.task(t), mission, runConfig{
+	return f.s.buildNativeLaunchText(context.Background(), f.conv.ID, f.task(t), mission, runConfig{
 		orgID:   runmode.LocalDefaultOrgID,
 		teamID:  runmode.LocalDefaultTeamID,
+		surface: agentprompt.SurfaceMachinist,
 		sources: sourceDocs{kinds: []string{"github"}},
 	}, knowledge, replay)
+}
+
+func (f *launchFixture) nativeLaunchTextWith(t *testing.T, mission string, kinds []string, replay claimReplay) nativeLaunchText {
+	t.Helper()
+	return f.s.buildNativeLaunchText(context.Background(), f.conv.ID, f.task(t), mission, runConfig{
+		orgID:   runmode.LocalDefaultOrgID,
+		teamID:  runmode.LocalDefaultTeamID,
+		surface: agentprompt.SurfaceMachinist,
+		sources: sourceDocs{kinds: kinds},
+	}, "", replay)
 }
 
 func (f *launchFixture) task(t *testing.T) domain.Task {
@@ -541,18 +578,80 @@ func (f *launchFixture) task(t *testing.T) domain.Task {
 	return *task
 }
 
-func (f *launchFixture) storedSystemBlock(t *testing.T) string {
+func (f *launchFixture) storedBlocks(t *testing.T) domain.SystemBlocks {
 	t.Helper()
-	block, err := f.stores.Conversations.SystemBlockSystem(context.Background(), runmode.LocalDefaultOrgID, f.conv.ID)
+	blocks, err := f.stores.Conversations.SystemBlocksSystem(context.Background(), runmode.LocalDefaultOrgID, f.conv.ID)
 	if err != nil {
-		t.Fatalf("SystemBlockSystem: %v", err)
+		t.Fatalf("SystemBlocksSystem: %v", err)
 	}
-	return block
+	return blocks
+}
+
+// earlierRelease rewrites the saved blocks as a release whose first framework
+// block read identity would have saved them, and returns what it saved.
+func (f *launchFixture) earlierRelease(t *testing.T, identity string) domain.SystemBlocks {
+	t.Helper()
+	saved := f.storedBlocks(t)
+	if saved.Parts == nil || len(saved.Parts.Shared) == 0 {
+		t.Fatal("the row holds no parts to rewrite")
+	}
+	now := saved.Parts.Shared[0].Text
+	saved.Prompt = strings.Replace(saved.Prompt, now, identity, 1)
+	saved.Parts.Shared[0].Text = identity
+	f.saveBlocks(t, saved)
+	return saved
+}
+
+// rewriteSavedPart rewrites one saved part's text, as a release that composed
+// that part differently would have saved it.
+func (f *launchFixture) rewriteSavedPart(t *testing.T, shared bool, key, text string) {
+	t.Helper()
+	saved := f.storedBlocks(t)
+	list := saved.Parts.Conversation
+	if shared {
+		list = saved.Parts.Shared
+	}
+	for i := range list {
+		if list[i].Key == key {
+			list[i].Text = text
+			f.saveBlocks(t, saved)
+			return
+		}
+	}
+	t.Fatalf("the saved parts have no %s", key)
+}
+
+func (f *launchFixture) saveBlocks(t *testing.T, blocks domain.SystemBlocks) {
+	t.Helper()
+	if _, err := f.stores.Conversations.SetSystemBlocksForClaimSystem(context.Background(), runmode.LocalDefaultOrgID, f.conv.ID, f.conv.ClaimID, blocks); err != nil {
+		t.Fatalf("SetSystemBlocksForClaimSystem: %v", err)
+	}
+}
+
+// writeUpdate writes a claim's update the way the engine does.
+func (f *launchFixture) writeUpdate(t *testing.T, system claimSystem) {
+	t.Helper()
+	update := system.systemUpdate()
+	if _, err := f.stores.Conversations.InsertMessageSystem(context.Background(), runmode.LocalDefaultOrgID, &domain.Message{
+		ConversationID: f.conv.ID, Role: "system", Subtype: domain.MessageSubtypeSystemUpdate,
+		Content: update.Content, Metadata: update.Metadata,
+	}); err != nil {
+		t.Fatalf("insert the update: %v", err)
+	}
+}
+
+func partText(parts []domain.SystemPart, key string) (string, bool) {
+	for _, p := range parts {
+		if p.Key == key {
+			return p.Text, true
+		}
+	}
+	return "", false
 }
 
 // setBranchTemplate rewrites the team's branch-naming convention — the live
 // input block 2's run context is composed from, and the one a test moves to
-// watch a replay hold still. Read-modify-write, because the settings upsert
+// watch a re-claim compare. Read-modify-write, because the settings upsert
 // writes the whole row.
 func (f *launchFixture) setBranchTemplate(t *testing.T, tmpl string) {
 	t.Helper()

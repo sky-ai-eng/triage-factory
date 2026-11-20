@@ -121,6 +121,32 @@ func Build(spec Spec) string {
 	return static + "\n"
 }
 
+// Section is one block file of a composed framework prompt: its path under
+// blocks/, and its text as Build joins it.
+type Section struct {
+	Path string
+	Text string
+}
+
+// Sections returns the block files Build(spec) is composed of, in the order it
+// joins them: Build(spec) is their texts joined by a blank line, plus one
+// trailing newline.
+//
+// It exists so a caller can tell which block files differ between two
+// compositions, which the joined string cannot say. Panics on a Spec no arm
+// covers, as Build does.
+func Sections(spec Spec) []Section {
+	paths, err := manifest(spec)
+	if err != nil {
+		panic(err.Error())
+	}
+	out := make([]Section, 0, len(paths))
+	for _, p := range paths {
+		out = append(out, Section{Path: p, Text: block(p)})
+	}
+	return out
+}
+
 // nonTerminalCompletion is the handoff addendum, resolved once at init for the
 // same reason staticPrompts is — it is read on every non-final blueprint step
 // dispatch and never varies.

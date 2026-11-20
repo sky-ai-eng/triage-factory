@@ -48,27 +48,14 @@ func (s *pollReadinessStore) MarkPollComplete(ctx context.Context, orgID, source
 }
 
 func (s *pollReadinessStore) Ready(ctx context.Context, orgID, source string) (bool, error) {
-	var restartedAt, lastPollAt sql.NullTime
+	var ready bool
 	err := s.q.QueryRowContext(ctx, `
-		SELECT restarted_at, last_poll_at FROM poll_readiness WHERE org_id = ? AND source = ?
-	`, orgID, source).Scan(&restartedAt, &lastPollAt)
-	if err == sql.ErrNoRows {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	if !lastPollAt.Valid {
-		return false, nil
-	}
-	if !restartedAt.Valid {
-		return true, nil
-	}
-	// Not-before rather than after: a restart nulls last_poll_at and
-	// MarkPollComplete admits only a poll that started at or after the restart,
-	// so a stored completion is already post-restart, and a clock that ticks
-	// coarsely (Windows) can stamp both with the same instant.
-	return !lastPollAt.Time.Before(restartedAt.Time), nil
+		SELECT EXISTS (
+			SELECT 1 FROM poll_readiness
+			WHERE org_id = ? AND source = ? AND last_poll_at IS NOT NULL
+		)
+	`, orgID, source).Scan(&ready)
+	return ready, err
 }
 
 func (s *pollReadinessStore) TakeAnnouncePending(ctx context.Context, orgID, source string) (bool, error) {

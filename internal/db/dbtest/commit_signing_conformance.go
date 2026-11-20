@@ -17,8 +17,10 @@ import (
 // OrgCommitSignerStoreFactory hands the conformance suite a wired store over
 // storage no earlier subtest wrote to, the org every call is scoped to, and a
 // user in that org to stamp as the signer's creator. Both rows must exist:
-// org_commit_signers carries foreign keys to orgs and users.
-type OrgCommitSignerStoreFactory func(t *testing.T) (store db.OrgCommitSignerStore, orgID, userID string)
+// org_commit_signers carries foreign keys to orgs and users. age moves the
+// org's signer's status_since and checked_at d earlier, so a subtest that
+// asserts a write moved them does not depend on the clock's resolution.
+type OrgCommitSignerStoreFactory func(t *testing.T) (store db.OrgCommitSignerStore, orgID, userID string, age func(t *testing.T, d time.Duration))
 
 const (
 	signerKeyA = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -33,6 +35,18 @@ const (
 func RunOrgCommitSignerStoreConformance(t *testing.T, mk OrgCommitSignerStoreFactory) {
 	t.Helper()
 	ctx := context.Background()
+	// aged moves the signer's stamps a minute back and reads it, so the next
+	// write that stamps them moves them later whatever the clock's
+	// resolution.
+	aged := func(t *testing.T, store db.OrgCommitSignerStore, orgID string, age func(*testing.T, time.Duration)) domain.OrgCommitSigner {
+		t.Helper()
+		age(t, time.Minute)
+		got, err := store.Get(ctx, orgID)
+		if err != nil || got == nil {
+			t.Fatalf("Get after aging = %+v, %v", got, err)
+		}
+		return *got
+	}
 
 	newSigner := func(orgID, userID string) domain.OrgCommitSigner {
 		return domain.OrgCommitSigner{
@@ -47,7 +61,7 @@ func RunOrgCommitSignerStoreConformance(t *testing.T, mk OrgCommitSignerStoreFac
 	}
 
 	t.Run("an_org_without_a_signer_reads_as_absent", func(t *testing.T) {
-		store, orgID, _ := mk(t)
+		store, orgID, _, _ := mk(t)
 		for name, get := range map[string]func(context.Context, string) (*domain.OrgCommitSigner, error){
 			"Get": store.Get, "GetSystem": store.GetSystem,
 		} {
@@ -62,7 +76,7 @@ func RunOrgCommitSignerStoreConformance(t *testing.T, mk OrgCommitSignerStoreFac
 	})
 
 	t.Run("create_stores_a_pending_signer_whatever_the_caller_passed", func(t *testing.T) {
-		store, orgID, userID := mk(t)
+		store, orgID, userID, _ := mk(t)
 		in := newSigner(orgID, userID)
 		// None of these belong to a new signer, so none may be stored.
 		in.Status = domain.CommitSignerActive
@@ -105,7 +119,7 @@ func RunOrgCommitSignerStoreConformance(t *testing.T, mk OrgCommitSignerStoreFac
 	})
 
 	t.Run("an_org_has_one_signer", func(t *testing.T) {
-		store, orgID, userID := mk(t)
+		store, orgID, userID, _ := mk(t)
 		first, err := store.Create(ctx, newSigner(orgID, userID))
 		if err != nil {
 			t.Fatalf("Create: %v", err)
@@ -125,7 +139,7 @@ func RunOrgCommitSignerStoreConformance(t *testing.T, mk OrgCommitSignerStoreFac
 	})
 
 	t.Run("create_refuses_a_signer_with_no_account_or_key", func(t *testing.T) {
-		store, orgID, userID := mk(t)
+		store, orgID, userID, _ := mk(t)
 		for name, mutate := range map[string]func(*domain.OrgCommitSigner){
 			"no host":       func(s *domain.OrgCommitSigner) { s.Host = "" },
 			"no account id": func(s *domain.OrgCommitSigner) { s.GitHubUserID = 0 },
@@ -148,7 +162,7 @@ func RunOrgCommitSignerStoreConformance(t *testing.T, mk OrgCommitSignerStoreFac
 	})
 
 	t.Run("the_email_override_is_set_and_cleared", func(t *testing.T) {
-		store, orgID, userID := mk(t)
+		store, orgID, userID, _ := mk(t)
 		if _, err := store.SetEmailOverride(ctx, orgID, "bot@example.com"); !errors.Is(err, db.ErrNoSuchOrgCommitSigner) {
 			t.Fatalf("SetEmailOverride with no signer = %v, want ErrNoSuchOrgCommitSigner", err)
 		}
@@ -177,7 +191,7 @@ func RunOrgCommitSignerStoreConformance(t *testing.T, mk OrgCommitSignerStoreFac
 	})
 
 	t.Run("a_rotation_promotes_its_key_only_once_found", func(t *testing.T) {
-		store, orgID, userID := mk(t)
+		store, orgID, userID, _ := mk(t)
 		if _, err := store.StagePendingKey(ctx, orgID, signerKeyB); !errors.Is(err, db.ErrNoSuchOrgCommitSigner) {
 			t.Fatalf("StagePendingKey with no signer = %v, want ErrNoSuchOrgCommitSigner", err)
 		}
@@ -237,12 +251,11 @@ func RunOrgCommitSignerStoreConformance(t *testing.T, mk OrgCommitSignerStoreFac
 	})
 
 	t.Run("activate_moves_status_since_only_on_a_change", func(t *testing.T) {
-		store, orgID, userID := mk(t)
-		created, err := store.Create(ctx, newSigner(orgID, userID))
-		if err != nil {
+		store, orgID, userID, age := mk(t)
+		if _, err := store.Create(ctx, newSigner(orgID, userID)); err != nil {
 			t.Fatalf("Create: %v", err)
 		}
-		time.Sleep(5 * time.Millisecond)
+		created := aged(t, store, orgID, age)
 		first, err := store.Activate(ctx, orgID, signerKeyA)
 		if err != nil {
 			t.Fatalf("Activate: %v", err)
@@ -256,7 +269,7 @@ func RunOrgCommitSignerStoreConformance(t *testing.T, mk OrgCommitSignerStoreFac
 		if first.CheckedAt == nil {
 			t.Fatal("checked_at = nil after Activate, want the verify stamped")
 		}
-		time.Sleep(5 * time.Millisecond)
+		first = aged(t, store, orgID, age)
 		second, err := store.Activate(ctx, orgID, signerKeyA)
 		if err != nil {
 			t.Fatalf("Activate again: %v", err)
@@ -271,14 +284,14 @@ func RunOrgCommitSignerStoreConformance(t *testing.T, mk OrgCommitSignerStoreFac
 	})
 
 	t.Run("activate_with_no_signer_is_a_miss", func(t *testing.T) {
-		store, orgID, _ := mk(t)
+		store, orgID, _, _ := mk(t)
 		if _, err := store.Activate(ctx, orgID, signerKeyA); !errors.Is(err, db.ErrNoSuchOrgCommitSigner) {
 			t.Fatalf("Activate with no signer = %v, want ErrNoSuchOrgCommitSigner", err)
 		}
 	})
 
 	t.Run("delete_removes_the_signer", func(t *testing.T) {
-		store, orgID, userID := mk(t)
+		store, orgID, userID, _ := mk(t)
 		if err := store.Delete(ctx, orgID); !errors.Is(err, db.ErrNoSuchOrgCommitSigner) {
 			t.Fatalf("Delete with no signer = %v, want ErrNoSuchOrgCommitSigner", err)
 		}
@@ -306,20 +319,19 @@ func RunOrgCommitSignerStoreConformance(t *testing.T, mk OrgCommitSignerStoreFac
 	}
 
 	t.Run("a_key_check_breaks_an_active_signer_and_restores_it", func(t *testing.T) {
-		store, orgID, userID := mk(t)
+		store, orgID, userID, age := mk(t)
 		if got, err := store.RecordKeyCheckSystem(ctx, orgID, keyCheck(false)); err != nil || got != nil {
 			t.Fatalf("RecordKeyCheckSystem with no signer = %+v, %v; want nil", got, err)
 		}
 		if _, err := store.Create(ctx, newSigner(orgID, userID)); err != nil {
 			t.Fatalf("Create: %v", err)
 		}
-		active, err := store.Activate(ctx, orgID, signerKeyA)
-		if err != nil {
+		if _, err := store.Activate(ctx, orgID, signerKeyA); err != nil {
 			t.Fatalf("Activate: %v", err)
 		}
 		read := func() (*domain.OrgCommitSigner, error) { return store.GetSystem(ctx, orgID) }
 
-		time.Sleep(5 * time.Millisecond)
+		active := aged(t, store, orgID, age)
 		missing, err := store.RecordKeyCheckSystem(ctx, orgID, keyCheck(false))
 		if err != nil || missing == nil {
 			t.Fatalf("RecordKeyCheckSystem (key gone) = %+v, %v", missing, err)
@@ -335,7 +347,7 @@ func RunOrgCommitSignerStoreConformance(t *testing.T, mk OrgCommitSignerStoreFac
 			t.Errorf("checked_at = %v, want a new stamp after %s", missing.CheckedAt, active.CheckedAt)
 		}
 
-		time.Sleep(5 * time.Millisecond)
+		*missing = aged(t, store, orgID, age)
 		again, err := store.RecordKeyCheckSystem(ctx, orgID, keyCheck(false))
 		if err != nil || again == nil {
 			t.Fatalf("RecordKeyCheckSystem (still gone) = %+v, %v", again, err)
@@ -344,7 +356,7 @@ func RunOrgCommitSignerStoreConformance(t *testing.T, mk OrgCommitSignerStoreFac
 			t.Errorf("a second missing check: status %q since %s, want broken since %s", again.Status, again.StatusSince, missing.StatusSince)
 		}
 
-		time.Sleep(5 * time.Millisecond)
+		*missing = aged(t, store, orgID, age)
 		back, err := store.RecordKeyCheckSystem(ctx, orgID, keyCheck(true))
 		if err != nil || back == nil {
 			t.Fatalf("RecordKeyCheckSystem (key back) = %+v, %v", back, err)
@@ -359,7 +371,7 @@ func RunOrgCommitSignerStoreConformance(t *testing.T, mk OrgCommitSignerStoreFac
 	})
 
 	t.Run("a_key_check_refreshes_the_account", func(t *testing.T) {
-		store, orgID, userID := mk(t)
+		store, orgID, userID, _ := mk(t)
 		if _, err := store.Create(ctx, newSigner(orgID, userID)); err != nil {
 			t.Fatalf("Create: %v", err)
 		}
@@ -383,7 +395,7 @@ func RunOrgCommitSignerStoreConformance(t *testing.T, mk OrgCommitSignerStoreFac
 	})
 
 	t.Run("a_key_check_leaves_other_statuses_and_other_keys", func(t *testing.T) {
-		store, orgID, userID := mk(t)
+		store, orgID, userID, _ := mk(t)
 		created, err := store.Create(ctx, newSigner(orgID, userID))
 		if err != nil {
 			t.Fatalf("Create: %v", err)
@@ -430,7 +442,7 @@ func RunOrgCommitSignerStoreConformance(t *testing.T, mk OrgCommitSignerStoreFac
 	})
 
 	t.Run("a_failing_commit_breaks_an_active_signer_and_the_first_reason_holds", func(t *testing.T) {
-		store, orgID, userID := mk(t)
+		store, orgID, userID, age := mk(t)
 		if got, err := store.BreakSystem(ctx, orgID, signerKeyA, "no_user"); err != nil || got != nil {
 			t.Fatalf("BreakSystem with no signer = %+v, %v; want nil", got, err)
 		}
@@ -453,7 +465,7 @@ func RunOrgCommitSignerStoreConformance(t *testing.T, mk OrgCommitSignerStoreFac
 			}
 		}
 
-		time.Sleep(5 * time.Millisecond)
+		active = aged(t, store, orgID, age)
 		broken, err := store.BreakSystem(ctx, orgID, signerKeyA, "unverified_email")
 		if err != nil || broken == nil {
 			t.Fatalf("BreakSystem = %+v, %v", broken, err)
@@ -473,7 +485,7 @@ func RunOrgCommitSignerStoreConformance(t *testing.T, mk OrgCommitSignerStoreFac
 	})
 
 	t.Run("a_failing_commit_replaces_key_missing_unless_it_is_the_missing_key", func(t *testing.T) {
-		store, orgID, userID := mk(t)
+		store, orgID, userID, _ := mk(t)
 		if _, err := store.Create(ctx, newSigner(orgID, userID)); err != nil {
 			t.Fatalf("Create: %v", err)
 		}
@@ -497,7 +509,7 @@ func RunOrgCommitSignerStoreConformance(t *testing.T, mk OrgCommitSignerStoreFac
 	})
 
 	t.Run("health_lists_each_signer", func(t *testing.T) {
-		store, orgID, userID := mk(t)
+		store, orgID, userID, _ := mk(t)
 		if _, err := store.Create(ctx, newSigner(orgID, userID)); err != nil {
 			t.Fatalf("Create: %v", err)
 		}
@@ -539,6 +551,10 @@ type CommitSignatureSeeder struct {
 	// Repository inserts a registry row for a push to land in and returns
 	// its id.
 	Repository func(t *testing.T) string
+
+	// AgePush moves a signature's pushed_at d earlier, so pushes made back to
+	// back have an order that cannot tie.
+	AgePush func(t *testing.T, signatureID string, d time.Duration)
 }
 
 const (
@@ -1006,7 +1022,6 @@ func RunCommitSignatureStoreConformance(t *testing.T, mk CommitSignatureStoreFac
 				t.Fatalf("InsertSystem: %v", err)
 			}
 			if push {
-				time.Sleep(5 * time.Millisecond)
 				if _, err := store.MarkPushedSystem(ctx, orgID, row.ID, repositoryID); err != nil {
 					t.Fatalf("MarkPushedSystem: %v", err)
 				}
@@ -1014,6 +1029,9 @@ func RunCommitSignatureStoreConformance(t *testing.T, mk CommitSignatureStoreFac
 			return row
 		}
 		older := insert(domain.CommitSigningOrg, true)
+		// Pushed back to back, the two could share a pushed_at, which the
+		// read leaves to the id.
+		seed.AgePush(t, older.ID, time.Minute)
 		newer := insert(domain.CommitSigningOrg, true)
 		insert(domain.CommitSigningOrg, false)
 		checked := insert(domain.CommitSigningOrg, true)
@@ -1118,6 +1136,10 @@ type CommitSignatureQueueFixture struct {
 	// claimed at claimedAt with a five-minute lease, released or not, and
 	// returns both ids.
 	Claim func(t *testing.T, claimedAt time.Time, released bool) (conversationID, claimID string)
+
+	// AgeRequest moves a signature row's created_at d earlier, so requests
+	// made back to back have an order that cannot tie.
+	AgeRequest func(t *testing.T, signatureID string, d time.Duration)
 }
 
 // CommitSignatureQueueFactory hands the queue suite a fixture over storage no
@@ -1142,7 +1164,6 @@ func RunCommitSignatureQueueConformance(t *testing.T, mk CommitSignatureQueueFac
 	)
 	request := func(t *testing.T, f CommitSignatureQueueFixture, conversationID, claimID string) domain.CommitSignature {
 		t.Helper()
-		awaitClockTick()
 		row, err := f.Signatures.InsertSystem(ctx, domain.CommitSignature{
 			OrgID:          f.OrgID,
 			ConversationID: conversationID,
@@ -1330,6 +1351,10 @@ func RunCommitSignatureQueueConformance(t *testing.T, mk CommitSignatureQueueFac
 		first := request(t, f, conversationID, claimID)
 		claimed := request(t, f, conversationID, claimID)
 		third := request(t, f, conversationID, claimID)
+		// Made back to back, the requests could share a created_at, which
+		// the sweep's order leaves to the id.
+		f.AgeRequest(t, first.ID, 2*time.Second)
+		f.AgeRequest(t, claimed.ID, time.Second)
 		if _, err := f.Signatures.ClaimRequestSystem(ctx, f.OrgID, claimed.ID, "pod-a"); err != nil {
 			t.Fatalf("ClaimRequestSystem: %v", err)
 		}

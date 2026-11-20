@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -14,6 +15,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // newTestStats builds an ingestStats recording into an in-memory
@@ -297,5 +299,121 @@ func TestProcessEventsAPIEnvelope_FirstAttemptNotCounted(t *testing.T) {
 	}
 	if got := sumByAttr(t, reader, "slack.retry.deliveries", "transport"); len(got) != 0 {
 		t.Errorf("retry deliveries = %v; want none for a first-attempt envelope", got)
+	}
+}
+
+// gaugePoint is one datapoint of an int64 gauge: its attributes, as strings,
+// and its value.
+type gaugePoint struct {
+	attrs map[string]string
+	value int64
+}
+
+// gaugePoints collects metricName's datapoints from reader. A missing metric
+// yields none.
+func gaugePoints(t *testing.T, reader *sdkmetric.ManualReader, metricName string) []gaugePoint {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collect metrics: %v", err)
+	}
+	var out []gaugePoint
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != metricName {
+				continue
+			}
+			g, ok := m.Data.(metricdata.Gauge[int64])
+			if !ok {
+				t.Fatalf("metric %s: data is %T, want Gauge[int64]", metricName, m.Data)
+			}
+			for _, dp := range g.DataPoints {
+				p := gaugePoint{attrs: map[string]string{}, value: dp.Value}
+				for _, kv := range dp.Attributes.ToSlice() {
+					p.attrs[string(kv.Key)] = kv.Value.String()
+				}
+				out = append(out, p)
+			}
+		}
+	}
+	return out
+}
+
+// TestSocketGauge_OnePointPerConnection: each running connection reports 1
+// with its app, whether it is the deployment's, and its state, and a manager
+// running none reports nothing.
+func TestSocketGauge_OnePointPerConnection(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mgr := newSocketManager(db.Stores{}, nil, http.DefaultClient, nil)
+	registerSocketGauge(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)), mgr)
+
+	if got := gaugePoints(t, reader, "slack.socket.connections"); len(got) != 0 {
+		t.Fatalf("points with no connections = %v; want none", got)
+	}
+
+	mgr.conns["A0DEPLOY01"] = &appConnection{appID: "A0DEPLOY01", deployment: true, status: connStatus{State: stateAuthFailed}}
+	mgr.conns["A0ORGAPP01"] = &appConnection{appID: "A0ORGAPP01", orgID: "org-1", status: connStatus{State: stateOpen}}
+
+	got := map[string]gaugePoint{}
+	for _, p := range gaugePoints(t, reader, "slack.socket.connections") {
+		got[p.attrs["app_id"]] = p
+	}
+	for app, want := range map[string]map[string]string{
+		"A0DEPLOY01": {"app_id": "A0DEPLOY01", "deployment_app": "true", "state": stateAuthFailed},
+		"A0ORGAPP01": {"app_id": "A0ORGAPP01", "deployment_app": "false", "state": stateOpen},
+	} {
+		p, ok := got[app]
+		if !ok || p.value != 1 || !reflect.DeepEqual(p.attrs, want) {
+			t.Errorf("point for %s = %+v (present %v); want value 1 with %v", app, p, ok, want)
+		}
+	}
+	if len(got) != 2 {
+		t.Errorf("points = %v; want one per connection", got)
+	}
+}
+
+// TestDeploymentAppGauge: no series without a deployment app, 1 for a
+// configured app behind HTTPS, and 0 with the reason for a misconfigured one
+// or one behind a public URL that is not HTTPS.
+func TestDeploymentAppGauge(t *testing.T) {
+	app := deploymentApp{AppID: "A0DEPLOY01", ClientID: "1.2", ClientSecret: "s", SigningSecret: "x", Transport: transportEventsAPI}
+	for _, tc := range []struct {
+		name          string
+		app           deploymentApp
+		misconfigured bool
+		publicURL     string
+		want          []gaugePoint
+	}{
+		{"none", deploymentApp{}, false, "https://tf.example", nil},
+		{"configured", app, false, "https://tf.example", []gaugePoint{{map[string]string{"app_id": "A0DEPLOY01"}, 1}}},
+		{"insecure public URL", app, false, "http://tf.example", []gaugePoint{{map[string]string{"app_id": "A0DEPLOY01", "reason": deploymentAppInsecureURL}, 0}}},
+		{"misconfigured", deploymentApp{}, true, "https://tf.example", []gaugePoint{{map[string]string{"reason": deploymentAppMisconfigured}, 0}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reader := sdkmetric.NewManualReader()
+			registerDeploymentAppGauge(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)), tc.app, tc.misconfigured, staticURL(tc.publicURL))
+			if got := gaugePoints(t, reader, "slack.deployment_app.up"); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("points = %+v; want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestLifecycleEnqueue_DropsAndCountsWhenFull: an event the backlog has room
+// for is queued, and one it has none for is dropped and counted by type.
+func TestLifecycleEnqueue_DropsAndCountsWhenFull(t *testing.T) {
+	stats, reader := newTestStats()
+	adapter := newLifecycleAdapter(db.Stores{}, slackHTTPClient, staticURL(""), nil)
+	adapter.stats = stats
+	ch := make(chan domain.Event, 1)
+
+	adapter.enqueue(context.Background(), ch, domain.Event{EventType: "system:conversation:status"})
+	adapter.enqueue(context.Background(), ch, domain.Event{EventType: "system:conversation:activity"})
+
+	if len(ch) != 1 || (<-ch).EventType != "system:conversation:status" {
+		t.Error("the first event was not queued")
+	}
+	if got := sumByAttr(t, reader, "slack.lifecycle.dropped", "event_type"); got["system:conversation:activity"] != 1 || len(got) != 1 {
+		t.Errorf("lifecycle dropped = %v; want {system:conversation:activity: 1}", got)
 	}
 }

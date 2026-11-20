@@ -63,7 +63,6 @@ var ratchetPermanent = []ratchetEntry{
 	// Webhook receivers answer the provider's expected shapes, not ours.
 	{"internal/server/github_webhooks.go", "http.Error"},
 	{"internal/server/github_webhooks.go", "http.NotFound"},
-	{"ee/slack/webhook.go", "http.Error"},
 	// GoTrue admin-proxy deny: deliberately indistinguishable from an
 	// unknown path, so it must be Go's stock text 404.
 	{"internal/server/auth_proxy.go", "http.NotFound"},

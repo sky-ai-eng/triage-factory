@@ -130,16 +130,16 @@ func (r *Router) evaluateReDerive(ctx context.Context, orgID, taskID string) (re
 	}
 
 	scopeCache := teamScopeCache{}
-	matchedRules, matchedTriggers, _, err := r.matchHandlers(ctx, orgID, *evt, scopeCache)
+	taskMakers, automating, _, err := r.matchHandlers(ctx, orgID, *evt, scopeCache)
 	if err != nil {
 		return reDerivePlan{}, fmt.Errorf("match handlers for event %s: %w", evt.ID, err)
 	}
-	// With no deferred trigger matched, the event-time walk held nothing and
-	// decided every trigger; the score leaves nothing to decide.
-	if !slices.ContainsFunc(matchedTriggers, deferredTrigger) {
+	// With no deferred automating handler matched, the event-time walk held
+	// nothing and decided every one; the score leaves nothing to decide.
+	if !slices.ContainsFunc(automating, deferredTrigger) {
 		return plan, nil
 	}
-	routing, ok, err := r.resolveTeamRouting(ctx, orgID, *evt, task.EntityID, matchedRules, matchedTriggers, scopeCache)
+	routing, ok, err := r.resolveTeamRouting(ctx, orgID, *evt, task.EntityID, taskMakers, automating, scopeCache)
 	if err != nil {
 		return reDerivePlan{}, fmt.Errorf("resolve owner for event %s: %w", evt.ID, err)
 	}
@@ -195,22 +195,4 @@ func (r *Router) evaluateReDerive(ctx context.Context, orgID, taskID string) (re
 	}
 	plan.Conflict = walk.conflict(routing)
 	return plan, nil
-}
-
-// derefIntDefault unwraps a *int with a default if nil. Used on
-// trigger-only fields that are nullable on the column level but
-// guaranteed non-nil by the per-kind CHECK constraint for kind='trigger'
-// rows; the default is the defensive value for the impossible nil case.
-func derefIntDefault(p *int, def int) int {
-	if p == nil {
-		return def
-	}
-	return *p
-}
-
-func derefFloatDefault(p *float64, def float64) float64 {
-	if p == nil {
-		return def
-	}
-	return *p
 }

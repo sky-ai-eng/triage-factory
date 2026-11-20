@@ -37,10 +37,10 @@ func TestSpendStore_SQLite(t *testing.T) {
 			t.Fatalf("seed agent: %v", err)
 		}
 
-		// A blueprint + trigger event_handler so an autonomous run can carry a
-		// non-NULL trigger_id (conversations.trigger_id FK → event_handlers;
-		// the trigger's same-team FK → blueprints). event_type is a stable
-		// seeded catalog id.
+		// A blueprint + an event_handler in automate so an autonomous run can
+		// carry a non-NULL trigger_id (conversations.trigger_id FK →
+		// event_handlers; the handler's same-team FK → blueprints). event_type
+		// is a stable seeded catalog id.
 		// The view passes conversations.trigger_id straight through (TFAC-478).
 		blueprintID := uuid.New().String()
 		if _, err := conn.Exec(
@@ -52,8 +52,8 @@ func TestSpendStore_SQLite(t *testing.T) {
 		triggerID := uuid.New().String()
 		if _, err := conn.Exec(
 			`INSERT INTO event_handlers
-				(id, org_id, team_id, creator_user_id, kind, event_type, blueprint_id, breaker_threshold, min_autonomy_suitability)
-			 VALUES (?, ?, ?, ?, 'trigger', 'github:pr:ci_check_failed', ?, 3, 0.5)`,
+				(id, org_id, team_id, creator_user_id, mode, event_type, name, blueprint_id, breaker_threshold, min_autonomy_suitability)
+			 VALUES (?, ?, ?, ?, 'automate', 'github:pr:ci_check_failed', 'Spend', ?, 3, 0.5)`,
 			triggerID, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID, blueprintID,
 		); err != nil {
 			t.Fatalf("seed trigger: %v", err)

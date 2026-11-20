@@ -61,7 +61,7 @@ func NewChannelResolver(stores db.Stores) *ChannelResolver {
 // until the first one finally succeeds. Callers should call this instead of
 // spawning resolveChannelName directly — see ingest.go's
 // captureChannelSighting.
-func (r *ChannelResolver) dispatch(ws slackstore.Workspace, channel slackstore.Channel) {
+func (r *ChannelResolver) dispatch(ws slackstore.Connection, channel slackstore.Channel) {
 	key := ws.OrgID + "/" + channel.ID
 	r.mu.Lock()
 	if r.inFlight == nil {
@@ -91,7 +91,7 @@ func (r *ChannelResolver) dispatch(ws slackstore.Workspace, channel slackstore.C
 // directly, so a slow/stuck resolution can't spawn duplicates. Never writes
 // a name on API failure — an unresolved row renders its raw channel ID
 // rather than risk a wrong fallback name.
-func (r *ChannelResolver) resolveChannelName(ctx context.Context, ws slackstore.Workspace, channel slackstore.Channel) {
+func (r *ChannelResolver) resolveChannelName(ctx context.Context, ws slackstore.Connection, channel slackstore.Channel) {
 	channelID := channel.ChannelID
 	ctx, cancel := context.WithTimeout(ctx, channelNameResolveTimeout)
 	defer cancel()

@@ -39,12 +39,43 @@ func newPgBreakerSeeder(conn *sql.DB, orgID, userID string) dbtest.BreakerSeeder
 	}
 	const team = `(SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1)`
 	eventOf := map[string]string{}
+	seedTrigger := func(t *testing.T, blueprintID string, threshold int) string {
+		t.Helper()
+		triggerID := uuid.New().String()
+		exec(t, "seed trigger", `
+			INSERT INTO event_handlers (id, org_id, creator_user_id, team_id, mode, event_type, source, name,
+			                            blueprint_id, breaker_threshold, min_autonomy_suitability)
+			VALUES ($1, $2, $3, `+team+`, 'automate', $4, 'user', 'Breaker', $5, $6, 0)
+		`, triggerID, orgID, userID, domain.EventGitHubPRCICheckFailed, blueprintID, threshold)
+		return triggerID
+	}
+	// seedRun stages a finished or running blueprint run with one step
+	// conversation; triggerID and creator are each nil or a value, as the
+	// run's trigger_type requires, and predicate is what the run recorded,
+	// stored as jsonb's text of it as the mint stores it.
+	seedRun := func(t *testing.T, taskID string, triggerID any, blueprintID, triggerType string, creator any, predicate, status string, startedAt time.Time) string {
+		t.Helper()
+		runID := uuid.New().String()
+		exec(t, "seed blueprint run", `
+			INSERT INTO blueprint_runs (id, org_id, team_id, creator_user_id, blueprint_id, task_id,
+			                            trigger_type, trigger_id, scope_predicate_json, status, worktree_path, step_plan, started_at)
+			VALUES ($1, $2, (SELECT team_id FROM blueprints WHERE id = $4 AND org_id = $2), $3, $4, $5, $6, $7,
+			        COALESCE(NULLIF($10, '')::jsonb::text, ''), $8, '/tmp/wt', '[]', $9)
+		`, runID, orgID, creator, blueprintID, taskID, triggerType, triggerID, status, startedAt, predicate)
+		promptID := seedPgStepPromptForClose(t, conn, orgID, userID)
+		conversationID := uuid.New().String()
+		exec(t, "seed step conversation", `
+			INSERT INTO conversations (id, org_id, creator_user_id, team_id, visibility, task_id,
+			                           prompt_id, trigger_type, origin, blueprint_run_id, blueprint_step_index, started_at)
+			VALUES ($1, $2, $3, `+team+`, 'team', $4, $5, $6, 'blueprint', $7, 0, $8)
+		`, conversationID, orgID, creator, taskID, promptID, triggerType, runID, startedAt)
+		return conversationID
+	}
 	return dbtest.BreakerSeeder{
-		Trigger: func(t *testing.T, threshold int) (string, string, string) {
+		Trigger: func(t *testing.T, threshold int) (string, string) {
 			t.Helper()
 			promptID := "p_" + uuid.New().String()
 			blueprintID := "bp_" + uuid.New().String()
-			triggerID := uuid.New().String()
 			exec(t, "seed prompt", `
 				INSERT INTO prompts (id, org_id, creator_user_id, team_id, name, body, source)
 				VALUES ($1, $2, $3, `+team+`, 'Breaker', 'x', 'user')
@@ -57,13 +88,9 @@ func newPgBreakerSeeder(conn *sql.DB, orgID, userID string) dbtest.BreakerSeeder
 				INSERT INTO blueprint_steps (org_id, team_id, blueprint_id, step_index, step_prompt_id)
 				VALUES ($2, `+team+`, $1, 0, $3)
 			`, blueprintID, orgID, promptID)
-			exec(t, "seed trigger", `
-				INSERT INTO event_handlers (id, org_id, creator_user_id, team_id, kind, event_type, source,
-				                            blueprint_id, breaker_threshold, min_autonomy_suitability)
-				VALUES ($1, $2, $3, `+team+`, 'trigger', $4, 'user', $5, $6, 0)
-			`, triggerID, orgID, userID, domain.EventGitHubPRCICheckFailed, blueprintID, threshold)
-			return triggerID, blueprintID, promptID
+			return seedTrigger(t, blueprintID, threshold), blueprintID
 		},
+		TriggerOn: seedTrigger,
 		Task: func(t *testing.T) (string, string) {
 			t.Helper()
 			entityID, eventID, taskID := seedPgTaskChain(t, conn, orgID, userID, "breaker-"+uuid.New().String()[:8])
@@ -80,30 +107,29 @@ func newPgBreakerSeeder(conn *sql.DB, orgID, userID string) dbtest.BreakerSeeder
 			`, taskID, orgID, userID, entityID, domain.EventGitHubPRCICheckFailed, "breaker-"+taskID, eventOf[entityID])
 			return taskID
 		},
-		Run: func(t *testing.T, taskID, blueprintID, triggerType, status string, startedAt time.Time) string {
+		EventRun: func(t *testing.T, taskID, triggerID, blueprintID, status string, startedAt time.Time) string {
 			t.Helper()
-			var creator any
-			if triggerType == "manual" {
-				creator = userID
+			var predicate string
+			if err := conn.QueryRow(`SELECT COALESCE(scope_predicate_json::text, '') FROM event_handlers WHERE id = $1`, triggerID).Scan(&predicate); err != nil {
+				t.Fatalf("read the trigger's predicate: %v", err)
 			}
-			runID := uuid.New().String()
-			exec(t, "seed blueprint run", `
-				INSERT INTO blueprint_runs (id, org_id, team_id, creator_user_id, blueprint_id, task_id,
-				                            trigger_type, status, worktree_path, step_plan, started_at)
-				VALUES ($1, $2, (SELECT team_id FROM blueprints WHERE id = $4 AND org_id = $2), $3, $4, $5, $6, $7, '/tmp/wt', '[]', $8)
-			`, runID, orgID, creator, blueprintID, taskID, triggerType, status, startedAt)
-			promptID := seedPgStepPromptForClose(t, conn, orgID, userID)
-			conversationID := uuid.New().String()
-			exec(t, "seed step conversation", `
-				INSERT INTO conversations (id, org_id, creator_user_id, team_id, visibility, task_id,
-				                           prompt_id, trigger_type, origin, blueprint_run_id, blueprint_step_index, started_at)
-				VALUES ($1, $2, $3, `+team+`, 'team', $4, $5, $6, 'blueprint', $7, 0, $8)
-			`, conversationID, orgID, creator, taskID, promptID, triggerType, runID, startedAt)
-			return conversationID
+			return seedRun(t, taskID, triggerID, blueprintID, "event", nil, predicate, status, startedAt)
 		},
-		SetTrigger: func(t *testing.T, triggerID string, enabled bool, threshold int) {
+		EventRunUnder: func(t *testing.T, taskID, triggerID, blueprintID, predicate, status string, startedAt time.Time) string {
 			t.Helper()
-			exec(t, "set trigger", `UPDATE event_handlers SET enabled = $1, breaker_threshold = $2 WHERE id = $3`, enabled, threshold, triggerID)
+			return seedRun(t, taskID, triggerID, blueprintID, "event", nil, predicate, status, startedAt)
+		},
+		ManualRun: func(t *testing.T, taskID, blueprintID, status string, startedAt time.Time) string {
+			t.Helper()
+			return seedRun(t, taskID, nil, blueprintID, "manual", userID, "", status, startedAt)
+		},
+		SetTrigger: func(t *testing.T, triggerID, mode string, threshold int) {
+			t.Helper()
+			exec(t, "set trigger", `UPDATE event_handlers SET mode = $1, breaker_threshold = $2 WHERE id = $3`, mode, threshold, triggerID)
+		},
+		SetPredicate: func(t *testing.T, triggerID, predicate string) {
+			t.Helper()
+			exec(t, "set predicate", `UPDATE event_handlers SET scope_predicate_json = NULLIF($1, '')::jsonb WHERE id = $2`, predicate, triggerID)
 		},
 		DeleteTrigger: func(t *testing.T, triggerID string) {
 			t.Helper()

@@ -343,6 +343,10 @@ type taskListRequest struct {
 	// holds the ids of the tasks it shows. Validated by taskListIDs. Empty =
 	// every id.
 	IDs []string `json:"ids"`
+	// EntityIDs narrows to the tasks on these entities, for a caller that
+	// holds the entities it shows and wants their work. Validated like IDs.
+	// Empty = every entity.
+	EntityIDs []string `json:"entity_ids"`
 	// CreatedBefore (RFC3339) is CreatedSince's other half: rows created at
 	// or before it. The pair is how a lane asks for a window rather than a
 	// ray, and either end may stand alone. It sits with the reader's own
@@ -471,6 +475,7 @@ func taskListIDs(v *httpx.Validation, raw []string) []string {
 type taskListFilterKey struct {
 	Statuses       []string `json:"statuses"`
 	IDs            []string `json:"ids"`
+	EntityIDs      []string `json:"entity_ids"`
 	TeamIDs        []string `json:"team_ids"`
 	OnlyUnclaimed  bool     `json:"only_unclaimed"`
 	IncludeSnoozed bool     `json:"include_snoozed"`
@@ -527,10 +532,11 @@ type taskCreateRequest struct {
 // resource a GET /api/tasks/{id} would.
 //
 // Three refusals, all before any write:
-//   - the entity must exist (404) and be active (409) — the factory snapshot's
-//     60s soft-close grace lets a chip ride the final animation hop after its
-//     entity flipped to merged/closed, and a task synthesized there would run
-//     to completion against a closed PR with no close-cascade to clean it up;
+//   - the entity must exist (404) and be active (409) — the factory keeps a
+//     closed entity on the floor for a minute so its chip can ride the final
+//     animation hop after it flipped to merged/closed, and a task synthesized
+//     there would run to completion against a closed PR with no close-cascade
+//     to clean it up;
 //   - the (entity, event_type, dedup_key) triple must resolve a real event
 //     (422). tasks.primary_event_id is NOT NULL: a task cannot exist without an
 //     anchor, and if nothing matches, the entity isn't at this station;
@@ -715,20 +721,20 @@ func (s *Server) handleTaskCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 // teamDefaultPriority is the priority a task gets at creation when no scorer has
-// run yet: the highest default among the enabled rules that both belong to
-// teamID and match this event, floored at 0.5. It mirrors the predicate-match
-// filter in internal/routing so a task minted by hand lands at the same priority
-// the router would have given one minted by a poll.
+// run yet: the highest default among the handlers that make a task, belong to
+// teamID and match this event, or 0.5 when none does. It mirrors the
+// predicate-match filter in internal/routing so a task minted by hand lands at
+// the same priority the router would have given one minted by a poll.
 //
-// Only rules belonging to the acting team (or org-visible system rules with no
-// team) count: a rule owned by another team must not lift the priority of a task
-// created for this one. The predicate gate stays for the same reason in the other
-// direction — iterating every enabled rule would inflate priority whenever a
-// high-priority rule's scope_predicate doesn't match this event's metadata.
-// Empty predJSON always matches, per the events package contract.
+// Only handlers belonging to the acting team count: a handler owned by another
+// team must not lift the priority of a task created for this one. The predicate
+// gate stays for the same reason in the other direction — iterating every
+// active handler would inflate priority whenever a high-priority handler's
+// scope_predicate doesn't match this event's metadata. Empty predJSON always
+// matches, per the events package contract.
 func teamDefaultPriority(ctx context.Context, tx db.TxStores, orgID, teamID, eventType string, primaryEvent *domain.Event, schema events.EventSchema, schemaOK bool) (float64, error) {
-	priority := 0.5
-	handlers, err := tx.EventHandlers.GetEnabledForEvent(ctx, orgID, eventType)
+	priority, matchedAny := 0.5, false
+	handlers, err := tx.EventHandlers.GetActiveForEvent(ctx, orgID, eventType)
 	if err != nil {
 		return 0, err
 	}
@@ -737,20 +743,15 @@ func teamDefaultPriority(ctx context.Context, tx db.TxStores, orgID, teamID, eve
 		return 0, err
 	}
 	for _, h := range handlers {
-		if h.Kind != domain.EventHandlerKindRule || h.DefaultPriority == nil {
-			// Trigger rows have no DefaultPriority; skip.
+		if !h.MakesTask() {
 			continue
 		}
-		// Multi-mode system rules are seeded per-team (visibility='team', real
-		// team_id), so this counts the acting team's own shipped rules and
-		// excludes siblings'.
 		if h.TeamID != "" && h.TeamID != teamID {
 			continue
 		}
 		if !schemaOK {
 			// No registered schema → the predicate can't be evaluated. Mirrors
-			// matchPredicate's quietly-permissive behavior: skip the rule and
-			// fall back to the floor.
+			// matchPredicate's quietly-permissive behavior: skip the handler.
 			continue
 		}
 		predJSON := ""
@@ -762,8 +763,8 @@ func teamDefaultPriority(ctx context.Context, tx db.TxStores, orgID, teamID, eve
 			tasksLog.Warn("event_handler predicate error, skipping", "event_handler", h.ID, "error", merr)
 			continue
 		}
-		if matched && *h.DefaultPriority > priority {
-			priority = *h.DefaultPriority
+		if matched && (!matchedAny || h.DefaultPriority > priority) {
+			priority, matchedAny = h.DefaultPriority, true
 		}
 	}
 	return priority, nil
@@ -810,6 +811,7 @@ func (s *Server) handleTaskList(w http.ResponseWriter, r *http.Request) {
 	var v httpx.Validation
 	filter, laneKeys := resolveTaskLane(&v, req.taskLaneRequest)
 	filter.IDs = taskListIDs(&v, req.IDs)
+	filter.EntityIDs = canonicalIDList(&v, "entity_ids", "an entity", req.EntityIDs)
 	var createdBeforeKey string
 	filter.CreatedBefore, createdBeforeKey = parseTaskWindow(&v, "created_before", req.CreatedBefore)
 	filter.EventTypes = httpx.CanonicalStrings(req.EventTypes)
@@ -830,6 +832,7 @@ func (s *Server) handleTaskList(w http.ResponseWriter, r *http.Request) {
 	page := httpx.ResolveKeysetPage(&v, req.PageRequest, httpx.FilterFingerprint(taskListFilterKey{
 		Statuses:       filter.Statuses,
 		IDs:            filter.IDs,
+		EntityIDs:      filter.EntityIDs,
 		TeamIDs:        filter.TeamIDs,
 		OnlyUnclaimed:  filter.OnlyUnclaimed,
 		IncludeSnoozed: filter.IncludeSnoozed,

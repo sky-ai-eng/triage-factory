@@ -109,7 +109,7 @@ type Manager struct {
 	// rather than leaking an event.
 	EventSources db.OrgEventSourceStore
 
-	// EventHandlers is the task rules and triggers the Jira drift check reads,
+	// EventHandlers is the event handlers the Jira drift check reads,
 	// beside the status rules, to find filters naming Jira values that are
 	// gone. nil disables the check, rules and handlers alike (tests, and any
 	// embedder that hasn't wired it).

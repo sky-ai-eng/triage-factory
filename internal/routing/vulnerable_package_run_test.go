@@ -24,8 +24,8 @@ func (s *vulnRunDelegator) StageOrDeliverAdditiveEvent(_ context.Context, orgID,
 	return delegate.AdditiveDelivery{Outcome: delegate.InjectDeliveredLocal}
 }
 
-// delegatedPackage is a vulnFixture whose team A runs a trigger on every
-// alert, and the run that trigger started on the package's task for alert 1.
+// delegatedPackage is a vulnFixture whose team A automates every alert, and
+// the run its handler started on the package's task for alert 1.
 type delegatedPackage struct {
 	*vulnFixture
 	sp             *vulnRunDelegator
@@ -39,8 +39,7 @@ func newDelegatedPackage(t *testing.T) delegatedPackage {
 	sp := &vulnRunDelegator{stubDelegator: &stubDelegator{db: f.db}}
 	f.router.spawner = sp
 	enableTeamAutoDelegate(t, f.db, f.teamA)
-	seedVulnHandler(t, f.db, domain.EventHandlerKindRule, f.teamA, "", 0.6, false)
-	seedVulnHandler(t, f.db, domain.EventHandlerKindTrigger, f.teamA, "", 0, false)
+	seedVulnHandler(t, f.db, domain.EventHandlerModeAutomate, f.teamA, "", 0.6, false)
 
 	first := vulnAlert(1, domain.DependabotSeverityHigh)
 	f.listing(t, lodashSnapshot(), lodashSnapshot(first))

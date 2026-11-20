@@ -11,7 +11,7 @@ import (
 // identity capture is a multi-mode concept (it resolves against
 // public.user_identities, which doesn't exist in local mode's SQLite
 // schema): local mode never runs the ingest pipeline that would call this,
-// so every method returns db.ErrNotApplicableInLocal. Mirrors workspaceStore.
+// so every method returns db.ErrNotApplicableInLocal. Mirrors connectionStore.
 type identityStore struct{ q db.Execer }
 
 func newIdentityStore(q db.Execer) slackstore.SlackIdentityStore {

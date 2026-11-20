@@ -7,7 +7,8 @@
 // Connections are per-app, not per-workspace: Slack load-balances an app's
 // envelopes across up to 10 open sockets regardless of which workspace(s)
 // installed it, so the desired state is "one connection per api_app_id that
-// has >=1 socket-transport row in an entitled org" — see desiredApps.
+// has >=1 socket-transport row", plus the deployment's own app when it uses
+// Socket Mode — see desiredApps.
 package slack
 
 import (
@@ -19,7 +20,6 @@ import (
 
 	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
-	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -60,8 +60,8 @@ var (
 
 // Per-connection lifecycle states (dialing -> open -> draining -> dead,
 // never repaired) plus the two states that describe why a connection isn't
-// open right now. These are also the wire values GET /api/slack/workspaces
-// exposes for the frontend's status chip.
+// open right now. These are also the wire values the connection reads
+// expose for the frontend's status chip.
 const (
 	stateDialing    = "dialing"
 	stateOpen       = "open"
@@ -72,7 +72,7 @@ const (
 
 // connStatus is the observable state of one per-app connection — held by
 // its appConnection (mutex-guarded there) and returned as a value snapshot
-// by StatusFor / appConnection.snapshot for GET /api/slack/workspaces.
+// by StatusFor / appConnection.snapshot for the connection reads.
 // ConnectedAt / LastEventAt are *time.Time, not time.Time: encoding/json's
 // omitempty is a no-op on a plain struct field (time.Time is a struct) — it
 // only elides false/0/nil-pointer/empty-string/empty-slice-or-map, so a
@@ -116,6 +116,9 @@ type socketManager struct {
 	// counting) — the same shared instance the pipeline records outcomes
 	// into. Nil-safe downstream, so tests may leave it unset.
 	stats *ingestStats
+	// deployment is the deployment's own Slack app, the zero app when there
+	// is none.
+	deployment deploymentApp
 
 	mu    sync.Mutex
 	conns map[string]*appConnection // keyed by api_app_id
@@ -138,8 +141,8 @@ func newSocketManager(stores db.Stores, pipeline *ingestPipeline, client *http.C
 // StatusFor returns the live status of appID's socket connection, if the
 // manager currently has one running (started by a reconcile pass, not yet
 // torn down by a later one). ok=false covers every "no connection" case
-// alike — webhook-only app, unentitled org, not yet reconciled — GET
-// /api/slack/workspaces treats them identically (omits the field).
+// alike — webhook-only app, not yet reconciled — the connection reads treat
+// them identically (omit the field).
 func (m *socketManager) StatusFor(appID string) (connStatus, bool) {
 	m.mu.Lock()
 	conn, ok := m.conns[appID]
@@ -187,15 +190,28 @@ type desiredApp struct {
 	// tokenRefs holds the app-token ref of every one of the app's socket
 	// rows. The token belongs to the app, so any of them dials.
 	tokenRefs map[string]bool
+	// deployment marks the deployment's own app. It has no org and no
+	// token ref: it dials with appToken, from the environment.
+	deployment bool
+	appToken   string
 }
 
 // desiredApps computes the full desired connection set: every api_app_id
-// with at least one transport=socket row in an entitled org. app->one-org
-// (TFAC-533) means every row sharing an api_app_id carries the same org_id,
-// so entitlement and the app-token secret ref are well-defined regardless
-// of which matching row supplies them — "credentials come off any of its
-// rows, same secret set" (see the ticket's architecture note). A nil Slack
-// store bundle (extension not linked) and the Postgres-only store's
+// with at least one transport=socket row, active or not and licensed or not,
+// and the deployment's own app when it is configured for Socket Mode. The
+// deployment app's connection depends on no row: it connects before any org
+// installs the app, so a bad TF_SLACK_APP_TOKEN shows in the logs at boot,
+// and it stays up when every org's connection through it is gone. Its rows
+// have no transport, so the loop over rows skips them.
+// An inactive connection and an unlicensed org keep their app's socket
+// because Slack reports the app's removal only through it: with the socket
+// closed, a removal is lost, and the removed app's row and dead bot token stay
+// for the org to come back to. An app belongs to one
+// org, so every row sharing an api_app_id carries the same org_id, and the
+// org and app-token secret ref are well-defined regardless of which matching
+// row supplies them.
+//
+// A nil Slack store bundle (extension not linked) and the Postgres-only store's
 // ErrNotApplicableInLocal both yield an empty desired set with a nil error —
 // run() already gates the reconciler out of local mode entirely, so this is
 // a defensive backstop, not a path exercised in production; the point is a
@@ -206,7 +222,7 @@ func (m *socketManager) desiredApps(ctx context.Context) (map[string]desiredApp,
 	if bundle == nil {
 		return nil, nil
 	}
-	rows, err := bundle.Workspaces.ListAllSystem(ctx)
+	rows, err := bundle.Connections.ListAllSystem(ctx)
 	if err != nil {
 		if errors.Is(err, db.ErrNotApplicableInLocal) {
 			return nil, nil
@@ -217,9 +233,6 @@ func (m *socketManager) desiredApps(ctx context.Context) (map[string]desiredApp,
 	desired := make(map[string]desiredApp)
 	for _, row := range rows {
 		if row.Transport != transportSocket {
-			continue
-		}
-		if !entitlements.For(row.OrgID).Has(entitlements.FeatureSlack) {
 			continue
 		}
 		if row.AppTokenRef == "" {
@@ -233,6 +246,11 @@ func (m *socketManager) desiredApps(ctx context.Context) (map[string]desiredApp,
 			desired[row.APIAppID] = d
 		}
 		d.tokenRefs[row.AppTokenRef] = true
+	}
+	// After the loop, so an org row holding the deployment app's id, which
+	// connect refuses to write, cannot take the app's connection over.
+	if m.deployment.Configured() && m.deployment.Transport == transportSocket {
+		desired[m.deployment.AppID] = desiredApp{appID: m.deployment.AppID, deployment: true, appToken: m.deployment.AppToken}
 	}
 	return desired, nil
 }
@@ -264,8 +282,9 @@ func (m *socketManager) reconcile(ctx context.Context) {
 		// removing the app there, deletes that row's secrets, its copy of the
 		// app token among them. A connection started from that row would
 		// otherwise redial with a key nothing holds, and the app's other
-		// workspaces would lose Socket Mode until a restart.
-		if !d.tokenRefs[conn.tokenRef()] {
+		// workspaces would lose Socket Mode until a restart. The deployment
+		// app's token is the environment's, not a row's.
+		if !d.deployment && !d.tokenRefs[conn.tokenRef()] {
 			conn.setTokenRef(d.appTokenRef)
 		}
 	}
@@ -303,6 +322,8 @@ func (m *socketManager) startConn(ctx context.Context, d desiredApp) {
 		appID:       d.appID,
 		orgID:       d.orgID,
 		appTokenRef: d.appTokenRef,
+		deployment:  d.deployment,
+		appToken:    d.appToken,
 		stats:       m.stats,
 		cancel:      cancel,
 		done:        make(chan struct{}),
@@ -314,7 +335,7 @@ func (m *socketManager) startConn(ctx context.Context, d desiredApp) {
 	m.conns[d.appID] = conn
 	m.mu.Unlock()
 
-	slackLog.Info("slack socket mode: starting connection", "app", d.appID, "org", d.orgID)
+	slackLog.Info("slack socket mode: starting connection", "app", d.appID, "org", d.orgID, "deployment_app", d.deployment)
 	go func() {
 		defer close(conn.done)
 		conn.run(connCtx, m.stores, m.pipeline, m.httpClient)

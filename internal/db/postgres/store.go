@@ -124,13 +124,11 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// AES-256-GCM-encrypted app-side with secretKey (TFAC-402).
 		Secrets: secrets,
 		// EventHandlers needs both pools: Seed writes shipped rows
-		// without JWT claims, but event_handlers_insert /
-		// event_handlers_update RLS policies gate on either
-		// creator_user_id = tf.current_user_id() or
-		// tf.user_is_org_admin() on org-visible writes. The impl
-		// routes Seed to admin (BYPASSRLS) and every CRUD method to
-		// app — same pool-split pattern PromptStore + the predecessor
-		// stores used.
+		// without JWT claims, but the event_handlers_insert RLS policy
+		// gates on creator_user_id = tf.current_user_id() and on team
+		// write. The impl routes Seed to admin (BYPASSRLS) and every
+		// CRUD method to app — same pool-split pattern PromptStore +
+		// the predecessor stores used.
 		EventHandlers: eventHandlers,
 		// Blueprints wires both pools: the request-facing reads on app
 		// under RLS, every write and every `...System` read (ListSteps,
@@ -163,7 +161,6 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// Factory wires admin — the snapshot is a system-level view
 		// (no per-user identity, must see every in-flight run
 		// regardless of creator).
-		Factory: newFactoryReadStore(admin),
 		// TeamActivity is request-equivalent (member-gated, like Dashboard),
 		// not a system-level view — it wires app here so a caller reaching
 		// this top-level bundle directly (bypassing WithTx and the
@@ -179,9 +176,7 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		TeamPRs: newTeamPRStore(app, admin),
 		// Conversations wires app — every consumer is request-
 		// equivalent (server agent handler, delegate spawner
-		// goroutine spawned from a handler, chains). System-service
-		// reads of run state are routed through the admin-pooled
-		// FactoryReadStore instead.
+		// goroutine spawned from a handler, chains).
 		// Conversations holds both pools. Manual-trigger Create + every
 		// other method run on app (RLS-active). Event-triggered
 		// Create routes to admin because the CHECK + RLS policy
@@ -536,7 +531,6 @@ func NewForTx(tx *sql.Tx, secretKey aead.Key) db.TxStores {
 		TeamAgents:    newTxTeamAgentStore(tx),
 		Users:         newUsersStore(tx, tx),
 		Tasks:         newTaskStore(tx, tx),
-		Factory:       newFactoryReadStore(tx),
 		TeamActivity:  newTeamActivityStore(tx),
 		TeamPRs:       newTeamPRStore(tx, tx),
 		// NewForTx is a test door — both pools collapse to the

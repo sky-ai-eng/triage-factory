@@ -24,6 +24,11 @@ type NotificationFixture struct {
 	Team         string
 	ArchivedTeam string
 	As           func(t *testing.T, userID string, fn func(s db.NotificationStore))
+	// Age moves every stamp on a notification and on its marks d earlier,
+	// as if the writes so far had happened d ago, leaving expires_at. A
+	// subtest that orders a write after earlier ones ages the earlier ones,
+	// so the order does not depend on the clock's resolution.
+	Age func(t *testing.T, id string, d time.Duration)
 }
 
 type NotificationFactory func(t *testing.T) NotificationFixture
@@ -55,7 +60,6 @@ func RunNotificationStoreConformance(t *testing.T, mk NotificationFactory) {
 		if o.Title == "" {
 			o.Title = "title"
 		}
-		awaitClockTick()
 		u, err := f.Stores.Notifications.UpsertOpenSystem(ctx, o)
 		if err != nil {
 			t.Fatalf("UpsertOpenSystem: %v", err)
@@ -113,7 +117,6 @@ func RunNotificationStoreConformance(t *testing.T, mk NotificationFactory) {
 		t.Helper()
 		var m domain.NotificationMarks
 		var err error
-		awaitClockTick()
 		f.As(t, f.Viewer, func(s db.NotificationStore) { m, err = s.SetMarks(ctx, f.OrgID, f.Viewer, id, p) })
 		return m, err
 	}
@@ -122,34 +125,41 @@ func RunNotificationStoreConformance(t *testing.T, mk NotificationFactory) {
 		f := mk(t)
 		first := raise(t, f, db.NotificationOccurrence{Key: "k", Dismissible: true, Priority: domain.NotificationLow,
 			Actions: []byte(`[{"id":"a"}]`), Params: []byte(`{"x":1}`)})
-		if !first.Opened || first.Escalated || first.Notification.SeenCount != 1 {
+		if !first.Opened || first.Escalated || first.Notification.SeenCount != 1 || first.Notification.EscalatedSeenCount != 1 {
 			t.Fatalf("first raise = %+v; want opened", first)
 		}
 		AssertWriteReturnedStoredRow(t, "UpsertOpenSystem insert", first.Notification, stored(t, f, first.Notification.ID))
 
 		bump := raise(t, f, db.NotificationOccurrence{Key: "k", Dismissible: true, Priority: domain.NotificationLow, Title: "new"})
 		if bump.Opened || bump.Escalated || bump.Notification.ID != first.Notification.ID ||
-			bump.Notification.SeenCount != 2 || bump.Notification.Title != "new" ||
+			bump.Notification.SeenCount != 2 || bump.Notification.EscalatedSeenCount != 1 || bump.Notification.Title != "new" ||
 			!bump.Notification.EscalatedAt.Equal(first.Notification.EscalatedAt) {
 			t.Fatalf("bump = %+v; want the same row, seen twice, retitled, not escalated", bump)
 		}
 		AssertWriteReturnedStoredRow(t, "UpsertOpenSystem bump", bump.Notification, stored(t, f, first.Notification.ID))
 
+		// The marks come after the raises, and the escalation after the
+		// marks.
+		f.Age(t, first.Notification.ID, time.Minute)
 		if _, err := setMarks(t, f, first.Notification.ID, db.NotificationMarksPatch{Read: &yes, Dismissed: &yes}); err != nil {
 			t.Fatalf("SetMarks: %v", err)
 		}
 		if v := get(t, f, first.Notification.ID); !v.Read || !v.Dismissed {
 			t.Fatalf("after marking: read=%v dismissed=%v", v.Read, v.Dismissed)
 		}
+		f.Age(t, first.Notification.ID, time.Minute)
 		up := raise(t, f, db.NotificationOccurrence{Key: "k", Dismissible: true, Priority: domain.NotificationUrgent})
-		if !up.Escalated || up.Notification.Priority != domain.NotificationUrgent {
+		if !up.Escalated || up.Notification.Priority != domain.NotificationUrgent || up.Notification.EscalatedSeenCount != 3 ||
+			!up.Notification.EscalatedAt.Equal(up.Notification.LastSeenAt) {
 			t.Fatalf("priority increase = %+v; want escalated", up)
 		}
 		if v := get(t, f, first.Notification.ID); v.Read || v.Dismissed {
 			t.Errorf("after escalation: read=%v dismissed=%v; want both cleared", v.Read, v.Dismissed)
 		}
+		// Raised again at once, the decrease can share the escalation's
+		// instant, and is still not one.
 		if down := raise(t, f, db.NotificationOccurrence{Key: "k", Dismissible: true, Priority: domain.NotificationLow}); down.Escalated ||
-			!down.Notification.EscalatedAt.Equal(up.Notification.EscalatedAt) {
+			down.Notification.EscalatedSeenCount != 3 || !down.Notification.EscalatedAt.Equal(up.Notification.EscalatedAt) {
 			t.Errorf("priority decrease = %+v; want no escalation", down)
 		}
 
@@ -339,6 +349,7 @@ func RunNotificationStoreConformance(t *testing.T, mk NotificationFactory) {
 			t.Errorf("OpenEventKeysSystem after the resolve = %+v, %v; want only ev:requested", got, err)
 		}
 
+		f.Age(t, notice.ID, time.Minute)
 		if _, err := setMarks(t, f, notice.ID, db.NotificationMarksPatch{Read: &yes, Dismissed: &yes}); err != nil {
 			t.Fatalf("mark the notice: %v", err)
 		}
@@ -350,6 +361,7 @@ func RunNotificationStoreConformance(t *testing.T, mk NotificationFactory) {
 		if v := get(t, f, notice.ID); v == nil || !v.Read || !v.Dismissed {
 			t.Errorf("after a quiet bump = %+v; want it still read and dismissed", v)
 		}
+		f.Age(t, notice.ID, time.Minute)
 		loud := raise(t, f, db.NotificationOccurrence{Origin: event, Lifecycle: domain.NotificationNotice, Kind: "ev:commented", Key: pr + "/",
 			EntityID: pr, Audience: user, Dismissible: true, ExpiresAt: &expires, Resurface: true})
 		if loud.Opened || !loud.Escalated || loud.Notification.ID != notice.ID || loud.Notification.SeenCount != 3 {
@@ -528,10 +540,14 @@ func RunNotificationStoreConformance(t *testing.T, mk NotificationFactory) {
 		urgent := raise(t, f, db.NotificationOccurrence{Key: "u", Priority: domain.NotificationUrgent}).Notification
 		low := raise(t, f, db.NotificationOccurrence{Key: "l", Priority: domain.NotificationLow}).Notification
 		for _, key := range []string{"h", "u", "l"} {
-			awaitClockTick()
 			if _, err := s.ResolveSystem(ctx, f.OrgID, domain.NotificationOriginSystem, "test.kind", key); err != nil {
 				t.Fatalf("ResolveSystem(%s): %v", key, err)
 			}
+		}
+		// Resolved back to back, the three can share an instant, which the
+		// order leaves to the id; aged apart, they resolved in that order.
+		for i, n := range []domain.Notification{high, urgent, low} {
+			f.Age(t, n.ID, time.Duration(3-i)*time.Minute)
 		}
 		// An open row, which the default order puts first.
 		open := raise(t, f, db.NotificationOccurrence{Key: "o", Priority: domain.NotificationUrgent}).Notification
@@ -578,7 +594,8 @@ func RunNotificationStoreConformance(t *testing.T, mk NotificationFactory) {
 	})
 
 	// narrowWorld raises five rows the viewer is sent, one per audience shape,
-	// in this order, so first_seen_at and escalated_at rise from a to e.
+	// in this order, and ages them apart, so first_seen_at and escalated_at
+	// rise from a to e.
 	type narrowWorld struct {
 		a, b, c, d, e domain.Notification
 	}
@@ -599,7 +616,11 @@ func RunNotificationStoreConformance(t *testing.T, mk NotificationFactory) {
 		w.e = raise(t, f, db.NotificationOccurrence{Key: "e", Priority: domain.NotificationLow,
 			Title: "Delta", Audience: domain.NotificationAudience{
 				Scope: domain.NotificationScopeOrg, Role: domain.NotificationRoleMembers}}).Notification
-		rows := []domain.Notification{w.a, w.b, w.c, w.d, w.e}
+		rows := []*domain.Notification{&w.a, &w.b, &w.c, &w.d, &w.e}
+		for i, n := range rows {
+			f.Age(t, n.ID, time.Duration(len(rows)-i)*time.Minute)
+			*n = get(t, f, n.ID).Notification
+		}
 		for i := 1; i < len(rows); i++ {
 			if !rows[i].FirstSeenAt.After(rows[i-1].FirstSeenAt) || !rows[i].EscalatedAt.After(rows[i-1].EscalatedAt) {
 				t.Fatalf("rows raised in order share a timestamp: %+v then %+v", rows[i-1], rows[i])
@@ -690,11 +711,12 @@ func RunNotificationStoreConformance(t *testing.T, mk NotificationFactory) {
 		check(t, "last_seen_at, no dir", db.NotificationSortLastSeenAt, "", []string{b, e, d, c, a})
 
 		for _, key := range []string{"c", "a"} {
-			awaitClockTick()
 			if _, err := f.Stores.Notifications.ResolveSystem(ctx, f.OrgID, domain.NotificationOriginSystem, "test.kind", key); err != nil {
 				t.Fatalf("ResolveSystem %s: %v", key, err)
 			}
 		}
+		// c resolved first.
+		f.Age(t, c, time.Minute)
 		// The open rows have no resolved_at and trail every resolved row in
 		// both directions, ordered among themselves by id.
 		open := []string{b, d, e}
@@ -836,6 +858,8 @@ func RunNotificationStoreConformance(t *testing.T, mk NotificationFactory) {
 		fixed := raise(t, f, db.NotificationOccurrence{Key: "f"}).Notification
 		other := raise(t, f, db.NotificationOccurrence{Key: "o", Dismissible: true, Audience: domain.NotificationAudience{
 			Scope: domain.NotificationScopeUser, UserID: f.Other}}).Notification
+		// b was raised before it is marked.
+		f.Age(t, b.ID, time.Minute)
 		if _, err := setMarks(t, f, b.ID, db.NotificationMarksPatch{Read: &yes}); err != nil {
 			t.Fatal(err)
 		}
@@ -932,7 +956,6 @@ func RunNotificationStoreConformance(t *testing.T, mk NotificationFactory) {
 			if _, err := tx.Notifications.UpsertOpenSystem(ctx, o); err != nil {
 				return err
 			}
-			awaitClockTick()
 			u, err := tx.Notifications.UpsertOpenSystem(ctx, o)
 			if err != nil {
 				return err

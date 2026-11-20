@@ -235,11 +235,10 @@ func TestTaskRuleOrder_Postgres(t *testing.T) {
 			},
 			SeedRule: func(t *testing.T, teamID, eventType string, sortOrder int) string {
 				t.Helper()
-				priority := 0.5
 				rule, err := stores.EventHandlers.Create(t.Context(), orgID, teamID, domain.EventHandler{
-					ID: uuid.New().String(), Kind: domain.EventHandlerKindRule,
-					EventType: eventType, Enabled: true,
-					Name: "rule " + teamID[:8], DefaultPriority: &priority, SortOrder: &sortOrder,
+					ID: uuid.New().String(), Mode: domain.EventHandlerModeWatch,
+					EventType: eventType,
+					Name:      "rule " + teamID[:8], DefaultPriority: 0.5, SortOrder: sortOrder, BreakerThreshold: 4,
 				})
 				if err != nil {
 					t.Fatalf("seed rule on team %s: %v", teamID, err)
@@ -484,22 +483,21 @@ func TestTaskStore_Postgres_CrossOrgLeakage(t *testing.T) {
 		t.Errorf("orgB Get returned orgA task %s", taskA)
 	}
 
-	// ListActiveRefsForEntities scoped to orgA, looking at entA, should
-	// see exactly one row. Asking the same with orgB and entA must
-	// return zero (entA isn't visible from orgB).
-	refs, err := stores.Tasks.ListActiveRefsForEntities(ctx, orgA, []string{entA}, nil)
+	// The task list narrowed to entA in orgA sees exactly taskA. Asking the
+	// same of orgB must return nothing (entA isn't visible from orgB).
+	inA, _, err := stores.Tasks.List(ctx, orgA, db.TaskListFilter{EntityIDs: []string{entA}}, db.Unwindowed)
 	if err != nil {
-		t.Fatalf("ListActiveRefsForEntities orgA: %v", err)
+		t.Fatalf("List orgA by entity: %v", err)
 	}
-	if len(refs) != 1 || refs[0].ID != taskA {
-		t.Errorf("orgA refs = %+v, want exactly taskA", refs)
+	if len(inA) != 1 || inA[0].ID != taskA {
+		t.Errorf("orgA tasks on entA = %d rows, want exactly taskA", len(inA))
 	}
-	refs, err = stores.Tasks.ListActiveRefsForEntities(ctx, orgB, []string{entA}, nil)
+	inB, _, err := stores.Tasks.List(ctx, orgB, db.TaskListFilter{EntityIDs: []string{entA}}, db.Unwindowed)
 	if err != nil {
-		t.Fatalf("ListActiveRefsForEntities orgB→entA: %v", err)
+		t.Fatalf("List orgB by entA: %v", err)
 	}
-	if len(refs) != 0 {
-		t.Errorf("orgB looking at entA returned %d refs; want 0 (cross-org leak)", len(refs))
+	if len(inB) != 0 {
+		t.Errorf("orgB looking at entA returned %d tasks; want 0 (cross-org leak)", len(inB))
 	}
 }
 
@@ -1037,6 +1035,13 @@ func TestTaskStore_Postgres_MemoryPendingConformance(t *testing.T) {
 					`UPDATE conversations SET ended_at = now() - make_interval(secs => $2) WHERE id = $1`,
 					conversationID, age.Seconds())
 			},
+			AgeAttempt: func(t *testing.T, attemptID string, age time.Duration) {
+				t.Helper()
+				dbtest.MustUpdate(t, h.AdminDB, `
+					UPDATE conversation_memory_attempts
+					SET started_at = $2, completed_at = CASE WHEN completed_at IS NULL THEN NULL ELSE $2::timestamptz END
+					WHERE id = $1`, attemptID, time.Now().UTC().Add(-age))
+			},
 			Conversation: func(t *testing.T, taskID, suffix string) string {
 				t.Helper()
 				stepIdx := 0
@@ -1076,10 +1081,24 @@ func TestTaskRequestedReviewer_Postgres(t *testing.T) {
 func TestTaskLatestEvent_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
-	dbtest.RunTaskLatestEventConformance(t, func(t *testing.T) (db.Stores, string, string) {
+	dbtest.RunTaskLatestEventConformance(t, func(t *testing.T) dbtest.TaskLatestEventFixture {
 		t.Helper()
 		h.Reset(t)
 		orgID, _, _ := seedPgOrgUserAgent(t, h)
-		return stores, orgID, firstTeamForOrg(t, h, orgID)
+		return dbtest.TaskLatestEventFixture{
+			Stores: stores,
+			OrgID:  orgID,
+			TeamID: firstTeamForOrg(t, h, orgID),
+			SetCreatedAt: func(t *testing.T, eventID string, at time.Time) {
+				t.Helper()
+				res, err := h.AdminDB.Exec(`UPDATE events SET created_at = $1 WHERE org_id = $2 AND id = $3`, at.UTC(), orgID, eventID)
+				if err != nil {
+					t.Fatalf("set created_at: %v", err)
+				}
+				if n, _ := res.RowsAffected(); n != 1 {
+					t.Fatalf("set created_at: %d rows for event %s, want 1", n, eventID)
+				}
+			},
+		}
 	})
 }

@@ -1,5 +1,5 @@
 // Package pg holds the Postgres implementation of the Enterprise Edition
-// Slack workspace store and registers it with core's store-extension
+// Slack stores and registers it with core's store-extension
 // registry for the "postgres" dialect — same app/admin pool split and RLS
 // posture as the rest of the Postgres data layer, mirroring ee/sso/store/pg.
 //
@@ -14,6 +14,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
 	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 )
@@ -21,7 +23,7 @@ import (
 func init() {
 	db.RegisterStoreExtension("postgres", slackstore.ExtKey, func(app, admin db.Execer) any {
 		return &slackstore.Bundle{
-			Workspaces:   newWorkspaceStore(app, admin),
+			Connections:  newConnectionStore(app, admin),
 			Identities:   newIdentityStore(admin),
 			Deliveries:   newDeliveryStore(admin),
 			Channels:     newChannelRegistryStore(app, admin),
@@ -31,221 +33,312 @@ func init() {
 }
 
 // rowScanner is the read shape shared by *sql.Row and *sql.Rows, so
-// scanWorkspace serves both the single-row Get and the iterating
-// ListForOrg/ListAllSystem without duplicating the column list.
+// scanConnection serves both the single-row reads and the iterating lists
+// without duplicating the column list.
 type rowScanner interface {
 	Scan(dest ...any) error
 }
 
-// workspaceStore is the Postgres impl of slackstore.WorkspaceStore.
+// connectionStore is the Postgres impl of slackstore.ConnectionStore.
 //
-//   - app: Upsert, ListForOrg, Get, Delete. Request-handler reads/writes
-//     gated by the org_slack_workspaces_* RLS policies.
-//   - admin: ListAllSystem. The future socket connection manager enumerates
-//     every configured workspace across every org at boot — no per-request
-//     claims to gate on.
-type workspaceStore struct {
+//   - app: Upsert, ListForOrg, Get, Delete, LockApp. Request-handler
+//     reads/writes gated by the org_slack_connections_* RLS policies.
+//   - admin: the ...System methods, for claims-free callers.
+type connectionStore struct {
 	app   db.Execer
 	admin db.Execer
 }
 
-func newWorkspaceStore(app, admin db.Execer) slackstore.WorkspaceStore {
-	return &workspaceStore{app: app, admin: admin}
+func newConnectionStore(app, admin db.Execer) slackstore.ConnectionStore {
+	return &connectionStore{app: app, admin: admin}
 }
 
-var _ slackstore.WorkspaceStore = (*workspaceStore)(nil)
+var _ slackstore.ConnectionStore = (*connectionStore)(nil)
 
-const workspaceColumns = `
-	workspace_id, api_app_id, org_id::text, workspace_name, COALESCE(enterprise_id, ''), transport,
-	bot_user_id, bot_token_ref, COALESCE(signing_secret_ref, ''), COALESCE(app_token_ref, ''),
-	COALESCE(registered_by_user_id::text, ''), created_at, updated_at
+// oneActiveIndex is the partial unique index that allows one active
+// connection per (org, workspace).
+const oneActiveIndex = "org_slack_connections_one_active"
+
+const connectionColumns = `
+	workspace_id, api_app_id, org_id::text, source, active, workspace_name, app_name,
+	COALESCE(enterprise_id, ''), COALESCE(transport, ''), bot_user_id, bot_token_ref,
+	COALESCE(signing_secret_ref, ''), COALESCE(app_token_ref, ''),
+	COALESCE(registered_by_user_id::text, ''), created_at, connected_at, updated_at
 `
 
-func scanWorkspace(sc rowScanner) (slackstore.Workspace, error) {
-	var w slackstore.Workspace
+func scanConnection(sc rowScanner) (slackstore.Connection, error) {
+	var c slackstore.Connection
 	if err := sc.Scan(
-		&w.WorkspaceID, &w.APIAppID, &w.OrgID, &w.WorkspaceName, &w.EnterpriseID, &w.Transport,
-		&w.BotUserID, &w.BotTokenRef, &w.SigningSecretRef, &w.AppTokenRef,
-		&w.RegisteredByUserID, &w.CreatedAt, &w.UpdatedAt,
+		&c.WorkspaceID, &c.APIAppID, &c.OrgID, &c.Source, &c.Active, &c.WorkspaceName, &c.AppName,
+		&c.EnterpriseID, &c.Transport, &c.BotUserID, &c.BotTokenRef,
+		&c.SigningSecretRef, &c.AppTokenRef,
+		&c.RegisteredByUserID, &c.CreatedAt, &c.ConnectedAt, &c.UpdatedAt,
 	); err != nil {
-		return slackstore.Workspace{}, err
+		return slackstore.Connection{}, err
 	}
-	return w, nil
+	return c, nil
 }
 
-// Upsert writes ws as the full desired end-state. It tries an UPDATE scoped
-// to (workspace_id, api_app_id, org_id) first — a re-submit for a
-// (workspace, app) pair this org already owns; if that affects zero rows
-// (either the (workspace_id, api_app_id) pair is wholly new, or it belongs
-// to a different org), it falls through to a plain INSERT. A different
-// org's (workspace_id, api_app_id) pair then hits the table's PRIMARY KEY
-// head-on and returns a real unique-violation error — no pre-check race
-// window, matching the sso_domains claim pattern (the constraint is the
-// authority, the handler translates the error). Callers MUST have already
-// called LockApp and checked AppBoundToOtherOrgSystem before calling
-// Upsert — this PK alone does not catch a DIFFERENT workspace_id already
-// carrying ws.APIAppID under another org, since api_app_id isn't unique on
-// its own (see the interface doc).
+func scanConnections(rows *sql.Rows) ([]slackstore.Connection, error) {
+	defer rows.Close()
+	out := []slackstore.Connection{}
+	for rows.Next() {
+		c, err := scanConnection(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan org_slack_connections: %w", err)
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// Upsert tries an UPDATE scoped to (workspace_id, api_app_id, org_id) first —
+// a re-submit for a (workspace, app) pair this org already owns, which writes
+// the credential and display columns and leaves active and source as stored.
+// If that matches no row (the pair is wholly new, or it belongs to a
+// different org), it falls through to a plain INSERT. A different org's
+// (workspace_id, api_app_id) pair then hits the table's PRIMARY KEY head-on and
+// returns a real unique-violation error — no pre-check race window, matching
+// the sso_domains claim pattern (the constraint is the authority, the handler
+// translates the error). An insert that would make a second active connection
+// in the org's workspace returns slackstore.ErrActiveConnectionExists.
 //
-// Nullable columns (enterprise_id, signing_secret_ref, app_token_ref,
-// registered_by_user_id) are written NULL when ws carries "" — NULLIF turns
-// an empty string request into a NULL column rather than a literal ”.
-func (s *workspaceStore) Upsert(ctx context.Context, ws slackstore.Workspace) error {
-	res, err := s.app.ExecContext(ctx, `
-		UPDATE org_slack_workspaces SET
+// Nullable columns are written NULL when c carries "" — NULLIF turns an empty
+// string into a NULL column rather than a literal ”.
+func (s *connectionStore) Upsert(ctx context.Context, c slackstore.Connection) (slackstore.Connection, error) {
+	got, err := scanConnection(s.app.QueryRowContext(ctx, `
+		UPDATE org_slack_connections SET
 			workspace_name = $4,
-			enterprise_id = NULLIF($5, ''),
-			transport = $6,
-			bot_user_id = $7,
-			bot_token_ref = $8,
-			signing_secret_ref = NULLIF($9, ''),
-			app_token_ref = NULLIF($10, ''),
-			registered_by_user_id = NULLIF($11, '')::uuid
+			app_name = $5,
+			enterprise_id = NULLIF($6, ''),
+			transport = NULLIF($7, ''),
+			bot_user_id = $8,
+			bot_token_ref = $9,
+			signing_secret_ref = NULLIF($10, ''),
+			app_token_ref = NULLIF($11, ''),
+			registered_by_user_id = NULLIF($12, '')::uuid,
+			connected_at = now()
 		WHERE workspace_id = $1 AND api_app_id = $2 AND org_id = $3
-	`, ws.WorkspaceID, ws.APIAppID, ws.OrgID, ws.WorkspaceName, ws.EnterpriseID, ws.Transport,
-		ws.BotUserID, ws.BotTokenRef, ws.SigningSecretRef, ws.AppTokenRef, ws.RegisteredByUserID)
+		RETURNING `+connectionColumns,
+		c.WorkspaceID, c.APIAppID, c.OrgID, c.WorkspaceName, c.AppName, c.EnterpriseID, c.Transport,
+		c.BotUserID, c.BotTokenRef, c.SigningSecretRef, c.AppTokenRef, c.RegisteredByUserID))
+	if err == nil {
+		return got, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return slackstore.Connection{}, fmt.Errorf("update org_slack_connections: %w", err)
+	}
+	got, err = scanConnection(s.app.QueryRowContext(ctx, `
+		INSERT INTO org_slack_connections (
+			workspace_id, api_app_id, org_id, source, active, workspace_name, app_name, enterprise_id,
+			transport, bot_user_id, bot_token_ref, signing_secret_ref, app_token_ref, registered_by_user_id
+		) VALUES (
+			$1, $2, $3, $4, $5, $6, $7, NULLIF($8, ''),
+			NULLIF($9, ''), $10, $11, NULLIF($12, ''), NULLIF($13, ''), NULLIF($14, '')::uuid
+		)
+		RETURNING `+connectionColumns,
+		c.WorkspaceID, c.APIAppID, c.OrgID, c.Source, c.Active, c.WorkspaceName, c.AppName, c.EnterpriseID,
+		c.Transport, c.BotUserID, c.BotTokenRef, c.SigningSecretRef, c.AppTokenRef, c.RegisteredByUserID))
 	if err != nil {
-		return fmt.Errorf("update org_slack_workspaces: %w", err)
-	}
-	if n, _ := res.RowsAffected(); n > 0 {
-		return nil
-	}
-	if _, err := s.app.ExecContext(ctx, `
-		INSERT INTO org_slack_workspaces (
-			workspace_id, api_app_id, org_id, workspace_name, enterprise_id, transport,
-			bot_user_id, bot_token_ref, signing_secret_ref, app_token_ref, registered_by_user_id
-		) VALUES ($1, $2, $3, $4, NULLIF($5, ''), $6, $7, $8, NULLIF($9, ''), NULLIF($10, ''), NULLIF($11, '')::uuid)
-	`, ws.WorkspaceID, ws.APIAppID, ws.OrgID, ws.WorkspaceName, ws.EnterpriseID, ws.Transport,
-		ws.BotUserID, ws.BotTokenRef, ws.SigningSecretRef, ws.AppTokenRef, ws.RegisteredByUserID); err != nil {
-		return fmt.Errorf("insert org_slack_workspaces: %w", err)
-	}
-	return nil
-}
-
-func (s *workspaceStore) ListForOrg(ctx context.Context, orgID string) ([]slackstore.Workspace, error) {
-	rows, err := s.app.QueryContext(ctx, `
-		SELECT `+workspaceColumns+`
-		FROM org_slack_workspaces
-		WHERE org_id = $1
-		ORDER BY created_at DESC, workspace_id ASC
-	`, orgID)
-	if err != nil {
-		return nil, fmt.Errorf("list org_slack_workspaces: %w", err)
-	}
-	defer rows.Close()
-
-	out := []slackstore.Workspace{}
-	for rows.Next() {
-		w, err := scanWorkspace(rows)
-		if err != nil {
-			return nil, fmt.Errorf("scan org_slack_workspaces: %w", err)
+		if isOneActiveViolation(err) {
+			return slackstore.Connection{}, slackstore.ErrActiveConnectionExists
 		}
-		out = append(out, w)
+		return slackstore.Connection{}, fmt.Errorf("insert org_slack_connections: %w", err)
 	}
-	return out, rows.Err()
+	return got, nil
 }
 
-func (s *workspaceStore) ListForOrgSystem(ctx context.Context, orgID string) ([]slackstore.Workspace, error) {
-	rows, err := s.admin.QueryContext(ctx, `
-		SELECT `+workspaceColumns+`
-		FROM org_slack_workspaces
-		WHERE org_id = $1
-		ORDER BY created_at DESC, workspace_id ASC
-	`, orgID)
+// ListForOrg counts in its own statement, on the same transaction as the page
+// when the caller runs it in one, so the total and the page describe one set.
+func (s *connectionStore) ListForOrg(ctx context.Context, orgID string, opts db.ListOpts) ([]slackstore.Connection, int, error) {
+	var total int
+	if err := s.app.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM org_slack_connections WHERE org_id = $1
+	`, orgID).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count org_slack_connections: %w", err)
+	}
+	if opts.CountOnly {
+		return []slackstore.Connection{}, total, nil
+	}
+	conns, err := s.listForOrg(ctx, s.app, orgID, opts)
 	if err != nil {
-		return nil, fmt.Errorf("list org_slack_workspaces: %w", err)
+		return nil, 0, err
 	}
-	defer rows.Close()
-
-	out := []slackstore.Workspace{}
-	for rows.Next() {
-		w, err := scanWorkspace(rows)
-		if err != nil {
-			return nil, fmt.Errorf("scan org_slack_workspaces: %w", err)
-		}
-		out = append(out, w)
-	}
-	return out, rows.Err()
+	return conns, total, nil
 }
 
-func (s *workspaceStore) Get(ctx context.Context, orgID, workspaceID, apiAppID string) (*slackstore.Workspace, error) {
-	w, err := scanWorkspace(s.app.QueryRowContext(ctx, `
-		SELECT `+workspaceColumns+`
-		FROM org_slack_workspaces
+func (s *connectionStore) ListForOrgSystem(ctx context.Context, orgID string) ([]slackstore.Connection, error) {
+	return s.listForOrg(ctx, s.admin, orgID, db.Unwindowed)
+}
+
+func (s *connectionStore) listForOrg(ctx context.Context, q db.Execer, orgID string, opts db.ListOpts) ([]slackstore.Connection, error) {
+	query := `
+		SELECT ` + connectionColumns + `
+		FROM org_slack_connections
+		WHERE org_id = $1
+		ORDER BY workspace_name ASC, workspace_id ASC, api_app_id ASC`
+	args := []any{orgID}
+	if opts.Limit > 0 {
+		query += `
+		LIMIT $2 OFFSET $3`
+		args = append(args, opts.Limit, opts.Offset)
+	}
+	rows, err := q.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list org_slack_connections: %w", err)
+	}
+	return scanConnections(rows)
+}
+
+func (s *connectionStore) Get(ctx context.Context, orgID, workspaceID, apiAppID string) (*slackstore.Connection, error) {
+	c, err := scanConnection(s.app.QueryRowContext(ctx, `
+		SELECT `+connectionColumns+`
+		FROM org_slack_connections
 		WHERE workspace_id = $1 AND api_app_id = $2 AND org_id = $3
 	`, workspaceID, apiAppID, orgID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("get org_slack_workspaces: %w", err)
+		return nil, fmt.Errorf("get org_slack_connections: %w", err)
 	}
-	return &w, nil
+	return &c, nil
 }
 
-func (s *workspaceStore) Delete(ctx context.Context, orgID, workspaceID, apiAppID string) error {
+func (s *connectionStore) Delete(ctx context.Context, orgID, workspaceID, apiAppID string) error {
 	if _, err := s.app.ExecContext(ctx, `
-		DELETE FROM org_slack_workspaces WHERE workspace_id = $1 AND api_app_id = $2 AND org_id = $3
+		DELETE FROM org_slack_connections WHERE workspace_id = $1 AND api_app_id = $2 AND org_id = $3
 	`, workspaceID, apiAppID, orgID); err != nil {
-		return fmt.Errorf("delete org_slack_workspaces: %w", err)
+		return fmt.Errorf("delete org_slack_connections: %w", err)
 	}
 	return nil
 }
 
-// DeleteSystem's updated_at condition holds against a concurrent connect: the
-// connect's UPDATE holds the row's lock, and once it commits Postgres
-// re-checks the condition against the row it wrote, whose updated_at the
-// trigger moved.
-func (s *workspaceStore) DeleteSystem(ctx context.Context, orgID, workspaceID, apiAppID string, updatedAt time.Time) (bool, error) {
-	res, err := s.admin.ExecContext(ctx, `
-		DELETE FROM org_slack_workspaces
-		WHERE workspace_id = $1 AND api_app_id = $2 AND org_id = $3 AND updated_at = $4
-	`, workspaceID, apiAppID, orgID, updatedAt)
+// LockWorkspace orders by app id so two callers take the rows' locks in the
+// same order and cannot deadlock on them.
+func (s *connectionStore) LockWorkspace(ctx context.Context, orgID, workspaceID string) ([]slackstore.Connection, error) {
+	rows, err := s.app.QueryContext(ctx, `
+		SELECT `+connectionColumns+`
+		FROM org_slack_connections
+		WHERE org_id = $1 AND workspace_id = $2
+		ORDER BY api_app_id ASC
+		FOR UPDATE
+	`, orgID, workspaceID)
 	if err != nil {
-		return false, fmt.Errorf("delete org_slack_workspaces (system): %w", err)
+		return nil, fmt.Errorf("lock org_slack_connections: %w", err)
+	}
+	return scanConnections(rows)
+}
+
+// Activate is two statements, not one: the one-active index is checked as
+// each row is written, and within one statement Postgres does not promise
+// which of two updated rows it writes first, so setting the target active
+// before the current one is cleared would trip the index.
+func (s *connectionStore) Activate(ctx context.Context, orgID, workspaceID, apiAppID string) (slackstore.Connection, error) {
+	var got slackstore.Connection
+	err := inTx(ctx, s.app, func(q db.Execer) error {
+		if _, err := q.ExecContext(ctx, `
+			UPDATE org_slack_connections SET active = false
+			WHERE org_id = $1 AND workspace_id = $2 AND active AND api_app_id <> $3
+		`, orgID, workspaceID, apiAppID); err != nil {
+			return activateError("deactivate org_slack_connections", err)
+		}
+		var err error
+		got, err = scanConnection(q.QueryRowContext(ctx, `
+			UPDATE org_slack_connections SET active = true
+			WHERE org_id = $1 AND workspace_id = $2 AND api_app_id = $3
+			RETURNING `+connectionColumns,
+			orgID, workspaceID, apiAppID))
+		if errors.Is(err, sql.ErrNoRows) {
+			return slackstore.ErrNoSuchConnection
+		}
+		if err != nil {
+			return activateError("activate org_slack_connections", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return slackstore.Connection{}, err
+	}
+	return got, nil
+}
+
+// activateError maps a violation of the one-active index to
+// slackstore.ErrActiveConnectionExists and wraps anything else.
+func activateError(what string, err error) error {
+	if isOneActiveViolation(err) {
+		return slackstore.ErrActiveConnectionExists
+	}
+	return fmt.Errorf("%s: %w", what, err)
+}
+
+// isOneActiveViolation reports whether err is a write refused by the
+// one-active index.
+func isOneActiveViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == oneActiveIndex
+}
+
+// DeleteSystem's connected_at condition holds against a concurrent connect:
+// the connect's UPDATE holds the row's lock, and once it commits Postgres
+// re-checks the condition against the row it wrote, whose connected_at the
+// connect moved. A concurrent Activate holds the lock the same way and leaves
+// connected_at, so the delete goes ahead once it commits.
+func (s *connectionStore) DeleteSystem(ctx context.Context, orgID, workspaceID, apiAppID string, connectedAt time.Time) (bool, error) {
+	res, err := s.admin.ExecContext(ctx, `
+		DELETE FROM org_slack_connections
+		WHERE workspace_id = $1 AND api_app_id = $2 AND org_id = $3 AND connected_at = $4
+	`, workspaceID, apiAppID, orgID, connectedAt)
+	if err != nil {
+		return false, fmt.Errorf("delete org_slack_connections (system): %w", err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return false, fmt.Errorf("delete org_slack_workspaces (system): rows affected: %w", err)
+		return false, fmt.Errorf("delete org_slack_connections (system): rows affected: %w", err)
 	}
 	return n > 0, nil
 }
 
-func (s *workspaceStore) ListAllSystem(ctx context.Context) ([]slackstore.Workspace, error) {
+func (s *connectionStore) ListAllSystem(ctx context.Context) ([]slackstore.Connection, error) {
 	rows, err := s.admin.QueryContext(ctx, `
-		SELECT `+workspaceColumns+`
-		FROM org_slack_workspaces
-		ORDER BY org_id ASC, workspace_id ASC
+		SELECT `+connectionColumns+`
+		FROM org_slack_connections
+		ORDER BY org_id ASC, workspace_id ASC, api_app_id ASC
 	`)
 	if err != nil {
-		return nil, fmt.Errorf("list all org_slack_workspaces: %w", err)
+		return nil, fmt.Errorf("list all org_slack_connections: %w", err)
 	}
-	defer rows.Close()
-
-	out := []slackstore.Workspace{}
-	for rows.Next() {
-		w, err := scanWorkspace(rows)
-		if err != nil {
-			return nil, fmt.Errorf("scan org_slack_workspaces: %w", err)
-		}
-		out = append(out, w)
-	}
-	return out, rows.Err()
+	return scanConnections(rows)
 }
 
-func (s *workspaceStore) GetByWorkspaceAppSystem(ctx context.Context, workspaceID, apiAppID string) (*slackstore.Workspace, error) {
-	w, err := scanWorkspace(s.admin.QueryRowContext(ctx, `
-		SELECT `+workspaceColumns+`
-		FROM org_slack_workspaces
+func (s *connectionStore) ActiveForWorkspaceSystem(ctx context.Context, orgID, workspaceID string) (*slackstore.Connection, error) {
+	c, err := scanConnection(s.admin.QueryRowContext(ctx, `
+		SELECT `+connectionColumns+`
+		FROM org_slack_connections
+		WHERE org_id = $1 AND workspace_id = $2 AND active
+	`, orgID, workspaceID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get active org_slack_connections: %w", err)
+	}
+	return &c, nil
+}
+
+func (s *connectionStore) GetByWorkspaceAppSystem(ctx context.Context, workspaceID, apiAppID string) (*slackstore.Connection, error) {
+	c, err := scanConnection(s.admin.QueryRowContext(ctx, `
+		SELECT `+connectionColumns+`
+		FROM org_slack_connections
 		WHERE workspace_id = $1 AND api_app_id = $2
 	`, workspaceID, apiAppID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("get org_slack_workspaces by workspace+app id: %w", err)
+		return nil, fmt.Errorf("get org_slack_connections by workspace+app id: %w", err)
 	}
-	return &w, nil
+	return &c, nil
 }
 
 // LockApp runs on the app pool — the SAME connection/transaction the caller
@@ -267,7 +360,7 @@ func (s *workspaceStore) GetByWorkspaceAppSystem(ctx context.Context, workspaceI
 // same global pg_advisory_xact_lock(bigint) keyspace as all of them, so a
 // distinct salt keeps a Slack api_app_id from ever landing on the same key
 // as an unrelated org id or email hashed under a reused salt.
-func (s *workspaceStore) LockApp(ctx context.Context, apiAppID string) error {
+func (s *connectionStore) LockApp(ctx context.Context, apiAppID string) error {
 	if _, err := s.app.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 2))`, apiAppID); err != nil {
 		return fmt.Errorf("lock app invariant: %w", err)
 	}
@@ -278,14 +371,15 @@ func (s *workspaceStore) LockApp(ctx context.Context, apiAppID string) error {
 // question — "does ANY org other than mine already own this api_app_id" —
 // is by definition unanswerable from an RLS-scoped view that only shows the
 // caller's own rows.
-func (s *workspaceStore) AppBoundToOtherOrgSystem(ctx context.Context, apiAppID, orgID string) (bool, error) {
+func (s *connectionStore) AppBoundToOtherOrgSystem(ctx context.Context, apiAppID, orgID string) (bool, error) {
 	var exists bool
 	if err := s.admin.QueryRowContext(ctx, `
 		SELECT EXISTS (
-			SELECT 1 FROM org_slack_workspaces WHERE api_app_id = $1 AND org_id != $2
+			SELECT 1 FROM org_slack_connections
+			WHERE api_app_id = $1 AND org_id != $2 AND source = 'org'
 		)
 	`, apiAppID, orgID).Scan(&exists); err != nil {
-		return false, fmt.Errorf("check org_slack_workspaces app-single-org invariant: %w", err)
+		return false, fmt.Errorf("check org_slack_connections app-single-org invariant: %w", err)
 	}
 	return exists, nil
 }

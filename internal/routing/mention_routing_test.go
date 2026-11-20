@@ -22,10 +22,10 @@ func seedMentionRule(t *testing.T, database *sql.DB, teamID string) {
 	t.Helper()
 	if _, err := database.Exec(`
 		INSERT INTO event_handlers
-			(id, org_id, team_id, creator_user_id, kind, event_type,
-			 scope_predicate_json, enabled, source, name, default_priority, sort_order,
+			(id, org_id, team_id, creator_user_id, mode, event_type,
+			 scope_predicate_json, source, name, default_priority, sort_order,
 			 created_at, updated_at)
-		VALUES (?, ?, ?, ?, 'rule', ?, NULL, 1, 'user', 'mention rule', 0.7, 100, ?, ?)
+		VALUES (?, ?, ?, ?, 'watch', ?, NULL, 'user', 'mention rule', 0.7, 100, ?, ?)
 	`, uuid.New().String(), runmode.LocalDefaultOrgID, teamID, runmode.LocalDefaultUserID,
 		domain.EventGitHubPRMentioned, time.Now(), time.Now()); err != nil {
 		t.Fatalf("seed mention rule: %v", err)

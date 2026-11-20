@@ -304,15 +304,15 @@ type Spawner struct {
 	// supersede the process-global ghClient/model above; tests leave them
 	// nil and the resolver helpers fall back to ghClient/model.
 	ghResolver ghclient.Resolver                                                // per-(org, owner) GitHub client source (App token in multi, keychain PAT in local)
-	runSecrets agentproc.SecretsReader                                          // per-org LLM-credential reader (system-door reader in both modes; an org with nothing stored resolves to the ambient subscription)
+	runSecrets agentproc.SecretsReader                                          // per-org LLM-credential reader (system-door reader; in local, narrowed to the providers the org's settings bound)
 	modelFor   func(context.Context, string, string) (domain.TeamModels, error) // per-(org, team) model resolver: the default a step inherits plus the set every model is held to
 	// llmResolver is the shared LLM-credential resolver (internal/cred/llmcred,
 	// TFAC-616) — role-mode Bedrock orgs mint short-lived STS session creds
 	// through it. Used only where a run resolves its own credentials in
 	// process (local): the RunOptions.LLMResolver it feeds is never consulted
 	// on an executor, whose agent launches into a prebuilt cell whose
-	// credentials the sidecar unsealed. nil in local mode (ambient) and in
-	// tests. Wired post-construction via SetLLMResolver.
+	// credentials the sidecar unsealed. nil in local mode, which cannot bind
+	// role mode, and in tests. Wired post-construction via SetLLMResolver.
 	llmResolver bundleLLMResolver
 	// jiraResolver routes the TFAC-300 board→Jira mirror under the org's
 	// system/bot credential (ForSystem). Wired post-construction via
@@ -1416,8 +1416,7 @@ func (s *Spawner) resolveModel(ctx context.Context, orgID, teamID string) (domai
 }
 
 // getRunSecrets returns the per-org LLM-credential reader threaded into
-// RunOptions.Secrets: nil in local (ambient subscription fallback), the
-// system-door reader in multi.
+// RunOptions.Secrets (nil only in tests).
 func (s *Spawner) getRunSecrets() agentproc.SecretsReader {
 	s.mu.Lock()
 	defer s.mu.Unlock()

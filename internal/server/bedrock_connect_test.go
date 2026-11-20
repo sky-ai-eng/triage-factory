@@ -116,6 +116,36 @@ func TestBedrockPut_BlankSecretIsRefusedNotKept(t *testing.T) {
 	}
 }
 
+// TestBedrockAccessKeysPut_SecretTooLargeForKeychain: a session token larger
+// than the OS keychain holds is answered 413 SECRET_TOO_LARGE through the
+// whole local path (the SQLite secret store, the transaction, and the route),
+// and the keys the bind wrote before the refused one are rolled back, so the
+// org is left with no half-written credential.
+func TestBedrockAccessKeysPut_SecretTooLargeForKeychain(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+	auth.LimitKeychainForTest(t, 2560)
+
+	rec := putBedrock(t, s, "access-keys", map[string]any{
+		"access_key_id":     "AKIABIG",
+		"secret_access_key": "secret-big",
+		"session_token":     strings.Repeat("x", 3000),
+		"region":            "us-east-1",
+		"model_id":          "model",
+	})
+	assertOneFault(t, rec, http.StatusRequestEntityTooLarge, httpx.ReasonSecretTooLarge, "")
+	for _, k := range []string{
+		integrations.KeyAWSAccessKeyID,
+		integrations.KeyAWSSecretAccessKey,
+		integrations.KeyAWSSessionToken,
+	} {
+		if got := mustSecret(t, s, k); got != "" {
+			t.Errorf("%s = %q after the refused bind, want nothing stored", k, got)
+		}
+	}
+}
+
 // TestBedrockAccessKeysPut_ReplaceClearsSessionToken: a new key pair with no
 // session token means long-lived keys, not "keep the old token" — a stale
 // token would 403 every AWS call.

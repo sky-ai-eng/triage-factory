@@ -14,8 +14,8 @@ import (
 //
 // Local mode is N=1: one org, one team, and every repo the install polls is
 // that team's, so the tracked-set outer filter the Postgres twin applies has
-// nothing to narrow and is left out, the same posture as sqlite/factory.go and
-// sqlite/team_activity.go. Both identity legs stay, because they are not about
+// nothing to narrow and is left out, the same posture as sqlite/entity_list.go
+// and sqlite/team_activity.go. Both identity legs stay, because they are not about
 // scoping: the member leg is a real join through the sole user's identity
 // binding (an install whose operator has bound no GitHub login has no authored
 // pull requests to claim), and the owning-team leg is what makes a pull

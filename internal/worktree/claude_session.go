@@ -1,11 +1,11 @@
 package worktree
 
 import (
-	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"unicode/utf16"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/cell"
@@ -13,27 +13,6 @@ import (
 
 // claudeProjectsDir is where Claude Code auto-creates per-cwd session history.
 const claudeProjectsDir = ".claude/projects"
-
-// ErrClaudeSessionNameTooLong is returned on Windows when the encoded project
-// directory name for a cwd exceeds the length Claude Code stores verbatim. Past
-// it Claude Code truncates the name and appends a hash TF does not reproduce, so
-// the session transcript cannot be located. Callers treat it like a missing
-// session: a crash-reclaim starts fresh, and a message resume reports the
-// session lost, as Claude Code itself does for such a cwd.
-var ErrClaudeSessionNameTooLong = errors.New("claude project directory name exceeds the length Claude Code stores verbatim")
-
-// WarnIfClaudeSessionNameTooLong logs a WARN when cwd's encoded Claude project
-// directory name is too long for TF to locate on this platform (Windows only).
-// Call it at launch so the cause of a later failed resume is visible in the log
-// of the run that created the problem.
-func WarnIfClaudeSessionNameTooLong(cwd string) {
-	encoded, resolved := claudeProjectEncoding(cwd)
-	if !claudeEncodedNameTooLong(encoded) {
-		return
-	}
-	worktreeLog.Warn("encoded cwd exceeds Claude Code's project directory name limit; session resume and cleanup are unavailable for this run, shorten the state root or TEMP path",
-		"cwd", resolved, "encoded_len", len(encoded))
-}
 
 // claudeHome resolves this process's home directory for ~/.claude
 // access. Claude Code SDK session state (the per-cwd JSONL transcripts
@@ -74,12 +53,51 @@ func ClaudeProjectDir(resolvedCwd string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	encoded := encodeClaudeProjectDir(resolvedCwd)
-	if claudeEncodedNameTooLong(encoded) {
-		worktreeLog.Warn("claude project dir name too long to locate", "cwd", resolvedCwd, "encoded_len", len(encoded))
-		return "", fmt.Errorf("%w: %d characters for %q", ErrClaudeSessionNameTooLong, len(encoded), resolvedCwd)
+	return filepath.Join(home, claudeProjectsDir, encodeClaudeProjectDir(resolvedCwd)), nil
+}
+
+// claudeProjectNameMax is the longest project directory name Claude Code
+// writes as-is; a longer one is cut to this length and given a hash suffix.
+const claudeProjectNameMax = 200
+
+// encodeClaudeProjectDir returns the directory name Claude Code uses
+// under ~/.claude/projects/ for a symlink-resolved absolute cwd.
+//
+// Claude Code computes it in JavaScript, on every platform alike:
+//
+//	n = cwd.replace(/[^a-zA-Z0-9]/g, "-")
+//	n.length <= 200 ? n : n.slice(0, 200) + "-" + Math.abs(h(cwd)).toString(36)
+//
+// where h is the 31-multiplier int32 string hash over the original cwd. A
+// JavaScript string is UTF-16, so both the replacement and the hash run per
+// UTF-16 unit, not per byte or per rune: a character outside the Basic
+// Multilingual Plane is two units and becomes two dashes. Claude Code does not
+// normalize the path first, so a decomposed "é" (e + U+0301) becomes "e-".
+func encodeClaudeProjectDir(resolvedAbs string) string {
+	units := utf16.Encode([]rune(resolvedAbs))
+	name := make([]byte, len(units))
+	var hash int32 // overflow wraps, as JavaScript's `| 0` does
+	for i, u := range units {
+		if isASCIIAlnum(u) {
+			name[i] = byte(u)
+		} else {
+			name[i] = '-'
+		}
+		hash = hash*31 + int32(u)
 	}
-	return filepath.Join(home, claudeProjectsDir, encoded), nil
+	if len(name) <= claudeProjectNameMax {
+		return string(name)
+	}
+	// int64, so the absolute value of math.MinInt32 does not overflow.
+	abs := int64(hash)
+	if abs < 0 {
+		abs = -abs
+	}
+	return string(name[:claudeProjectNameMax]) + "-" + strconv.FormatInt(abs, 36)
+}
+
+func isASCIIAlnum(u uint16) bool {
+	return 'a' <= u && u <= 'z' || 'A' <= u && u <= 'Z' || '0' <= u && u <= '9'
 }
 
 // claudeProjectEncoding combines symlink resolution and encoding for
@@ -140,7 +158,7 @@ func RemoveClaudeProjectDir(cwd string) {
 	if err != nil {
 		return
 	}
-	if !strings.HasPrefix(resolved, tmpResolved) {
+	if !pathUnder(resolved, tmpResolved) {
 		worktreeLog.Warn("refusing to clean project dir for non-tmp cwd", "cwd", resolved)
 		return
 	}
@@ -149,13 +167,16 @@ func RemoveClaudeProjectDir(cwd string) {
 	if err != nil {
 		return
 	}
-	encoded := encodeClaudeProjectDir(resolved)
-	if claudeEncodedNameTooLong(encoded) {
-		worktreeLog.Warn("not removing claude project dir: name too long to locate", "cwd", resolved, "encoded_len", len(encoded))
-		return
-	}
-	projectDir := filepath.Join(home, claudeProjectsDir, encoded)
+	projectDir := filepath.Join(home, claudeProjectsDir, encodeClaudeProjectDir(resolved))
 	if err := os.RemoveAll(projectDir); err != nil {
 		worktreeLog.Warn("remove ghost project dir", "dir", projectDir, "error", err)
 	}
+}
+
+// pathUnder reports whether the clean absolute path p is strictly inside dir.
+// A string prefix test is not enough: it admits a sibling such as /tmpwork
+// for dir /tmp.
+func pathUnder(p, dir string) bool {
+	rel, err := filepath.Rel(dir, p)
+	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }

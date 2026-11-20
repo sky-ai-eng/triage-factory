@@ -427,7 +427,7 @@ func (s *repoStore) ListSystem(ctx context.Context, orgID, host string) ([]domai
 // (tf_app, RLS active) team_github_repos_select constrains visible tracking
 // rows to the caller's own memberships, so the EXISTS auto-scopes to the
 // viewer's teams with no explicit team_id — the RLS-does-the-scoping
-// semi-join pattern factory.go's factoryGitHubRepoTrackedExists and
+// semi-join pattern tracked_set.go's githubRepoTrackedExists and
 // entities.go's jiraTeamProjectMembershipExists use for the same class of
 // org-wide-entity-list leak. Under the admin pool every team in the
 // org counts, and the teams join on rp.org_id is what keeps it to that org.

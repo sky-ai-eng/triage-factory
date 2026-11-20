@@ -140,9 +140,9 @@ func seedSlackHandler(t *testing.T, h *pgtest.Harness, orgID, teamID, userID, na
 	t.Helper()
 	var id string
 	if err := h.AdminDB.QueryRow(`
-		INSERT INTO event_handlers (org_id, creator_user_id, team_id, kind, event_type, scope_predicate_json,
+		INSERT INTO event_handlers (org_id, creator_user_id, team_id, mode, event_type, scope_predicate_json,
 			source, name, default_priority, sort_order)
-		VALUES ($1, $2, $3, 'rule', $4, $5::jsonb, 'user', $6, 0.5, 0)
+		VALUES ($1, $2, $3, 'watch', $4, $5::jsonb, 'user', $6, 0.5, 0)
 		RETURNING id
 	`, orgID, userID, teamID, domain.EventSlackMessage, predicate, name).Scan(&id); err != nil {
 		t.Fatalf("seed handler %s: %v", name, err)

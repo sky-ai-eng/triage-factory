@@ -19,16 +19,16 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// seedNotifyRule inserts an enabled, match-all notify rule on eventType for
+// seedNotifyRule inserts a match-all handler in notify on eventType for
 // teamID and returns its id.
-func seedNotifyRule(t *testing.T, database *sql.DB, teamID, eventType, audience string) string {
+func seedNotifyRule(t *testing.T, database *sql.DB, teamID, eventType string) string {
 	t.Helper()
 	id := uuid.New().String()
 	if _, err := database.Exec(`
 		INSERT INTO event_handlers
-			(id, org_id, team_id, creator_user_id, kind, event_type, enabled, source, name, notify_audience, created_at, updated_at)
-		VALUES (?, ?, ?, ?, 'notify', ?, 1, 'user', ?, ?, ?, ?)
-	`, id, runmode.LocalDefaultOrgID, teamID, runmode.LocalDefaultUserID, eventType, "notify "+eventType, audience, time.Now(), time.Now()); err != nil {
+			(id, org_id, team_id, creator_user_id, mode, event_type, source, name, created_at, updated_at)
+		VALUES (?, ?, ?, ?, 'notify', ?, 'user', ?, ?, ?)
+	`, id, runmode.LocalDefaultOrgID, teamID, runmode.LocalDefaultUserID, eventType, "notify "+eventType, time.Now(), time.Now()); err != nil {
 		t.Fatalf("seed notify rule: %v", err)
 	}
 	return id
@@ -60,15 +60,16 @@ func githubEvent(entityID, eventType, dedupKey string, meta any) domain.Event {
 	}
 }
 
-// A notify rule on a type a typed close relation closes raises a condition
-// naming the rule, with no task when no rule or trigger matched; the relation
-// that closes the task closes the notification, on the same gate: a pass with
-// a check still failing leaves it, a green suite resolves it.
+// A notify handler on a type a typed close relation closes raises a condition
+// naming the handler, with no task when no handler that makes one matched;
+// the relation that closes the task closes the notification, on the same
+// gate: a pass with a check still failing leaves it, a green suite resolves
+// it.
 func TestNotify_ConditionRaisedAndResolvedByItsCloseRelation(t *testing.T) {
 	rec := notifytest.Record(t)
 	database, r, entityID := notifyFixture(t)
 	ctx := context.Background()
-	ruleID := seedNotifyRule(t, database, runmode.LocalDefaultTeamID, domain.EventGitHubPRCICheckFailed, domain.NotifyAudienceCreator)
+	ruleID := seedNotifyRule(t, database, runmode.LocalDefaultTeamID, domain.EventGitHubPRCICheckFailed)
 
 	if err := r.HandleEvent(ctx, ciEvent(t, entityID, "owner/repo")); err != nil {
 		t.Fatalf("route ci_check_failed: %v", err)
@@ -76,8 +77,8 @@ func TestNotify_ConditionRaisedAndResolvedByItsCloseRelation(t *testing.T) {
 	got := rec.Events(runmode.LocalDefaultOrgID)
 	if len(got) != 1 || !got[0].Condition || got[0].EntityID != entityID || got[0].EventType != domain.EventGitHubPRCICheckFailed ||
 		got[0].DedupKey != "build" || len(got[0].Raise.Rules) != 1 || got[0].Raise.Rules[0].HandlerID != ruleID ||
-		got[0].Raise.Rules[0].CreatorUserID != runmode.LocalDefaultUserID || got[0].Raise.Source != "github" {
-		t.Fatalf("raised %+v; want one condition about the entity naming the rule and its creator", got)
+		got[0].Raise.Rules[0].TeamID != runmode.LocalDefaultTeamID || got[0].Raise.Source != "github" {
+		t.Fatalf("raised %+v; want one condition about the entity naming the rule and its team", got)
 	}
 	if n := activeTaskCount(t, database, entityID); n != 0 {
 		t.Errorf("active tasks = %d; want none, a notify rule makes no task", n)
@@ -114,8 +115,8 @@ func TestNotify_NoticeAndTerminatingClose(t *testing.T) {
 	rec := notifytest.Record(t)
 	database, r, entityID := notifyFixture(t)
 	ctx := context.Background()
-	seedNotifyRule(t, database, runmode.LocalDefaultTeamID, domain.EventGitHubPRCICheckFailed, domain.NotifyAudienceTeam)
-	seedNotifyRule(t, database, runmode.LocalDefaultTeamID, domain.EventGitHubPRReviewCommented, domain.NotifyAudienceCreator)
+	seedNotifyRule(t, database, runmode.LocalDefaultTeamID, domain.EventGitHubPRCICheckFailed)
+	seedNotifyRule(t, database, runmode.LocalDefaultTeamID, domain.EventGitHubPRReviewCommented)
 
 	if err := r.HandleEvent(ctx, ciEvent(t, entityID, "owner/repo")); err != nil {
 		t.Fatalf("route ci_check_failed: %v", err)
@@ -149,7 +150,7 @@ func TestNotify_CloseOwedNamesNoCloser(t *testing.T) {
 	rec := notifytest.Record(t)
 	database, r, entityID := notifyFixture(t)
 	ctx := context.Background()
-	seedNotifyRule(t, database, runmode.LocalDefaultTeamID, domain.EventGitHubPRCICheckFailed, domain.NotifyAudienceTeam)
+	seedNotifyRule(t, database, runmode.LocalDefaultTeamID, domain.EventGitHubPRCICheckFailed)
 
 	if err := r.HandleEvent(ctx, ciEvent(t, entityID, "owner/repo")); err != nil {
 		t.Fatalf("route ci_check_failed: %v", err)
@@ -179,7 +180,7 @@ func TestNotify_GateFailsClosed(t *testing.T) {
 	database, r, _ := notifyFixture(t)
 	ctx := context.Background()
 	st := sqlitestore.New(database)
-	seedNotifyRule(t, database, runmode.LocalDefaultTeamID, domain.EventGitHubPRCICheckFailed, domain.NotifyAudienceCreator)
+	seedNotifyRule(t, database, runmode.LocalDefaultTeamID, domain.EventGitHubPRCICheckFailed)
 
 	untracked, _, err := st.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "github", dbtest.TestGitHubHost, "other/repo#1", "", "pr", "x", "https://github.com/other/repo/pull/1")
 	if err != nil {
@@ -224,7 +225,7 @@ func TestNotify_RaisesOnlyOnceRoutingSucceeds(t *testing.T) {
 	rec := notifytest.Record(t)
 	database, r, entityID := notifyFixture(t)
 	ctx := context.Background()
-	seedNotifyRule(t, database, runmode.LocalDefaultTeamID, domain.EventGitHubPRCICheckFailed, domain.NotifyAudienceCreator)
+	seedNotifyRule(t, database, runmode.LocalDefaultTeamID, domain.EventGitHubPRCICheckFailed)
 	seedMatchAllCIRule(t, database, runmode.LocalDefaultTeamID)
 
 	failingDeps := gateRouterDeps(database)
@@ -251,7 +252,7 @@ func TestNotify_NotificationOnlyCloseNeverFailsRouting(t *testing.T) {
 	rec := notifytest.Record(t)
 	database, r, entityID := notifyFixture(t)
 	ctx := context.Background()
-	seedNotifyRule(t, database, runmode.LocalDefaultTeamID, domain.EventGitHubPRCICheckFailed, domain.NotifyAudienceCreator)
+	seedNotifyRule(t, database, runmode.LocalDefaultTeamID, domain.EventGitHubPRCICheckFailed)
 	if err := r.HandleEvent(ctx, ciEvent(t, entityID, "owner/repo")); err != nil {
 		t.Fatalf("route ci_check_failed: %v", err)
 	}

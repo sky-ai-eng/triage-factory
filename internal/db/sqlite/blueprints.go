@@ -52,10 +52,10 @@ func (s *blueprintStore) List(ctx context.Context, orgID string, f db.BlueprintL
 		where += `
 		  AND NOT (
 		    EXISTS (SELECT 1 FROM event_handlers h
-		             WHERE h.blueprint_id = blueprints.id AND h.kind = 'trigger'
+		             WHERE h.blueprint_id = blueprints.id
 		               AND h.deleted_at IS NULL)
 		    AND NOT EXISTS (SELECT 1 FROM event_handlers h
-		                     WHERE h.blueprint_id = blueprints.id AND h.kind = 'trigger'
+		                     WHERE h.blueprint_id = blueprints.id
 		                       AND h.deleted_at IS NULL
 		                       AND h.event_type NOT IN (` + strings.Join(placeholders, ",") + `))
 		  )`
@@ -133,6 +133,41 @@ func (s *blueprintStore) Get(ctx context.Context, orgID string, id string) (*dom
 		return nil, err
 	}
 	return &b, nil
+}
+
+// GetLiveSystem is Get: SQLite has one connection, so the admin read and the
+// request read are the same read.
+func (s *blueprintStore) GetLiveSystem(ctx context.Context, orgID string, id string) (*domain.Blueprint, error) {
+	return s.Get(ctx, orgID, id)
+}
+
+// GetForShare and GetForUpdate are Get once the caller is known to hold the
+// database's write lock, which a write transaction takes when it begins
+// (BEGIN IMMEDIATE): that lock already orders the caller against every other
+// writer. A read transaction holds no such lock, and neither does a statement
+// outside a transaction, so both are refused, as the Postgres impl refuses
+// them.
+func (s *blueprintStore) GetForShare(ctx context.Context, orgID string, id string) (*domain.Blueprint, error) {
+	return s.getLocked(ctx, orgID, id)
+}
+
+func (s *blueprintStore) GetForUpdate(ctx context.Context, orgID string, id string) (*domain.Blueprint, error) {
+	return s.getLocked(ctx, orgID, id)
+}
+
+func (s *blueprintStore) getLocked(ctx context.Context, orgID, id string) (*domain.Blueprint, error) {
+	tx, ok := s.q.(*sql.Tx)
+	if !ok {
+		return nil, errors.New("sqlite: a locking blueprint read needs a transaction's stores, whose transaction serializes the caller")
+	}
+	var readOnly bool
+	if err := tx.QueryRowContext(ctx, `PRAGMA query_only`).Scan(&readOnly); err != nil {
+		return nil, fmt.Errorf("sqlite: read query_only: %w", err)
+	}
+	if readOnly {
+		return nil, errors.New("sqlite: a locking blueprint read needs a write transaction; a read transaction holds no lock")
+	}
+	return s.Get(ctx, orgID, id)
 }
 
 func (s *blueprintStore) GetSystem(ctx context.Context, orgID string, id string) (*domain.Blueprint, error) {
@@ -448,7 +483,7 @@ func (s *blueprintStore) MergeInto(ctx context.Context, orgID, hostID, sourceID 
 			return err
 		}
 		if n == 0 {
-			return fmt.Errorf("blueprint %s not found or already deleted", sourceID)
+			return db.ErrNoSuchBlueprint
 		}
 		if _, err := q.ExecContext(ctx,
 			`UPDATE blueprints SET updated_at = ?, user_modified = 1 WHERE id = ?`, now, hostID); err != nil {
@@ -952,18 +987,19 @@ func firingTeamArchived(ctx context.Context, q queryer, teamID string) (bool, er
 // insertFiringRun writes the blueprint_runs row for a firing on the given
 // transaction, fenced on the event arm and plain on the manual one, and
 // reports through inserted whether a row landed. Split out so the two arms'
-// only difference — the fence and the creator column the
-// blueprint_runs_creator_matches_trigger_type CHECK pairs with trigger_type —
-// reads as the two statements it is.
+// differences — the fence, the creator column the
+// blueprint_runs_creator_matches_trigger_type CHECK pairs with trigger_type,
+// and the trigger's predicate, which only the event arm records — read as
+// the two statements they are.
 func insertFiringRun(ctx context.Context, q queryer, br domain.BlueprintRun, teamID, stepPlan string, event bool, inserted *bool) error {
 	var res sql.Result
 	var err error
 	if event {
 		res, err = q.ExecContext(ctx, `
-			INSERT INTO blueprint_runs (id, team_id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id, actor_agent_id, status, step_plan, worktree_path, creator_user_id, started_at)
-			VALUES (?, ?, ?, ?, 'event', ?, ?, ?, ?, ?, ?, NULL, CURRENT_TIMESTAMP)
+			INSERT INTO blueprint_runs (id, team_id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id, scope_predicate_json, actor_agent_id, status, step_plan, worktree_path, creator_user_id, started_at)
+			VALUES (?, ?, ?, ?, 'event', ?, ?, ?, ?, ?, ?, ?, NULL, CURRENT_TIMESTAMP)
 			ON CONFLICT (triggering_event_id, trigger_id) WHERE triggering_event_id IS NOT NULL DO NOTHING
-		`, br.ID, nullIfEmpty(teamID), br.BlueprintID, br.TaskID, br.TriggerID, br.TriggeringEventID,
+		`, br.ID, nullIfEmpty(teamID), br.BlueprintID, br.TaskID, br.TriggerID, br.TriggeringEventID, br.ScopePredicateJSON,
 			nullIfEmpty(br.ActorAgentID), br.Status, stepPlan, br.WorktreePath)
 	} else {
 		res, err = q.ExecContext(ctx, `

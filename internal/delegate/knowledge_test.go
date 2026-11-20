@@ -427,3 +427,64 @@ func equalStrings(a, b []string) bool {
 	}
 	return true
 }
+
+// TestKnowledgeForClaim_AHandedOffTreeListsTheFilesOnDisk: a later claim
+// cannot write into a tree the sandbox owns, so it stages nothing, and its
+// listing names the files the tree holds — the same listing their staging
+// rendered, so a re-claim on an unchanged tree has nothing to update.
+func TestKnowledgeForClaim_AHandedOffTreeListsTheFilesOnDisk(t *testing.T) {
+	kb := kbstore.NewLocalAt(t.TempDir())
+	writeKB(t, kb, kbTeam, kbstore.RootPrivate, "architecture.md", "# How it fits together\n\nmore")
+	writeKB(t, kb, kbTeam, kbstore.RootShared, "notes/conventions.md", "Naming and review conventions")
+	writeKB(t, kb, "team-platform", kbstore.RootShared, "slo/latency.md", "What we promise")
+	// A first line long enough that the summary's read cuts a character.
+	writeKB(t, kb, kbTeam, kbstore.RootPrivate, "long.md", "x"+strings.Repeat("é", 4000))
+	s := stagingSpawner(t, kb, fakeTeams{teams: []domain.Team{
+		{ID: kbTeam, Slug: "alpha", Name: "Alpha"},
+		{ID: "team-platform", Slug: "platform", Name: "Platform"},
+	}})
+	cwd := t.TempDir()
+	staged := s.knowledgeForClaim(context.Background(), kbOrg, kbTeam, cwd, false)
+	if staged == "" {
+		t.Fatal("staging rendered no listing; this test would pass vacuously")
+	}
+
+	// The knowledge base moves on; the tree, owned by the sandbox now, does not.
+	writeKB(t, kb, kbTeam, kbstore.RootShared, "new.md", "Filed after the tree was handed off")
+	if got := s.knowledgeForClaim(context.Background(), kbOrg, kbTeam, cwd, true); got != staged {
+		t.Errorf("the handed-off tree's listing is not its staging's;\ngot:\n%s\n\nwant:\n%s", got, staged)
+	}
+	if got := stagedTree(t, cwd); slicesContain(got, "team/shared/new.md") {
+		t.Error("a claim on a handed-off tree staged into it")
+	}
+
+	// What the agent can read is what the listing names, whoever put it there.
+	extra := filepath.Join(cwd, scratchDirName, knowledgeDirName, "team", "shared", "runbook.md")
+	if err := os.WriteFile(extra, []byte("How to roll back\n"), 0o644); err != nil {
+		t.Fatalf("write a file into the tree: %v", err)
+	}
+	got := s.knowledgeForClaim(context.Background(), kbOrg, kbTeam, cwd, true)
+	if !strings.Contains(got, "shared/runbook.md — How to roll back") {
+		t.Errorf("the listing does not name a file the tree holds;\n%s", got)
+	}
+	if strings.Contains(got, "new.md") {
+		t.Errorf("the listing names a document the tree does not hold;\n%s", got)
+	}
+}
+
+// TestKnowledgeForClaim_AHandedOffTreeWithNoKnowledgeListsNothing.
+func TestKnowledgeForClaim_AHandedOffTreeWithNoKnowledgeListsNothing(t *testing.T) {
+	s := stagingSpawner(t, kbstore.NewLocalAt(t.TempDir()), fakeTeams{})
+	if got := s.knowledgeForClaim(context.Background(), kbOrg, kbTeam, t.TempDir(), true); got != "" {
+		t.Errorf("listing = %q, want none", got)
+	}
+}
+
+func slicesContain(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}

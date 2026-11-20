@@ -12,6 +12,8 @@ organization that has its own keeps using it. Local mode ignores all of these.
   Jira Cloud connections
 - [Linear app](deployment-linear-app.md) — one Linear OAuth app every
   organization can install
+- [Slack app](deployment-slack-app.md) — one Slack app every organization can
+  add to its workspaces
 - [Commit signer](deployment-commit-signer.md) — signed, Verified commits for
   organizations on the deployment GitHub App
 

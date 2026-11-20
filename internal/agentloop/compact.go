@@ -109,10 +109,10 @@ func warmCacheLive(rows []domain.Message) bool {
 // and the warmth check, whatever the model or the cache. Claim start is the
 // only place the state can be met: every error out of compactWarm ends the
 // engagement, so only a new engagement finds it.
-func (e *Engine) compactOnResume(ctx context.Context, params Params, spent *spend) error {
+func (e *Engine) compactOnResume(ctx context.Context, params Params, spent *spend) (compacted bool, err error) {
 	rows, err := e.Transcript.ListForAssembly(ctx, params.OrgID, params.ConversationID)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if summary, ok := uncommittedWarmSummary(rows); ok {
 		// The reply is already a row, priced and counted by the engagement
@@ -120,23 +120,47 @@ func (e *Engine) compactOnResume(ctx context.Context, params Params, spent *spen
 		// passed as nil: the span flips it inactive with everything else.
 		e.info("committing a compaction summary an earlier engagement persisted",
 			"conversation", params.ConversationID)
-		return e.compaction(ctx, compactResume, func(ctx context.Context) error {
+		err := e.compaction(ctx, compactResume, func(ctx context.Context) error {
 			if err := e.commitCompaction(ctx, params, nil, summary, compactionSpan(rows)); err != nil {
 				return err
 			}
 			markCompacted(ctx, compactedRecovered)
 			return nil
 		})
+		return err == nil, err
 	}
 	if !e.compactionDue(params, rows) {
-		return nil
+		return false, nil
 	}
 	if warmCacheLive(rows) {
-		return nil
+		return false, nil
 	}
-	return e.compaction(ctx, compactResume, func(ctx context.Context) error {
+	err = e.compaction(ctx, compactResume, func(ctx context.Context) error {
 		return e.compactCold(ctx, params, spent)
 	})
+	return err == nil, err
+}
+
+// adoptCurrentSystem moves the engagement onto the system blocks its claim
+// composed (Params.Current), and returns the params every later call is built
+// from. Only a compaction whose commit landed may precede it: the commit saves
+// Current (commitCompaction), and the blocks the engagement sends from here
+// must be the ones the next claim reads back, or that claim replays this
+// engagement's thinking under other blocks.
+//
+// The blocks a conversation is sent stay the ones its earlier turns were sent,
+// because the provider binds each thinking block to them. A compaction flips
+// every delivered row a thinking block rides on, so from here nothing binds
+// them, and the claim's system update would otherwise survive only inside a
+// summary. The update, now in the blocks, is not written.
+func adoptCurrentSystem(params Params) Params {
+	if params.Current == nil {
+		return params
+	}
+	params.SystemPrompt, params.SystemAddendum = params.Current.Prompt, params.Current.Block
+	params.Current = nil
+	params.SystemUpdate = nil
+	return params
 }
 
 // compactWindowFull is the reactive arm's dispatcher: warm semantics while
@@ -217,7 +241,8 @@ func (e *Engine) compactWarm(ctx context.Context, params Params, spent *spend) e
 	// same tool_choice (absent), same model, same effort — over the same
 	// transcript plus the one request row. The only cache invalidation in
 	// the whole compaction process is the commit below.
-	completion, err := e.streamWithRetry(ctx, params.OrgID, client, e.buildRequest(params, provider, rows, callMaxTokens(params, provider)))
+	req := e.buildRequest(params, provider, rows, callMaxTokens(params, provider))
+	completion, err := e.streamWithRetry(ctx, params.OrgID, client, req)
 	if release != nil {
 		release()
 	}
@@ -254,7 +279,7 @@ func (e *Engine) compactWarm(ctx context.Context, params Params, spent *spend) e
 	// Success: the reply is a genuine transcript event — persist it like any
 	// assistant turn (usage, cost, duration), then flip it inactive with the
 	// span it summarized.
-	replyRow, err := e.persistAssistant(ctx, params, completion, e.msSince(callStarted))
+	replyRow, err := e.persistAssistant(ctx, params, completion, toolsFingerprint(req.Tools), e.msSince(callStarted))
 	if err != nil {
 		return err
 	}
@@ -363,10 +388,14 @@ func withoutReasoning(rows []domain.Message) []domain.Message {
 }
 
 // commitCompaction composes the result row and commits the whole compaction
-// through the transcript's single fenced transaction.
+// through the transcript's single fenced transaction, which also saves the
+// blocks the claim composed (Params.Current) as the conversation's. The flip
+// and the save land together or not at all: a commit that fails leaves the
+// transcript, the saved blocks, and the blocks the engagement sends as they
+// were.
 func (e *Engine) commitCompaction(ctx context.Context, params Params, replyRow *domain.Message, summary string, span []int) error {
 	resultRow := composeResultRow(params, summary)
-	if err := e.Transcript.Compact(ctx, params.OrgID, params.ConversationID, replyRow, resultRow, span); err != nil {
+	if err := e.Transcript.Compact(ctx, params.OrgID, params.ConversationID, replyRow, resultRow, span, params.Current); err != nil {
 		return fmt.Errorf("commit compaction: %w", err)
 	}
 	e.info("conversation compacted",

@@ -61,10 +61,10 @@ func (s *blueprintStore) List(ctx context.Context, orgID string, f db.BlueprintL
 		  AND NOT (
 		    EXISTS (SELECT 1 FROM event_handlers h
 		             WHERE h.org_id = blueprints.org_id AND h.blueprint_id = blueprints.id
-		               AND h.kind = 'trigger' AND h.deleted_at IS NULL)
+		               AND h.deleted_at IS NULL)
 		    AND NOT EXISTS (SELECT 1 FROM event_handlers h
 		                     WHERE h.org_id = blueprints.org_id AND h.blueprint_id = blueprints.id
-		                       AND h.kind = 'trigger' AND h.deleted_at IS NULL
+		                       AND h.deleted_at IS NULL
 		                       AND NOT (h.event_type = ANY(` + gated + `)))
 		  )`
 	}
@@ -114,6 +114,41 @@ func (s *blueprintStore) Get(ctx context.Context, orgID string, id string) (*dom
 
 func (s *blueprintStore) GetSystem(ctx context.Context, orgID string, id string) (*domain.Blueprint, error) {
 	return getBlueprint(ctx, s.admin, orgID, id, true)
+}
+
+func (s *blueprintStore) GetLiveSystem(ctx context.Context, orgID string, id string) (*domain.Blueprint, error) {
+	return getBlueprint(ctx, s.admin, orgID, id, false)
+}
+
+func (s *blueprintStore) GetForShare(ctx context.Context, orgID string, id string) (*domain.Blueprint, error) {
+	return s.getLocked(ctx, orgID, id, "FOR SHARE")
+}
+
+func (s *blueprintStore) GetForUpdate(ctx context.Context, orgID string, id string) (*domain.Blueprint, error) {
+	return s.getLocked(ctx, orgID, id, "FOR UPDATE")
+}
+
+// getLocked is the live point read with a row lock. Under READ COMMITTED a
+// lock that waited re-checks the WHERE against the row the other transaction
+// committed, which is what makes a retired blueprint answer as absent here.
+func (s *blueprintStore) getLocked(ctx context.Context, orgID, id, lock string) (*domain.Blueprint, error) {
+	// Outside a transaction the lock would be released by the statement that
+	// took it, so a caller would hold nothing while believing it held the row.
+	tx, ok := s.app.(*sql.Tx)
+	if !ok {
+		return nil, errors.New("postgres: a locking blueprint read needs a transaction's stores, whose commit releases the lock")
+	}
+	b, err := scanBlueprintRowPG(tx.QueryRowContext(ctx, `
+		SELECT `+pgBlueprintColumns+`
+		FROM blueprints WHERE org_id = $1 AND id = $2 AND deleted_at IS NULL
+		`+lock, orgID, id).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &b, nil
 }
 
 // pgBlueprintColumns is the canonical projection of a blueprints row, in the
@@ -438,11 +473,17 @@ func (s *blueprintStore) MergeInto(ctx context.Context, orgID, hostID, sourceID 
 			return err
 		}
 		if n == 0 {
-			return fmt.Errorf("blueprint %s not found or already deleted", sourceID)
+			return db.ErrNoSuchBlueprint
 		}
 		// Bump host.updated_at (the set_updated_at trigger also stamps it, but
 		// the row must be touched for the trigger to fire) and stamp
 		// user_modified true (the source is retired, not stamped).
+		//
+		// TODO(TFAC-1518): nothing holds the host, and this stamp does not
+		// check that it is still live, so a concurrent merge that absorbs the
+		// host leaves the source's steps on a retired blueprint. Holding it
+		// needs every writer of a blueprint's steps to lock blueprint rows
+		// before step rows, or the hold deadlocks against a steps PUT.
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE blueprints SET updated_at = now(), user_modified = TRUE WHERE org_id = $1 AND id = $2`, orgID, hostID); err != nil {
 			return fmt.Errorf("bump host updated_at: %w", err)
@@ -1039,8 +1080,13 @@ func lockFiringTeam(ctx context.Context, q queryer, orgID, teamID string) (archi
 // insertFiringRun writes the blueprint_runs row for a firing on the given
 // transaction, fenced on the event arm and plain on the manual one, and
 // reports through inserted whether a row landed. Split out so the two arms'
-// only difference — the fence and the creator column the schema CHECK pairs
-// with trigger_type — reads as the two statements it is.
+// differences — the fence, the creator column the schema CHECK pairs with
+// trigger_type, and the trigger's predicate, which only the event arm
+// records — read as the two statements they are.
+//
+// The predicate is stored as jsonb's text of it, the form the trigger's own
+// jsonb column reads back as, so the breaker compares the two as text
+// whatever spacing or key order the caller's copy had.
 func insertFiringRun(ctx context.Context, q queryer, orgID string, br domain.BlueprintRun, teamID, stepPlan string, event bool, creatorUserID string, inserted *bool) error {
 	var res sql.Result
 	var err error
@@ -1048,15 +1094,15 @@ func insertFiringRun(ctx context.Context, q queryer, orgID string, br domain.Blu
 		res, err = q.ExecContext(ctx, `
 			INSERT INTO blueprint_runs
 				(id, org_id, team_id, creator_user_id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id,
-				 actor_agent_id, status, worktree_path, started_at, step_plan)
+				 scope_predicate_json, actor_agent_id, status, worktree_path, started_at, step_plan)
 			VALUES (
 				$1, $2, $3::uuid, NULL,
 				$4, $5, 'event', $6, $7,
-				$8, $9, $10, now(), $11
+				COALESCE(NULLIF($12, '')::jsonb::text, ''), $8, $9, $10, now(), $11
 			)
 			ON CONFLICT (triggering_event_id, trigger_id) WHERE triggering_event_id IS NOT NULL DO NOTHING
 		`, br.ID, orgID, nullIfEmpty(teamID), br.BlueprintID, br.TaskID, br.TriggerID, br.TriggeringEventID,
-			nullIfEmpty(br.ActorAgentID), br.Status, br.WorktreePath, stepPlan)
+			nullIfEmpty(br.ActorAgentID), br.Status, br.WorktreePath, stepPlan, br.ScopePredicateJSON)
 	} else {
 		// A manual run is attributed to the person who asked for it, and the
 		// creator has to arrive on the row — see db.ErrManualCreatorRequired.

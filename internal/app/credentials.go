@@ -14,6 +14,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/github/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/linear/linearoauth"
+	"github.com/sky-ai-eng/triage-factory/internal/llm/modelaccess"
 	"github.com/sky-ai-eng/triage-factory/internal/llm/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/systemjob/systemllm"
@@ -24,15 +25,13 @@ import (
 // through these, so the event → router → task → delegation chain stops
 // branching on mode.
 //
-//   - runSecrets reads a run's per-org LLM credential, in both modes. Multi
-//     mode reads the Postgres vault through the system/admin door (these runs
-//     are claims-free background work, and the orgID always originates from the
-//     run/entity/task, never user input). Local mode reads the keychain through
-//     the same door, where the key an operator bound in Settings or the setup
-//     wizard lives. A local org that bound none resolves to an empty map, so
-//     the agent inherits the host's Claude subscription as before; binding a
-//     credential and choosing the host's are mutually exclusive, so a stored key
-//     is never shadowed by a stale one.
+//   - runSecrets reads a run's per-org LLM credential through the system door
+//     (these runs are claims-free background work, and the orgID always
+//     originates from the run/entity/task, never user input). Local mode
+//     reads the keychain, but only for the providers the org's settings row
+//     has bound, since the keychain is shared by every state root of the OS
+//     user (agentproc.NewBoundSecretsReader). An org on the host's
+//     credentials binds nothing, so its runs inherit the host's environment.
 //
 //   - modelFor resolves the run's team model configuration (per-(org, team)):
 //     the default an unset step inherits, and the enable-set every model the
@@ -46,14 +45,23 @@ import (
 //   - linearResolver resolves an org's Linear service credential, either
 //     shape. Shared by the poller and the credential provisioner.
 func (a *App) buildRunCredentials() error {
-	a.runSecrets = agentproc.NewSystemSecretsReader(a.stores.Secrets)
-	if !a.local() {
+	if a.local() {
+		orgs := a.stores.Orgs
+		a.runSecrets = agentproc.NewBoundSecretsReader(a.stores.Secrets, func(ctx context.Context, orgID string) (map[string]bool, error) {
+			set, err := orgs.GetSettingsSystem(ctx, orgID)
+			if err != nil {
+				return nil, fmt.Errorf("read org settings: %w", err)
+			}
+			return modelaccess.BoundProviders(set), nil
+		})
+	} else {
+		a.runSecrets = agentproc.NewSystemSecretsReader(a.stores.Secrets)
 		// Shared LLM-credential resolver (internal/cred/llmcred, TFAC-616): the one
 		// seam every brain-side Bedrock/Anthropic resolution flows through.
-		// Multi mode only — local has no STS role mode, so its runs resolve the
-		// stored material through runSecrets directly. Env knobs
-		// (mint TTL + executor egress binding) are validated here so a typo
-		// fails boot rather than shipping an unbound or always-failing mint.
+		// Multi mode only: local cannot bind role mode, the one shape that needs
+		// a mint, so its runs resolve stored material through runSecrets. Env
+		// knobs (mint TTL + executor egress binding) are validated here so a
+		// typo fails boot rather than shipping an unbound or always-failing mint.
 		ttl, err := llmcred.TTLFromEnv()
 		if err != nil {
 			return err

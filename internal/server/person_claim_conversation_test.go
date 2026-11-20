@@ -298,8 +298,8 @@ func TestPersonClaim_ATakeoverCancelsTheTasksQueuedFirings(t *testing.T) {
 		triggerID := fixtureUUID("person-claim-trigger")
 		execSQL(t, s.db, `
 			INSERT INTO event_handlers
-				(id, org_id, team_id, kind, event_type, source, system_slug, name, default_priority, sort_order, enabled, creator_user_id)
-			VALUES (?, ?, ?, 'rule', 'github:pr:ci_check_passed', 'system', 'person-claim-trigger', 'Trigger', 0.5, 0, 1, NULL)`,
+				(id, org_id, team_id, mode, event_type, source, system_slug, name, default_priority, sort_order, creator_user_id)
+			VALUES (?, ?, ?, 'watch', 'github:pr:ci_check_passed', 'system', 'person-claim-trigger', 'Trigger', 0.5, 0, NULL)`,
 			triggerID, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID)
 		inserted, _, err := sqlitestore.New(s.db).PendingFirings.Enqueue(t.Context(), runmode.LocalDefaultOrgID,
 			"e_pa", taskID, triggerID, "ev_pa", db.AgentClaimStamp{})

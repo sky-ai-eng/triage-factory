@@ -106,8 +106,11 @@ func (st *claimLeaseState) acceptedLocked(issuedAt time.Time, suspended time.Dur
 	// An acceptance issued before the one already recorded is older news: a
 	// renewal that was out across a sleep while a write's recovery took the
 	// claim back. Recording it would rewind the suspend base to before that
-	// sleep, and a later lapse would count the same sleep again.
-	if issuedAt.Before(*st.lastRenewal.Load()) {
+	// sleep, and a later lapse would count the same sleep again. A coarse
+	// clock can give both one issue time, and then the suspend reading taken
+	// beside each decides: one behind the recorded base was taken before it.
+	last := *st.lastRenewal.Load()
+	if issuedAt.Before(last) || issuedAt.Equal(last) && suspended < st.suspendBase {
 		return
 	}
 	// Published BEFORE the re-arm, so a callback dispatched in between reads
@@ -400,9 +403,9 @@ func (c *leaseRecoveringConversations) SetWorktreePathForClaimSystem(ctx context
 	return conv, err
 }
 
-func (c *leaseRecoveringConversations) SetSystemBlockForClaimSystem(ctx context.Context, orgID, conversationID, claimID, block string) (conv *domain.Conversation, err error) {
+func (c *leaseRecoveringConversations) SetSystemBlocksForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, blocks domain.SystemBlocks) (conv *domain.Conversation, err error) {
 	err = c.s.retryAfterRecovery(ctx, claimID, func() (e error) {
-		conv, e = c.ConversationStore.SetSystemBlockForClaimSystem(ctx, orgID, conversationID, claimID, block)
+		conv, e = c.ConversationStore.SetSystemBlocksForClaimSystem(ctx, orgID, conversationID, claimID, blocks)
 		return e
 	})
 	return conv, err
@@ -420,9 +423,9 @@ func (c *leaseRecoveringConversations) RequeueInputForClaimSystem(ctx context.Co
 	})
 }
 
-func (c *leaseRecoveringConversations) CompactForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, replyRow, resultRow *domain.Message, inactiveIDs []int) error {
+func (c *leaseRecoveringConversations) CompactForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, replyRow, resultRow *domain.Message, inactiveIDs []int, blocks *domain.SystemBlocks) error {
 	return c.s.retryAfterRecovery(ctx, claimID, func() error {
-		return c.ConversationStore.CompactForClaimSystem(ctx, orgID, conversationID, claimID, replyRow, resultRow, inactiveIDs)
+		return c.ConversationStore.CompactForClaimSystem(ctx, orgID, conversationID, claimID, replyRow, resultRow, inactiveIDs, blocks)
 	})
 }
 

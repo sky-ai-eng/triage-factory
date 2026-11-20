@@ -281,8 +281,10 @@ func (s *Spawner) renewClaimLease(ctx context.Context, conv *domain.Conversation
 				"conversation", conv.ID, "claim", conv.ClaimID, "suspended", slept)
 		}
 		// A select with both cases ready picks either; a tick buffered while
-		// the previous call blocked must not outvote the stop.
-		if ctx.Err() != nil {
+		// the previous call blocked must not outvote the stop. The watchdog
+		// fences before it stops this loop, so that its cause is the one the
+		// engagement reads, and a fence it has set ends the loop as well.
+		if ctx.Err() != nil || st.fenced.Load() {
 			return
 		}
 
