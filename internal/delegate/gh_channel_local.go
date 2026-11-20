@@ -30,7 +30,8 @@ type noopChannelCloser struct{}
 
 func (noopChannelCloser) Close() error { return nil }
 
-// isolatedChannelCloser removes the per-run directory isolatedGHConfig made.
+// isolatedChannelCloser takes the degraded channel's directory away with the
+// run, as a live channel's Close does, so no run leaves one behind.
 type isolatedChannelCloser struct{ dir string }
 
 func (c isolatedChannelCloser) Close() error { return os.RemoveAll(c.dir) }
@@ -212,6 +213,18 @@ func (s *Spawner) startLocalGHChannel(ctx context.Context, orgID, conversationID
 
 	delegateLog.Info("local gh channel up", "conversation", conversationID, "host", ch.Host, "git_host", ch.GitHost)
 	return localGHChannelParams(ch), ch
+}
+
+// sdkAllowedTools is the allowlist an SDK launch and its cold resume both pass.
+// It grants the gh subcommands only beside a live channel: a run whose channel
+// is nil or did not start has no TF-owned gh, so the `gh` its shell resolves is
+// the user's own installation, which the allowlist must not name at all.
+func sdkAllowedTools(selfBin, extras string, gh *agentproc.GHChannelParams) string {
+	return agentproc.BuildAllowedToolsFor(agentproc.AllowedToolsOptions{
+		SelfBin: selfBin,
+		Extras:  extras,
+		GH:      gh.Live(),
+	})
 }
 
 // localGHChannelParams is the agent-facing half of a local channel.

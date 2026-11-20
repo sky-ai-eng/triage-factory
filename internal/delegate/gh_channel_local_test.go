@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/cred/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
@@ -221,5 +222,23 @@ func TestStartLocalGHChannel_MultiModeReturnsNothing(t *testing.T) {
 	s := &Spawner{}
 	if gc, _ := s.startLocalGHChannel(context.Background(), "org", "conv-multi", "", agenthost.ConversationInfo{}); gc != nil {
 		t.Errorf("multi-mode channel = %+v, want nil", gc)
+	}
+}
+
+// The allowlist names gh only beside a live channel. A run whose channel did
+// not start still carries params, and the gh its shell finds is the user's own.
+func TestSDKAllowedTools_GrantsGHOnlyWithALiveChannel(t *testing.T) {
+	for name, tc := range map[string]struct {
+		gh   *agentproc.GHChannelParams
+		want bool
+	}{
+		"no channel":            {nil, false},
+		"channel did not start": {&agentproc.GHChannelParams{ConfigDir: "/state/gh-channel/conv/config"}, false},
+		"live channel":          {&agentproc.GHChannelParams{Host: "127.0.0.1", CertSourcePath: "/c", ConfigDir: "/d"}, true},
+	} {
+		tools := sdkAllowedTools("/opt/tf/triagefactory", "", tc.gh)
+		if got := strings.Contains(tools, "Bash(gh pr view"); got != tc.want {
+			t.Errorf("%s: allowlist grants gh = %v, want %v (%s)", name, got, tc.want, tools)
+		}
 	}
 }

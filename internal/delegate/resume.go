@@ -524,12 +524,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 		// is why the stored half stops at the block.
 		SystemPrompt: sdkSystemPrompt(surfaceFor(opts.conversationType), opts.SystemBlock, agentproc.AgentVisibleBinary(selfBin)),
 
-		// gh is granted only alongside a live channel — see runAgent's note.
-		AllowedTools: agentproc.BuildAllowedToolsFor(agentproc.AllowedToolsOptions{
-			SelfBin: selfBin,
-			Extras:  opts.ExtraAllowedTools,
-			GH:      ghChannel.Live(),
-		}),
+		AllowedTools:   sdkAllowedTools(selfBin, opts.ExtraAllowedTools, ghChannel),
 		ExtraEnv:       extraEnv,
 		TraceID:        conversationID,
 		ConversationID: conversationID,

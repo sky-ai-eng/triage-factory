@@ -614,22 +614,15 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		ClaudeAIConnectors:     teamOpts.claudeAIConnectors,
 		SessionID:              resumeSession,
 		SessionCostBaselineUSD: resumeSessionCostUSD,
-		// The gh subcommands are granted only when the channel is actually
-		// live: without one, `gh` on a local host would resolve to the user's
-		// own installation, so the allowlist must not name it at all.
-		AllowedTools: agentproc.BuildAllowedToolsFor(agentproc.AllowedToolsOptions{
-			SelfBin: selfBin,
-			Extras:  cfg.extraAllowedTools,
-			GH:      ghChannel.Live(),
-		}),
-		ExtraEnv:       extraEnv,
-		TraceID:        conversationID,
-		ConversationID: conversationID,
-		WorkspaceKey:   namespace,
-		SystemPrompt:   systemPrompt,
-		OrgID:          orgID,
-		Secrets:        s.getRunSecrets(),
-		LLMResolver:    s.llmResolverForConversation(orgID, conversationID),
+		AllowedTools:           sdkAllowedTools(selfBin, cfg.extraAllowedTools, ghChannel),
+		ExtraEnv:               extraEnv,
+		TraceID:                conversationID,
+		ConversationID:         conversationID,
+		WorkspaceKey:           namespace,
+		SystemPrompt:           systemPrompt,
+		OrgID:                  orgID,
+		Secrets:                s.getRunSecrets(),
+		LLMResolver:            s.llmResolverForConversation(orgID, conversationID),
 		// Measured sandbox cost lands on the engagement that paid for it, at
 		// teardown. Empty claim id (a path with no claimed run in scope)
 		// records nothing.

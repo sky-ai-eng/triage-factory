@@ -35,9 +35,11 @@ import (
 //     leaves a user who ran `gh auth login` reachable. With it, a request to
 //     github.com or a ghe.com tenancy that names its host around GH_HOST (an
 //     explicit --hostname, a GH_REPO or URL naming it) presents a value GitHub
-//     refuses instead of the user's keyring entry. GITHUB_TOKEN stays unset:
-//     gh reads it only when GH_TOKEN is unset, and the tools that read it keep
-//     their anonymous path.
+//     refuses instead of the user's keyring entry. A sandboxed run gets it
+//     too: the sandbox masks paths but shares the network namespace, so a
+//     session bus on an abstract socket still reaches the keyring. GITHUB_TOKEN
+//     stays unset: gh reads it only when GH_TOKEN is unset, and the tools that
+//     read it keep their anonymous path.
 //
 // A channel that could not start (no pinned binary for the platform, a failed
 // fetch, no GitHub URL) arrives with only ConfigDir set, and its run degrades to
