@@ -193,7 +193,7 @@ function EffortGroup({
             aria-checked={checked}
             tabIndex={i === (selected < 0 ? 0 : selected) ? 0 : -1}
             onClick={() => onChange(level)}
-            className={`rounded-[4px] px-2 py-1 text-reported outline-none transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-warm/50 ${
+            className={`rounded-[4px] px-2 py-1 text-reported transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-warm/50 ${
               checked ? 'bg-warm/[0.10] text-warm' : 'text-ink-2 hover:bg-tint-3'
             }`}
           >

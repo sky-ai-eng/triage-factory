@@ -105,7 +105,7 @@ export default function JiraStatusRule<T extends JiraStatusRef>({
                 )
               }
               disabled={value.members.length === 0}
-              className={`bg-raised border rounded-lg px-2 py-1 text-ui text-ink-1 focus:outline-none focus:ring-2 focus:ring-warm/30 focus:border-warm/40 transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+              className={`bg-raised border rounded-lg px-2 py-1 text-ui text-ink-1 focus:ring-2 focus:ring-warm/30 focus:border-warm/40 transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
                 showCanonicalWarning ? 'border-alarm/40' : 'border-line-1'
               }`}
             >

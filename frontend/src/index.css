@@ -59,19 +59,56 @@ body {
   padding: 2rem;
 }
 
-/* Links take the measurement hue. The rules sit in the components layer so
-   that a text-* or hover:text-* class on a link wins: utilities are a later
-   layer, and unlayered CSS outranks every layer whatever its specificity. The
-   components layer still beats preflight's `a { color: inherit }`, which is in
-   the base layer. The underline is deliberately NOT global: this app is mostly
-   nav pills and card links, where an underline reads as noise. Prose surfaces
-   opt in — see .review-markdown a below. */
+/* Defaults for bare elements. Each is meant to give way to a utility class on
+   the element, so they sit in the components layer: Tailwind's utilities are
+   a later layer, and unlayered CSS outranks every layer whatever its
+   specificity. The components layer still beats preflight, which is in the
+   base layer: its `a { color: inherit }`, and its transparent background on an
+   optgroup. */
 @layer components {
+  /* Links take the measurement hue. The underline is deliberately NOT global:
+     this app is mostly nav pills and card links, where an underline reads as
+     noise. Prose surfaces opt in — see .review-markdown a below. */
   :where(a) {
     color: var(--color-warm);
   }
   :where(a):hover {
     color: var(--color-ink-1);
+  }
+
+  /* Tailwind v4 dropped the default cursor: pointer on buttons; restore it for
+     every enabled button so clickable controls read as interactive. */
+  :where(button:not(:disabled)) {
+    cursor: pointer;
+  }
+
+  /* A native select's open list is painted by the browser, not by the page.
+     Chromium fills its rows from the select's computed background, and most of
+     our selects are bg-transparent, so in dark mode the rows fall back to the
+     browser's light default while the options inherit the theme's light ink.
+     Giving the options an explicit ground and ink keeps the list in the theme
+     for every select. Author styles beat the user-agent sheet whatever their
+     layer or specificity, so the UA's greyed-out colour for a disabled option
+     loses to the rule above, and the disabled row needs its own. */
+  :where(select option, select optgroup) {
+    background-color: var(--color-raised);
+    color: var(--color-ink-1);
+  }
+  :where(select option:disabled) {
+    color: var(--color-ink-4);
+  }
+
+  /* One keyboard focus ring for every control. The radius rounds the ring on
+     an element with no radius of its own; a rounded-* class keeps its
+     element's shape, and a focus-visible:outline-* class restyles the ring.
+     outline-none removes the ring, so it belongs only on an element that marks
+     focus without an outline (focus-visible:ring-*), or on a focus target that
+     is not a control (tabIndex -1). Never pair it with focus-visible:outline:
+     it also sets the outline style that utility reads, so no ring is drawn. */
+  :where(button, a, input, select, textarea, [tabindex]):focus-visible {
+    outline: 1.5px solid var(--color-focus);
+    outline-offset: 3px;
+    border-radius: var(--radius-nested);
   }
 }
 
@@ -82,37 +119,6 @@ kbd,
 samp {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
-}
-
-/* Tailwind v4 dropped the default cursor: pointer on buttons; restore it for
-   every enabled button so clickable controls read as interactive. Wrapped in
-   :where() for zero specificity so explicit cursor-* utilities (cursor-wait,
-   cursor-not-allowed, etc.) always override it. */
-:where(button:not(:disabled)) {
-  cursor: pointer;
-}
-
-/* A native select's open list is painted by the browser, not by the page.
-   Chromium fills its rows from the select's computed background, and most of
-   our selects are bg-transparent, so in dark mode the rows fall back to the
-   browser's light default while the options inherit the theme's light ink.
-   Giving the options an explicit ground and ink keeps the list in the theme
-   for every select. Author styles beat the user-agent sheet regardless of
-   specificity, so :where() keeps these at zero for a utility class to win;
-   that is also why the disabled row needs its own colour, since the UA's
-   greyed-out rule would otherwise lose to the one above. */
-:where(select option, select optgroup) {
-  background-color: var(--color-raised);
-  color: var(--color-ink-1);
-}
-:where(select option:disabled) {
-  color: var(--color-ink-4);
-}
-
-:where(button, a, input, select, textarea, [tabindex]):focus-visible {
-  outline: 1.5px solid var(--color-focus);
-  outline-offset: 3px;
-  border-radius: var(--radius-nested);
 }
 
 /* ── react-diff-view theme overrides ── */

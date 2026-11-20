@@ -283,7 +283,7 @@ export default function TriggerConfigPanel({
                   min={1}
                   value={breakerThreshold}
                   onChange={(e) => setBreakerThreshold(Math.max(1, Number(e.target.value)))}
-                  className="w-full px-3 py-2 rounded-lg border border-line-1 bg-raised text-body text-ink-1 focus:outline-none focus:border-warm/40 focus:ring-1 focus:ring-warm/20 transition-colors"
+                  className="w-full px-3 py-2 rounded-lg border border-line-1 bg-raised text-body text-ink-1 focus:border-warm/40 focus:ring-1 focus:ring-warm/20 transition-colors"
                 />
               </Section>
 

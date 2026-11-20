@@ -51,7 +51,7 @@ function IntervalScale({
             aria-checked={selected}
             tabIndex={i === tabbable ? 0 : -1}
             onClick={() => onChange(o.value)}
-            className="group relative flex-1 px-3 py-2 text-center outline-none"
+            className="group relative flex-1 px-3 py-2 text-center"
           >
             <span
               className={`text-body font-medium transition-colors ${

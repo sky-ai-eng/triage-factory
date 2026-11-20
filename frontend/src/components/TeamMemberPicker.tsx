@@ -169,7 +169,7 @@ function PickerModal({
                   value={selected}
                   disabled={submitting}
                   onChange={(e) => setSelected(e.target.value)}
-                  className="w-full rounded-lg border border-line-1 bg-ground px-2.5 py-2 text-body text-ink-2 focus:border-warm/40 focus:outline-none focus:ring-2 focus:ring-warm/30 disabled:opacity-50"
+                  className="w-full rounded-lg border border-line-1 bg-ground px-2.5 py-2 text-body text-ink-2 focus:border-warm/40 focus:ring-2 focus:ring-warm/30 disabled:opacity-50"
                 >
                   {candidates.map((m) => (
                     <option key={m.user_id} value={m.user_id}>
@@ -185,7 +185,7 @@ function PickerModal({
                   value={role}
                   disabled={submitting}
                   onChange={(e) => setRole(e.target.value)}
-                  className="w-full rounded-lg border border-line-1 bg-ground px-2.5 py-2 text-body text-ink-2 focus:border-warm/40 focus:outline-none focus:ring-2 focus:ring-warm/30 disabled:opacity-50"
+                  className="w-full rounded-lg border border-line-1 bg-ground px-2.5 py-2 text-body text-ink-2 focus:border-warm/40 focus:ring-2 focus:ring-warm/30 disabled:opacity-50"
                 >
                   {ADD_ROLES.map((r) => (
                     <option key={r} value={r}>

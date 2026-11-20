@@ -824,7 +824,7 @@ function VariantB({
           onKeyDown={onKeyDown}
           onFocus={() => setOpen(true)}
           placeholder={selected.length === 0 ? labels.searchPlaceholder : ''}
-          className="flex-1 min-w-[140px] bg-transparent text-body text-ink-1 placeholder:text-ink-3 focus:outline-none"
+          className="flex-1 min-w-[140px] bg-transparent text-body text-ink-1 placeholder:text-ink-3"
         />
       </div>
 

@@ -756,7 +756,7 @@ export default function TeamSettings({
             value={branchTemplate}
             onChange={(e) => setBranchTemplate(e.target.value)}
             placeholder="tfac/<ticket-id>"
-            className="mt-1.5 w-full rounded-md border border-line-1 bg-transparent px-2 py-1 text-body text-ink-1 focus:border-warm focus:outline-none"
+            className="mt-1.5 w-full rounded-md border border-line-1 bg-transparent px-2 py-1 text-body text-ink-1 focus:border-warm"
           />
         </div>
         <div>
@@ -768,7 +768,7 @@ export default function TeamSettings({
           <select
             value={reviewPosture}
             onChange={(e) => setReviewPosture(e.target.value)}
-            className="mt-1.5 w-full rounded-md border border-line-1 bg-transparent px-2 py-1 text-body text-ink-1 focus:border-warm focus:outline-none"
+            className="mt-1.5 w-full rounded-md border border-line-1 bg-transparent px-2 py-1 text-body text-ink-1 focus:border-warm"
           >
             {REVIEW_POSTURES.map((p) => (
               <option key={p.value} value={p.value}>
@@ -790,7 +790,7 @@ export default function TeamSettings({
           <select
             value={basePushPolicy}
             onChange={(e) => setBasePushPolicy(e.target.value)}
-            className="mt-1.5 w-full rounded-md border border-line-1 bg-transparent px-2 py-1 text-body text-ink-1 focus:border-warm focus:outline-none"
+            className="mt-1.5 w-full rounded-md border border-line-1 bg-transparent px-2 py-1 text-body text-ink-1 focus:border-warm"
           >
             {BASE_BRANCH_PUSH_POLICIES.map((p) => (
               <option key={p.value} value={p.value}>

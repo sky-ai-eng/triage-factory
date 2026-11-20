@@ -174,7 +174,7 @@ function ScreenTranscript({ messages, conversation, hasOlder, loadingOlder, onLo
         tabIndex={0}
         role="log"
         aria-label="Agent run transcript"
-        className="absolute inset-0 overflow-y-auto px-5 py-5 focus:outline-none md:px-8"
+        className="absolute inset-0 overflow-y-auto px-5 py-5 md:px-8"
       >
         <div ref={contentRef}>
           {hasOlder && (

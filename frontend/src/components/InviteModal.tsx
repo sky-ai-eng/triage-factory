@@ -163,7 +163,7 @@ export default function InviteModal({ create, onClose }: Props) {
                 onChange={(e) => setEmail(e.target.value)}
                 required
                 placeholder="person@example.com"
-                className="w-full rounded-lg border border-line-1 bg-raised px-3 py-2 text-body text-ink-1 placeholder:text-ink-3 focus:border-warm focus:bg-raised focus:outline-none"
+                className="w-full rounded-lg border border-line-1 bg-raised px-3 py-2 text-body text-ink-1 placeholder:text-ink-3 focus:border-warm focus:bg-raised"
               />
             </Field>
 
@@ -172,7 +172,7 @@ export default function InviteModal({ create, onClose }: Props) {
                 id="invite-role"
                 value={role}
                 onChange={(e) => setRole(e.target.value)}
-                className="w-full rounded-lg border border-line-1 bg-raised px-3 py-2 text-body text-ink-1 focus:border-warm focus:bg-raised focus:outline-none"
+                className="w-full rounded-lg border border-line-1 bg-raised px-3 py-2 text-body text-ink-1 focus:border-warm focus:bg-raised"
               >
                 {roles.map((r) => (
                   <option key={r} value={r}>
@@ -187,7 +187,7 @@ export default function InviteModal({ create, onClose }: Props) {
                 id="invite-team"
                 value={teamId}
                 onChange={(e) => setTeamId(e.target.value)}
-                className="w-full rounded-lg border border-line-1 bg-raised px-3 py-2 text-body text-ink-1 focus:border-warm focus:bg-raised focus:outline-none"
+                className="w-full rounded-lg border border-line-1 bg-raised px-3 py-2 text-body text-ink-1 focus:border-warm focus:bg-raised"
               >
                 <option value="">No team</option>
                 {teams.map((t) => (
@@ -258,7 +258,7 @@ export function CopyLink({ url }: { url: string }) {
         value={url}
         aria-label="Invite link"
         onFocus={(e) => e.currentTarget.select()}
-        className="min-w-0 flex-1 rounded-lg border border-line-1 bg-raised px-3 py-2 font-mono text-ui text-ink-2 focus:border-warm focus:outline-none"
+        className="min-w-0 flex-1 rounded-lg border border-line-1 bg-raised px-3 py-2 font-mono text-ui text-ink-2 focus:border-warm"
       />
       <button
         type="button"
