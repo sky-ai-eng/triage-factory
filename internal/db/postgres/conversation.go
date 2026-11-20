@@ -1326,20 +1326,12 @@ func (s *conversationStore) SetWorktreePathSystem(ctx context.Context, orgID, co
 // sends, refused once a successor holds the conversation. Fenced-only: nothing
 // without a claim composes a prompt.
 func (s *conversationStore) SetSystemBlocksForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, blocks domain.SystemBlocks) (*domain.Conversation, error) {
-	parts, err := db.MarshalSystemParts(blocks.Parts)
-	if err != nil {
-		return nil, err
-	}
 	var result *domain.Conversation
-	err = inTx(ctx, s.admin, func(q queryer) error {
+	err := inTx(ctx, s.admin, func(q queryer) error {
 		if err := assertClaimActiveForConversationWrite(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
-		r, err := writeConversationReturning(ctx, q, `
-			UPDATE conversations SET system_prompt = $1, system_block = $2, system_parts = $3::jsonb
-			WHERE org_id = $4 AND id = $5
-			RETURNING *
-		`, blocks.Prompt, blocks.Block, parts, orgID, conversationID)
+		r, err := setSystemBlocks(ctx, q, orgID, conversationID, blocks)
 		if err != nil {
 			return err
 		}
@@ -1350,6 +1342,21 @@ func (s *conversationStore) SetSystemBlocksForClaimSystem(ctx context.Context, o
 		return nil, err
 	}
 	return result, nil
+}
+
+// setSystemBlocks is the write behind SetSystemBlocksForClaimSystem and behind
+// a compaction that carries blocks, run inside the caller's fenced
+// transaction, which has already locked the conversation row.
+func setSystemBlocks(ctx context.Context, q queryer, orgID, conversationID string, blocks domain.SystemBlocks) (*domain.Conversation, error) {
+	parts, err := db.MarshalSystemParts(blocks.Parts)
+	if err != nil {
+		return nil, err
+	}
+	return writeConversationReturning(ctx, q, `
+		UPDATE conversations SET system_prompt = $1, system_block = $2, system_parts = $3::jsonb
+		WHERE org_id = $4 AND id = $5
+		RETURNING *
+	`, blocks.Prompt, blocks.Block, parts, orgID, conversationID)
 }
 
 // SystemBlocksSystem reads that stamp back for the engagement picking the
@@ -3176,13 +3183,20 @@ func (s *conversationStore) WithdrawPendingInputSystem(ctx context.Context, orgI
 // greater than the result row's and sorts after every fraction on its own.
 //
 // Exempt from the returned-row rule (bare error stays the return type): this
-// writes up to two inserted rows, a batch flip, and a re-seq of every queued
-// row ahead of the result — no single row a return value could name.
-// replyRow/resultRow's assigned IDs are written back to the caller's own
-// pointers, which stands in for "the row it persisted" here.
-func (s *conversationStore) CompactForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, replyRow, resultRow *domain.Message, inactiveIDs []int) error {
+// writes up to two inserted rows, a batch flip, a re-seq of every queued row
+// ahead of the result, and the conversation's blocks when given them — no
+// single row a return value could name. replyRow/resultRow's assigned IDs are
+// written back to the caller's own pointers, which stands in for "the row it
+// persisted" here.
+func (s *conversationStore) CompactForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, replyRow, resultRow *domain.Message, inactiveIDs []int, blocks *domain.SystemBlocks) error {
 	return inTx(ctx, s.admin, func(q queryer) error {
-		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
+		// Saving the blocks writes the conversation row, so the fence then
+		// locks that row before the claim, as every writer of both does.
+		fence := assertClaimActive
+		if blocks != nil {
+			fence = assertClaimActiveForConversationWrite
+		}
+		if err := fence(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
 		if replyRow != nil {
@@ -3232,6 +3246,12 @@ func (s *conversationStore) CompactForClaimSystem(ctx context.Context, orgID, co
 				UPDATE messages SET seq = $1 WHERE org_id = $2 AND conversation_id = $3 AND id = $4
 			`, seq, orgID, conversationID, id); err != nil {
 				return fmt.Errorf("re-seq queued row %d: %w", id, err)
+			}
+		}
+
+		if blocks != nil {
+			if _, err := setSystemBlocks(ctx, q, orgID, conversationID, *blocks); err != nil {
+				return fmt.Errorf("save system blocks: %w", err)
 			}
 		}
 		return nil

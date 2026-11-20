@@ -221,8 +221,9 @@ type PRCoherenceTargetQuery struct {
 //     scanner; a miss is ErrNoSuchMessage. CompactForClaimSystem is exempt —
 //     it inserts up to two rows, batch-flips an arbitrary span to
 //     window_state='inactive', and re-seqs every queued row ahead of the
-//     result, so there is no single row a return value could name (the
-//     standard's bulk bucket).
+//     result (and, when given them, saves the conversation's system blocks),
+//     so there is no single row a return value could name (the standard's
+//     bulk bucket).
 
 // ConversationListFilter is the filter set ConversationStore.List narrows on.
 // The zero value narrows nothing: every conversation the caller can see, which
@@ -1058,8 +1059,9 @@ type ConversationStore interface {
 	// which is what the next claim compares with.
 	//
 	// An inactive row does not count: a compaction that flips one also makes
-	// the blocks it brought the conversation up to the saved ones
-	// (SetSystemBlocksForClaimSystem), so the saved parts are newer than it.
+	// the blocks it brought the conversation up to the saved ones, in the same
+	// transaction (CompactForClaimSystem), so the saved parts are newer than
+	// it.
 	// Newest is the highest assembly key, COALESCE(seq, id).
 	LatestSystemUpdateSystem(ctx context.Context, orgID, conversationID string) (*domain.Message, error)
 
@@ -1229,10 +1231,11 @@ type ConversationStore interface {
 	// recorded keeps its block, and its next claim saves beside it the parts
 	// that claim composed, which is what the claims after it compare with.
 	//
-	// Written by the claim that launches the conversation, on either runtime,
-	// and by a native engagement whose compaction committed; read by every
-	// claim after it — so the bytes a later turn is sent are the ones its
-	// earlier turns were sent, which the provider binds their thinking to.
+	// Written by the claim that launches the conversation, on either runtime
+	// (a native compaction writes the same columns inside its own commit,
+	// CompactForClaimSystem); read by every claim after it — so the bytes a
+	// later turn is sent are the ones its earlier turns were sent, which the
+	// provider binds their thinking to.
 	// Fenced for the reason the other coordinates are: a zombie engagement's
 	// late write would hand the successor's next turn the prompt the zombie
 	// composed. There is no unfenced door because there is no claimless
@@ -1321,13 +1324,25 @@ type ConversationStore interface {
 	// written back. Refused with ErrClaimReleased when claimID no longer
 	// holds the conversation — zombie executors don't compact.
 	//
+	// blocks, when non-nil, becomes the conversation's saved system blocks in
+	// the same transaction: system_prompt, system_block and system_parts,
+	// written as SetSystemBlocksForClaimSystem writes them. A compaction flips
+	// every row a thinking block rides on, so nothing binds the blocks the
+	// conversation was sent before it, and the blocks the engagement composed
+	// are what every later call sends. Saving them in the commit means the
+	// flip and the save land together: a commit that fails or is fenced writes
+	// neither, and the next claim reads back the blocks the engagement was
+	// sending. Nil leaves the saved blocks as they are.
+	//
 	// Exempt from the returned-row rule: this writes up to two inserted rows,
-	// a batch flip of an arbitrary span to window_state='inactive', and a
-	// re-seq of every queued row ahead of the result — there is no single row
-	// a return value could name. Both replyRow/resultRow's assigned IDs are
-	// already written back to the caller's own pointers, which is the
-	// equivalent of "the row it persisted" for a write with more than one row.
-	CompactForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, replyRow, resultRow *domain.Message, inactiveIDs []int) error
+	// a batch flip of an arbitrary span to window_state='inactive', a re-seq
+	// of every queued row ahead of the result, and the conversation's blocks
+	// — there is no single row a return value could name. Both
+	// replyRow/resultRow's assigned IDs are already written back to the
+	// caller's own pointers, which is the equivalent of "the row it
+	// persisted" for a write with more than one row, and the blocks are
+	// stored exactly as passed.
+	CompactForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, replyRow, resultRow *domain.Message, inactiveIDs []int, blocks *domain.SystemBlocks) error
 
 	// SettleCompactionRequestForClaimSystem records a discarded warm
 	// compaction attempt on the request row that asked for it: the failed

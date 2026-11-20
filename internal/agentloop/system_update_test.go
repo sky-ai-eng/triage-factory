@@ -3,6 +3,7 @@ package agentloop
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -19,7 +20,13 @@ func usageOf(promptTokens int) inference.Usage { return inference.Usage{PromptTo
 func reclaimParams() Params {
 	p := fableParams()
 	p.NewSandbox = true
-	p.Current = &SystemBlocks{Prompt: "system (next release)", Addendum: "conversation block (recomposed)"}
+	p.Current = &domain.SystemBlocks{
+		Prompt: "system (next release)",
+		Block:  "conversation block (recomposed)",
+		Parts: &domain.SystemParts{Conversation: []domain.SystemPart{
+			{Key: "run_context.branch_convention", Text: "Branch convention: after-the-park/<ticket-id>"},
+		}},
+	}
 	p.SystemUpdate = &SystemUpdate{
 		Content:  "The branch naming convention changed.",
 		Metadata: map[string]any{domain.MessageMetadataSystemParts: map[string]any{"shared": []any{}}},
@@ -97,8 +104,8 @@ func TestThinkingBinding_AResumeWithASystemUpdate(t *testing.T) {
 
 // TestThinkingBinding_ACompactionMovesTheCallsOntoTheNewestBlocks: once a
 // compaction commits, no row a thinking block rides on is sent again, so the
-// engagement saves the blocks its claim composed and every later call sends
-// them, while the compaction's own call still sends the old ones.
+// commit saves the blocks the claim composed, parts and all, and every later
+// call sends them, while the compaction's own call still sends the old ones.
 func TestThinkingBinding_ACompactionMovesTheCallsOntoTheNewestBlocks(t *testing.T) {
 	tr := newMemTranscript(pendingUser("go"))
 	full := overThresholdFor(t, fableParams().Model)
@@ -112,14 +119,8 @@ func TestThinkingBinding_ACompactionMovesTheCallsOntoTheNewestBlocks(t *testing.
 	runEngagement(t, tr, p, newScriptedToolHost(), fableParams())
 	oneMoreThing(tr)
 
-	var saved []SystemBlocks
-	engine := newTestEngine(tr, p, newScriptedToolHost())
-	engine.Hooks.SaveSystemBlocks = func(_ context.Context, blocks SystemBlocks) error {
-		saved = append(saved, blocks)
-		return nil
-	}
 	params := reclaimParams()
-	result := engine.Run(context.Background(), params)
+	result := newTestEngine(tr, p, newScriptedToolHost()).Run(context.Background(), params)
 	if result.Kind != ResultConcluded {
 		t.Fatalf("disposition = %v, want concluded (err: %v)", result.Kind, result.Err)
 	}
@@ -128,51 +129,66 @@ func TestThinkingBinding_ACompactionMovesTheCallsOntoTheNewestBlocks(t *testing.
 	}
 
 	p.assertBound(t)
-	if len(saved) != 1 || saved[0] != *params.Current {
-		t.Errorf("saved blocks = %+v, want the claim's composition once", saved)
+	if len(tr.savedBlocks) != 1 || !reflect.DeepEqual(tr.savedBlocks[0], *params.Current) {
+		t.Errorf("saved blocks = %+v, want the claim's composition once, with its parts", tr.savedBlocks)
 	}
 	for call, want := range map[int]string{1: "system", 2: "system", 3: "system (next release)", 4: "system (next release)"} {
 		if got := p.requests[call].SystemPrompt; got != want {
 			t.Errorf("call %d sends shared prompt %q, want %q", call+1, got, want)
 		}
 	}
-	if got := p.requests[3].SystemAddendum; got != params.Current.Addendum {
+	if got := p.requests[3].SystemAddendum; got != params.Current.Block {
 		t.Errorf("the first call after the compaction sends block 2 %q, want the claim's", got)
 	}
-	if result.SystemPrompt != params.Current.Prompt || result.SystemAddendum != params.Current.Addendum {
+	if result.SystemPrompt != params.Current.Prompt || result.SystemAddendum != params.Current.Block {
 		t.Errorf("result system blocks = (%q, %q), want the claim's composition", result.SystemPrompt, result.SystemAddendum)
 	}
 }
 
-// TestSystemUpdate_AFailedSaveKeepsTheBlocksTheEngagementWasSending: the next
-// claim reads the saved blocks back, so an engagement whose save failed must
-// go on sending what is saved.
-func TestSystemUpdate_AFailedSaveKeepsTheBlocksTheEngagementWasSending(t *testing.T) {
+// TestSystemUpdate_AFailedCommitKeepsTheBlocksTheEngagementWasSending: the
+// claim's blocks are saved in the compaction's own commit, so a commit that
+// fails flips nothing and saves nothing, and the engagement ends on the blocks
+// it was sending, which are the ones the next claim reads back.
+func TestSystemUpdate_AFailedCommitKeepsTheBlocksTheEngagementWasSending(t *testing.T) {
 	tr := newMemTranscript(pendingUser("go"))
 	full := overThresholdFor(t, fableParams().Model)
 	p := newBindingProvider(
 		thinking(scriptedTurn{calls: []domain.ToolCall{{ID: "c1", Name: "bash"}}, usage: usageOf(full)}),
 		thinking(summaryReply("everything that happened")),
-		thinking(scriptedTurn{text: "done"}),
 	)
-	engine := newTestEngine(tr, p, newScriptedToolHost())
-	engine.Hooks.SaveSystemBlocks = func(context.Context, SystemBlocks) error { return errors.New("connection reset") }
-	result := engine.Run(context.Background(), reclaimParams())
-	if result.Kind != ResultConcluded {
-		t.Fatalf("disposition = %v, want concluded (err: %v)", result.Kind, result.Err)
+	tr.failCompact = func() error { return errors.New("connection reset") }
+	result := newTestEngine(tr, p, newScriptedToolHost()).Run(context.Background(), reclaimParams())
+	if result.Kind != ResultFailed {
+		t.Fatalf("disposition = %v, want failed (err: %v)", result.Kind, result.Err)
 	}
-	if got := p.requests[2].SystemPrompt; got != "system" {
-		t.Errorf("the call after a compaction whose save failed sends %q, want the saved prompt", got)
+	if len(p.requests) != 2 {
+		t.Fatalf("provider calls = %d, want the working call and the summarize call", len(p.requests))
 	}
-	if result.SystemPrompt != "system" {
-		t.Errorf("result.SystemPrompt = %q, want the saved prompt", result.SystemPrompt)
+
+	if n := len(tr.savedBlocks); n != 0 {
+		t.Errorf("saved blocks = %d, want none: the commit failed", n)
+	}
+	if m := tr.find(func(m domain.Message) bool { return m.Subtype == domain.MessageSubtypeInjectionCompactionResult }); m != nil {
+		t.Errorf("result row = %+v, want none: the commit failed", m)
+	}
+	if m := tr.find(func(m domain.Message) bool { return m.WindowState == domain.MessageWindowInactive }); m != nil {
+		t.Errorf("row %d is inactive, want the window as the failed commit found it", m.ID)
+	}
+	for call, req := range p.requests {
+		if req.SystemPrompt != "system" || req.SystemAddendum != "conversation block" {
+			t.Errorf("call %d sends (%q, %q), want the saved blocks", call+1, req.SystemPrompt, req.SystemAddendum)
+		}
+	}
+	if result.SystemPrompt != "system" || result.SystemAddendum != "conversation block" {
+		t.Errorf("result system blocks = (%q, %q), want the saved ones", result.SystemPrompt, result.SystemAddendum)
 	}
 	p.assertBound(t)
 }
 
 // TestSystemUpdate_AResumeCompactionCarriesTheChangeItself: a compaction that
 // commits before the claim's first drain leaves nothing earlier to bind, so the
-// claim's blocks are sent from the first call and no update is written.
+// commit saves the claim's blocks, they are sent from the first call, and no
+// update is written.
 func TestSystemUpdate_AResumeCompactionCarriesTheChangeItself(t *testing.T) {
 	tr := newMemTranscript(pendingUser("go"))
 	p := newBindingProvider(
@@ -184,24 +200,54 @@ func TestSystemUpdate_AResumeCompactionCarriesTheChangeItself(t *testing.T) {
 	tr.ageRows(time.Hour)
 	oneMoreThing(tr)
 
-	var saved int
-	engine := newTestEngine(tr, p, newScriptedToolHost())
-	engine.Hooks.SaveSystemBlocks = func(context.Context, SystemBlocks) error { saved++; return nil }
 	params := reclaimParams()
-	if result := engine.Run(context.Background(), params); result.Kind != ResultConcluded {
+	if result := newTestEngine(tr, p, newScriptedToolHost()).Run(context.Background(), params); result.Kind != ResultConcluded {
 		t.Fatalf("disposition = %v, want concluded (err: %v)", result.Kind, result.Err)
 	}
 	if p.requests[1].SystemPrompt != coldCompactionSystemPrompt {
 		t.Fatal("staging failed: the re-claim did not compact on resume")
 	}
-	if saved != 1 {
-		t.Errorf("saves = %d, want one", saved)
+	if len(tr.savedBlocks) != 1 || !reflect.DeepEqual(tr.savedBlocks[0], *params.Current) {
+		t.Errorf("saved blocks = %+v, want the claim's composition once", tr.savedBlocks)
 	}
-	if got := p.requests[2]; got.SystemPrompt != params.Current.Prompt || got.SystemAddendum != params.Current.Addendum {
+	if got := p.requests[2]; got.SystemPrompt != params.Current.Prompt || got.SystemAddendum != params.Current.Block {
 		t.Errorf("the first working call sends (%q, %q), want the claim's composition", got.SystemPrompt, got.SystemAddendum)
 	}
 	if n := len(tr.systemUpdates()); n != 0 {
 		t.Errorf("system rows = %d, want none: the blocks carry the change", n)
 	}
 	p.assertBound(t)
+}
+
+// TestSystemUpdate_ARecoveredSummaryCommitSavesTheClaimsBlocks: committing a
+// warm summary an earlier engagement persisted goes through the same commit as
+// every other arm, so it saves the claim's blocks too, and the claim's one
+// call sends them with no update written.
+func TestSystemUpdate_ARecoveredSummaryCommitSavesTheClaimsBlocks(t *testing.T) {
+	old := time.Now().UTC().Add(-time.Hour)
+	tr := newMemTranscript(
+		domain.Message{Role: "user", Content: "the mission", CreatedAt: old},
+		usedAssistant("worked a lot", overThreshold, old),
+		domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionCompactionRequest, Content: warmCompactionRequest, CreatedAt: old},
+		domain.Message{Role: "assistant", Content: canonicalCompactionArtifact("thinking it through", "the persisted summary"), CreatedAt: old},
+		pendingUser("go on"),
+	)
+	provider := &scriptedProvider{turns: []scriptedTurn{{text: "done"}}}
+
+	params := reclaimParams()
+	if result := newTestEngine(tr, provider, newScriptedToolHost()).Run(context.Background(), params); result.Kind != ResultConcluded {
+		t.Fatalf("disposition = %v, want concluded (err: %v)", result.Kind, result.Err)
+	}
+	if len(provider.requests) != 1 {
+		t.Fatalf("provider calls = %d, want the working call alone: the persisted summary needs none", len(provider.requests))
+	}
+	if len(tr.savedBlocks) != 1 || !reflect.DeepEqual(tr.savedBlocks[0], *params.Current) {
+		t.Errorf("saved blocks = %+v, want the claim's composition once", tr.savedBlocks)
+	}
+	if got := provider.requests[0]; got.SystemPrompt != params.Current.Prompt || got.SystemAddendum != params.Current.Block {
+		t.Errorf("the working call sends (%q, %q), want the claim's composition", got.SystemPrompt, got.SystemAddendum)
+	}
+	if n := len(tr.systemUpdates()); n != 0 {
+		t.Errorf("system rows = %d, want none: the blocks carry the change", n)
+	}
 }

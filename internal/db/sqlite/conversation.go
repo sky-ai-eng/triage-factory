@@ -576,10 +576,10 @@ func (s *conversationStore) SetWorktreePath(ctx context.Context, orgID, conversa
 	return scanConversationReturning(row)
 }
 
-// setSystemBlocks is the write behind SetSystemBlocksForClaimSystem, split out
-// so the fenced door can run it inside the fence's own transaction. No
-// unfenced door exposes it: only the engagement that composed the prompt
-// writes it.
+// setSystemBlocks is the write behind SetSystemBlocksForClaimSystem and behind
+// a compaction that carries blocks, split out so each fenced door can run it
+// inside the fence's own transaction. No unfenced door exposes it: only the
+// engagement that composed the prompt writes it.
 func (s *conversationStore) setSystemBlocks(ctx context.Context, orgID, conversationID string, blocks domain.SystemBlocks) (*domain.Conversation, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
@@ -3025,11 +3025,12 @@ func (s *conversationStore) markDelivered(ctx context.Context, orgID, conversati
 // it inserts.
 //
 // Exempt from the returned-row rule (bare error stays the return type): this
-// writes up to two inserted rows, a batch flip, and a re-seq of every queued
-// row ahead of the result — no single row a return value could name.
-// replyRow/resultRow's assigned IDs are written back to the caller's own
-// pointers, which stands in for "the row it persisted" here.
-func (s *conversationStore) CompactForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, replyRow, resultRow *domain.Message, inactiveIDs []int) error {
+// writes up to two inserted rows, a batch flip, a re-seq of every queued row
+// ahead of the result, and the conversation's blocks when given them — no
+// single row a return value could name. replyRow/resultRow's assigned IDs are
+// written back to the caller's own pointers, which stands in for "the row it
+// persisted" here.
+func (s *conversationStore) CompactForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, replyRow, resultRow *domain.Message, inactiveIDs []int, blocks *domain.SystemBlocks) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
@@ -3090,6 +3091,12 @@ func (s *conversationStore) CompactForClaimSystem(ctx context.Context, orgID, co
 				UPDATE messages SET seq = ? WHERE conversation_id = ? AND id = ?
 			`, seq, conversationID, id); err != nil {
 				return fmt.Errorf("re-seq queued row %d: %w", id, err)
+			}
+		}
+
+		if blocks != nil {
+			if _, err := txStore.setSystemBlocks(ctx, orgID, conversationID, *blocks); err != nil {
+				return fmt.Errorf("save system blocks: %w", err)
 			}
 		}
 		return nil

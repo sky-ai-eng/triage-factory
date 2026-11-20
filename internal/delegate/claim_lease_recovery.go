@@ -420,9 +420,9 @@ func (c *leaseRecoveringConversations) RequeueInputForClaimSystem(ctx context.Co
 	})
 }
 
-func (c *leaseRecoveringConversations) CompactForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, replyRow, resultRow *domain.Message, inactiveIDs []int) error {
+func (c *leaseRecoveringConversations) CompactForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, replyRow, resultRow *domain.Message, inactiveIDs []int, blocks *domain.SystemBlocks) error {
 	return c.s.retryAfterRecovery(ctx, claimID, func() error {
-		return c.ConversationStore.CompactForClaimSystem(ctx, orgID, conversationID, claimID, replyRow, resultRow, inactiveIDs)
+		return c.ConversationStore.CompactForClaimSystem(ctx, orgID, conversationID, claimID, replyRow, resultRow, inactiveIDs, blocks)
 	})
 }
 

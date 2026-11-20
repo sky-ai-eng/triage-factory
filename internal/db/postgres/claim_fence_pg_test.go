@@ -160,15 +160,20 @@ func TestClaimFence_ReleasedClaimRefusesEveryEngagementWrite(t *testing.T) {
 
 		resultRow := &domain.Message{Role: "user",
 			Subtype: domain.MessageSubtypeInjectionCompactionResult, Content: "summary"}
-		err = fx.store.CompactForClaimSystem(ctx, fx.orgID, fx.conversationID, fx.claimID, nil, resultRow, []int{int(spanID)})
+		err = fx.store.CompactForClaimSystem(ctx, fx.orgID, fx.conversationID, fx.claimID, nil, resultRow, []int{int(spanID)},
+			&domain.SystemBlocks{Prompt: "zombie prompt", Block: "zombie block"})
 		if !errors.Is(err, db.ErrClaimReleased) {
 			t.Fatalf("compact after reap = %v, want ErrClaimReleased", err)
 		}
-		// Nothing landed: the span is still active and no result row exists —
-		// a zombie must not rewrite the successor's window.
+		// Nothing landed: the span is still active, no result row exists, and
+		// the saved blocks are untouched — a zombie must not rewrite the
+		// successor's window or the prompt its next call sends.
 		msgs, err := fx.store.ListForAssemblySystem(ctx, fx.orgID, fx.conversationID)
 		if err != nil || len(msgs) != 1 || msgs[0].ID != int(spanID) {
 			t.Fatalf("assembly after refused compact = %+v (err %v), want the untouched span row", msgs, err)
+		}
+		if blocks, err := fx.store.SystemBlocksSystem(ctx, fx.orgID, fx.conversationID); err != nil || blocks.Prompt != "" || blocks.Block != "" {
+			t.Errorf("system blocks after refused compact = (%+v, %v), want none saved", blocks, err)
 		}
 	})
 

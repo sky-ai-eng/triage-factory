@@ -330,17 +330,6 @@ func capitalize(s string) string {
 	return strings.ToUpper(s[:1]) + s[1:]
 }
 
-// saveSystemBlocksHook is the engine's SaveSystemBlocks for a native
-// engagement: a compaction committed, so the blocks the claim composed become
-// the conversation's, saved with the parts they were composed from.
-func (s *Spawner) saveSystemBlocksHook(orgID, conversationID, claimID string, current domain.SystemBlocks) func(context.Context, agentloop.SystemBlocks) error {
-	return func(ctx context.Context, blocks agentloop.SystemBlocks) error {
-		saved := domain.SystemBlocks{Prompt: blocks.Prompt, Block: blocks.Addendum, Parts: current.Parts}
-		_, err := s.conversations.SetSystemBlocksForClaimSystem(context.WithoutCancel(ctx), orgID, conversationID, claimID, saved)
-		return err
-	}
-}
-
 // runContextOrder is the order the run-context parts render in, which is the
 // order runContextLines writes them.
 var runContextOrder = []string{
