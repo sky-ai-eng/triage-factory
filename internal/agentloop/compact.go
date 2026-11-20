@@ -143,10 +143,10 @@ func (e *Engine) compactOnResume(ctx context.Context, params Params, spent *spen
 
 // adoptCurrentSystem moves the engagement onto the system blocks its claim
 // composed (Params.Current), and returns the params every later call is built
-// from. It is called once a compaction has committed. Every arm commits
-// through commitCompaction, which saved Current in the compaction's own
-// transaction, so the blocks it moves onto are the ones the next claim reads
-// back.
+// from. Only a compaction whose commit landed may precede it: the commit saves
+// Current (commitCompaction), and the blocks the engagement sends from here
+// must be the ones the next claim reads back, or that claim replays this
+// engagement's thinking under other blocks.
 //
 // The blocks a conversation is sent stay the ones its earlier turns were sent,
 // because the provider binds each thinking block to them. A compaction flips

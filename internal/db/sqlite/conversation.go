@@ -576,22 +576,37 @@ func (s *conversationStore) SetWorktreePath(ctx context.Context, orgID, conversa
 	return scanConversationReturning(row)
 }
 
-// setSystemBlocks is the write behind SetSystemBlocksForClaimSystem and behind
-// a compaction that carries blocks, split out so each fenced door can run it
-// inside the fence's own transaction. No unfenced door exposes it: only the
-// engagement that composed the prompt writes it.
+// setSystemBlocks is the write behind SetSystemBlocksForClaimSystem, split out
+// so the fenced door can run it inside the fence's own transaction. No
+// unfenced door exposes it: only the engagement that composed the prompt
+// writes it.
 func (s *conversationStore) setSystemBlocks(ctx context.Context, orgID, conversationID string, blocks domain.SystemBlocks) (*domain.Conversation, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
+	args, err := systemBlocksArgs(conversationID, blocks)
+	if err != nil {
+		return nil, err
+	}
+	row := s.q.QueryRowContext(ctx, systemBlocksUpdateSQL+`
+		RETURNING `+sqliteConversationReturningColumns, args...)
+	return scanConversationReturning(row)
+}
+
+// systemBlocksUpdateSQL saves a conversation's system blocks from
+// systemBlocksArgs. setSystemBlocks returns the row it wrote; a compaction that
+// carries blocks has no use for it, so it runs the statement bare rather than
+// paying for the returned row's columns, which sum every message of the
+// conversation.
+const systemBlocksUpdateSQL = `
+		UPDATE conversations SET system_prompt = ?, system_block = ?, system_parts = ? WHERE id = ?`
+
+func systemBlocksArgs(conversationID string, blocks domain.SystemBlocks) ([]any, error) {
 	parts, err := db.MarshalSystemParts(blocks.Parts)
 	if err != nil {
 		return nil, err
 	}
-	row := s.q.QueryRowContext(ctx, `
-		UPDATE conversations SET system_prompt = ?, system_block = ?, system_parts = ? WHERE id = ?
-		RETURNING `+sqliteConversationReturningColumns, blocks.Prompt, blocks.Block, parts, conversationID)
-	return scanConversationReturning(row)
+	return []any{blocks.Prompt, blocks.Block, parts, conversationID}, nil
 }
 
 func (s *conversationStore) SystemBlocksSystem(ctx context.Context, orgID, conversationID string) (domain.SystemBlocks, error) {
@@ -3034,6 +3049,13 @@ func (s *conversationStore) CompactForClaimSystem(ctx context.Context, orgID, co
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
+	var blockArgs []any
+	if blocks != nil {
+		var err error
+		if blockArgs, err = systemBlocksArgs(conversationID, *blocks); err != nil {
+			return err
+		}
+	}
 	return inTx(ctx, s.q, func(q queryer) error {
 		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
@@ -3094,8 +3116,8 @@ func (s *conversationStore) CompactForClaimSystem(ctx context.Context, orgID, co
 			}
 		}
 
-		if blocks != nil {
-			if _, err := txStore.setSystemBlocks(ctx, orgID, conversationID, *blocks); err != nil {
+		if blockArgs != nil {
+			if _, err := q.ExecContext(ctx, systemBlocksUpdateSQL, blockArgs...); err != nil {
 				return fmt.Errorf("save system blocks: %w", err)
 			}
 		}
