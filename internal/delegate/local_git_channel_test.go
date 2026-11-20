@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/cmd/gitssh"
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
@@ -85,6 +87,11 @@ func TestStartLocalGitChannel_RoutesHTTPSAndSSHForms(t *testing.T) {
 		if !found {
 			t.Errorf("Git rewrites = %v, missing %q", rewrites, want)
 		}
+	}
+	// A gh channel that did not start has no listener for git to share, so its
+	// run's git is routed as one with no channel at all.
+	if got := channel.configPairs(&agentproc.GHChannelParams{ConfigDir: "/state/gh-channel/conv-2/config"}); !slices.Equal(got, pairs) {
+		t.Errorf("Git config with a channel that is not live = %v, want the no-channel config %v", got, pairs)
 	}
 
 	seed := s.gitSeedFor(context.Background(), runmode.LocalDefaultOrgID, "repo-widgets", "acme", "widgets", nil, channel)

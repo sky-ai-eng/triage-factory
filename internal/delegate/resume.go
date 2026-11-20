@@ -528,7 +528,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 		AllowedTools: agentproc.BuildAllowedToolsFor(agentproc.AllowedToolsOptions{
 			SelfBin: selfBin,
 			Extras:  opts.ExtraAllowedTools,
-			GH:      ghChannel != nil,
+			GH:      ghChannel.Live(),
 		}),
 		ExtraEnv:       extraEnv,
 		TraceID:        conversationID,

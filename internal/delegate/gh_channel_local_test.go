@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -20,6 +22,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/ghcli/ghinjector"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/github/githubapp"
+	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 )
@@ -167,5 +170,56 @@ func TestLocalGHRepositories_ReadsTheRunsSetPerRequest(t *testing.T) {
 
 	if _, _, err := localGHRepositories(db.Stores{}, false, info)(ctx); !errors.Is(err, errLocalRepositoriesUnwired) {
 		t.Errorf("a channel with no stores: err = %v, want a refusal", err)
+	}
+}
+
+// A local run whose gh channel cannot start still gets params that keep the gh
+// on its PATH, the user's own, off the user's login: an empty per-run gh config
+// dir and no listener. What a process that died before its Close left in the
+// directory is cleared first, and the closer removes the directory with the
+// run.
+func TestStartLocalGHChannel_DegradedRunIsolatesGHConfig(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	paths.SetForTest(t, t.TempDir())
+	channelDir := paths.GHChannelDir("conv-iso")
+	stale := filepath.Join(channelDir, "config", "config.yml")
+	if err := os.MkdirAll(filepath.Dir(stale), 0o700); err != nil {
+		t.Fatalf("stage stale config: %v", err)
+	}
+	if err := os.WriteFile(stale, []byte("http_unix_socket: /dead.sock\n"), 0o600); err != nil {
+		t.Fatalf("stage stale config: %v", err)
+	}
+
+	s := &Spawner{} // no GitHub resolver: the first way the channel cannot start
+	gc, closer := s.startLocalGHChannel(context.Background(), runmode.LocalDefaultOrgID, "conv-iso", "", agenthost.ConversationInfo{})
+	if gc == nil {
+		t.Fatal("degraded channel = nil, want params that are not live")
+	}
+	if gc.Live() {
+		t.Errorf("degraded channel is Live: %+v", gc)
+	}
+	if want := filepath.Join(channelDir, "config"); gc.ConfigDir != want {
+		t.Errorf("ConfigDir = %q, want %q", gc.ConfigDir, want)
+	}
+	if entries, err := os.ReadDir(gc.ConfigDir); err != nil || len(entries) != 0 {
+		t.Errorf("config dir: entries=%v err=%v, want an existing empty dir", entries, err)
+	}
+	if err := closer.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, err := os.Stat(channelDir); !os.IsNotExist(err) {
+		t.Errorf("channel dir after Close: err=%v, want it removed", err)
+	}
+}
+
+// Multi mode brings its own channel through the sidecar, so the local path
+// returns none there.
+func TestStartLocalGHChannel_MultiModeReturnsNothing(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	paths.SetForTest(t, t.TempDir())
+
+	s := &Spawner{}
+	if gc, _ := s.startLocalGHChannel(context.Background(), "org", "conv-multi", "", agenthost.ConversationInfo{}); gc != nil {
+		t.Errorf("multi-mode channel = %+v, want nil", gc)
 	}
 }
