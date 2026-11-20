@@ -3,11 +3,13 @@ package httpx
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -186,6 +188,35 @@ func TestInternalError_Envelope(t *testing.T) {
 				t.Errorf("items = %+v, want one {INTERNAL, %q}", items, tc.wantMsg)
 			}
 		})
+	}
+}
+
+// TestInternalError_SecretTooLarge pins the answer a credential route gives
+// when the OS keychain refuses its secret for its size: the error arrives
+// wrapped by the store, the transaction, and the route, and is still a 413
+// with its own reason and the message that names the file backend, never a
+// 500 carrying the wrap chain.
+func TestInternalError_SecretTooLarge(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	restore := logging.SetOutput(&strings.Builder{})
+	defer restore()
+
+	err := fmt.Errorf("persist jira connection: %w",
+		fmt.Errorf("store jira_api_token: %w",
+			fmt.Errorf("keychain set jira_api_token (3000 bytes): %w", auth.ErrSecretTooLarge)))
+	rec := httptest.NewRecorder()
+	InternalError(rec, "test", err)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("status = %d, want 413", rec.Code)
+	}
+	items := decodeEnvelope(t, rec)
+	want := ErrorItem{Reason: ReasonSecretTooLarge, Message: auth.ErrSecretTooLarge.Error()}
+	if len(items) != 1 || items[0] != want {
+		t.Errorf("items = %+v, want [%+v]", items, want)
+	}
+	if !strings.Contains(want.Message, "TF_SECRETS_BACKEND=file") {
+		t.Errorf("message %q does not name the file backend", want.Message)
 	}
 }
 

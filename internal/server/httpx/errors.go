@@ -103,6 +103,13 @@ const (
 	ReasonRateLimited         = "RATE_LIMITED"
 	ReasonPayloadTooLarge     = "PAYLOAD_TOO_LARGE"
 	ReasonInternal            = "INTERNAL"
+
+	// A credential is larger than the OS keychain holds (local mode, on
+	// Windows and macOS). Its own code rather than PAYLOAD_TOO_LARGE because
+	// the request body is within its cap and a smaller body is not the fix:
+	// the operator moves the install's secrets to the encrypted file, which
+	// the message names.
+	ReasonSecretTooLarge = "SECRET_TOO_LARGE"
 )
 
 // ErrorItem is one fault in an error response. Reason is a stable machine
