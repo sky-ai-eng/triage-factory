@@ -642,23 +642,16 @@ func handlerBlueprint(ctx context.Context, tx db.TxStores, orgID, teamID, bluepr
 	return blueprint, blueprint.TeamID != "" && teamID != "" && blueprint.TeamID != teamID, nil
 }
 
-// lockHandlerBlueprint keeps the blueprint a handler write names live until
-// the write's transaction ends (Blueprints.LockForReference). The routes
-// first read the blueprint in an earlier transaction, and a merge or a
-// reconnect can retire it after that read, so this answers
-// errBlueprintNotFound for a blueprint that is no longer live, which the
-// routes answer as they do a missing one. The write calls it right before it
-// writes, once no fault refuses the write, so the blueprint is the handler's
-// team's own, a team the caller can write, as the lock's RLS requires.
-func lockHandlerBlueprint(ctx context.Context, tx db.TxStores, orgID, blueprintID string) error {
+// lockHandlerBlueprint keeps the blueprint a handler write will store live
+// until the write's transaction ends (Blueprints.LockForReference), and
+// reports whether it is live. A route's first read of the blueprint is in an
+// earlier transaction, so the blueprint can be retired or deleted by the time
+// the route writes. The write calls this right before it writes, once no
+// fault refuses the write: by then the blueprint is the handler's team's own,
+// a team the caller can write, as the lock's RLS requires.
+func lockHandlerBlueprint(ctx context.Context, tx db.TxStores, orgID, blueprintID string) (bool, error) {
 	blueprint, err := tx.Blueprints.LockForReference(ctx, orgID, blueprintID)
-	if err != nil {
-		return err
-	}
-	if blueprint == nil {
-		return errBlueprintNotFound
-	}
-	return nil
+	return blueprint != nil, err
 }
 
 // createEventHandlerRequest is the body of POST /api/event-handlers. event_type
@@ -743,8 +736,7 @@ func (eh *eventHandlersHandler) handleEventHandlerCreate(w http.ResponseWriter, 
 	// clean 422. Both reads share one tx so the blueprint's team and the
 	// acting team are read under the same claims. It only reads: the acting
 	// team is recorded as the caller's last-written one by the write itself
-	// (insertEventHandler), which a refused request never commits, and which
-	// reads the blueprint again under lock (lockHandlerBlueprint).
+	// (insertEventHandler), which a refused request never commits.
 	//
 	// TODO(TFAC-1517): in Postgres a blueprint delete detaches the blueprint's
 	// handlers before it writes the blueprint's row, so a create that locks
@@ -817,9 +809,13 @@ func (eh *eventHandlersHandler) insertEventHandler(w http.ResponseWriter, r *htt
 		if e := checkPredicateReferences(r.Context(), tx, orgID, teamID, h.EventType, h.ScopePredicateJSON, nil, found, catalogFaults); e != nil {
 			return e
 		}
+		// Read again, under lock: the read before the predicate catalog check
+		// is in an earlier transaction.
 		if h.BlueprintID != "" {
-			if e := lockHandlerBlueprint(r.Context(), tx, orgID, h.BlueprintID); e != nil {
+			if live, e := lockHandlerBlueprint(r.Context(), tx, orgID, h.BlueprintID); e != nil {
 				return e
+			} else if !live {
+				return errBlueprintNotFound
 			}
 		}
 		stored, e = tx.EventHandlers.Create(r.Context(), orgID, teamID, h)
@@ -925,9 +921,17 @@ func (eh *eventHandlersHandler) handleEventHandlerUpdate(w http.ResponseWriter, 
 		if e := checkPredicateReferences(r.Context(), tx, orgID, existing.TeamID, existing.EventType, updated.ScopePredicateJSON, existing.ScopePredicateJSON, found, catalogFaults); e != nil {
 			return e
 		}
-		if attaches {
-			if e := lockHandlerBlueprint(r.Context(), tx, orgID, updated.BlueprintID); e != nil {
+		// Locked whenever the row will hold a blueprint, not only when the body
+		// attaches one: existing can be stale, so a write that keeps the
+		// blueprint existing names can still attach it to the row as it is
+		// now. A blueprint the body attaches that is no longer live is a 404.
+		// One the body keeps does not refuse the write here, so a handler left
+		// on a retired blueprint can still have its other fields changed.
+		if updated.BlueprintID != "" {
+			if live, e := lockHandlerBlueprint(r.Context(), tx, orgID, updated.BlueprintID); e != nil {
 				return e
+			} else if !live && attaches {
+				return errBlueprintNotFound
 			}
 		}
 		var e error

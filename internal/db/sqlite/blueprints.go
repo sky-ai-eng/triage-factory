@@ -135,19 +135,11 @@ func (s *blueprintStore) Get(ctx context.Context, orgID string, id string) (*dom
 	return &b, nil
 }
 
-func (s *blueprintStore) LockForReference(ctx context.Context, orgID string, id string) (*domain.Blueprint, error) {
-	return s.lockLive(ctx, orgID, id, "LockForReference")
-}
-
-func (s *blueprintStore) LockForRetire(ctx context.Context, orgID string, id string) (*domain.Blueprint, error) {
-	return s.lockLive(ctx, orgID, id, "LockForRetire")
-}
-
-// lockLive is Get, refused outside a transaction: the IMMEDIATE write
+// LockForReference is Get, refused outside a transaction: the IMMEDIATE write
 // transaction around it is what serializes the caller.
-func (s *blueprintStore) lockLive(ctx context.Context, orgID, id, method string) (*domain.Blueprint, error) {
+func (s *blueprintStore) LockForReference(ctx context.Context, orgID string, id string) (*domain.Blueprint, error) {
 	if _, ok := s.q.(*sql.Tx); !ok {
-		return nil, fmt.Errorf("sqlite: %s needs a transaction's stores, whose transaction serializes the caller", method)
+		return nil, errors.New("sqlite: LockForReference needs a transaction's stores, whose transaction serializes the caller")
 	}
 	return s.Get(ctx, orgID, id)
 }
@@ -465,7 +457,7 @@ func (s *blueprintStore) MergeInto(ctx context.Context, orgID, hostID, sourceID 
 			return err
 		}
 		if n == 0 {
-			return fmt.Errorf("blueprint %s not found or already deleted", sourceID)
+			return db.ErrNoSuchBlueprint
 		}
 		if _, err := q.ExecContext(ctx,
 			`UPDATE blueprints SET updated_at = ?, user_modified = 1 WHERE id = ?`, now, hostID); err != nil {

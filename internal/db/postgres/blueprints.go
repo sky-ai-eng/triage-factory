@@ -119,29 +119,19 @@ func (s *blueprintStore) GetSystem(ctx context.Context, orgID string, id string)
 // LockForReference takes FOR SHARE and not FOR KEY SHARE: a retire writes
 // deleted_at, a non-key column, and a key-share lock, which is all a
 // referencing row's foreign key check takes, lets that write through without
-// waiting.
+// waiting. Under READ COMMITTED a lock that waited on a concurrent write
+// re-checks the WHERE against the row that write committed, so a reference
+// queued behind a retire reads the retire's deleted_at and finds no live row.
 func (s *blueprintStore) LockForReference(ctx context.Context, orgID string, id string) (*domain.Blueprint, error) {
-	return s.lockLive(ctx, orgID, id, "FOR SHARE", "LockForReference")
-}
-
-func (s *blueprintStore) LockForRetire(ctx context.Context, orgID string, id string) (*domain.Blueprint, error) {
-	return s.lockLive(ctx, orgID, id, "FOR NO KEY UPDATE", "LockForRetire")
-}
-
-// lockLive is Get on the caller's transaction with a row lock. Under READ
-// COMMITTED a lock that waited on a concurrent write re-checks the WHERE
-// against the row that write committed, so a reference queued behind a
-// retire reads the retire's deleted_at and finds no live row.
-func (s *blueprintStore) lockLive(ctx context.Context, orgID, id, lock, method string) (*domain.Blueprint, error) {
 	// Outside a transaction the lock would be released by the statement that
 	// took it, so a caller would hold nothing while believing it held the lock.
 	tx, ok := s.app.(*sql.Tx)
 	if !ok {
-		return nil, fmt.Errorf("postgres: %s needs a transaction's stores, whose commit releases the lock", method)
+		return nil, errors.New("postgres: LockForReference needs a transaction's stores, whose commit releases the lock")
 	}
 	b, err := scanBlueprintRowPG(tx.QueryRowContext(ctx, `
 		SELECT `+pgBlueprintColumns+`
-		FROM blueprints WHERE org_id = $1 AND id = $2 AND deleted_at IS NULL `+lock,
+		FROM blueprints WHERE org_id = $1 AND id = $2 AND deleted_at IS NULL FOR SHARE`,
 		orgID, id).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -474,7 +464,7 @@ func (s *blueprintStore) MergeInto(ctx context.Context, orgID, hostID, sourceID 
 			return err
 		}
 		if n == 0 {
-			return fmt.Errorf("blueprint %s not found or already deleted", sourceID)
+			return db.ErrNoSuchBlueprint
 		}
 		// Bump host.updated_at (the set_updated_at trigger also stamps it, but
 		// the row must be touched for the trigger to fire) and stamp

@@ -369,28 +369,24 @@ type BlueprintStore interface {
 	// LockForReference reads the live blueprint id as Get does, and keeps it
 	// live until the caller's transaction ends. A write that makes a row
 	// reference the blueprint, such as an event handler naming it, calls it
-	// right before that write. A retire of the blueprint then either commits
-	// first, and this answers (nil, nil), or waits for the write to commit and
-	// sees the reference. Two references do not wait for each other.
+	// right before that write. A transaction that retires the blueprint and
+	// then checks what references it (MergeInto's caller) is then ordered
+	// against the reference: either its retire came first, and this answers
+	// (nil, nil) once it commits, or its retire waits for the referencing
+	// write to commit, and its check sees the reference.
 	//
-	// LockForRetire is the other half: a write about to retire the blueprint,
-	// such as a merge absorbing it, calls it before it checks what references
-	// the blueprint. A reference that locked first is then visible to that
-	// check, and one that comes after waits for the retire and reads the
-	// blueprint as absent.
-	//
-	// The locks belong to the transaction, so both are called on a
-	// transaction's stores (db.TxStores), and both impls refuse any other.
-	// Postgres takes row locks that conflict, FOR SHARE and FOR NO KEY UPDATE;
-	// the second is the lock the retire's own UPDATE takes, taken before the
-	// check instead of at the write. Under RLS a locking read also applies the
-	// table's UPDATE policy, so a blueprint of a team the caller cannot write
-	// reads as absent; a caller that answers that case differently reads the
-	// blueprint with Get first. SQLite takes nothing: its write transaction
-	// begins IMMEDIATE and already holds the database's write lock, so a read
-	// inside it is enough.
+	// The lock belongs to the transaction, so it is called on a write
+	// transaction's stores (db.TxStores from WithTx); both impls refuse
+	// stores outside a transaction. Postgres takes FOR SHARE, which conflicts
+	// with the lock a retire's UPDATE takes and not with another FOR SHARE, so
+	// in Postgres two references do not wait for each other. Under RLS a
+	// locking read also applies the table's UPDATE policy, so a blueprint of a
+	// team the caller cannot write reads as absent; a caller that answers that
+	// case differently reads the blueprint with Get first. SQLite takes
+	// nothing: its write transaction begins IMMEDIATE and already holds the
+	// database's write lock, so a read inside it is enough, and inside a read
+	// transaction it holds nothing at all.
 	LockForReference(ctx context.Context, orgID string, id string) (*domain.Blueprint, error)
-	LockForRetire(ctx context.Context, orgID string, id string) (*domain.Blueprint, error)
 
 	// Create inserts a new blueprint (user or imported source) owned by
 	// teamID. Caller-provided ID. The Postgres impl binds teamID directly
@@ -486,11 +482,18 @@ type BlueprintStore interface {
 	// unchanged since both blueprints share them (validated same-team by the
 	// caller). The host's updated_at is bumped.
 	//
-	// The caller must reject a triggered source for a clean 422, checking
-	// after LockForRetire on the source so that no handler write lands
-	// between the check and the retire. MergeInto itself does not touch
+	// The caller must reject a triggered source for a clean 422. It checks
+	// after MergeInto, in the same transaction, and rolls back when a handler
+	// names the source: the check then runs under the row lock the retire's
+	// UPDATE holds, so a handler written under LockForReference either
+	// committed before the retire, and the check sees it, or waits for the
+	// merge and reads the source as absent. MergeInto itself does not touch
 	// event_handlers — the source carrying no trigger is a precondition, not
 	// something this method enforces or repairs.
+	//
+	// Returns ErrNoSuchBlueprint when the source is not live by the time its
+	// retire runs. The source's steps have been moved by then, so the caller
+	// rolls back.
 	//
 	// Stamps user_modified true on the host (see the stamping contract
 	// above); the source is retired, not stamped.

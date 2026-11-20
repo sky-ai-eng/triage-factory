@@ -98,6 +98,8 @@ func TestBlueprintReconnect_TriggeredTargetRejected(t *testing.T) {
 	if len(hs) != 3 {
 		t.Fatalf("host steps after rejected reconnect = %d, want 3 (untouched). p0=%s", len(hs), p[0])
 	}
+	// The reconnect retires the target before it finds the handler.
+	assertLiveWithSteps(t, s, target, 1)
 }
 
 func TestBlueprintReconnect_IndexOutOfRangeRejected(t *testing.T) {

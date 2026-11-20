@@ -109,3 +109,27 @@ func TestEventHandlers_BlueprintRetiredAfterTheRouteReadIt(t *testing.T) {
 		})
 	}
 }
+
+// TestEventHandlers_PatchKeepingARetiredBlueprint: a handler already on a
+// retired blueprint can still have its other fields changed. The PATCH locks
+// the blueprint the row keeps, and a retired one refuses only a body that
+// attaches it.
+func TestEventHandlers_PatchKeepingARetiredBlueprint(t *testing.T) {
+	s := newTestServer(t)
+	configureEventSources(t, s)
+	host, absorbed := fixtureUUID("keep-host"), fixtureUUID("keep-absorbed")
+	seedHandlerBlueprint(t, s, host)
+	seedHandlerBlueprint(t, s, absorbed)
+	id := createHandlerID(t, s, map[string]any{"event_type": domain.EventGitHubPROpened, "blueprint_id": absorbed})
+	if err := s.allStores.Blueprints.MergeInto(t.Context(), runmode.LocalDefaultOrgID, host, absorbed); err != nil {
+		t.Fatalf("retire the handler's blueprint: %v", err)
+	}
+
+	rec := doJSON(t, s, http.MethodPatch, "/api/event-handlers/"+id, map[string]any{"mode": domain.EventHandlerModeOff})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PATCH mode on a handler whose blueprint was retired = %d %s, want 200", rec.Code, rec.Body.String())
+	}
+	if got := getEventHandler(t, s, id); got["mode"] != domain.EventHandlerModeOff || got["blueprint_id"] != absorbed {
+		t.Errorf("handler after the PATCH = mode %v, blueprint %v; want off, still on %s", got["mode"], got["blueprint_id"], absorbed)
+	}
+}

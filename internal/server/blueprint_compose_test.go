@@ -101,6 +101,21 @@ func TestBlueprintMerge_TriggeredSourceRejected(t *testing.T) {
 	if len(hostSteps) != 1 {
 		t.Fatalf("host steps after rejected merge = %d, want 1 (untouched)", len(hostSteps))
 	}
+	// The merge retires the source before it finds the handler, so the
+	// refusal has to roll that back too.
+	assertLiveWithSteps(t, s, source, 1)
+}
+
+// assertLiveWithSteps fails the test unless the blueprint reads as live and
+// holds want steps.
+func assertLiveWithSteps(t *testing.T, s *Server, blueprintID string, want int) {
+	t.Helper()
+	if rec := doJSON(t, s, http.MethodGet, "/api/blueprints/"+blueprintID, nil); rec.Code != http.StatusOK {
+		t.Fatalf("GET blueprint %s = %d %s, want it live", blueprintID, rec.Code, rec.Body.String())
+	}
+	if got := len(listBlueprintSteps(t, s, blueprintID)); got != want {
+		t.Fatalf("blueprint %s steps = %d, want %d", blueprintID, got, want)
+	}
 }
 
 func TestBlueprintMerge_ExceedsStepCapRejected(t *testing.T) {
