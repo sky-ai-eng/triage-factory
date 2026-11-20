@@ -17,7 +17,7 @@ import type {
 // the floor is one page of the entity list, the work on those entities from
 // the task and conversation lists, the recent events of the entities that
 // need them from the event list, and the station counters from the activity
-// node's by_event_type cut. What the floor makes of them — stations, chips,
+// node's by_event_type cut over the last REACHED_WINDOW_DAYS days. What the floor makes of them — stations, chips,
 // rides — is the scene's.
 
 export const ENTITY_LIST_PATH = '/api/entities/list'
@@ -75,10 +75,16 @@ export function readFloorEntities(teamIds: string[], now: number) {
   })
 }
 
-/** Distinct entities that ever reached each event type, over the viewer's
- *  teams. */
-export async function readLifetimeCounts(): Promise<Record<string, number>> {
-  const node = await apiJSON<ActivityNode>(`${ACTIVITY_PATH}?since=1970-01-01`)
+/** How far back a station's counter looks. A window rather than all history
+ *  keeps the activity read bounded as an org ages, and says what is moving
+ *  now rather than what ever moved. */
+export const REACHED_WINDOW_DAYS = 30
+
+/** Distinct entities that reached each event type in the last
+ *  REACHED_WINDOW_DAYS days, over the viewer's teams. */
+export async function readReachedCounts(now: number): Promise<Record<string, number>> {
+  const since = new Date(now - REACHED_WINDOW_DAYS * 24 * 60 * 60_000).toISOString()
+  const node = await apiJSON<ActivityNode>(`${ACTIVITY_PATH}?since=${encodeURIComponent(since)}`)
   const out: Record<string, number> = {}
   for (const row of node.by_event_type ?? []) out[row.event_type] = row.entities
   return out
@@ -186,13 +192,13 @@ async function readWork(entityIds: string[]): Promise<{ runs: FactoryRun[]; open
 }
 
 /** Reads the floor for the team filter. `stations` is the set of event types
- *  the scene has a station for; `lifetime` is the station counters last read,
+ *  the scene has a station for; `reached` is the station counters last read,
  *  which this read does not refresh. */
 export async function readFactoryFloor(opts: {
   teamIds: string[]
   stations: ReadonlySet<string>
   cache: FloorHistoryCache
-  lifetime: Record<string, number>
+  reached: Record<string, number>
   now: number
 }): Promise<FactoryFloor> {
   const page = await readFloorEntities(opts.teamIds, opts.now)
@@ -220,6 +226,6 @@ export async function readFactoryFloor(opts: {
     })),
     total: page.total_count ?? page.items.length,
     runs,
-    lifetime: opts.lifetime,
+    reached: opts.reached,
   }
 }

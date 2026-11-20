@@ -778,7 +778,7 @@ const stationSpec = (
   h: STATION_H,
   // The station's stable id IS its event_type. Click hit-testing,
   // the floor reconciler, and the routing table all key off this
-  // value, so the floor's runs and lifetime counters, keyed by event
+  // value, so the floor's runs and reached counters, keyed by event
   // type, line up 1:1 with our 12 stations without an intermediate
   // slug layer.
   id: eventType,
@@ -2584,10 +2584,10 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
         row.handle.setConversationCount(conversationCount)
         lastTrayState.set(eventType, { queuedCount, conversationCount })
       }
-      // Lifetime counter: the station-handle API exposes this for every
+      // Reached counter: the station-handle API exposes this for every
       // station, so we update it unconditionally here with the latest
       // floor value when present.
-      row.handle.setLifetimeCount(latestFloor.lifetime[eventType] ?? 0)
+      row.handle.setReachedCount(latestFloor.reached[eventType] ?? 0)
       row.data = {
         id: eventType,
         label: row.spec.label ?? eventType,

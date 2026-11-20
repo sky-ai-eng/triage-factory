@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { readFactoryFloor, readLifetimeCounts, type FloorHistoryCache } from './factoryFloor'
+import { readFactoryFloor, readReachedCounts, type FloorHistoryCache } from './factoryFloor'
 import { jsonBody } from '../test/apiResponse'
 import type { EntityResource, EventResource } from '../types'
 
@@ -80,7 +80,7 @@ describe('readFactoryFloor', () => {
       teamIds: ['team-a'],
       stations: STATIONS,
       cache: new Map(),
-      lifetime: {},
+      reached: {},
       now: NOW,
     })
     expect(calls).toHaveLength(1)
@@ -93,7 +93,7 @@ describe('readFactoryFloor', () => {
     })
     // An empty floor names no entities, and an empty entity_ids narrows
     // nothing, so nothing else is read.
-    expect(floor).toEqual({ entities: [], total: 0, runs: {}, lifetime: {} })
+    expect(floor).toEqual({ entities: [], total: 0, runs: {}, reached: {} })
   })
 
   it('joins the work on the floor and reads history only where a chip may move or stands at an earlier event', async () => {
@@ -150,7 +150,7 @@ describe('readFactoryFloor', () => {
       teamIds: [],
       stations: STATIONS,
       cache: new Map(),
-      lifetime: { x: 1 },
+      reached: { x: 1 },
       now: NOW,
     })
 
@@ -163,7 +163,7 @@ describe('readFactoryFloor', () => {
     expect(history[0].body.entity_ids).toEqual(['riding', 'commented'])
 
     expect(floor.total).toBe(340)
-    expect(floor.lifetime).toEqual({ x: 1 })
+    expect(floor.reached).toEqual({ x: 1 })
     expect(floor.runs['github:pr:ci_check_passed'].map((r) => r.run.id)).toEqual(['run-1'])
     expect(floor.runs['github:pr:merged'].map((r) => r.task.id)).toEqual(['task-closed'])
 
@@ -200,12 +200,12 @@ describe('readFactoryFloor', () => {
       list([event('e1', 'riding', 'github:pr:merged', '2026-11-20T11:59:50Z')])
     const cache: FloorHistoryCache = new Map()
 
-    await readFactoryFloor({ teamIds: [], stations: STATIONS, cache, lifetime: {}, now: NOW })
+    await readFactoryFloor({ teamIds: [], stations: STATIONS, cache, reached: {}, now: NOW })
     await readFactoryFloor({
       teamIds: [],
       stations: STATIONS,
       cache,
-      lifetime: {},
+      reached: {},
       now: NOW + 1000,
     })
     expect(calls.filter((c) => c.path === EVENTS)).toHaveLength(1)
@@ -215,19 +215,20 @@ describe('readFactoryFloor', () => {
       teamIds: [],
       stations: STATIONS,
       cache,
-      lifetime: {},
+      reached: {},
       now: NOW + 2000,
     })
     expect(calls.filter((c) => c.path === EVENTS)).toHaveLength(2)
   })
 })
 
-describe('readLifetimeCounts', () => {
-  it('reads distinct entities per event type from the viewer activity node, with no lower bound', async () => {
+describe('readReachedCounts', () => {
+  it('reads distinct entities per event type from the viewer activity node over the last 30 days', async () => {
     answers['/api/me/activity'] = () => ({
       by_event_type: [{ event_type: 'github:pr:merged', events: 9, tasks: 2, entities: 4 }],
     })
-    expect(await readLifetimeCounts()).toEqual({ 'github:pr:merged': 4 })
-    expect(calls[0].path).toBe('/api/me/activity?since=1970-01-01')
+    expect(await readReachedCounts(NOW)).toEqual({ 'github:pr:merged': 4 })
+    const since = new Date(NOW - 30 * 24 * 60 * 60_000).toISOString()
+    expect(calls[0].path).toBe(`/api/me/activity?since=${encodeURIComponent(since)}`)
   })
 })

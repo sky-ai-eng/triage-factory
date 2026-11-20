@@ -29,7 +29,7 @@ import type { Conversation, FactoryEntity, ConversationStatusValue, Task } from 
 import { isActiveStatus } from '../lib/conversationStatus'
 import { apiErrors, apiJSON, httpErrorMessage } from '../lib/apiClient'
 import { delegateTask } from '../lib/taskWrites'
-import { readFactoryFloor, readLifetimeCounts, type FloorHistoryCache } from '../lib/factoryFloor'
+import { readFactoryFloor, readReachedCounts, type FloorHistoryCache } from '../lib/factoryFloor'
 
 // Production factory page — Babylon scene driven by the generic entity,
 // event, task, and conversation reads (lib/factoryFloor). The page itself
@@ -52,10 +52,11 @@ import { readFactoryFloor, readLifetimeCounts, type FloorHistoryCache } from '..
 // debounce delays that.
 const REFETCH_DEBOUNCE_MS = 250
 
-// How often the station counters are re-read. They count every entity that
-// ever reached a station, so one more arrival is not worth a read of the
-// whole history on every frame of floor traffic.
-const LIFETIME_REFRESH_MS = 60_000
+// How often the station counters are re-read. The read computes every cut of
+// the activity node over the counters' window, and one more arrival barely
+// moves a month's count, so it is not repeated on every burst of floor
+// traffic.
+const REACHED_REFRESH_MS = 60_000
 
 // Drop target ID for the conversations tray inside the station drawer. A
 // constant string is fine — the drawer only renders one station at a
@@ -163,34 +164,34 @@ export default function Factory() {
     // cannot put an older floor back on the scene.
     let loadSeq = 0
     const historyCache: FloorHistoryCache = new Map()
-    let lifetime: Record<string, number> = {}
-    let lifetimeReadAt = -Infinity
+    let reached: Record<string, number> = {}
+    let reachedReadAt = -Infinity
 
     const load = () => {
       loadSeq += 1
       const seq = loadSeq
       const now = Date.now()
-      const lifetimeRead = now - lifetimeReadAt >= LIFETIME_REFRESH_MS ? readLifetimeCounts() : null
-      if (lifetimeRead) lifetimeReadAt = now
+      const reachedRead = now - reachedReadAt >= REACHED_REFRESH_MS ? readReachedCounts(now) : null
+      if (reachedRead) reachedReadAt = now
       Promise.all([
         readFactoryFloor({
           teamIds: teamFilterRef.current,
           stations: STATION_EVENT_TYPES,
           cache: historyCache,
-          lifetime,
+          reached,
           now,
         }),
-        lifetimeRead,
+        reachedRead,
       ])
         .then(([floor, counts]) => {
-          if (counts) lifetime = counts
+          if (counts) reached = counts
           if (cancelled || seq !== loadSeq) return
-          sceneRef.current?.applyFloor({ ...floor, lifetime })
+          sceneRef.current?.applyFloor({ ...floor, reached })
           setFloorCount({ shown: floor.entities.length, total: floor.total })
         })
         .catch((err) => {
           // A failed counter read is tried again on the next load.
-          if (lifetimeRead) lifetimeReadAt = -Infinity
+          if (reachedRead) reachedReadAt = -Infinity
           if (cancelled) return
           console.warn('[factory] floor load failed:', err)
         })

@@ -1416,8 +1416,9 @@ export interface FactoryFloor {
   /** Conversations in flight on the floor's entities, by their task's event
    *  type. */
   runs: Record<string, FactoryRun[]>
-  /** Distinct entities that ever reached each event type. */
-  lifetime: Record<string, number>
+  /** Distinct entities that reached each event type in the last
+   *  REACHED_WINDOW_DAYS days (lib/factoryFloor). */
+  reached: Record<string, number>
 }
 
 export type WSEvent =
