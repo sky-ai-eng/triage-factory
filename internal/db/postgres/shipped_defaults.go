@@ -313,9 +313,14 @@ func pgLoadTeamUnitState(ctx context.Context, q queryer, orgID, teamID string, b
 		bpMod  bool
 		bpDel  bool
 	)
+	// Locked before the steps are read, as every write that changes a
+	// blueprint's steps holds it (BlueprintStore.GetAllForUpdate): the plan
+	// may replace them, and a user's edit that held the row first has
+	// committed its user_modified stamp by the time this read returns.
 	switch err := q.QueryRowContext(ctx, `
 		SELECT id, name, user_modified, (deleted_at IS NOT NULL)
 		FROM blueprints WHERE org_id = $1 AND team_id = $2 AND system_slug = $3
+		FOR UPDATE
 	`, orgID, teamID, b.SystemSlug).Scan(&bpID, &bpName, &bpMod, &bpDel); {
 	case errors.Is(err, sql.ErrNoRows):
 		st.BlueprintExists = false

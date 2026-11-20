@@ -372,10 +372,7 @@ type BlueprintStore interface {
 	// takes GetForUpdate before it reads or detaches what references it, so
 	// the two run one after the other and the second sees what the first
 	// committed: a reference written first is there for the retire to detach,
-	// and a blueprint retired first reads as absent. A write whose retire is
-	// itself a write to the row, as MergeInto's is, can retire first and read
-	// what references the blueprint after: the retire's write holds the row
-	// as GetForUpdate would.
+	// and a blueprint retired first reads as absent.
 	//
 	// Postgres locks the row FOR SHARE or FOR UPDATE, so two writes that only
 	// reference the blueprint do not wait for one another. A lock that waited
@@ -391,6 +388,29 @@ type BlueprintStore interface {
 	// hold the blueprint past the read, or nothing a writer waits for.
 	GetForShare(ctx context.Context, orgID string, id string) (*domain.Blueprint, error)
 	GetForUpdate(ctx context.Context, orgID string, id string) (*domain.Blueprint, error)
+
+	// GetAllForUpdate is GetForUpdate for several blueprints in one statement,
+	// which in Postgres locks them in id order. A blueprint that is not live
+	// is absent from the map. It is refused where GetForUpdate is.
+	//
+	// # One lock order for a blueprint's steps
+	//
+	// Every write that changes a blueprint's steps holds the blueprints whose
+	// steps it changes this way before it reads or writes one of their step
+	// rows. ReplaceSteps, SplitAt, MergeInto and DeleteStep each take the
+	// hold themselves, and answer ErrNoSuchBlueprint, having written nothing,
+	// when a blueprint they change is not live. A caller that reads the steps
+	// to decide what to write takes the hold first, so that what it read is
+	// what the write changes; the method's own hold then takes nothing new.
+	//
+	// The order is what keeps two such writes from deadlocking. A write that
+	// held a step row while it waited for the blueprint's row could be waited
+	// on by one that held the blueprint's row and wanted that step row. And
+	// a write that holds two blueprints, as a merge does, takes both in one
+	// call, so two writes holding the same two never each hold one and wait
+	// for the other. A transaction takes every blueprint it holds in its
+	// first call, and a later call names only blueprints it already holds.
+	GetAllForUpdate(ctx context.Context, orgID string, ids []string) (map[string]*domain.Blueprint, error)
 
 	// Create inserts a new blueprint (user or imported source) owned by
 	// teamID. Caller-provided ID. The Postgres impl binds teamID directly
@@ -491,18 +511,16 @@ type BlueprintStore interface {
 	// unchanged since both blueprints share them (validated same-team by the
 	// caller). The host's updated_at is bumped.
 	//
-	// The caller must reject a triggered source for a clean 422. It checks
-	// after MergeInto, in the same transaction, and rolls back when a handler
-	// names the source: the check then runs while the retire's write holds the
-	// source's row, so a handler written under GetForShare either committed
-	// before the retire, and the check sees it, or waits for the merge and
-	// reads the source as absent. MergeInto itself does not touch
-	// event_handlers — the source carrying no trigger is a precondition, not
-	// something this method enforces or repairs.
+	// The caller must reject a triggered source for a clean 422. It holds the
+	// host and the source with GetAllForUpdate before it checks, so a handler
+	// written under GetForShare either committed before the hold, and the
+	// check sees it, or waits for the merge and reads the source as absent.
+	// MergeInto itself does not touch event_handlers — the source carrying no
+	// trigger is a precondition, not something this method enforces or
+	// repairs.
 	//
-	// Returns ErrNoSuchBlueprint when the source is not live by the time its
-	// retire runs. The source's steps have been moved by then, so the caller
-	// rolls back.
+	// Returns ErrNoSuchBlueprint, having written nothing, when the host or
+	// the source is not live (see the lock order at GetAllForUpdate).
 	//
 	// Stamps user_modified true on the host (see the stamping contract
 	// above); the source is retired, not stamped.
@@ -528,6 +546,9 @@ type BlueprintStore interface {
 	// creates newBlueprintID with user_modified already true and no
 	// system_slug — a split product is never a shipped row (see the
 	// stamping contract above).
+	//
+	// Returns ErrNoSuchBlueprint, having written nothing, when id is not live
+	// (see the lock order at GetAllForUpdate).
 	SplitAt(ctx context.Context, orgID string, id string, atIndex int, newBlueprintID, newName string) (string, error)
 
 	// DeleteStep removes the step at stepIndex from a multi-step blueprint
@@ -572,6 +593,9 @@ type BlueprintStore interface {
 	// already true, no system_slug (see the stamping contract above). The
 	// internal isolation wrapper is not part of this contract — it is a
 	// born-soft-deleted audit row sync never resurrects regardless of the flag.
+	//
+	// Returns ErrNoSuchBlueprint, having written nothing, when blueprintID is
+	// not live (see the lock order at GetAllForUpdate).
 	DeleteStep(ctx context.Context, orgID, blueprintID string, stepIndex int, newName string) (downstreamID string, err error)
 
 	// DuplicatePrompts deep-copies a flat set of prompt ids into new,

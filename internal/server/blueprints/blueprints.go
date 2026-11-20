@@ -636,8 +636,24 @@ func (h *Handler) handleBlueprintStepsPut(w http.ResponseWriter, r *http.Request
 
 	// Validate each step's prompt exists + is same-team, then replace in one
 	// tx so all lookups and the final write share claims.
-	var fault blueprintFault
+	var (
+		fault blueprintFault
+		gone  bool
+	)
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		// Held until commit, before the checks below read which blueprint
+		// owns each prompt, so they read what a merge, split or prompt delete
+		// that held this blueprint first committed
+		// (BlueprintStore.GetAllForUpdate). A blueprint retired meanwhile is
+		// answered 404.
+		held, e := tx.Blueprints.GetForUpdate(r.Context(), orgID, id)
+		if e != nil {
+			return e
+		}
+		if held == nil {
+			gone = true
+			return nil
+		}
 		for i, sid := range stepIDs {
 			stepPrompt, e := tx.Prompts.Get(r.Context(), orgID, sid)
 			if e != nil {
@@ -673,10 +689,14 @@ func (h *Handler) handleBlueprintStepsPut(w http.ResponseWriter, r *http.Request
 		if fault.status != 0 {
 			return nil
 		}
-		_, e := tx.Blueprints.ReplaceSteps(r.Context(), orgID, id, stepIDs, briefs)
+		_, e = tx.Blueprints.ReplaceSteps(r.Context(), orgID, id, stepIDs, briefs)
 		return e
 	}); err != nil {
 		httpx.InternalError(w, "blueprints", err)
+		return
+	}
+	if gone {
+		httpx.NotFound(w, "blueprint")
 		return
 	}
 	if fault.write(w) {
@@ -707,20 +727,6 @@ func (f *blueprintFault) raise(status int, reason, message, field string) {
 	}
 	f.status = status
 	f.item = httpx.ErrorItem{Reason: reason, Message: message, Field: field}
-}
-
-// errRefused is what a closure returns when it finds, after it has written,
-// that the request is refused: a raised fault, or a blueprint that is gone
-// since the closure read it. The transaction then rolls back instead of
-// committing writes the answer does not describe.
-var errRefused = errors.New("blueprint write refused")
-
-// refuse is raise for a refusal found after the closure wrote. The caller
-// returns what it returns, and treats errRefused from the transaction as the
-// raised fault rather than as a failure.
-func (f *blueprintFault) refuse(status int, reason, message, field string) error {
-	f.raise(status, reason, message, field)
-	return errRefused
 }
 
 // write emits the refusal if one was raised, reporting whether it did so the
@@ -808,6 +814,20 @@ func (h *Handler) handleBlueprintMerge(w http.ResponseWriter, r *http.Request) {
 				"host and source blueprints belong to different teams", "source_blueprint_id")
 			return nil
 		}
+		// Held until commit, before the checks below read either blueprint's
+		// steps or handlers, so what they read is what the merge moves
+		// (BlueprintStore.GetAllForUpdate). Either one retired while this
+		// waited, as a merge absorbing the host would, is answered 404. The
+		// hold comes after the same-team guard because its row-level security
+		// is the UPDATE policy, which hides a source of a team the caller may
+		// only read, and that source is answered with the guard's fault.
+		held, e := tx.Blueprints.GetAllForUpdate(r.Context(), orgID, []string{hostID, req.SourceBlueprintID})
+		if e != nil {
+			return e
+		}
+		if host, source = held[hostID], held[req.SourceBlueprintID]; host == nil || source == nil {
+			return nil // resolved to 404 below
+		}
 		// Cap: the merged blueprint must stay editable via the normal steps-PUT,
 		// which rejects lists longer than maxBlueprintSteps. Reject up front
 		// rather than minting an un-editable blueprint.
@@ -824,37 +844,32 @@ func (h *Handler) handleBlueprintMerge(w http.ResponseWriter, r *http.Request) {
 				"merged blueprint would exceed "+strconv.Itoa(maxBlueprintSteps)+" steps", "source_blueprint_id")
 			return nil
 		}
-		if e := tx.Blueprints.MergeInto(r.Context(), orgID, hostID, req.SourceBlueprintID); e != nil {
-			if errors.Is(e, db.ErrNoSuchBlueprint) {
-				source = nil // retired since the read above; resolved to 404 below
-				return errRefused
-			}
-			return e
-		}
 		// No event handler may reference the source, in any mode: the merge
 		// retires it, and a handler on it would be left referencing a retired
 		// blueprint. Unreachable from the canvas (you can only connect a tail
 		// into an entry no handler references), but the endpoint is
-		// third-party-callable, so it refuses here, and rolls the merge back.
-		// The check comes after the retire so that it runs while the retire's
-		// write holds the source's row: a handler write holding the source
-		// (GetForShare) either committed before that write, and its handler
-		// is listed here, or waits for this transaction and then reads the
-		// source as absent.
+		// third-party-callable, so it refuses here. A handler write holding
+		// the source (GetForShare) either committed before the hold above,
+		// and its handler is listed here, or waits for this transaction and
+		// then reads the source as absent.
 		triggers, e := tx.EventHandlers.ListForBlueprint(r.Context(), orgID, req.SourceBlueprintID)
 		if e != nil {
 			return e
 		}
 		if len(triggers) > 0 {
-			return fault.refuse(http.StatusUnprocessableEntity, httpx.ReasonConflict,
+			fault.raise(http.StatusUnprocessableEntity, httpx.ReasonConflict,
 				"an event handler references the absorbed blueprint; detach it first", "source_blueprint_id")
+			return nil
+		}
+		if e := tx.Blueprints.MergeInto(r.Context(), orgID, hostID, req.SourceBlueprintID); e != nil {
+			return e
 		}
 		if merged, e = tx.Blueprints.Get(r.Context(), orgID, hostID); e != nil {
 			return e
 		}
 		steps, e = tx.Blueprints.ListSteps(r.Context(), orgID, hostID)
 		return e
-	}); err != nil && !errors.Is(err, errRefused) {
+	}); err != nil {
 		httpx.InternalError(w, "blueprints", err)
 		return
 	}
@@ -929,7 +944,10 @@ func (h *Handler) handleBlueprintSplit(w http.ResponseWriter, r *http.Request) {
 	)
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		if bp, e = tx.Blueprints.Get(r.Context(), orgID, id); e != nil || bp == nil {
+		// Held until commit, before the steps are read, so the index is
+		// checked against the steps the split moves
+		// (BlueprintStore.GetAllForUpdate).
+		if bp, e = tx.Blueprints.GetForUpdate(r.Context(), orgID, id); e != nil || bp == nil {
 			return e
 		}
 		steps, e := tx.Blueprints.ListSteps(r.Context(), orgID, id)
@@ -1078,6 +1096,15 @@ func (h *Handler) handleBlueprintReconnect(w http.ResponseWriter, r *http.Reques
 				"host and target blueprints belong to different teams", "target_blueprint_id")
 			return nil
 		}
+		// Held until commit, as a merge holds its host and source, and after
+		// the same-team guard for the merge's reason.
+		held, e := tx.Blueprints.GetAllForUpdate(r.Context(), orgID, []string{id, req.TargetBlueprintID})
+		if e != nil {
+			return e
+		}
+		if host, target = held[id], held[req.TargetBlueprintID]; host == nil || target == nil {
+			return nil // resolved to 404 below
+		}
 		steps, e := tx.Blueprints.ListSteps(r.Context(), orgID, id)
 		if e != nil {
 			return e
@@ -1100,6 +1127,19 @@ func (h *Handler) handleBlueprintReconnect(w http.ResponseWriter, r *http.Reques
 				"reconnected blueprint would exceed "+strconv.Itoa(maxBlueprintSteps)+" steps", "target_blueprint_id")
 			return nil
 		}
+		// No event handler may reference the target, as for a merge's source:
+		// the absorb retires it, and a handler on it would be left referencing a
+		// retired blueprint. The hold above orders this check against a
+		// handler write for the merge's reason.
+		triggers, e := tx.EventHandlers.ListForBlueprint(r.Context(), orgID, req.TargetBlueprintID)
+		if e != nil {
+			return e
+		}
+		if len(triggers) > 0 {
+			fault.raise(http.StatusUnprocessableEntity, httpx.ReasonConflict,
+				"an event handler references the target blueprint; detach it first", "target_blueprint_id")
+			return nil
+		}
 		// Orphan name defaults to its new step-0 prompt's name (the prompt at the
 		// boundary), consistent with split / auto-wrap.
 		orphanName := ""
@@ -1115,23 +1155,7 @@ func (h *Handler) handleBlueprintReconnect(w http.ResponseWriter, r *http.Reques
 			return e
 		}
 		if e = tx.Blueprints.MergeInto(r.Context(), orgID, id, req.TargetBlueprintID); e != nil {
-			if errors.Is(e, db.ErrNoSuchBlueprint) {
-				target = nil // retired since the read above; resolved to 404 below
-				return errRefused
-			}
 			return e
-		}
-		// No event handler may reference the target, as for a merge's source:
-		// the absorb retires it, and a handler on it would be left referencing a
-		// retired blueprint. The check comes after the retire, and a handler
-		// found here rolls the reconnect back, for the merge's reason.
-		triggers, e := tx.EventHandlers.ListForBlueprint(r.Context(), orgID, req.TargetBlueprintID)
-		if e != nil {
-			return e
-		}
-		if len(triggers) > 0 {
-			return fault.refuse(http.StatusUnprocessableEntity, httpx.ReasonConflict,
-				"an event handler references the target blueprint; detach it first", "target_blueprint_id")
 		}
 		if hostOut, e = tx.Blueprints.Get(r.Context(), orgID, id); e != nil {
 			return e
@@ -1143,7 +1167,7 @@ func (h *Handler) handleBlueprintReconnect(w http.ResponseWriter, r *http.Reques
 		}
 		hostSteps, e = tx.Blueprints.ListSteps(r.Context(), orgID, id)
 		return e
-	}); err != nil && !errors.Is(err, errRefused) {
+	}); err != nil {
 		httpx.InternalError(w, "blueprints", err)
 		return
 	}

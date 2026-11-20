@@ -151,6 +151,65 @@ func (s *blueprintStore) getLocked(ctx context.Context, orgID, id, lock string) 
 	return &b, nil
 }
 
+func (s *blueprintStore) GetAllForUpdate(ctx context.Context, orgID string, ids []string) (map[string]*domain.Blueprint, error) {
+	tx, ok := s.app.(*sql.Tx)
+	if !ok {
+		return nil, errors.New("postgres: a locking blueprint read needs a transaction's stores, whose commit releases the lock")
+	}
+	return lockBlueprintsPG(ctx, tx, orgID, ids)
+}
+
+// lockBlueprintsPG locks the live blueprints among ids FOR UPDATE and returns
+// them by id (BlueprintStore.GetAllForUpdate). Postgres sorts the rows before
+// it locks each one, so ORDER BY id is the order they are locked in. A row
+// whose lock waited on a retire is read again as that retire committed it,
+// fails deleted_at IS NULL, and is left out.
+func lockBlueprintsPG(ctx context.Context, q queryer, orgID string, ids []string) (map[string]*domain.Blueprint, error) {
+	valid := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if isValidUUID(id) {
+			valid = append(valid, id)
+		}
+	}
+	held := make(map[string]*domain.Blueprint, len(valid))
+	if len(valid) == 0 {
+		return held, nil
+	}
+	rows, err := q.QueryContext(ctx, `
+		SELECT `+pgBlueprintColumns+`
+		FROM blueprints WHERE org_id = $1 AND id = ANY($2) AND deleted_at IS NULL
+		ORDER BY id
+		FOR UPDATE`, orgID, valid)
+	if err != nil {
+		return nil, fmt.Errorf("lock blueprints: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		b, err := scanBlueprintRowPG(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		held[b.ID] = &b
+	}
+	return held, rows.Err()
+}
+
+// holdLiveBlueprintsPG is the hold a step writer takes before it touches a
+// step row (BlueprintStore.GetAllForUpdate): db.ErrNoSuchBlueprint unless
+// every one of ids is live.
+func holdLiveBlueprintsPG(ctx context.Context, q queryer, orgID string, ids ...string) error {
+	held, err := lockBlueprintsPG(ctx, q, orgID, ids)
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if held[id] == nil {
+			return db.ErrNoSuchBlueprint
+		}
+	}
+	return nil
+}
+
 // pgBlueprintColumns is the canonical projection of a blueprints row, in the
 // order scanBlueprintRowPG reads them. Every point read SELECTs it and every
 // single-row write RETURNs it, so the write shape cannot drift from the read
@@ -392,6 +451,9 @@ func (s *blueprintStore) ReplaceSteps(ctx context.Context, orgID, blueprintID st
 	}
 	var stamped domain.Blueprint
 	if err := inTx(ctx, s.app, func(tx queryer) error {
+		if err := holdLiveBlueprintsPG(ctx, tx, orgID, blueprintID); err != nil {
+			return err
+		}
 		if _, err := tx.ExecContext(ctx,
 			`DELETE FROM blueprint_steps WHERE org_id = $1 AND blueprint_id = $2`,
 			orgID, blueprintID); err != nil {
@@ -452,6 +514,9 @@ func reparentBlueprintStepsPG(ctx context.Context, q queryer, orgID, fromBluepri
 
 func (s *blueprintStore) MergeInto(ctx context.Context, orgID, hostID, sourceID string) error {
 	return inTx(ctx, s.app, func(tx queryer) error {
+		if err := holdLiveBlueprintsPG(ctx, tx, orgID, hostID, sourceID); err != nil {
+			return err
+		}
 		var hostLen int
 		if err := tx.QueryRowContext(ctx,
 			`SELECT COUNT(*) FROM blueprint_steps WHERE org_id = $1 AND blueprint_id = $2`,
@@ -462,28 +527,14 @@ func (s *blueprintStore) MergeInto(ctx context.Context, orgID, hostID, sourceID 
 		if err := reparentBlueprintStepsPG(ctx, tx, orgID, sourceID, hostID, hostLen, 0); err != nil {
 			return fmt.Errorf("reparent source steps: %w", err)
 		}
-		res, err := tx.ExecContext(ctx,
-			`UPDATE blueprints SET deleted_at = now() WHERE org_id = $1 AND id = $2 AND deleted_at IS NULL`,
-			orgID, sourceID)
-		if err != nil {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE blueprints SET deleted_at = now() WHERE org_id = $1 AND id = $2`,
+			orgID, sourceID); err != nil {
 			return fmt.Errorf("soft-delete source: %w", err)
-		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if n == 0 {
-			return db.ErrNoSuchBlueprint
 		}
 		// Bump host.updated_at (the set_updated_at trigger also stamps it, but
 		// the row must be touched for the trigger to fire) and stamp
 		// user_modified true (the source is retired, not stamped).
-		//
-		// TODO(TFAC-1518): nothing holds the host, and this stamp does not
-		// check that it is still live, so a concurrent merge that absorbs the
-		// host leaves the source's steps on a retired blueprint. Holding it
-		// needs every writer of a blueprint's steps to lock blueprint rows
-		// before step rows, or the hold deadlocks against a steps PUT.
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE blueprints SET updated_at = now(), user_modified = TRUE WHERE org_id = $1 AND id = $2`, orgID, hostID); err != nil {
 			return fmt.Errorf("bump host updated_at: %w", err)
@@ -575,6 +626,9 @@ func insertIsolationBlueprintPG(ctx context.Context, q queryer, orgID, id, srcBl
 
 func (s *blueprintStore) SplitAt(ctx context.Context, orgID, id string, atIndex int, newBlueprintID, newName string) (string, error) {
 	err := inTx(ctx, s.app, func(tx queryer) error {
+		if err := holdLiveBlueprintsPG(ctx, tx, orgID, id); err != nil {
+			return err
+		}
 		// Create the new trigger-less downstream blueprint (team derived from the
 		// blueprint being split so both halves share a team).
 		if err := insertTriggerlessBlueprintPG(ctx, tx, orgID, newBlueprintID, newName, id); err != nil {
@@ -599,6 +653,9 @@ func (s *blueprintStore) SplitAt(ctx context.Context, orgID, id string, atIndex 
 func (s *blueprintStore) DeleteStep(ctx context.Context, orgID, blueprintID string, stepIndex int, newName string) (string, error) {
 	var downstreamID string
 	err := inTx(ctx, s.app, func(tx queryer) error {
+		if err := holdLiveBlueprintsPG(ctx, tx, orgID, blueprintID); err != nil {
+			return err
+		}
 		var n int
 		if err := tx.QueryRowContext(ctx,
 			`SELECT COUNT(*) FROM blueprint_steps WHERE org_id = $1 AND blueprint_id = $2`,
