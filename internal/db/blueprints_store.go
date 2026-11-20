@@ -395,13 +395,17 @@ type BlueprintStore interface {
 	//
 	// # One lock order for a blueprint's steps
 	//
-	// Every write that changes a blueprint's steps holds the blueprints whose
-	// steps it changes this way before it reads or writes one of their step
-	// rows. ReplaceSteps, SplitAt, MergeInto and DeleteStep each take the
-	// hold themselves, and answer ErrNoSuchBlueprint, having written nothing,
-	// when a blueprint they change is not live. A caller that reads the steps
-	// to decide what to write takes the hold first, so that what it read is
-	// what the write changes; the method's own hold then takes nothing new.
+	// Every write that changes the steps of a blueprint it did not create in
+	// the same transaction holds the blueprints whose steps it changes this
+	// way before it reads or writes one of their step rows. ReplaceSteps,
+	// SplitAt, MergeInto and DeleteStep each take the hold themselves, and
+	// answer ErrNoSuchBlueprint, having written nothing, when a blueprint they
+	// change is not live. A caller that reads the steps to decide what to
+	// write takes the hold first, so that what it read is what the write
+	// changes; the method's own hold then takes nothing new. A write that only
+	// inserts steps onto blueprints it has just inserted, as DuplicatePrompts
+	// and a marketplace install do, needs no hold: no other transaction can
+	// see those rows, so none can wait on them.
 	//
 	// The order is what keeps two such writes from deadlocking. A write that
 	// held a step row while it waited for the blueprint's row could be waited

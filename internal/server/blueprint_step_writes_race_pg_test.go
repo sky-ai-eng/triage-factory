@@ -7,7 +7,10 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/server/blueprints"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
@@ -146,8 +149,8 @@ func concat(parts ...[]string) []string {
 // into X, in both orders. Every such write holds A before it reads or moves a
 // step, so the two run one after the other: a write behind the merge finds A
 // retired and answers 404, and a merge behind the write absorbs what the
-// write left on A. Steps never end up on the retired A, and a merge or a
-// reconnect into A never retires B with B's steps moved onto it.
+// write left on A. Steps never end up on the retired A: B's steps stay on B,
+// or reach X through A.
 func TestBlueprints_StepWritesRaceAMergeThatRetiresTheirBlueprint_Postgres(t *testing.T) {
 	type write struct {
 		// send sends the write on A. B is the blueprint a merge or a
@@ -326,4 +329,47 @@ func TestBlueprints_StepsPutRacesAPromptDelete_Postgres(t *testing.T) {
 		}
 		r.wantSteps(t, "the blueprint", a, true, aSteps[:1])
 	})
+}
+
+// TestBlueprints_Postgres_AbsorbingAnotherTeamsBlueprintIs422: a merge or a
+// reconnect naming a blueprint of a team the caller may only read is refused
+// with 422 CROSS_TEAM_REF, and changes neither blueprint. The route holds its
+// two blueprints only after its same-team guard: under the hold's row-level
+// security that blueprint would read as absent, and the route would answer
+// 404 for a blueprint the caller can see.
+func TestBlueprints_Postgres_AbsorbingAnotherTeamsBlueprintIs422(t *testing.T) {
+	r := newStepWriteRig(t)
+	ctx := t.Context()
+	other := pgtest.SeedTeam(t, r.h, r.orgID, "other")
+	pgtest.MustExec(t, r.h.AdminDB, `INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'admin')`, r.admin, other)
+	pgtest.MustExec(t, r.h.AdminDB, `INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'viewer')`, r.member, other)
+	host := r.seedChain(t, "host", 2)
+	theirs := uuid.NewString()
+	if err := r.s.tx.WithTx(ctx, r.orgID, r.admin, func(tx db.TxStores) error {
+		_, err := tx.Blueprints.Create(ctx, r.orgID, other, domain.Blueprint{ID: theirs, Name: "theirs", Source: "user"})
+		return err
+	}); err != nil {
+		t.Fatalf("seed the other team's blueprint: %v", err)
+	}
+	hostSteps := r.stepPrompts(t, host)
+
+	for route, c := range map[string]struct {
+		body  map[string]any
+		field string
+	}{
+		"merge":     {map[string]any{"source_blueprint_id": theirs}, "source_blueprint_id"},
+		"reconnect": {map[string]any{"at_step_index": 1, "target_blueprint_id": theirs}, "target_blueprint_id"},
+	} {
+		rec := httptest.NewRecorder()
+		r.mux.ServeHTTP(rec, r.req(http.MethodPost, "/api/blueprints/"+host+"/"+route, r.member, c.body))
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Errorf("%s naming another team's blueprint = %d: %s; want 422", route, rec.Code, rec.Body.String())
+			continue
+		}
+		if items := decodeErrorItems(t, rec); len(items) != 1 || items[0].Reason != httpx.ReasonCrossTeamRef || items[0].Field != c.field {
+			t.Errorf("%s: errors = %+v; want one CROSS_TEAM_REF on %s", route, items, c.field)
+		}
+		r.wantSteps(t, route+"'s host", host, true, hostSteps)
+		r.wantSteps(t, route+"'s other-team blueprint", theirs, true, nil)
+	}
 }

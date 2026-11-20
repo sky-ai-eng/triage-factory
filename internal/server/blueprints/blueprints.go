@@ -689,6 +689,9 @@ func (h *Handler) handleBlueprintStepsPut(w http.ResponseWriter, r *http.Request
 		if fault.status != 0 {
 			return nil
 		}
+		// TODO(TFAC-1537): the PUT takes no precondition, so a list read
+		// before another write changed the steps replaces that change, and
+		// the prompts of the steps it drops are left with no blueprint.
 		_, e = tx.Blueprints.ReplaceSteps(r.Context(), orgID, id, stepIDs, briefs)
 		return e
 	}); err != nil {
