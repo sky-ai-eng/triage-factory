@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, waitFor, fireEvent, act, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import Board from './Board'
+import { HttpError } from '../lib/apiClient'
 import type { Conversation, Task, TeamBot, TeamMember } from '../types'
 
 // The board's lanes, checked against what it actually reads; the two gestures
@@ -384,7 +385,167 @@ describe('the board while it loads', () => {
     await within(queued).findByText(FREE.title)
     expect(queued.querySelectorAll('[data-skeleton]')).toHaveLength(0)
   })
+
+  it('says a lane could not load when its first read fails, not that it is empty', async () => {
+    failLaneReads((statuses) => statuses.includes('queued'))
+    renderBoard()
+    const queued = (await screen.findByLabelText('Search Queued')).closest('.bc-col') as HTMLElement
+    expect(await within(queued).findByRole('alert')).toHaveTextContent('Could not load the queue.')
+    expect(within(queued).queryByText('Queue is empty')).toBeNull()
+    expect(queued.querySelectorAll('[data-skeleton]')).toHaveLength(0)
+    // The lanes whose reads landed paint as usual.
+    await screen.findByText(HELD.title)
+  })
+
+  it('says a collapsed lane could not load when its first read fails', async () => {
+    localStorage.setItem('sky330.board.collapsed.v1.u1', JSON.stringify({ done: true }))
+    try {
+      failLaneReads((statuses) => statuses.includes('done'))
+      renderBoard()
+      expect(
+        await screen.findByRole('button', {
+          name: 'Expand Done. Could not load the finished tasks.',
+        }),
+      ).toBeInTheDocument()
+    } finally {
+      localStorage.removeItem('sky330.board.collapsed.v1.u1')
+    }
+  })
+
+  it('marks a collapsed failed lane in place of the count it held, not beside it', async () => {
+    renderBoard()
+    const queued = (await screen.findByLabelText('Search Queued')).closest('.bc-col') as HTMLElement
+    await within(queued).findByText(FREE.title)
+
+    await failSnoozedRead(queued)
+    try {
+      fireEvent.click(within(queued).getByRole('button', { name: 'Collapse Queued' }))
+      const rail = screen.getByRole('button', {
+        name: 'Expand Queued. Could not load the queue.',
+      })
+      expect(rail.querySelector('svg.text-alarm')).not.toBeNull()
+      expect(rail).not.toHaveTextContent('1')
+    } finally {
+      // The collapse is the viewer's, and stays for the next board they open.
+      localStorage.removeItem('sky330.board.collapsed.v1.u1')
+    }
+  })
+
+  it('keeps the cards a lane holds when a refresh fails', async () => {
+    renderBoard()
+    const queued = (await screen.findByLabelText('Search Queued')).closest('.bc-col') as HTMLElement
+    await within(queued).findByText(FREE.title)
+
+    await failRefresh()
+    expect(within(queued).getByText(FREE.title)).toBeInTheDocument()
+    expect(within(queued).queryByRole('alert')).toBeNull()
+  })
+
+  it('keeps the empty state a lane read when a refresh fails', async () => {
+    renderBoard()
+    const done = (await screen.findByLabelText('Search Done')).closest('.bc-col') as HTMLElement
+    await within(done).findByText('Nothing done in last 7 days')
+
+    await failRefresh()
+    expect(within(done).getByText('Nothing done in last 7 days')).toBeInTheDocument()
+    expect(within(done).queryByRole('alert')).toBeNull()
+  })
+
+  it('says a lane could not load when a read for a new query fails, not the old answer', async () => {
+    renderBoard()
+    const queued = (await screen.findByLabelText('Search Queued')).closest('.bc-col') as HTMLElement
+    await within(queued).findByText(FREE.title)
+
+    await failSnoozedRead(queued)
+    expect(within(queued).queryByText(FREE.title)).toBeNull()
+  })
+
+  it('asks for no further page of the query a failed lane held', async () => {
+    const answer = api.apiList.getMockImplementation()!
+    api.apiList.mockImplementation(async (path: string, body: Record<string, unknown>) => {
+      if (!(body.statuses as string[]).includes('queued')) return answer(path, body)
+      listBodies.push(body)
+      return body.page_token
+        ? { items: [], next_page_token: '', total_count: 2 }
+        : { items: [FREE], next_page_token: 'p2', total_count: 2 }
+    })
+    renderBoard()
+    const queued = (await screen.findByLabelText('Search Queued')).closest('.bc-col') as HTMLElement
+    await within(queued).findByText('1 of 2')
+
+    // A lane reads its next page when its scroll nears the end. jsdom lays
+    // nothing out, so give every element a height: a lane holding a further
+    // page then asks for it the next time its paging changes.
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      get: () => 100,
+    })
+    try {
+      await failSnoozedRead(queued)
+      await act(async () => {})
+      expect(listBodies.some((b) => b.page_token)).toBe(false)
+      expect(within(queued).queryByText('1 of 2')).toBeNull()
+    } finally {
+      delete (HTMLElement.prototype as { clientHeight?: number }).clientHeight
+    }
+  })
+
+  it('moves a card by the lane it shows on, not by a failed lane holding a copy', async () => {
+    // Done's held page lists the in-progress task too, as a page read before
+    // it was reopened would.
+    closed = [{ ...HELD, status: 'done' }]
+    renderBoard()
+    const done = (await screen.findByLabelText('Search Done')).closest('.bc-col') as HTMLElement
+    await within(done).findByText(HELD.title)
+
+    failLaneReads((statuses) => statuses.includes('done'))
+    try {
+      fireEvent.change(within(done).getByLabelText('Search Done'), {
+        target: { value: 'sampler' },
+      })
+      await within(done).findByRole('alert')
+
+      // The card shows on In Progress, so dropping it on Done completes it.
+      await act(async () => {
+        await dnd.drop!(HELD.id, 'done')
+      })
+      expect(writes).toEqual([
+        { path: `/api/tasks/${HELD.id}`, body: { status: 'done', version: HELD.version } },
+      ])
+    } finally {
+      // The search is the viewer's, and stays for the next board they open.
+      localStorage.removeItem('sky330.board.filters.v1.u1')
+    }
+  })
 })
+
+/** Turns on the Queued lane's snoozed toggle, a new query, and fails its read. */
+async function failSnoozedRead(queued: HTMLElement) {
+  failLaneReads((statuses) => statuses.includes('snoozed'))
+  fireEvent.click(within(queued).getByRole('button', { name: 'Sort & filter' }))
+  fireEvent.click(within(queued).getByRole('button', { name: 'Show snoozed' }))
+  expect(await within(queued).findByRole('alert')).toHaveTextContent('Could not load the queue.')
+}
+
+/** Fails every lane read whose statuses match, and answers the rest as the
+ *  unheld stub would. */
+function failLaneReads(match: (statuses: string[]) => boolean) {
+  const answer = api.apiList.getMockImplementation()!
+  api.apiList.mockImplementation(async (path: string, body: Record<string, unknown>) => {
+    if (!match(body.statuses as string[])) return answer(path, body)
+    listBodies.push(body)
+    throw new HttpError(500, '')
+  })
+}
+
+/** Fails every lane's next read, delivers the push that refreshes the board,
+ *  and waits for the three reads to fail. */
+async function failRefresh() {
+  api.apiList.mockRejectedValue(new HttpError(500, ''))
+  await act(async () => ws.handler?.({ type: 'tasks_updated' }))
+  await waitFor(() => expect(api.apiList.mock.calls.length).toBeGreaterThanOrEqual(6))
+  await act(async () => {})
+}
 
 describe('the board lanes', () => {
   it('renders Queued, In Progress and Done — neither Claimed nor In Review', async () => {
