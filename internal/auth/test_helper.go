@@ -1,6 +1,10 @@
 package auth
 
-import "net/http"
+import (
+	"net/http"
+
+	"github.com/zalando/go-keyring"
+)
 
 // TestT is the minimal slice of *testing.T this package's cross-package test
 // helpers need — mirrors runmode.TestT so production builds of internal/auth
@@ -54,4 +58,34 @@ func ResetSecretBackendForTest(t TestT) {
 		activeBackend = nil
 		backendMu.Unlock()
 	})
+}
+
+// LimitKeychainForTest makes the active secret backend the keychain with a
+// limit of maxBytes per value for the duration of t, so a test on a host whose
+// keychain has no limit (Linux, or keyring.MockInit) can reach a route's
+// answer to ErrSecretTooLarge. A value within the limit goes to the keychain
+// as usual. Test-only; mutates a package global, so callers must not run in
+// parallel with each other.
+func LimitKeychainForTest(t TestT, maxBytes int) {
+	t.Helper()
+	backendMu.Lock()
+	activeBackend = limitedKeychain{maxBytes: maxBytes}
+	backendMu.Unlock()
+	t.Cleanup(func() {
+		backendMu.Lock()
+		activeBackend = nil
+		backendMu.Unlock()
+	})
+}
+
+type limitedKeychain struct {
+	keychainBackend
+	maxBytes int
+}
+
+func (l limitedKeychain) put(key, value string) error {
+	if len(value) > l.maxBytes {
+		return keychainSetError(key, value, keyring.ErrSetDataTooBig)
+	}
+	return l.keychainBackend.put(key, value)
 }

@@ -1,11 +1,10 @@
 // Package httpx is the shared HTTP kernel for the Triage Factory server: the
 // JSON response writers, the request-body decoder, and the request-scoped
-// identity accessors (verified JWT claims + active org). It is the leaf
-// package every per-domain handler imports, so it depends only on other leaf
-// packages (auth/verify, runmode) and never on package server. That one-way
-// edge is what lets handlers move into their own subpackages without an
-// import cycle: the root composes and registers them, they reach back only
-// as far as this kernel.
+// identity accessors (verified JWT claims + active org). It is the package
+// every per-domain handler imports, so it never depends on package server or
+// on a handler subpackage. That one-way edge is what lets handlers move into
+// their own subpackages without an import cycle: the root composes and
+// registers them, they reach back only as far as this kernel.
 package httpx
 
 import (
@@ -75,11 +74,10 @@ func InternalError(w http.ResponseWriter, scope string, err error) {
 		w.WriteHeader(StatusClientClosedRequest)
 		return
 	}
-	// A credential route's keychain write fails deep in its transaction, and
-	// the route answers whatever it does not recognize here, so every route
-	// that stores a secret gets this answer without checking for it. The
-	// request is fine and the fix is the operator's, a different secret
-	// backend, which the message names.
+	// Checked here rather than in each credential route, so every route that
+	// stores a secret answers a keychain refusal with its fix instead of a
+	// 500. The request is fine and the fix is the operator's, a different
+	// secret backend, which the message names.
 	if errors.Is(err, auth.ErrSecretTooLarge) {
 		logging.Component(scope).Warn("secret refused by the OS keychain", "error", err)
 		WriteErrors(w, http.StatusRequestEntityTooLarge, ErrorItem{Reason: ReasonSecretTooLarge, Message: auth.ErrSecretTooLarge.Error()})
