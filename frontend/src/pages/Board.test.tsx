@@ -286,6 +286,25 @@ describe('the board lanes', () => {
     expect(screen.queryAllByText('In Review')).toHaveLength(0)
   })
 
+  it('keeps its lanes while the first read is out, with placeholder cards in them', async () => {
+    let land: () => void = () => {}
+    const landed = new Promise<void>((resolve) => (land = resolve))
+    const answer = api.apiList.getMockImplementation()!
+    api.apiList.mockImplementation(async (path: string, body: Record<string, unknown>) => {
+      await landed
+      return answer(path, body)
+    })
+    renderBoard()
+    expect(screen.getByLabelText('Search Queued')).toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('Loading board…')
+    expect(document.querySelectorAll('[data-skeleton]')).toHaveLength(9)
+
+    await act(async () => land())
+    await screen.findByText(FREE.title)
+    expect(document.querySelectorAll('[data-skeleton]')).toHaveLength(0)
+    expect(screen.queryByRole('status')).toBeNull()
+  })
+
   it('asks for three lanes, and the Queued lane asks for the whole queue', async () => {
     renderBoard()
     await waitFor(() => expect(listBodies.length).toBe(3))

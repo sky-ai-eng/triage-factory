@@ -38,7 +38,7 @@ import PromptPicker from '../components/PromptPicker'
 import AssigneePicker from '../components/board/AssigneePicker'
 import ClaimTeamConfirm from '../components/board/ClaimTeamConfirm'
 import RequeueConfirm from '../components/board/RequeueConfirm'
-import { TaskCard } from '../components/board/TaskCard'
+import { TaskCard, TaskCardSkeleton } from '../components/board/TaskCard'
 import { deriveCard } from '../components/board/cardModel'
 import { toast } from '../components/Toast/toastStore'
 import { apiErrors, apiJSON, httpErrorMessage } from '../lib/apiClient'
@@ -667,7 +667,7 @@ export default function Board() {
 
       // Paint the board as soon as the three columns are in state. The agent-conversation
       // enrichment below fills cards progressively and must not hold the
-      // spinner, so it is cleared here rather than waiting for `enrich` to settle.
+      // lanes' skeletons, so it is cleared here rather than waiting for `enrich` to settle.
       setLoading(false)
 
       await enrich([...queuedItems, ...inProgressItems, ...doneItems].map((t) => t.id))
@@ -1207,7 +1207,6 @@ export default function Board() {
     setEdgeFade((prev) => (prev.left === left && prev.right === right ? prev : { left, right }))
   }, [])
   useEffect(() => {
-    if (loading) return
     recomputeFade()
     const onResize = () => recomputeFade()
     window.addEventListener('resize', onResize)
@@ -1234,7 +1233,7 @@ export default function Board() {
       cancelAnimationFrame(raf)
       ro.disconnect()
     }
-  }, [loading, recomputeFade])
+  }, [recomputeFade])
 
   // Centered-lane geometry. We want the viewport center to land on the midpoint
   // of the *open* (expanded) columns — one open → that column; two → their
@@ -1280,7 +1279,7 @@ export default function Board() {
   // next frame until it sticks, bounded so an unreachable target cannot spin.
   useLayoutEffect(() => {
     const el = scrollRef.current
-    if (!el || loading) return
+    if (!el) return
     let raf = 0
     const park = (tries: number) => {
       el.scrollLeft = lane.targetScroll
@@ -1291,7 +1290,7 @@ export default function Board() {
     }
     park(PARK_TRIES)
     return () => cancelAnimationFrame(raf)
-  }, [lane, loading, recomputeFade])
+  }, [lane, recomputeFade])
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
 
@@ -1524,17 +1523,6 @@ export default function Board() {
     )
   }
 
-  if (loading) {
-    return (
-      <>
-        <GlassBackdrop />
-        <div className="flex items-center justify-center min-h-[70vh]">
-          <p className="text-body text-ink-3">Loading board…</p>
-        </div>
-      </>
-    )
-  }
-
   // Per-column header extras. (Queued's snoozed toggle now lives inside the
   // filter panel — see the `snooze` prop below — not as a header button.)
   const doneHeader = (
@@ -1582,11 +1570,17 @@ export default function Board() {
             fades dissolve columns into the page at whichever edge still has
             more to scroll — painted over the lane, never a mask on it. */}
         <div className="relative min-h-0 flex-1">
+          {loading && (
+            <span className="sr-only" role="status">
+              Loading board…
+            </span>
+          )}
           <span aria-hidden className="bc-fade bc-fade-l" style={{ opacity: edgeFade.left }} />
           <span aria-hidden className="bc-fade bc-fade-r" style={{ opacity: edgeFade.right }} />
           <div
             ref={scrollRef}
             onScroll={recomputeFade}
+            aria-busy={loading}
             className="h-full overflow-x-auto pb-3 pt-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
           >
             <div
@@ -1624,26 +1618,30 @@ export default function Board() {
                         : undefined
                     }
                   >
-                    <ColumnContents
-                      colId={colId}
-                      tasks={lists[colId].items}
-                      narrowed={narrows(filters[colId])}
-                      conversations={conversations}
-                      chainStepConversations={chainStepConversations}
-                      unrunChats={unrunChats}
-                      permQueues={permQueueMap}
-                      onResolvePermission={resolvePermission}
-                      currentUserID={currentUserID}
-                      members={members}
-                      searchMembers={searchMembers}
-                      bot={bot}
-                      delegateFailures={delegateFailures}
-                      onPickerClaim={handlePickerClaim}
-                      onPickerUnclaim={handlePickerUnclaim}
-                      onPickerDelegate={handlePickerDelegate}
-                      onPickerReassign={handlePickerReassign}
-                      onRetry={handlePickerDelegate}
-                    />
+                    {loading ? (
+                      <LaneSkeleton />
+                    ) : (
+                      <ColumnContents
+                        colId={colId}
+                        tasks={lists[colId].items}
+                        narrowed={narrows(filters[colId])}
+                        conversations={conversations}
+                        chainStepConversations={chainStepConversations}
+                        unrunChats={unrunChats}
+                        permQueues={permQueueMap}
+                        onResolvePermission={resolvePermission}
+                        currentUserID={currentUserID}
+                        members={members}
+                        searchMembers={searchMembers}
+                        bot={bot}
+                        delegateFailures={delegateFailures}
+                        onPickerClaim={handlePickerClaim}
+                        onPickerUnclaim={handlePickerUnclaim}
+                        onPickerDelegate={handlePickerDelegate}
+                        onPickerReassign={handlePickerReassign}
+                        onRetry={handlePickerDelegate}
+                      />
+                    )}
                   </BoardColumn>
                 ),
               )}
@@ -1975,6 +1973,19 @@ const SortableCard = memo(function SortableCard({
     </div>
   )
 })
+
+// The lanes are mounted from the first paint, so the board keeps its shape
+// (the mastheads, the centring, and any collapsed rails) while the first read
+// is out, and the first page replaces these cards in place.
+function LaneSkeleton() {
+  return (
+    <>
+      {[0, 1, 2].map((n) => (
+        <TaskCardSkeleton key={n} n={n} />
+      ))}
+    </>
+  )
+}
 
 function EmptyColumn({ children }: { children: React.ReactNode }) {
   return <p className="text-ui text-ink-3 text-center py-12">{children}</p>
