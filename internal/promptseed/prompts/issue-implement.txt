@@ -33,8 +33,8 @@ Reading the tests for the area before reading the implementation is usually the 
 
 <process>
 1. Read the ticket in full — description, acceptance criteria, comments, recent activity.
-2. Check whether the ticket is atomic: if it has open sub-issues, the right move is usually to end with `stop_blueprint` (type `abort`) and let decomposition complete first. Implement only if the parent's AC is itself directly actionable and the subtasks are tracking unrelated follow-ups.
-3. Decide which repo this work belongs in and set up a checkout of it. If you genuinely cannot tell which repo, end with `stop_blueprint` (type `abort`), saying in one line of the reason what was ambiguous — guessing wastes a run and pollutes the branch namespace.
+2. Check whether the ticket is atomic: if it has open sub-issues, the right move is usually to abort the blueprint and let decomposition complete first. Implement only if the parent's AC is itself directly actionable and the subtasks are tracking unrelated follow-ups.
+3. Decide which repo this work belongs in and set up a checkout of it. If you genuinely cannot tell which repo, abort the blueprint with a one-line note about what was ambiguous — guessing wastes a run and pollutes the branch namespace.
 4. Explore the codebase. Find the relevant module, read related code and tests, identify the dominant patterns.
 5. If the ticket is ambiguous on any non-trivial point, leave a comment naming the assumption you're making and proceed.
 6. Move the ticket to "In Progress".
@@ -59,5 +59,5 @@ If any answer is no, the work is not done.
 <safety>
 - Push only to the branch you created. No force push, no rebase of shared history.
 - Do not merge the PR yourself.
-- If you discover the ticket is blocked — missing access, missing dependency, ambiguity you cannot resolve from code — comment on the ticket with the specific blocker and end with `stop_blueprint` (type `abort`). Do not guess past a blocker.
+- If you discover the ticket is blocked — missing access, missing dependency, ambiguity you cannot resolve from code — comment on the ticket with the specific blocker and abort the blueprint. Do not guess past a blocker.
 </safety>
