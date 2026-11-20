@@ -57,7 +57,7 @@ groups:
             ) > 0
           )
           unless on (app_id)
-          sum by (app_id) (increase(tf_slack_ingest_events_total[15m])) > 0
+          sum by (app_id) (increase(tf_slack_webhook_deployment_deliveries_total{signature="verified"}[15m])) > 0
         labels:
           severity: warning
         annotations:
@@ -71,6 +71,40 @@ groups:
             fail within an hour. A forged request also counts, so check the
             secret before changing it. Each control pod logs a WARN line for
             these, at most one a minute.
+
+      # Deliveries to the deployment app's Events API endpoint refused because
+      # their timestamp is more than five minutes from control's clock, and
+      # none verified. A control host clock that far off refuses every
+      # delivery this way. One running fast usually breaks GitHub App tokens
+      # too, so UpstreamFailingFleetWide may fire first; one running slow
+      # breaks only this. Anyone can replay or forge a stale request, which
+      # the verified-delivery condition rules out while Slack is delivering;
+      # in a quiet window a single one can still fire it, so it is a warning.
+      - alert: SlackDeploymentDeliveriesStale
+        expr: |
+          (
+            sum by (app_id) (increase(tf_slack_webhook_deployment_deliveries_total{signature="stale"}[15m])) > 0
+            or
+            sum by (app_id) (
+              tf_slack_webhook_deployment_deliveries_total{signature="stale"}
+              unless last_over_time(tf_slack_webhook_deployment_deliveries_total{signature="stale"}[15m] offset 15m)
+            ) > 0
+          )
+          unless on (app_id)
+          sum by (app_id) (increase(tf_slack_webhook_deployment_deliveries_total{signature="verified"}[15m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Deliveries to the deployment Slack app are refused as stale"
+          description: >-
+            In the last 15 minutes, deliveries for app {{ $labels.app_id }}
+            reached /api/webhooks/slack with a timestamp more than five minutes
+            from control's clock, and none verified. If the clock on a host
+            running control is that far off, every delivery fails, and Slack
+            turns the app's event subscriptions off once more than 95% of them
+            fail within an hour. Compare that clock with the real time and fix
+            the host's time sync. A replayed or forged request also counts, so
+            check the clock before changing anything.
 
       # Slack sent app_rate_limited: the app went past the Events API's
       # 30,000 events per workspace per hour, and Slack drops the deliveries
@@ -153,8 +187,9 @@ groups:
       # A delivery is counted only once it names a workspace and app
       # connected to the org in its URL, so a forged one has to know all
       # three. The deployment app's endpoint is not counted here; it has
-      # SlackSigningSecretMismatch. Each control pod counts the deliveries it
-      # served, and the sums add the pods up.
+      # SlackSigningSecretMismatch and SlackDeploymentDeliveriesStale. Each
+      # control pod counts the deliveries it served, and the sums add the pods
+      # up.
       - alert: SlackDeliveriesRefusedFleetWide
         expr: |
           (

@@ -34,7 +34,8 @@ the admin's browser, not by Slack.
 
 With the Events API, the control host's clock must be within five minutes of
 the real time. Triage Factory refuses a delivery whose timestamp is further
-from its own clock, and logs nothing for it.
+from its own clock, and logs no line for it. With the bundled Prometheus,
+[`SlackDeploymentDeliveriesStale`](../monitoring.md#alerts) fires when it does.
 
 ## 1. Create the app
 
@@ -169,7 +170,9 @@ With the bundled Prometheus, the deployment app's problems also raise
 malformed configuration or a public URL that is not HTTPS,
 `SlackDeploymentSocketDown` for a Socket Mode connection that stays down,
 `SlackDeploymentAppInstallRefused` for an install refused for the app's own
-settings, and `SlackSigningSecretMismatch` for a wrong signing secret.
+settings, `SlackSigningSecretMismatch` for a wrong signing secret, and
+`SlackDeploymentDeliveriesStale` for a control clock more than five minutes
+off.
 
 Each of these is a line in `docker compose logs control`, except where noted.
 
@@ -218,6 +221,13 @@ Each of these is a line in `docker compose logs control`, except where noted.
   id as `delivery_app_id`. That app's request URL is
   `<TF_PUBLIC_URL>/api/webhooks/slack`, usually an app you replaced: change
   its request URL or delete it.
+- **Control's clock is off** (Events API) — not logged. Triage Factory answers
+  each delivery 401 and counts it in
+  `tf_slack_webhook_deployment_deliveries_total` under `signature="stale"`.
+  That count rising with nothing under `signature="verified"` means the clock
+  on a host running control is more than five minutes from the real time; a
+  replayed or forged request also counts, so a few and then nothing is not
+  this. Fix the host's time sync; no restart is needed.
 
 Slack expects an answer to each delivery "within three seconds". When more
 than 95% of deliveries fail within 60 minutes, it turns off the app's event
