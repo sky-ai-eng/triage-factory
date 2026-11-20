@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -580,9 +581,14 @@ type blueprintStepsPutRequest struct {
 	Steps []blueprintStepInput `json:"steps"`
 }
 
-// handleBlueprintStepsPut replaces the blueprint's step list. Validates that
-// the blueprint exists and that every step references a prompt the blueprint's
-// own team owns (same-team guard).
+// handleBlueprintStepsPut replaces the blueprint's step list: the order of its
+// steps, their briefs, and the prompts it adds. The list must name every step
+// the blueprint holds when the PUT lands, so a list read before another write
+// added a step is refused instead of dropping that step, and a PUT never
+// leaves a prompt in no blueprint, where no screen shows it. Removing a step
+// is a prompt delete, and moving one is a split and a merge. Validates that
+// the blueprint exists and that every step references a prompt the
+// blueprint's own team owns (same-team guard).
 func (h *Handler) handleBlueprintStepsPut(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
@@ -641,17 +647,36 @@ func (h *Handler) handleBlueprintStepsPut(w http.ResponseWriter, r *http.Request
 		gone  bool
 	)
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		// Held until commit, before the checks below read which blueprint
-		// owns each prompt, so they read what a merge, split or prompt delete
-		// that held this blueprint first committed
-		// (BlueprintStore.GetAllForUpdate). A blueprint retired meanwhile is
-		// answered 404.
+		// Held until commit, before the checks below read the blueprint's
+		// steps and which blueprint owns each prompt, so they read what a
+		// merge, split, reconnect, prompt delete or steps PUT that held this
+		// blueprint first committed (BlueprintStore.GetAllForUpdate). A
+		// blueprint retired meanwhile is answered 404.
 		held, e := tx.Blueprints.GetForUpdate(r.Context(), orgID, id)
 		if e != nil {
 			return e
 		}
 		if held == nil {
 			gone = true
+			return nil
+		}
+		// First, because a list that leaves out a step the blueprint holds
+		// was decided against steps the blueprint no longer has, and every
+		// check after this one would judge that list.
+		current, e := tx.Blueprints.ListSteps(r.Context(), orgID, id)
+		if e != nil {
+			return e
+		}
+		var missing []string
+		for _, st := range current {
+			if !slices.Contains(stepIDs, st.StepPromptID) {
+				missing = append(missing, st.StepPromptID)
+			}
+		}
+		if len(missing) > 0 {
+			fault.raise(http.StatusConflict, httpx.ReasonConflict,
+				"the blueprint holds steps this list leaves out (step prompts "+strings.Join(missing, ", ")+
+					"): read its steps again and send a list that names every one. To remove a step, delete its prompt.", "steps")
 			return nil
 		}
 		for i, sid := range stepIDs {
@@ -689,9 +714,6 @@ func (h *Handler) handleBlueprintStepsPut(w http.ResponseWriter, r *http.Request
 		if fault.status != 0 {
 			return nil
 		}
-		// TODO(TFAC-1537): the PUT takes no precondition, so a list read
-		// before another write changed the steps replaces that change, and
-		// the prompts of the steps it drops are left with no blueprint.
 		_, e = tx.Blueprints.ReplaceSteps(r.Context(), orgID, id, stepIDs, briefs)
 		return e
 	}); err != nil {

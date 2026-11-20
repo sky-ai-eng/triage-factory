@@ -240,10 +240,13 @@ func TestBlueprints_StepWritesRaceAMergeThatRetiresTheirBlueprint_Postgres(t *te
 }
 
 // TestBlueprints_StepsPutRacesAMergeIntoItsBlueprint_Postgres runs a steps
-// PUT on X against a merge of A into X, in both orders. The merge holds X
-// before it moves a step and the PUT holds X before it reads or writes one,
-// so neither can hold a step row while it waits for X's row, and the two do
-// not deadlock: each waits for the other and both succeed.
+// PUT on X, sending the list read before the merge, against a merge of A into
+// X, in both orders. The merge holds X before it moves a step and the PUT
+// holds X before it reads or writes one, so neither can hold a step row while
+// it waits for X's row, and the two do not deadlock. A PUT ahead of the merge
+// rewrites the list it was read from, and the merge appends A's steps to it.
+// A PUT behind the merge reads the steps the merge appended, finds its list
+// leaves them out, and is refused, so they stay on X.
 func TestBlueprints_StepsPutRacesAMergeIntoItsBlueprint_Postgres(t *testing.T) {
 	setup := func(t *testing.T) (r stepWriteRig, x, a string, xSteps, aSteps []string) {
 		r = newStepWriteRig(t)
@@ -267,19 +270,19 @@ func TestBlueprints_StepsPutRacesAMergeIntoItsBlueprint_Postgres(t *testing.T) {
 	})
 
 	t.Run("merge_holds_first", func(t *testing.T) {
-		r, x, a, xSteps, _ := setup(t)
+		r, x, a, xSteps, aSteps := setup(t)
 		merged, put := r.firstHolds(t, [2]string{"merge of A into X", "steps PUT on X"},
 			func() <-chan *httptest.ResponseRecorder { return r.merge(x, a) },
 			func() <-chan *httptest.ResponseRecorder { return r.putSteps(x, xSteps) })
 		if merged.Code != http.StatusOK {
 			t.Fatalf("merge = %d %s, want 200", merged.Code, merged.Body.String())
 		}
-		if put.Code != http.StatusNoContent {
-			t.Errorf("steps PUT behind the merge = %d %s, want 204", put.Code, put.Body.String())
+		if put.Code != http.StatusConflict {
+			t.Errorf("steps PUT sent X's steps from before the merge, behind it = %d %s, want 409", put.Code, put.Body.String())
+		} else if items := decodeErrorItems(t, put); len(items) != 1 || items[0].Reason != httpx.ReasonConflict || items[0].Field != "steps" {
+			t.Errorf("steps PUT behind the merge: errors = %+v; want one CONFLICT on steps", items)
 		}
-		// The PUT replaces the list the merge left with the one it was sent,
-		// as a PUT does.
-		r.wantSteps(t, "X", x, true, xSteps)
+		r.wantSteps(t, "X", x, true, concat(xSteps, aSteps))
 		r.wantSteps(t, "A", a, false, nil)
 	})
 }
