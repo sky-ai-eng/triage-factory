@@ -248,9 +248,9 @@ func (rs *runSidecar) ghChannel() *agentproc.GHChannelParams {
 	}
 }
 
-// cellGHChannel is gc in the cell contract's shape, nil when gc is.
+// cellGHChannel is gc in the cell contract's shape, nil when gc is not Live.
 func cellGHChannel(gc *agentproc.GHChannelParams) *cell.GHChannel {
-	if gc == nil {
+	if !gc.Live() {
 		return nil
 	}
 	return &cell.GHChannel{Host: gc.Host, Token: gc.Token}

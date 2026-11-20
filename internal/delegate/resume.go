@@ -521,12 +521,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 		// is why the saved blocks stop short of it.
 		SystemPrompt: sdkSystemPrompt(opts.SystemBlocks, agentproc.AgentVisibleBinary(selfBin)),
 
-		// gh is granted only alongside a live channel — see runAgent's note.
-		AllowedTools: agentproc.BuildAllowedToolsFor(agentproc.AllowedToolsOptions{
-			SelfBin: selfBin,
-			Extras:  opts.ExtraAllowedTools,
-			GH:      ghChannel != nil,
-		}),
+		AllowedTools:   sdkAllowedTools(selfBin, opts.ExtraAllowedTools, ghChannel),
 		ExtraEnv:       extraEnv,
 		TraceID:        conversationID,
 		ConversationID: conversationID,

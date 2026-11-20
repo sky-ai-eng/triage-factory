@@ -606,31 +606,24 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		ClaudeAIConnectors:     teamOpts.claudeAIConnectors,
 		SessionID:              resumeSession,
 		SessionCostBaselineUSD: resumeSessionCostUSD,
-		// The gh subcommands are granted only when the channel is actually
-		// live: without one, `gh` on a local host would resolve to the user's
-		// own installation under the user's own auth, so the allowlist must
-		// not name it at all.
-		AllowedTools: agentproc.BuildAllowedToolsFor(agentproc.AllowedToolsOptions{
-			SelfBin: selfBin,
-			Extras:  cfg.extraAllowedTools,
-			GH:      ghChannel != nil,
-		}),
-		ExtraEnv:       extraEnv,
-		TraceID:        conversationID,
-		ConversationID: conversationID,
-		WorkspaceKey:   namespace,
-		SystemPrompt:   systemPrompt,
-		OrgID:          orgID,
-		Secrets:        s.getRunSecrets(),
-		LLMResolver:    s.llmResolverForConversation(orgID, conversationID),
+		AllowedTools:           sdkAllowedTools(selfBin, cfg.extraAllowedTools, ghChannel),
+		ExtraEnv:               extraEnv,
+		TraceID:                conversationID,
+		ConversationID:         conversationID,
+		WorkspaceKey:           namespace,
+		SystemPrompt:           systemPrompt,
+		OrgID:                  orgID,
+		Secrets:                s.getRunSecrets(),
+		LLMResolver:            s.llmResolverForConversation(orgID, conversationID),
 		// Measured sandbox cost lands on the engagement that paid for it, at
 		// teardown. Empty claim id (a path with no claimed run in scope)
 		// records nothing.
 		ClaimID:              cfg.claimID,
 		RecordSandboxActuals: s.recordSandboxActuals,
 		// Real-gh channel: the sidecar's injector + mounted binary in multi, the
-		// loopback injector + fetched binary in local. nil when neither could be
-		// provisioned, which keeps the run on the scoped exec verbs.
+		// loopback injector + fetched binary in local. When neither could be
+		// provisioned it is nil in multi and not Live in local, and the run
+		// stays on the scoped exec verbs.
 		GHChannel: ghChannel,
 		// This step's staged skill, bind-mounted read-only. Empty for every
 		// non-blueprint run and in local mode (where the skill lives in the

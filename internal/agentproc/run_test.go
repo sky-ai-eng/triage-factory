@@ -296,9 +296,9 @@ func TestNewDirectCommand_NeverCarriesSandboxMarker(t *testing.T) {
 
 // TestNewDirectCommand_StripsInheritedGitHubCLIEnv pins that a local run
 // reaches GitHub only through its gh channel: no GitHub token or gh setting
-// from the operator's environment reaches the agent, with a channel or
-// without one, while the channel's own entries do and a variable that only
-// shares a stem is left alone.
+// from the operator's environment reaches the agent, with a channel, with one
+// that did not start, or with none, while the channel's own entries do and a
+// variable that only shares a stem is left alone.
 func TestNewDirectCommand_StripsInheritedGitHubCLIEnv(t *testing.T) {
 	inherited := map[string]string{
 		"GH_TOKEN":                "gho_operators_own",
@@ -329,7 +329,14 @@ func TestNewDirectCommand_StripsInheritedGitHubCLIEnv(t *testing.T) {
 		}},
 		"channel": {channel: channel, want: map[string][]string{
 			"GH_HOST":             {"127.0.0.1"},
+			"GH_TOKEN":            {ghNoCredentialToken},
 			"GH_ENTERPRISE_TOKEN": {"per-run-placeholder"},
+			"GH_CONFIG_DIR":       {"/state/gh-channel/conv/config"},
+			"GITHUB_WORKSPACE":    {"/operator/workspace"},
+		}},
+		"channel did not start": {channel: &GHChannelParams{ConfigDir: "/state/gh-channel/conv/config"}, want: map[string][]string{
+			"GH_TOKEN":            {ghNoCredentialToken},
+			"GH_ENTERPRISE_TOKEN": {ghNoCredentialToken},
 			"GH_CONFIG_DIR":       {"/state/gh-channel/conv/config"},
 			"GITHUB_WORKSPACE":    {"/operator/workspace"},
 		}},

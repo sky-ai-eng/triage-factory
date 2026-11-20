@@ -1,6 +1,7 @@
 package agentproc
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,10 +25,53 @@ func TestDirectGHChannelEnv_Off(t *testing.T) {
 	if got := directGHChannelEnv(nil); got != nil {
 		t.Errorf("directGHChannelEnv(nil) = %v, want nil", got)
 	}
-	// A half-built channel is off too: pointing gh at a listener with no trust
-	// file would fail every TLS handshake instead of degrading cleanly.
-	if got := directGHChannelEnv(&GHChannelParams{Host: "127.0.0.1:1"}); got != nil {
-		t.Errorf("directGHChannelEnv(no cert) = %v, want nil", got)
+}
+
+// A local run whose channel could not start gets a gh config dir of its own and
+// a refusing token for every host gh knows, and nothing else: no listener to
+// point gh at, no PATH entry for a binary TF does not have. Both token
+// variables matter, because gh reads the OS keyring for a host whose variable
+// is unset, and the keyring is where `gh auth login` keeps the user's
+// credential. A half-built channel gets the same: pointing gh at a listener
+// with no trust file would fail every TLS handshake instead of degrading
+// cleanly.
+func TestDirectGHChannelEnv_NotLive(t *testing.T) {
+	const configDir = "/state/gh-channel/run1/config"
+	want := map[string]string{
+		"GH_CONFIG_DIR":         configDir,
+		"GH_TOKEN":              ghNoCredentialToken,
+		"GH_ENTERPRISE_TOKEN":   ghNoCredentialToken,
+		"GH_PROMPT_DISABLED":    "1",
+		"GH_NO_UPDATE_NOTIFIER": "1",
+	}
+	for name, gc := range map[string]*GHChannelParams{
+		"channel did not start":   {ConfigDir: configDir},
+		"listener, no trust file": {Host: "127.0.0.1:1", Token: "per-run-placeholder", BinDir: "/state/bin", ConfigDir: configDir},
+	} {
+		if got := envMap(t, directGHChannelEnv(gc)); !maps.Equal(got, want) {
+			t.Errorf("%s: env = %v, want %v", name, got, want)
+		}
+	}
+	// With no config dir to name, the tokens still keep gh off the keyring.
+	if got := envMap(t, directGHChannelEnv(&GHChannelParams{})); got["GH_TOKEN"] != ghNoCredentialToken || got["GH_ENTERPRISE_TOKEN"] != ghNoCredentialToken {
+		t.Errorf("no config dir: env = %v, want the refusing tokens", got)
+	}
+}
+
+func TestGHChannelParams_Live(t *testing.T) {
+	var none *GHChannelParams
+	for name, tc := range map[string]struct {
+		gc   *GHChannelParams
+		want bool
+	}{
+		"nil":                   {none, false},
+		"channel did not start": {&GHChannelParams{ConfigDir: "/state/gh-channel/run1/config"}, false},
+		"local channel":         {&GHChannelParams{Host: "127.0.0.1", CertSourcePath: "/c", ConfigDir: "/d"}, true},
+		"sidecar channel":       {&GHChannelParams{Host: "10.0.0.1:8443", Token: "placeholder"}, true},
+	} {
+		if got := tc.gc.Live(); got != tc.want {
+			t.Errorf("%s: Live() = %v, want %v", name, got, tc.want)
+		}
 	}
 }
 
@@ -44,6 +88,7 @@ func TestDirectGHChannelEnv_Shape(t *testing.T) {
 
 	for k, want := range map[string]string{
 		"GH_HOST":               "127.0.0.1:54321",
+		"GH_TOKEN":              ghNoCredentialToken,
 		"GH_ENTERPRISE_TOKEN":   "per-run-placeholder",
 		"SSL_CERT_FILE":         "/state/gh-channel/run1/injector.crt",
 		"GH_PROMPT_DISABLED":    "1",
