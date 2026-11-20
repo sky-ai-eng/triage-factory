@@ -903,7 +903,7 @@ function DockComposer({
         tabIndex={hidden ? -1 : undefined}
         placeholder={placeholder}
         aria-label={placeholder.replace(/…$/, '')}
-        className="min-w-0 flex-1 resize-none bg-transparent py-1 text-body leading-relaxed text-ink-1 placeholder:text-ink-3/70"
+        className="min-w-0 flex-1 resize-none bg-transparent py-1 text-body leading-relaxed text-ink-1 placeholder:text-ink-3/70 focus:outline-none"
       />
       {settings}
       <button

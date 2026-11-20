@@ -467,7 +467,7 @@ function TextListField({
           setDraft('')
         }}
         placeholder={selected.length === 0 ? 'any; Enter adds one' : ''}
-        className="flex-1 min-w-[120px] bg-transparent text-body text-ink-1 placeholder:text-ink-3"
+        className="flex-1 min-w-[120px] bg-transparent text-body text-ink-1 placeholder:text-ink-3 focus:outline-none"
       />
     </div>
   )

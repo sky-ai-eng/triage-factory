@@ -102,8 +102,9 @@ body {
      an element with no radius of its own; a rounded-* class keeps its
      element's shape, and a focus-visible:outline-* class restyles the ring.
      outline-none removes the ring, so it belongs only on an element that marks
-     focus without an outline (focus-visible:ring-*), or on a focus target that
-     is not a control (tabIndex -1). Never pair it with focus-visible:outline:
+     focus without an outline (focus-visible:ring-*), on a control whose
+     wrapper marks it (focus-within:*), or on a focus target that is not a
+     control (tabIndex -1). Never pair it with focus-visible:outline:
      it also sets the outline style that utility reads, so no ring is drawn. */
   :where(button, a, input, select, textarea, [tabindex]):focus-visible {
     outline: 1.5px solid var(--color-focus);
