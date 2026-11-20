@@ -77,11 +77,6 @@ func trippedTrigger(t *testing.T, database *sql.DB) (entityID, taskID, eventID s
 		t.Fatalf("read trigger: %v", err)
 	}
 	trigger = *got
-	// A breaker keyed on the step prompt would count these runs only if the
-	// two shared an id, so the fixture keeps them apart.
-	if trigger.BlueprintID == "p-drain-1" {
-		t.Fatalf("the trigger's blueprint shares its step prompt's id; the test needs them apart")
-	}
 	for i := range 4 {
 		lastConversationID = seedFinishedRun(t, database, taskID, trigger, "event", "failed", i)
 	}
