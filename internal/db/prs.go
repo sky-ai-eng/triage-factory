@@ -30,8 +30,8 @@ type PRListFilter struct {
 	// widened to "all", which is what a silent fallback would do.
 	//
 	// "open" is the ENTITY's own state ('active'), not the snapshot's: it is
-	// the population the factory belt renders, so the figure on the Overview
-	// and the objects on the belt cannot disagree. "merged" and "closed" come
+	// the population the entity list's active state serves, so the figure on
+	// the Overview and the pull requests on the factory floor cannot disagree. "merged" and "closed" come
 	// off the snapshot, closed meaning closed-and-not-merged.
 	States []string
 

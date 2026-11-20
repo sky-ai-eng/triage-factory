@@ -202,14 +202,6 @@ function readStoredFilter(pageKey: string): string[] {
   }
 }
 
-// teamFilterQuery renders a multi-team read filter as repeated team_id
-// query params ("team_id=A&team_id=B"), or "" for the empty (all-teams)
-// set. Callers prefix it with "?" or "&" as appropriate.
-export function teamFilterQuery(teamIds: string[]): string {
-  if (!teamIds || teamIds.length === 0) return ''
-  return teamIds.map((id) => `team_id=${encodeURIComponent(id)}`).join('&')
-}
-
 export function useTeamFilter(pageKey: string): [string[], (next: string[]) => void] {
   const { teams, loaded } = useTeams()
   const [filter, setFilterState] = useState<string[]>(() => readStoredFilter(pageKey))

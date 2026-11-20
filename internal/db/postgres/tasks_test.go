@@ -483,22 +483,21 @@ func TestTaskStore_Postgres_CrossOrgLeakage(t *testing.T) {
 		t.Errorf("orgB Get returned orgA task %s", taskA)
 	}
 
-	// ListActiveRefsForEntities scoped to orgA, looking at entA, should
-	// see exactly one row. Asking the same with orgB and entA must
-	// return zero (entA isn't visible from orgB).
-	refs, err := stores.Tasks.ListActiveRefsForEntities(ctx, orgA, []string{entA}, nil)
+	// The task list narrowed to entA in orgA sees exactly taskA. Asking the
+	// same of orgB must return nothing (entA isn't visible from orgB).
+	inA, _, err := stores.Tasks.List(ctx, orgA, db.TaskListFilter{EntityIDs: []string{entA}}, db.Unwindowed)
 	if err != nil {
-		t.Fatalf("ListActiveRefsForEntities orgA: %v", err)
+		t.Fatalf("List orgA by entity: %v", err)
 	}
-	if len(refs) != 1 || refs[0].ID != taskA {
-		t.Errorf("orgA refs = %+v, want exactly taskA", refs)
+	if len(inA) != 1 || inA[0].ID != taskA {
+		t.Errorf("orgA tasks on entA = %d rows, want exactly taskA", len(inA))
 	}
-	refs, err = stores.Tasks.ListActiveRefsForEntities(ctx, orgB, []string{entA}, nil)
+	inB, _, err := stores.Tasks.List(ctx, orgB, db.TaskListFilter{EntityIDs: []string{entA}}, db.Unwindowed)
 	if err != nil {
-		t.Fatalf("ListActiveRefsForEntities orgB→entA: %v", err)
+		t.Fatalf("List orgB by entA: %v", err)
 	}
-	if len(refs) != 0 {
-		t.Errorf("orgB looking at entA returned %d refs; want 0 (cross-org leak)", len(refs))
+	if len(inB) != 0 {
+		t.Errorf("orgB looking at entA returned %d tasks; want 0 (cross-org leak)", len(inB))
 	}
 }
 

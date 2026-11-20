@@ -461,8 +461,8 @@ func listActiveEntities(ctx context.Context, q queryer, orgID, source string) ([
 // The team scoping is free: under the app pool (tf_app, RLS active) the
 // jira_rules_select policy already constrains visible rows to the
 // viewer's team memberships, so the EXISTS auto-scopes with no explicit
-// team_id — the same RLS-does-the-scoping pattern as the factory belt's
-// task-membership semi-join. The org_id bind is defense-in-depth so the
+// team_id — the same RLS-does-the-scoping pattern as the entity list's
+// tracked-set semi-join. The org_id bind is defense-in-depth so the
 // filter holds even on the admin pool where RLS is bypassed.
 const jiraTeamProjectMembershipExists = `EXISTS (
 	SELECT 1 FROM jira_project_status_rules jr

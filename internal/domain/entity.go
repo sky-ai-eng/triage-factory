@@ -197,6 +197,16 @@ type Entity struct {
 	PollSeq int64 `json:"poll_seq"`
 }
 
+// ListedEntity is an entity as the entity reads serve it: the row and its
+// most recent event's type and detection time (events.created_at), so a
+// reader learns where the entity stands without reading its history.
+// LatestEventType is "" and LatestEventAt nil for an entity with no event.
+type ListedEntity struct {
+	Entity          Entity
+	LatestEventType string
+	LatestEventAt   *time.Time
+}
+
 // JiraIssueRef is what a Jira REST call names a Jira entity's issue by: its
 // issue id, which a move or a project key rename leaves alone, where the key
 // would name another issue once this one moved. A local entity carried over
@@ -251,6 +261,12 @@ func EntityKinds() []string {
 	}
 	slices.Sort(kinds)
 	return kinds
+}
+
+// EntityStates is every state an entity is stored in, sorted: the vocabulary
+// of the entity list's states filter.
+func EntityStates() []string {
+	return []string{"active", "closed"}
 }
 
 // GitHubIdentity is what GitHub answered for the objects a GitHub act names,

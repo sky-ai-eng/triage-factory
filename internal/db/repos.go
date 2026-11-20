@@ -258,7 +258,7 @@ type RepositoryStore interface {
 	// returns only the configured repos tracked by at least one of the
 	// caller's teams, semi-joined through team_github_repos. Mirrors the
 	// read-scoping seam entities.ListActiveJiraTeamScoped and
-	// FactoryReadStore.Entities use for the same org-wide-entity-list
+	// EntityStore.List use for the same org-wide-entity-list
 	// leak class (CLAUDE.md's multi-mode read-scoping standing rule).
 	//
 	// Multi-mode (Postgres): under the app pool (tf_app, RLS active) the
@@ -270,7 +270,7 @@ type RepositoryStore interface {
 	//
 	// Local mode (SQLite, N=1): returns the same set as ListTrackedSystem —
 	// there is no other team to scope away, mirroring the local-mode
-	// asymmetry of ListActiveJiraTeamScoped / FactoryReadStore.Entities. A
+	// asymmetry of ListActiveJiraTeamScoped / EntityStore.List. A
 	// row no team tracks is left out in both dialects, and an archived team
 	// tracks nothing, as in ListTrackedSystem.
 	//

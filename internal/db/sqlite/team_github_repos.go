@@ -274,7 +274,7 @@ func (s *teamGitHubReposStore) RepoUpdateRecipientsSystem(ctx context.Context, o
 // TracksRepositoryViewerScoped always reports true — this backend only ever
 // runs local mode, where N=1 has no team boundary to enforce, mirroring the
 // local-mode asymmetry of ListActiveJiraTeamScoped /
-// FactoryReadStore.Entities (TFAC-559).
+// EntityStore.List.
 //
 // The handler gate never reaches it — isOrgAdmin short-circuits to true in
 // local before any store call, and multi-mode resolves against the Postgres

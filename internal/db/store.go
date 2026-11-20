@@ -81,15 +81,6 @@ type Stores struct {
 	// ScoreStore.
 	Tasks TaskStore
 
-	// Factory is the read-only projection that backs the
-	// /api/factory/snapshot handler. Every method is org-scoped via
-	// an explicit orgID parameter (the handler reads from request
-	// claims and forwards it). Admin-pool in Postgres for the
-	// non-tx wiring on this bundle; production callers always run
-	// inside WithTx and get the tx-bound, claims-set Factory via
-	// TxStores instead.
-	Factory FactoryReadStore
-
 	// TeamActivity computes the team activity node (GET
 	// /api/teams/{team_id}/activity). Read it through TxStores under the
 	// caller's claims — the Postgres predicates lean on tf.user_in_team and
@@ -604,7 +595,6 @@ type TxStores struct {
 	TeamAgents               TeamAgentStore
 	Users                    UsersStore
 	Tasks                    TaskStore
-	Factory                  FactoryReadStore
 	TeamActivity             TeamActivityStore
 	TeamPRs                  TeamPRStore
 	Conversations            ConversationStore

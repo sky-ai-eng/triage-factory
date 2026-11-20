@@ -217,7 +217,6 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		TeamAgents:   newTxTeamAgentStore(tx),
 		Users:        newUsersStore(tx, tx),
 		Tasks:        newTaskStore(tx, s.admin),
-		Factory:      newFactoryReadStore(tx),
 		TeamActivity: newTeamActivityStore(tx),
 		// TeamPRs: the page runs through the tx so the tracked-set semi-join
 		// reads under the caller's claims; the admin half stays s.admin so the

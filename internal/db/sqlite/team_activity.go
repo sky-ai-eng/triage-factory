@@ -11,8 +11,10 @@ import (
 
 // teamActivityStore is the SQLite impl of db.TeamActivityStore. Local mode
 // is N=1 — the team is the org — so every count is unscoped (the same
-// posture as sqlite/factory.go) and every source's event count is defined,
-// which is why the cuts leave EventsDefinedFor nil.
+// posture as the entity list) and every source's event count is defined,
+// which is why the cuts leave EventsDefinedFor nil. A non-empty team set is
+// the org's one team for the same reason, and an empty one answers zeros as
+// it does on Postgres.
 type teamActivityStore struct{ q queryer }
 
 func newTeamActivityStore(q queryer) db.TeamActivityStore {
@@ -30,9 +32,12 @@ const sqliteTeamActivityUnitKey = `COALESCE(CASE e.source
 		WHEN 'linear' THEN e.linear_team_id
 	END, '')`
 
-func (s *teamActivityStore) TeamActivity(ctx context.Context, orgID, _ string, since, until time.Time) (domain.TeamActivity, error) {
+func (s *teamActivityStore) TeamActivity(ctx context.Context, orgID string, teamIDs []string, since, until time.Time) (domain.TeamActivity, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return domain.TeamActivity{}, err
+	}
+	if len(teamIDs) == 0 {
+		return db.BuildTeamActivity(db.TeamActivityCuts{}), nil
 	}
 	sinceArg := since.UTC()
 	untilArg := until.UTC()
@@ -205,17 +210,50 @@ func (s *teamActivityStore) TeamActivity(ctx context.Context, orgID, _ string, s
 		return domain.TeamActivity{}, err
 	}
 
+	// The event-type cut counts the events cut's rows and the tasks cut's
+	// rows by type.
+	typeRows, err := s.q.QueryContext(ctx, `
+		SELECT ev.event_type, COUNT(*), COUNT(DISTINCT ev.entity_id)
+		FROM events ev
+		JOIN entities e ON e.id = ev.entity_id
+		WHERE julianday(ev.created_at) >= julianday(?) AND julianday(ev.created_at) < julianday(?)
+		GROUP BY 1`, sinceArg, untilArg)
+	if err != nil {
+		return domain.TeamActivity{}, err
+	}
+	defer typeRows.Close()
+	typeEvents, err := db.ScanTeamActivityEventTypeCounts(typeRows)
+	if err != nil {
+		return domain.TeamActivity{}, err
+	}
+	typeTaskRows, err := s.q.QueryContext(ctx, `
+		SELECT t.event_type, COUNT(*)
+		FROM tasks t
+		JOIN entities e ON e.id = t.entity_id
+		WHERE julianday(t.created_at) >= julianday(?) AND julianday(t.created_at) < julianday(?)
+		GROUP BY 1`, sinceArg, untilArg)
+	if err != nil {
+		return domain.TeamActivity{}, err
+	}
+	defer typeTaskRows.Close()
+	typeTasks, err := db.ScanTeamActivityKeyCounts(typeTaskRows)
+	if err != nil {
+		return domain.TeamActivity{}, err
+	}
+
 	return db.BuildTeamActivity(db.TeamActivityCuts{
-		Events:     events,
-		Tasks:      tasks,
-		Runs:       runs,
-		Merged:     merged,
-		Failed:     failed,
-		Tracked:    tracked,
-		UnitEvents: unitEvents,
-		UnitTasks:  unitTasks,
-		UnitRuns:   unitRuns,
-		LastEvent:  lastEvent,
+		Events:          events,
+		Tasks:           tasks,
+		Runs:            runs,
+		Merged:          merged,
+		Failed:          failed,
+		Tracked:         tracked,
+		UnitEvents:      unitEvents,
+		UnitTasks:       unitTasks,
+		UnitRuns:        unitRuns,
+		LastEvent:       lastEvent,
+		EventTypeEvents: typeEvents,
+		EventTypeTasks:  typeTasks,
 	}), nil
 }
 

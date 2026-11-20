@@ -1315,6 +1315,11 @@ func sqliteConversationListWhere(filter db.ConversationListFilter, taskIDs []str
 		where += ` AND r.team_id IN (` + placeholders + `)`
 		args = append(args, teamArgs...)
 	}
+	if len(filter.EntityIDs) > 0 {
+		placeholders, entityArgs := inListArgs(filter.EntityIDs)
+		where += ` AND EXISTS (SELECT 1 FROM tasks et WHERE et.id = r.task_id AND et.entity_id IN (` + placeholders + `))`
+		args = append(args, entityArgs...)
+	}
 	if len(filter.Statuses) > 0 {
 		placeholders, statusArgs := inListArgs(filter.Statuses)
 		where += ` AND (` + sqliteDisplayStatusSQL + `) IN (` + placeholders + `)`
@@ -2424,42 +2429,6 @@ func (s *conversationStore) ListResumableWorktreePathsSystem(ctx context.Context
 		paths = append(paths, p)
 	}
 	return paths, rows.Err()
-}
-
-func (s *conversationStore) EntitiesWithOpenConversations(ctx context.Context, orgID string, entityIDs []string) (map[string]struct{}, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
-	}
-	out := make(map[string]struct{})
-	if len(entityIDs) == 0 {
-		return out, nil
-	}
-	placeholders := make([]string, len(entityIDs))
-	args := make([]any, 0, len(entityIDs))
-	for i, id := range entityIDs {
-		placeholders[i] = "?"
-		args = append(args, id)
-	}
-	query := `
-		SELECT DISTINCT t.entity_id
-		FROM conversations r
-		JOIN tasks t ON t.id = r.task_id
-		WHERE r.status = 'open' AND r.completed_at IS NULL
-		  AND t.entity_id IN (` + strings.Join(placeholders, ",") + `)
-	`
-	rows, err := s.q.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		out[id] = struct{}{}
-	}
-	return out, rows.Err()
 }
 
 // --- Transcript / messages ---
