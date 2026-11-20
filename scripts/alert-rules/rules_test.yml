@@ -774,6 +774,78 @@ tests:
   - eval_time: 30m
     alertname: SlackDeploymentDeliveriesStale
     exp_alerts: []
+- name: SlackDeploymentDeliveriesMalformed fires after 15 minutes of refusals with nothing verified, and clears once they stop
+  interval: 1m
+  input_series:
+  - series: 'tf_slack_webhook_deployment_deliveries_total{instance="control-1:9464",app_id="A1",signature="malformed"}'
+    values: '1+1x30 31x20'
+  alert_rule_test:
+  - eval_time: 15m
+    alertname: SlackDeploymentDeliveriesMalformed
+    exp_alerts: []
+  - eval_time: 16m
+    alertname: SlackDeploymentDeliveriesMalformed
+    exp_alerts:
+    - exp_labels:
+        app_id: A1
+        severity: warning
+      exp_annotations:
+        summary: 'Control is refusing the deployment Slack app''s deliveries as malformed'
+        description: 'For 15 minutes, deliveries for app A1 have kept reaching /api/webhooks/slack with Slack''s signature headers missing or malformed, and none verified. Something in front of control, such as a reverse proxy, a load balancer or an API gateway, is likely dropping the X-Slack-Signature or X-Slack-Request-Timestamp header. That refuses every delivery, and once more than 95% of the app''s deliveries fail within an hour, Slack turns the app''s event subscriptions off. Make it pass both headers to control unchanged. Requests that are not from Slack, such as a scanner''s, also count, and one delivery from Slack that verifies clears the alert.'
+  - eval_time: 40m
+    alertname: SlackDeploymentDeliveriesMalformed
+    exp_alerts: []
+- name: SlackDeploymentDeliveriesMalformed fires once for the app when every pod refuses
+  interval: 1m
+  input_series:
+  - series: 'tf_slack_webhook_deployment_deliveries_total{instance="control-1:9464",app_id="A1",signature="malformed"}'
+    values: '1+2x40'
+  - series: 'tf_slack_webhook_deployment_deliveries_total{instance="control-2:9464",app_id="A1",signature="malformed"}'
+    values: '1+3x40'
+  alert_rule_test:
+  - eval_time: 30m
+    alertname: SlackDeploymentDeliveriesMalformed
+    exp_alerts:
+    - exp_labels:
+        app_id: A1
+        severity: warning
+      exp_annotations:
+        summary: 'Control is refusing the deployment Slack app''s deliveries as malformed'
+        description: 'For 15 minutes, deliveries for app A1 have kept reaching /api/webhooks/slack with Slack''s signature headers missing or malformed, and none verified. Something in front of control, such as a reverse proxy, a load balancer or an API gateway, is likely dropping the X-Slack-Signature or X-Slack-Request-Timestamp header. That refuses every delivery, and once more than 95% of the app''s deliveries fail within an hour, Slack turns the app''s event subscriptions off. Make it pass both headers to control unchanged. Requests that are not from Slack, such as a scanner''s, also count, and one delivery from Slack that verifies clears the alert.'
+- name: SlackDeploymentDeliveriesMalformed does not fire for a burst of requests
+  interval: 1m
+  input_series:
+  - series: 'tf_slack_webhook_deployment_deliveries_total{instance="control-1:9464",app_id="A1",signature="malformed"}'
+    values: '_x3 1 200x40'
+  alert_rule_test:
+  - eval_time: 6m
+    alertname: SlackDeploymentDeliveriesMalformed
+    exp_alerts: []
+  - eval_time: 20m
+    alertname: SlackDeploymentDeliveriesMalformed
+    exp_alerts: []
+- name: SlackDeploymentDeliveriesMalformed does not fire while the app's deliveries verify on any pod
+  interval: 1m
+  input_series:
+  - series: 'tf_slack_webhook_deployment_deliveries_total{instance="control-1:9464",app_id="A1",signature="malformed"}'
+    values: '1+1x40'
+  - series: 'tf_slack_webhook_deployment_deliveries_total{instance="control-2:9464",app_id="A1",signature="verified"}'
+    values: '1+1x40'
+  alert_rule_test:
+  - eval_time: 30m
+    alertname: SlackDeploymentDeliveriesMalformed
+    exp_alerts: []
+- name: SlackDeploymentDeliveriesMalformed does not fire for other refusals
+  interval: 1m
+  input_series:
+  - series: 'tf_slack_webhook_deployment_deliveries_total{instance="control-1:9464",app_id="A1",signature="mismatch"}'
+    values: '1+1x40'
+  - series: 'tf_slack_webhook_deployment_deliveries_total{instance="control-1:9464",app_id="A1",signature="stale"}'
+    values: '1+1x40'
+  alert_rule_test:
+  - eval_time: 30m
+    alertname: SlackDeploymentDeliveriesMalformed
+    exp_alerts: []
 - name: SlackAppRateLimited fires on a new series' first sample
   interval: 1m
   input_series:

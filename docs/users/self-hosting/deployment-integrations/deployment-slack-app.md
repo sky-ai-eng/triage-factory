@@ -38,6 +38,12 @@ from its own clock, and logs no line for it. With the bundled Prometheus,
 [`SlackDeploymentDeliveriesStale`](../monitoring.md#alerts) fires when a
 control pod refuses deliveries this way and verifies none.
 
+With the Events API, a reverse proxy, load balancer or API gateway in front of
+control must pass Slack's `X-Slack-Signature` and `X-Slack-Request-Timestamp`
+headers through unchanged. Triage Factory refuses a delivery without them, and
+[`SlackDeploymentDeliveriesMalformed`](../monitoring.md#alerts) fires when
+deliveries keep being refused this way and none verify.
+
 ## 1. Create the app
 
 1. Download the manifest for your transport and replace each
@@ -171,9 +177,10 @@ With the bundled Prometheus, the deployment app's problems also raise
 malformed configuration or a public URL that is not HTTPS,
 `SlackDeploymentSocketDown` for a Socket Mode connection that stays down,
 `SlackDeploymentAppInstallRefused` for an install refused for the app's own
-settings, `SlackSigningSecretMismatch` for a wrong signing secret, and
+settings, `SlackSigningSecretMismatch` for a wrong signing secret,
 `SlackDeploymentDeliveriesStale` for a control clock more than five minutes
-off.
+off, and `SlackDeploymentDeliveriesMalformed` for a proxy in front of control
+that drops Slack's signature headers.
 
 Each of these is a line in `docker compose logs control`, except where noted.
 
@@ -230,6 +237,16 @@ Each of these is a line in `docker compose logs control`, except where noted.
   means that pod's host clock is more than five minutes from the real time; a
   replayed or forged request also counts, so a few and then nothing is not
   this. Fix the host's time sync; no restart is needed.
+- **Slack's signature headers dropped** (Events API) — not logged. Triage
+  Factory answers each delivery 401 and counts it in
+  `tf_slack_webhook_deployment_deliveries_total` under `signature="malformed"`.
+  That count rising for 15 minutes with nothing under `signature="verified"`
+  means something in front of control, such as a reverse proxy, a load
+  balancer or an API gateway, drops or rewrites the `X-Slack-Signature` or
+  `X-Slack-Request-Timestamp` header. A request that is not from Slack, such
+  as a scanner's, usually has neither header and also counts, so a few and
+  then nothing is not this. Make whatever is in front of control pass both
+  headers to it unchanged; Triage Factory needs no restart.
 
 Slack expects an answer to each delivery "within three seconds". When more
 than 95% of deliveries fail within 60 minutes, it turns off the app's event
