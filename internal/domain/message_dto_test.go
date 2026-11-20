@@ -55,3 +55,27 @@ func TestMessageDTOCostStamp(t *testing.T) {
 		}
 	})
 }
+
+// The tools fingerprint is the native loop's own record, so it stays off the
+// wire while the rest of a row's metadata crosses it, and the row keeps it.
+func TestMessageDTOLeavesOutTheToolsFingerprint(t *testing.T) {
+	row := Message{ID: 7, Metadata: map[string]any{
+		MessageMetadataToolsFingerprint: "abc",
+		"compaction_path":               "forced",
+	}}
+	metadata, _ := wireKeys(t, row.ToDTO())["metadata"].(map[string]any)
+	if _, ok := metadata[MessageMetadataToolsFingerprint]; ok {
+		t.Error("the wire shape carries the tools fingerprint")
+	}
+	if metadata["compaction_path"] != "forced" {
+		t.Errorf("wire metadata = %v, want the other keys kept", metadata)
+	}
+	if row.Metadata[MessageMetadataToolsFingerprint] != "abc" {
+		t.Error("projecting the row removed the fingerprint from the row itself")
+	}
+
+	alone := Message{ID: 8, Metadata: map[string]any{MessageMetadataToolsFingerprint: "abc"}}
+	if _, ok := wireKeys(t, alone.ToDTO())["metadata"]; ok {
+		t.Error("a row whose only metadata is the fingerprint must omit the key")
+	}
+}

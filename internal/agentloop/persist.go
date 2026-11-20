@@ -16,7 +16,11 @@ import (
 // ones: the frontend reads one shape and never branches on
 // conversations.runtime, so a native row that skipped (say) token counts
 // would render as a degraded SDK row rather than an equivalent one.
-func (e *Engine) persistAssistant(ctx context.Context, params Params, completion *inference.Completion, durationMs int) (domain.Message, error) {
+//
+// toolsFP is the fingerprint of the tools carried by the request this
+// completion answers, taken from that request so the row records what was
+// sent.
+func (e *Engine) persistAssistant(ctx context.Context, params Params, completion *inference.Completion, toolsFP string, durationMs int) (domain.Message, error) {
 	row, err := inference.MessageToRow(completion.Message)
 	if err != nil {
 		return domain.Message{}, fmt.Errorf("map completion to row: %w", err)
@@ -32,6 +36,7 @@ func (e *Engine) persistAssistant(ctx context.Context, params Params, completion
 	if unreplayableTurn(row) {
 		row.WindowState = domain.MessageWindowInactive
 	}
+	recordToolsFingerprint(&row, toolsFP)
 	// Wall time from request to complete message, retries included — the
 	// same request-to-row span the SDK parser stamps. A call that measured 0
 	// stores 0.

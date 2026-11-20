@@ -591,7 +591,8 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 			escalatedMaxTokens = 0
 		}
 		callStarted := e.now()
-		completion, err := e.streamWithRetry(ctx, params.OrgID, client, e.buildRequest(params, provider, rows, maxTokens))
+		req := e.buildRequest(params, provider, rows, maxTokens)
+		completion, err := e.streamWithRetry(ctx, params.OrgID, client, req)
 		if release != nil {
 			release()
 		}
@@ -652,7 +653,7 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 		if class.interrupted() {
 			stubTruncatedToolArgs(completion)
 		}
-		assistantRow, err := e.persistAssistant(ctx, params, completion, e.msSince(callStarted))
+		assistantRow, err := e.persistAssistant(ctx, params, completion, toolsFingerprint(req.Tools), e.msSince(callStarted))
 		if err != nil {
 			return e.failed(ctx, started, turn, fmt.Errorf("persist assistant message: %w", err))
 		}
@@ -954,14 +955,19 @@ func wholeSeconds(d time.Duration) int {
 // not part of it, so the loop's one-shot escalation after a truncated turn
 // costs nothing, while tool_choice (which does invalidate) stays absent on
 // both.
+//
+// The rows go out with the reasoning produced under other tools removed (see
+// reasoningBoundTo). Both callers get the same removal, so it is part of the
+// shared prefix and not a difference between them.
 func (e *Engine) buildRequest(params Params, provider schemas.ModelProvider, rows []domain.Message, maxTokens int) inference.Request {
+	tools := e.toolSchemas(params)
 	return inference.Request{
 		Provider:       provider,
 		Model:          params.Model,
 		SystemPrompt:   params.SystemPrompt,
 		SystemAddendum: params.SystemAddendum,
-		Rows:           rows,
-		Tools:          e.toolSchemas(params),
+		Rows:           reasoningBoundTo(rows, toolsFingerprint(tools)),
+		Tools:          tools,
 		Effort:         params.Effort,
 		MaxTokens:      maxTokens,
 	}

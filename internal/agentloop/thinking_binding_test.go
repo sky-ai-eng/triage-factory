@@ -146,6 +146,8 @@ func contextOf(req inference.Request) (bindingContext, []schemas.ChatMessage, er
 		encoded[i] = string(b)
 	}
 	// The API binds the tools as a name-sorted set, so their order is free.
+	// Rendered here and not by canonicalTools, so a fault in what the
+	// fingerprint covers shows up as a block this provider reports.
 	tools := append([]schemas.ChatTool(nil), req.Tools...)
 	sort.SliceStable(tools, func(i, j int) bool { return toolName(tools[i]) < toolName(tools[j]) })
 	toolsJSON, err := json.Marshal(tools)
@@ -318,6 +320,9 @@ func TestThinkingBinding_AResumeWithTheSameSystemText(t *testing.T) {
 		ConversationID: "conv", Role: "user", Content: "one more thing", Delivered: boolPtr(false),
 	})
 	runEngagement(t, tr, p, newScriptedToolHost(), fableParams())
+	if got := replayedBlocks(t, p.requests[2]); got != 2 {
+		t.Errorf("the resume's first call replays %d blocks, want both the earlier engagement produced", got)
+	}
 	p.assertBound(t)
 }
 
@@ -349,6 +354,182 @@ func TestThinkingBinding_AResumeAfterTheSystemTextChanged(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A resume under other tools is what a release that changes a tool definition
+// gives every parked conversation, and what a claim that offers a different
+// set gives one. The earlier blocks are bound to the earlier tools, so the
+// resume must not replay them, and must replay the ones it produces itself.
+func TestThinkingBinding_AResumeAfterTheToolsChanged(t *testing.T) {
+	tr := newMemTranscript(pendingUser("go"))
+	p := newBindingProvider(
+		thinking(scriptedTurn{calls: []domain.ToolCall{{ID: "c1", Name: "bash"}}}),
+		thinking(scriptedTurn{text: "done"}),
+		thinking(scriptedTurn{calls: []domain.ToolCall{{ID: "c2", Name: "bash"}}}),
+		thinking(scriptedTurn{text: "done again"}),
+	)
+	runEngagement(t, tr, p, newScriptedToolHost(), fableParams())
+	tr.ageRows(time.Hour)
+	_, _ = tr.Insert(context.Background(), "org", &domain.Message{
+		ConversationID: "conv", Role: "user", Content: "one more thing", Delivered: boolPtr(false),
+	})
+	runEngagement(t, tr, p, newScriptedToolHost(), otherToolsParams())
+
+	if toolsFingerprint(p.requests[1].Tools) == toolsFingerprint(p.requests[2].Tools) {
+		t.Fatal("staging failed: the resume carries the tools the first engagement did")
+	}
+	for call, want := range []int{0, 1, 0, 1} {
+		if got := replayedBlocks(t, p.requests[call]); got != want {
+			t.Errorf("call %d replays %d blocks, want %d", call+1, got, want)
+		}
+	}
+	p.assertBound(t)
+}
+
+// A conversation that goes back to tools it held before, as one does when a
+// deploy is rolled back or its claims alternate between two releases, does
+// not get the blocks from its first time under them back: the rows between
+// were produced without those blocks in front of them.
+func TestThinkingBinding_AResumeUnderToolsTheConversationHeldBefore(t *testing.T) {
+	tr := newMemTranscript(pendingUser("go"))
+	p := newBindingProvider(
+		thinking(scriptedTurn{text: "first"}),
+		thinking(scriptedTurn{text: "second"}),
+		thinking(scriptedTurn{calls: []domain.ToolCall{{ID: "c1", Name: "bash"}}}),
+		thinking(scriptedTurn{text: "third"}),
+	)
+	for _, params := range []Params{fableParams(), otherToolsParams(), fableParams()} {
+		_, _ = tr.Insert(context.Background(), "org", &domain.Message{
+			ConversationID: "conv", Role: "user", Content: "next", Delivered: boolPtr(false),
+		})
+		runEngagement(t, tr, p, newScriptedToolHost(), params)
+	}
+	for call, want := range []int{0, 0, 0, 1} {
+		if got := replayedBlocks(t, p.requests[call]); got != want {
+			t.Errorf("call %d replays %d blocks, want %d", call+1, got, want)
+		}
+	}
+	p.assertBound(t)
+}
+
+// A row that records no tools fingerprint is one a binary that records none
+// wrote, and that binary replays its reasoning, so this one does too.
+func TestThinkingBinding_AResumeOverRowsThatRecordNoTools(t *testing.T) {
+	tr := newMemTranscript(pendingUser("go"))
+	p := newBindingProvider(
+		thinking(scriptedTurn{text: "done"}),
+		thinking(scriptedTurn{calls: []domain.ToolCall{{ID: "c1", Name: "bash"}}}),
+		thinking(scriptedTurn{text: "done again"}),
+	)
+	runEngagement(t, tr, p, newScriptedToolHost(), fableParams())
+	tr.forgetToolsFingerprints()
+	_, _ = tr.Insert(context.Background(), "org", &domain.Message{
+		ConversationID: "conv", Role: "user", Content: "one more thing", Delivered: boolPtr(false),
+	})
+	runEngagement(t, tr, p, newScriptedToolHost(), fableParams())
+	for call, want := range []int{0, 1, 2} {
+		if got := replayedBlocks(t, p.requests[call]); got != want {
+			t.Errorf("call %d replays %d blocks, want %d", call+1, got, want)
+		}
+	}
+	p.assertBound(t)
+}
+
+// A row that records no fingerprint goes out without its reasoning once a
+// later row puts it behind the cut.
+func TestThinkingBinding_AToolChangeAfterRowsThatRecordNoTools(t *testing.T) {
+	tr := newMemTranscript(pendingUser("go"))
+	p := newBindingProvider(
+		thinking(scriptedTurn{text: "first"}),
+		thinking(scriptedTurn{text: "second"}),
+		thinking(scriptedTurn{text: "third"}),
+	)
+	runEngagement(t, tr, p, newScriptedToolHost(), fableParams())
+	tr.forgetToolsFingerprints()
+	for _, params := range []Params{fableParams(), otherToolsParams()} {
+		_, _ = tr.Insert(context.Background(), "org", &domain.Message{
+			ConversationID: "conv", Role: "user", Content: "next", Delivered: boolPtr(false),
+		})
+		runEngagement(t, tr, p, newScriptedToolHost(), params)
+	}
+	for call, want := range []int{0, 1, 0} {
+		if got := replayedBlocks(t, p.requests[call]); got != want {
+			t.Errorf("call %d replays %d blocks, want %d", call+1, got, want)
+		}
+	}
+	p.assertBound(t)
+}
+
+// forgetToolsFingerprints leaves every row as a binary that records no
+// fingerprint would have written it.
+func (t *memTranscript) forgetToolsFingerprints() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for i := range t.rows {
+		delete(t.rows[i].Metadata, domain.MessageMetadataToolsFingerprint)
+	}
+}
+
+func TestToolsFingerprint(t *testing.T) {
+	tool := func(name, description string, required ...string) schemas.ChatTool {
+		return schemas.ChatTool{
+			Type: schemas.ChatToolTypeFunction,
+			Function: &schemas.ChatToolFunction{
+				Name:        name,
+				Description: &description,
+				Parameters:  &schemas.ToolFunctionParameters{Type: "object", Required: required},
+			},
+		}
+	}
+	base := toolsFingerprint([]schemas.ChatTool{tool("bash", "run a command", "command"), tool("read", "read a file", "path")})
+	if base == "" {
+		t.Fatal("no fingerprint for a list that renders")
+	}
+	if got := toolsFingerprint([]schemas.ChatTool{tool("read", "read a file", "path"), tool("bash", "run a command", "command")}); got != base {
+		t.Error("the same tools in another order have another fingerprint; the API binds them as a set")
+	}
+	if bifrostVersion() == "" {
+		t.Error("the binary reports no bifrost version, so the fingerprint cannot tell one from another")
+	}
+	tools := []schemas.ChatTool{tool("bash", "run a command", "command")}
+	if fingerprintTools(tools, "v1.0.0") == fingerprintTools(tools, "v1.0.1") {
+		t.Error("the same tools under another bifrost version have the same fingerprint")
+	}
+	for name, changed := range map[string][]schemas.ChatTool{
+		"a description":   {tool("bash", "run one command", "command"), tool("read", "read a file", "path")},
+		"an input schema": {tool("bash", "run a command", "command", "timeout"), tool("read", "read a file", "path")},
+		"a name":          {tool("shell", "run a command", "command"), tool("read", "read a file", "path")},
+		"a removed tool":  {tool("bash", "run a command", "command")},
+		"an added tool":   {tool("bash", "run a command", "command"), tool("read", "read a file", "path"), tool("write", "write a file", "path")},
+	} {
+		if toolsFingerprint(changed) == base {
+			t.Errorf("%s changed and the fingerprint did not", name)
+		}
+	}
+}
+
+// otherToolsParams is fableParams for a claim that offers the conversation a
+// different set of tools.
+func otherToolsParams() Params {
+	p := fableParams()
+	p.HasBlueprint = !p.HasBlueprint
+	return p
+}
+
+// replayedBlocks counts the thinking blocks a request sends back.
+func replayedBlocks(t *testing.T, req inference.Request) int {
+	t.Helper()
+	_, msgs, err := contextOf(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, m := range msgs {
+		if m.ChatAssistantMessage != nil {
+			n += len(m.ReasoningDetails)
+		}
+	}
+	return n
 }
 
 func TestThinkingBinding_WarmCompactionMidWork(t *testing.T) {
