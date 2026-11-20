@@ -7316,6 +7316,9 @@ CREATE TABLE public.notifications (
     last_seen_at    timestamp with time zone NOT NULL,
     seen_count      integer DEFAULT 1 NOT NULL,
     escalated_at    timestamp with time zone NOT NULL,
+    -- seen_count as of escalated_at, which is how an upsert tells an
+    -- escalation from a bump in the same clock tick.
+    escalated_seen_count integer DEFAULT 1 NOT NULL,
     resolved_at     timestamp with time zone,
     resolved_reason text,
     -- Why the row resolved, in a sentence its kind renders. Written after
@@ -7329,6 +7332,7 @@ CREATE TABLE public.notifications (
     CONSTRAINT notifications_kind_check CHECK ((kind <> ''::text)),
     CONSTRAINT notifications_priority_check CHECK ((priority = ANY (ARRAY['urgent'::text, 'high'::text, 'low'::text]))),
     CONSTRAINT notifications_seen_count_check CHECK ((seen_count >= 1)),
+    CONSTRAINT notifications_escalated_seen_count_check CHECK (((escalated_seen_count >= 1) AND (escalated_seen_count <= seen_count))),
     CONSTRAINT notifications_resolved_reason_check CHECK ((resolved_reason = ANY (ARRAY['cleared'::text, 'source_off'::text, 'audience_removed'::text]))),
     CONSTRAINT notifications_audience_check CHECK ((
         ((audience_scope = 'org'::text) AND (audience_role = ANY (ARRAY['members'::text, 'admins'::text])) AND (team_id IS NULL) AND (user_id IS NULL))

@@ -32,7 +32,7 @@ var _ db.NotificationStore = (*notificationStore)(nil)
 const sqliteNotificationColsTmpl = `{p}id, {p}org_id, {p}origin, {p}lifecycle, {p}kind, {p}key,
 	{p}audience_scope, COALESCE({p}audience_role, ''), COALESCE({p}team_id, ''), COALESCE({p}user_id, ''),
 	COALESCE({p}source, ''), {p}priority, {p}dismissible, {p}title, {p}body, {p}actions, {p}params,
-	{p}first_seen_at, {p}last_seen_at, {p}seen_count, {p}escalated_at,
+	{p}first_seen_at, {p}last_seen_at, {p}seen_count, {p}escalated_at, {p}escalated_seen_count,
 	{p}resolved_at, COALESCE({p}resolved_reason, ''), COALESCE({p}resolution, ''), {p}expires_at,
 	COALESCE({p}entity_id, '')`
 
@@ -55,6 +55,10 @@ const sqliteNotificationReadable = `n.org_id = ? AND (n.expires_at IS NULL OR n.
 // team's.
 const sqliteNotificationSent = `(n.audience_scope <> 'team'
 	OR EXISTS (SELECT 1 FROM teams t WHERE t.id = n.team_id AND t.deleted_at IS NULL))`
+
+// sqliteNotificationEscalates is the bump's escalation test, binding Resurface.
+var sqliteNotificationEscalates = db.NotificationPriorityRankSQL("excluded.priority") + ` > ` +
+	db.NotificationPriorityRankSQL("n.priority") + ` OR ?`
 
 func (s *notificationStore) UpsertOpenSystem(ctx context.Context, o db.NotificationOccurrence) (db.NotificationUpsert, error) {
 	o, err := db.ValidateNotificationOccurrence(o)
@@ -87,16 +91,16 @@ func (s *notificationStore) UpsertOpenSystem(ctx context.Context, o db.Notificat
 			id, org_id, origin, lifecycle, kind, key,
 			audience_scope, audience_role, team_id, user_id,
 			source, priority, dismissible, title, body, actions, params,
-			first_seen_at, last_seen_at, seen_count, escalated_at, expires_at, entity_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+			first_seen_at, last_seen_at, seen_count, escalated_at, escalated_seen_count, expires_at, entity_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 1, ?, ?)
 		ON CONFLICT (org_id, origin, kind, key, audience_scope,
 			coalesce(audience_role, ''), coalesce(team_id, ''), coalesce(user_id, ''))
 			WHERE resolved_at IS NULL
 		DO UPDATE SET
 			last_seen_at = excluded.last_seen_at,
 			seen_count   = n.seen_count + 1,
-			escalated_at = CASE WHEN `+db.NotificationPriorityRankSQL("excluded.priority")+` > `+db.NotificationPriorityRankSQL("n.priority")+` OR ?
-			                    THEN excluded.last_seen_at ELSE n.escalated_at END,
+			escalated_at = CASE WHEN `+sqliteNotificationEscalates+` THEN excluded.last_seen_at ELSE n.escalated_at END,
+			escalated_seen_count = CASE WHEN `+sqliteNotificationEscalates+` THEN n.seen_count + 1 ELSE n.escalated_seen_count END,
 			priority     = excluded.priority,
 			dismissible  = excluded.dismissible,
 			source       = excluded.source,
@@ -109,7 +113,7 @@ func (s *notificationStore) UpsertOpenSystem(ctx context.Context, o db.Notificat
 		uuid.New().String(), o.OrgID, o.Origin, o.Lifecycle, o.Kind, o.Key,
 		a.Scope, nullIfEmpty(string(a.Role)), nullIfEmpty(a.TeamID), nullIfEmpty(a.UserID),
 		nullIfEmpty(o.Source), o.Priority, o.Dismissible, o.Title, o.Body, string(o.Actions), string(o.Params),
-		now, now, now, expiresAt, nullIfEmpty(o.EntityID), o.Resurface).Scan)
+		now, now, now, expiresAt, nullIfEmpty(o.EntityID), o.Resurface, o.Resurface).Scan)
 	if err != nil {
 		return db.NotificationUpsert{}, err
 	}

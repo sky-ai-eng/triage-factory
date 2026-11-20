@@ -149,9 +149,12 @@ type Notification struct {
 	SeenCount   int
 	// EscalatedAt is FirstSeenAt until the priority first increases, or an
 	// event notice recurs; marks older than it no longer count.
-	EscalatedAt    time.Time
-	ResolvedAt     *time.Time
-	ResolvedReason NotificationResolvedReason
+	EscalatedAt time.Time
+	// EscalatedSeenCount is SeenCount as of EscalatedAt: the sighting that
+	// opened the row or last escalated it.
+	EscalatedSeenCount int
+	ResolvedAt         *time.Time
+	ResolvedReason     NotificationResolvedReason
 	// Resolution says in a sentence why the row resolved, rendered by its
 	// kind once it has; empty while it is open, and on a row whose kind
 	// could not render one.

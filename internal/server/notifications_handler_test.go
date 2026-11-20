@@ -14,6 +14,7 @@ import (
 	"github.com/zalando/go-keyring"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/notify"
 	"github.com/sky-ai-eng/triage-factory/internal/notify/notifytest"
@@ -201,12 +202,18 @@ func orgNotificationsList() string {
 func localNotification(t *testing.T, s *Server, id string) string {
 	t.Helper()
 	fixableCondition.Set(context.Background(), runmode.LocalDefaultOrgID, notificationTestParams{ID: id}, true)
+	return notificationIDByTitle(t, s, "fixable "+id)
+}
+
+// notificationIDByTitle is the id of the inbox row titled title.
+func notificationIDByTitle(t *testing.T, s *Server, title string) string {
+	t.Helper()
 	for _, it := range listNotifications(t, s, meNotifications+"/list", nil).Items {
-		if it.Title == "fixable "+id {
+		if it.Title == title {
 			return it.ID
 		}
 	}
-	t.Fatalf("no row for fixable %s after Set", id)
+	t.Fatalf("no inbox row titled %q", title)
 	return ""
 }
 
@@ -281,6 +288,8 @@ func TestNotificationList_Filters(t *testing.T) {
 	s, _ := newNotificationsServer(t)
 	read := localNotification(t, s, "a")
 	localNotification(t, s, "b")
+	// a was raised before b.
+	dbtest.AgeNotification(t, s.db, read, time.Minute)
 	requiredCondition.Set(context.Background(), runmode.LocalDefaultOrgID, notificationTestParams{ID: "c"}, true)
 	fixableCondition.Set(context.Background(), runmode.LocalDefaultOrgID, notificationTestParams{ID: "b"}, false)
 	if rec := doJSON(t, s, http.MethodPatch, meNotifications+"/"+read, map[string]any{"read": true}); rec.Code != http.StatusOK {
@@ -356,11 +365,15 @@ func TestNotificationList_Filters(t *testing.T) {
 // field named, and a page token is bound to the order it was minted under.
 func TestNotificationList_Sort(t *testing.T) {
 	s, _ := newNotificationsServer(t)
-	localNotification(t, s, "a")
-	localNotification(t, s, "b")
+	a := localNotification(t, s, "a")
+	b := localNotification(t, s, "b")
 	localNotification(t, s, "c")
+	// a is raised before b, and b resolves before a. Aging the earlier writes
+	// orders them whatever the clock's resolution.
+	dbtest.AgeNotification(t, s.db, a, 2*time.Minute)
 	fixableCondition.Set(context.Background(), runmode.LocalDefaultOrgID, notificationTestParams{ID: "b"}, false)
 	fixableCondition.Set(context.Background(), runmode.LocalDefaultOrgID, notificationTestParams{ID: "a"}, false)
+	dbtest.AgeNotification(t, s.db, b, time.Minute)
 
 	titles := func(page httpxtest.ListEnvelope[notificationItemWire]) string {
 		var out []string
@@ -464,6 +477,8 @@ func TestNotificationGet(t *testing.T) {
 func TestNotificationMarksPatch(t *testing.T) {
 	s, pings := newNotificationsServer(t)
 	id := localNotification(t, s, "a")
+	// Raised before it is marked: a dismissal counts only after the raise.
+	dbtest.AgeNotification(t, s.db, id, time.Minute)
 	pings.take()
 
 	patch := func(body any) notificationItemWire {
@@ -599,6 +614,11 @@ func TestNotificationDismiss(t *testing.T) {
 	a := localNotification(t, s, "a")
 	b := localNotification(t, s, "b")
 	c := localNotification(t, s, "c")
+	// Raised before they are dismissed: a dismissal counts only after the
+	// raise.
+	for _, id := range []string{a, b, c} {
+		dbtest.AgeNotification(t, s.db, id, time.Minute)
+	}
 	pings.take()
 
 	rec := doJSON(t, s, http.MethodPost, meNotifications+"/dismiss", map[string]any{

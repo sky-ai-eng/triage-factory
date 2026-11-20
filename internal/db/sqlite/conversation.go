@@ -584,14 +584,29 @@ func (s *conversationStore) setSystemBlocks(ctx context.Context, orgID, conversa
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
+	args, err := systemBlocksArgs(conversationID, blocks)
+	if err != nil {
+		return nil, err
+	}
+	row := s.q.QueryRowContext(ctx, systemBlocksUpdateSQL+`
+		RETURNING `+sqliteConversationReturningColumns, args...)
+	return scanConversationReturning(row)
+}
+
+// systemBlocksUpdateSQL saves a conversation's system blocks from
+// systemBlocksArgs. setSystemBlocks returns the row it wrote; a compaction that
+// carries blocks has no use for it, so it runs the statement bare rather than
+// paying for the returned row's columns, which sum every message of the
+// conversation.
+const systemBlocksUpdateSQL = `
+		UPDATE conversations SET system_prompt = ?, system_block = ?, system_parts = ? WHERE id = ?`
+
+func systemBlocksArgs(conversationID string, blocks domain.SystemBlocks) ([]any, error) {
 	parts, err := db.MarshalSystemParts(blocks.Parts)
 	if err != nil {
 		return nil, err
 	}
-	row := s.q.QueryRowContext(ctx, `
-		UPDATE conversations SET system_prompt = ?, system_block = ?, system_parts = ? WHERE id = ?
-		RETURNING `+sqliteConversationReturningColumns, blocks.Prompt, blocks.Block, parts, conversationID)
-	return scanConversationReturning(row)
+	return []any{blocks.Prompt, blocks.Block, parts, conversationID}, nil
 }
 
 func (s *conversationStore) SystemBlocksSystem(ctx context.Context, orgID, conversationID string) (domain.SystemBlocks, error) {
@@ -3025,13 +3040,21 @@ func (s *conversationStore) markDelivered(ctx context.Context, orgID, conversati
 // it inserts.
 //
 // Exempt from the returned-row rule (bare error stays the return type): this
-// writes up to two inserted rows, a batch flip, and a re-seq of every queued
-// row ahead of the result — no single row a return value could name.
-// replyRow/resultRow's assigned IDs are written back to the caller's own
-// pointers, which stands in for "the row it persisted" here.
-func (s *conversationStore) CompactForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, replyRow, resultRow *domain.Message, inactiveIDs []int) error {
+// writes up to two inserted rows, a batch flip, a re-seq of every queued row
+// ahead of the result, and the conversation's blocks when given them — no
+// single row a return value could name. replyRow/resultRow's assigned IDs are
+// written back to the caller's own pointers, which stands in for "the row it
+// persisted" here.
+func (s *conversationStore) CompactForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, replyRow, resultRow *domain.Message, inactiveIDs []int, blocks *domain.SystemBlocks) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
+	}
+	var blockArgs []any
+	if blocks != nil {
+		var err error
+		if blockArgs, err = systemBlocksArgs(conversationID, *blocks); err != nil {
+			return err
+		}
 	}
 	return inTx(ctx, s.q, func(q queryer) error {
 		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
@@ -3090,6 +3113,12 @@ func (s *conversationStore) CompactForClaimSystem(ctx context.Context, orgID, co
 				UPDATE messages SET seq = ? WHERE conversation_id = ? AND id = ?
 			`, seq, conversationID, id); err != nil {
 				return fmt.Errorf("re-seq queued row %d: %w", id, err)
+			}
+		}
+
+		if blockArgs != nil {
+			if _, err := q.ExecContext(ctx, systemBlocksUpdateSQL, blockArgs...); err != nil {
+				return fmt.Errorf("save system blocks: %w", err)
 			}
 		}
 		return nil

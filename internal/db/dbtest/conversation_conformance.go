@@ -106,6 +106,12 @@ type ConversationSeeder struct {
 	// read the newest stamp a row carries, which is what that shape is for.
 	BackdateCompletedAt func(t *testing.T, conversationID string, age time.Duration)
 
+	// BackdateParkedAt is BackdateStartedAt for the park stamp, which is
+	// also a park's identity to the pause notice: a subtest that parks again
+	// ages the first park, so the second has a parked_at of its own whatever
+	// the clock's resolution.
+	BackdateParkedAt func(t *testing.T, conversationID string, age time.Duration)
+
 	// ClaimRows returns the conversation's claims rows oldest-first, so
 	// the suite can assert mint/release bookkeeping.
 	ClaimRows func(t *testing.T, conversationID string) []ClaimRow
@@ -145,6 +151,12 @@ type ConversationSeeder struct {
 	// holds to `age` ago, so a claim minted after it is newer by more than
 	// any column's resolution.
 	BackdateClaimedAt func(t *testing.T, conversationID string, age time.Duration)
+
+	// AgeClaims moves the conversation's queued_at and its claims'
+	// claimed_at and released_at d earlier, as ClaimPredicateHarness.Age
+	// does, so a release after it is later than every earlier one whatever
+	// the clock's resolution.
+	AgeClaims func(t *testing.T, conversationID string, d time.Duration)
 
 	// BlueprintRun mints a blueprint + blueprint_run pair against the
 	// given taskID and returns the blueprint_run id. Every conversation
@@ -1391,6 +1403,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if _, err := store.SetExecutorSystem(ctx, orgID, twice, "", 0); err != nil {
 			t.Fatalf("release the first engagement: %v", err)
 		}
+		// The first engagement is aged, so the second is the newer whatever
+		// the clock's resolution.
+		seed.AgeClaims(t, twice, time.Second)
 		if _, err := store.SetExecutorSystem(ctx, orgID, twice, "exec-2", 2); err != nil {
 			t.Fatalf("SetExecutorSystem exec-2: %v", err)
 		}
@@ -2350,7 +2365,8 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		_, err = store.SetClaimPhaseSystem(ctx, orgID, conversationID, claimID, "agent_starting")
 		refuse("SetClaimPhaseSystem", err)
 		refuse("CompactForClaimSystem", store.CompactForClaimSystem(ctx, orgID, conversationID, claimID, nil,
-			&domain.Message{Role: "user", Content: "summary"}, []int{int(ownedID)}))
+			&domain.Message{Role: "user", Content: "summary"}, []int{int(ownedID)},
+			&domain.SystemBlocks{Prompt: "zombie prompt", Block: "<run_context>zombie</run_context>"}))
 		_, err = store.SettleCompactionRequestForClaimSystem(ctx, orgID, conversationID, claimID, int(ownedID), 1, 1, 0, 0, nil, "zombie")
 		refuse("SettleCompactionRequestForClaimSystem", err)
 
@@ -2369,6 +2385,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		if got, _ := store.Get(ctx, orgID, conversationID); got == nil || got.Status != "open" {
 			t.Errorf("status after the refusals = %v, want open (the stop's own state, untouched)", got)
+		}
+		if got, err := store.SystemBlocksSystem(ctx, orgID, conversationID); err != nil || got.Prompt != "" || got.Block != "" || got.Parts != nil {
+			t.Errorf("system blocks after the refusals = (%+v, %v), want none saved", got, err)
 		}
 		after := seed.ClaimRows(t, conversationID)
 		if len(after) != 1 || after[0].ID != stopped[0].ID || !after[0].Released ||
@@ -2672,7 +2691,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		resultRow := &domain.Message{Role: "user",
 			Subtype: domain.MessageSubtypeInjectionCompactionResult, Content: "the summary"}
 		span := []int{assistantID, toolID, requestID}
-		if err := store.CompactForClaimSystem(ctx, orgID, conversationID, claimID, replyRow, resultRow, span); err != nil {
+		if err := store.CompactForClaimSystem(ctx, orgID, conversationID, claimID, replyRow, resultRow, span, nil); err != nil {
 			t.Fatalf("CompactForClaimSystem: %v", err)
 		}
 		if replyRow.ID == 0 || resultRow.ID == 0 {
@@ -2741,6 +2760,90 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		if !sawReply || !sawAssistant {
 			t.Fatalf("display read lost compacted history: reply=%v assistant=%v", sawReply, sawAssistant)
+		}
+	})
+
+	// A compaction that carries blocks saves them in its own transaction, so
+	// the blocks every later call sends are the ones the next claim reads
+	// back. One that carries none leaves the saved blocks alone.
+	t.Run("CompactForClaimSystem_SavesTheBlocksItCarries", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		conversationID := seedConversationForTest(t, orgID, seed, "running")
+
+		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-compact-blocks", 1); err != nil {
+			t.Fatalf("SetExecutorSystem: %v", err)
+		}
+		claimID := seed.ClaimRows(t, conversationID)[0].ID
+		launched := domain.SystemBlocks{
+			Prompt: "You are the machinist.",
+			Block:  "<run_context>\nBranch convention: at-launch/<ticket-id>\n</run_context>",
+			Parts: &domain.SystemParts{
+				Shared:       []domain.SystemPart{{Key: "identity/machinist.txt", Text: "You are the machinist."}},
+				Conversation: []domain.SystemPart{{Key: "run_context.branch_convention", Text: "Branch convention: at-launch/<ticket-id>"}},
+			},
+		}
+		if _, err := store.SetSystemBlocksForClaimSystem(ctx, orgID, conversationID, claimID, launched); err != nil {
+			t.Fatalf("SetSystemBlocksForClaimSystem: %v", err)
+		}
+		// Each compaction supersedes the whole window, an earlier one's result
+		// row included.
+		compact := func(blocks *domain.SystemBlocks) *domain.Message {
+			t.Helper()
+			if _, err := store.InsertMessageForClaimSystem(ctx, orgID, claimID, &domain.Message{
+				ConversationID: conversationID, Role: "assistant", Content: "working",
+			}); err != nil {
+				t.Fatalf("insert span row: %v", err)
+			}
+			window, err := store.ListForAssemblySystem(ctx, orgID, conversationID)
+			if err != nil {
+				t.Fatalf("ListForAssemblySystem: %v", err)
+			}
+			var span []int
+			for _, m := range window {
+				span = append(span, m.ID)
+			}
+			result := &domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionCompactionResult, Content: "the summary"}
+			if err := store.CompactForClaimSystem(ctx, orgID, conversationID, claimID, nil, result, span, blocks); err != nil {
+				t.Fatalf("CompactForClaimSystem: %v", err)
+			}
+			return result
+		}
+		saved := func() domain.SystemBlocks {
+			t.Helper()
+			got, err := store.SystemBlocksSystem(ctx, orgID, conversationID)
+			if err != nil {
+				t.Fatalf("SystemBlocksSystem: %v", err)
+			}
+			return got
+		}
+
+		compact(nil)
+		if got := saved(); !reflect.DeepEqual(got, launched) {
+			t.Errorf("saved blocks after a compaction carrying none = %+v, want the launch's %+v", got, launched)
+		}
+
+		recomposed := domain.SystemBlocks{
+			Prompt: "You are the machinist.\n\nGit is backed by a proxy.",
+			Block:  "<run_context>\nBranch convention: after-the-park/<ticket-id>\n</run_context>",
+			Parts: &domain.SystemParts{
+				Shared: []domain.SystemPart{
+					{Key: "identity/machinist.txt", Text: "You are the machinist."},
+					{Key: "github/multi.txt", Text: "Git is backed by a proxy."},
+				},
+				Conversation: []domain.SystemPart{{Key: "run_context.branch_convention", Text: "Branch convention: after-the-park/<ticket-id>"}},
+			},
+		}
+		result := compact(&recomposed)
+		if got := saved(); !reflect.DeepEqual(got, recomposed) {
+			t.Errorf("saved blocks after a compaction carrying them = %+v, want %+v", got, recomposed)
+		}
+		window, err := store.ListForAssemblySystem(ctx, orgID, conversationID)
+		if err != nil {
+			t.Fatalf("ListForAssemblySystem: %v", err)
+		}
+		if len(window) != 1 || window[0].ID != result.ID {
+			t.Errorf("assembly window = %+v, want only the second compaction's result row", window)
 		}
 	})
 
@@ -2932,9 +3035,8 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Fatalf("SystemBlocksSystem parts = %+v, want %+v", got.Parts, blocks.Parts)
 		}
 
-		// A compaction saves the blocks the engagement composed in place of the
-		// first claim's: the columns are what the conversation's next call
-		// sends. A nil Parts clears them.
+		// A second stamp replaces the first, all three columns together, so a
+		// nil Parts clears them.
 		if _, err := store.SetSystemBlocksForClaimSystem(ctx, orgID, conversationID, claimID, domain.SystemBlocks{Prompt: "next release", Block: "recomposed"}); err != nil {
 			t.Fatalf("re-stamp the system blocks: %v", err)
 		}
@@ -3288,6 +3390,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Helper()
 			// The empty stamp releases the active claim; without it the next
 			// mint would update in place instead of starting an engagement.
+			// The claims so far are aged first, so the release is the newest
+			// on the clock: the predecessor is read by release time.
+			seed.AgeClaims(t, conversationID, time.Second)
 			if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "", 0); err != nil {
 				t.Fatalf("release before minting %s: %v", executorID, err)
 			}
@@ -6098,6 +6203,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		conversationID := seedConversationForTaskTest(t, orgID, taskID, "", seed)
 		park(conversationID)
+		seed.BackdateParkedAt(t, conversationID, time.Minute)
 		// The awaiting-person test applies: a trigger fired this one.
 		fired := seed.Conversation(t, domain.Conversation{
 			TaskID: taskID, PromptID: conversationTestPrompt(t), Model: "m",

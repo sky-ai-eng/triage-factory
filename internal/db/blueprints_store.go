@@ -366,6 +366,29 @@ type BlueprintStore interface {
 	// request-facing paths).
 	Get(ctx context.Context, orgID string, id string) (*domain.Blueprint, error)
 
+	// GetForShare and GetForUpdate are Get inside a write transaction, holding
+	// the blueprint until the transaction ends. A write that makes something
+	// reference the blueprint takes GetForShare, and a write that retires it
+	// takes GetForUpdate before it reads or detaches what references it, so
+	// the two run one after the other and the second sees what the first
+	// committed: a reference written first is there for the retire to detach,
+	// and a blueprint retired first reads as absent.
+	//
+	// Postgres locks the row FOR SHARE or FOR UPDATE, so two writes that only
+	// reference the blueprint do not wait for one another. A lock that waited
+	// on a retire reads the row as it committed, so a retired blueprint answers
+	// (nil, nil). Row-level security applies the blueprints UPDATE policy to a
+	// locking read as well as the SELECT one, so a blueprint of a team the
+	// caller may only read also answers (nil, nil). SQLite takes nothing: its
+	// write transaction begins IMMEDIATE and already holds the database's
+	// write lock.
+	//
+	// Call them on a write transaction's db.TxStores (WithTx). Outside a
+	// transaction, or in a read transaction, both are refused: nothing would
+	// hold the blueprint past the read, or nothing a writer waits for.
+	GetForShare(ctx context.Context, orgID string, id string) (*domain.Blueprint, error)
+	GetForUpdate(ctx context.Context, orgID string, id string) (*domain.Blueprint, error)
+
 	// Create inserts a new blueprint (user or imported source) owned by
 	// teamID. Caller-provided ID. The Postgres impl binds teamID directly
 	// (it satisfies the team-membership RLS); the SQLite impl ignores it.
@@ -406,10 +429,15 @@ type BlueprintStore interface {
 	// is not a step in any blueprint.
 	StepPromptOwner(ctx context.Context, orgID string, promptID string) (blueprintID string, ok bool, err error)
 
-	// GetSystem mirrors Get but routes through the admin pool in Postgres.
-	// The delegate spawner resolves a trigger/manual blueprint from a
-	// goroutine that continues past the request lifecycle.
+	// GetSystem is Get on the admin pool in Postgres, except that it also
+	// resolves a soft-deleted blueprint, as a past run's blueprint can be.
 	GetSystem(ctx context.Context, orgID string, id string) (*domain.Blueprint, error)
+
+	// GetLiveSystem is GetSystem filtering deleted_at IS NULL, as Get does: a
+	// soft-deleted blueprint answers (nil, nil). Planning an event-fired run
+	// reads through it, because a handler can be left on a blueprint its team
+	// deleted, and a run of one would execute steps the team deleted.
+	GetLiveSystem(ctx context.Context, orgID string, id string) (*domain.Blueprint, error)
 
 	// IncrementUsage bumps usage_count by 1.
 	// IncrementUsage / IncrementUsageSystem are exempt from the returned-row

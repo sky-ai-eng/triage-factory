@@ -119,7 +119,7 @@ func (s *taskMemoryStore) GetRecentMemoriesForEntitySystem(ctx context.Context, 
 	rows, err := s.q.QueryContext(ctx, taskMemorySelect+`
 		WHERE rm.agent_content IS NOT NULL
 		  AND rm.conversation_id IN (SELECT conversation_id FROM conversation_memory_entities WHERE entity_id = ?)
-		ORDER BY rm.created_at DESC
+		ORDER BY rm.created_at DESC, rm.id DESC
 		LIMIT ?
 	`, entityID, limit)
 	if err != nil {
@@ -138,7 +138,7 @@ func getMemoriesForEntity(ctx context.Context, q queryer, entityID string) ([]do
 	rows, err := q.QueryContext(ctx, taskMemorySelect+`
 		WHERE rm.agent_content IS NOT NULL
 		  AND rm.conversation_id IN (SELECT conversation_id FROM conversation_memory_entities WHERE entity_id = ?)
-		ORDER BY rm.created_at ASC
+		ORDER BY rm.created_at ASC, rm.id ASC
 	`, entityID)
 	if err != nil {
 		return nil, err

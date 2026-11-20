@@ -52,6 +52,13 @@ type ClaimLeaseFixture struct {
 	// method writes, since every status write releases its claim.
 	SetStoredStatus func(t *testing.T, conversationID, status string)
 
+	// AgeClaims moves the stamps the retry budget orders a conversation's
+	// claims by d earlier, as ClaimPredicateHarness.Age does. A subtest that
+	// counts a hand-back released after the claim that started its episode
+	// ages the claim first, so the count does not depend on the clock's
+	// resolution.
+	AgeClaims func(t *testing.T, conversationID string, d time.Duration)
+
 	// BackdateConclusion moves a conversation's completed_at and parked_at,
 	// each when it has one, and the release of every claim of it already
 	// released, `ago` into the past, on the clock and in the layout each
@@ -316,6 +323,9 @@ func RunClaimLeaseConformance(t *testing.T, mk ClaimLeaseFactory) {
 		if released, err := q.ReleaseExpiredClaimSystem(ctx, f.OrgID, conversationID, first.ClaimID); err != nil || !released {
 			t.Fatalf("ReleaseExpiredClaimSystem = (%v, %v), want (true, nil)", released, err)
 		}
+		// Claimed back to back, the two could share a claimed_at, which the
+		// list leaves to the id.
+		f.AgeClaims(t, conversationID, time.Second)
 		second := claim(t, f, conversationID)
 		otherID, _ := f.StageStep(t)
 		other := claim(t, f, otherID)

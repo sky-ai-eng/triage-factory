@@ -8,16 +8,19 @@ import (
 	"reflect"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // EntityKeyFactory hands RunEntityKeyConformance an EntityStore and the org to
-// call it with. It is a store and nothing else so a backend can run the suite
-// through any wiring — the conformance pool, or a transaction carrying a
-// user's claims under RLS.
-type EntityKeyFactory func(t *testing.T) (store db.EntityStore, orgID string)
+// call it with, so a backend can run the suite through any wiring — the
+// conformance pool, or a transaction carrying a user's claims under RLS.
+// setCreatedAt rewrites an entity's created_at through that same wiring: the
+// key lookup breaks a closed_at tie on it, and a transaction's now() ties
+// every close inside it.
+type EntityKeyFactory func(t *testing.T) (store db.EntityStore, orgID string, setCreatedAt func(t *testing.T, entityID string, at time.Time))
 
 // RunEntityKeyConformance covers the key half of the entity identity model
 // through the request-path methods (FindOrCreate, GetBySource):
@@ -39,11 +42,14 @@ func RunEntityKeyConformance(t *testing.T, mk EntityKeyFactory) {
 	const scope = "ws-a"
 
 	t.Run("key_lookup_prefers_active_then_most_recently_closed", func(t *testing.T) {
-		s, orgID := mk(t)
+		s, orgID, setCreatedAt := mk(t)
 		first, _, err := s.FindOrCreate(ctx, orgID, "github", scope, "acme/key#1", "uuid-k1-a", "pr", "first", "")
 		if err != nil {
 			t.Fatalf("create first: %v", err)
 		}
+		// An hour older than the second, which a key's rows always are: the
+		// next row under a key is created only after the last one closed.
+		setCreatedAt(t, first.ID, time.Now().Add(-time.Hour))
 		if _, err := s.MarkClosed(ctx, orgID, first.ID); err != nil {
 			t.Fatalf("close first: %v", err)
 		}
@@ -74,7 +80,7 @@ func RunEntityKeyConformance(t *testing.T, mk EntityKeyFactory) {
 	})
 
 	t.Run("an_active_key_refuses_a_different_object", func(t *testing.T) {
-		s, orgID := mk(t)
+		s, orgID, _ := mk(t)
 		holder, _, err := s.FindOrCreate(ctx, orgID, "github", scope, "acme/key#2", "uuid-k2-a", "pr", "holder", "")
 		if err != nil {
 			t.Fatalf("create holder: %v", err)
@@ -92,7 +98,7 @@ func RunEntityKeyConformance(t *testing.T, mk EntityKeyFactory) {
 	})
 
 	t.Run("a_keyless_create_returns_the_row_under_the_key", func(t *testing.T) {
-		s, orgID := mk(t)
+		s, orgID, _ := mk(t)
 		row, _, err := s.FindOrCreate(ctx, orgID, "github", scope, "acme/key#3", "uuid-k3", "pr", "t", "")
 		if err != nil {
 			t.Fatalf("create: %v", err)
@@ -104,7 +110,7 @@ func RunEntityKeyConformance(t *testing.T, mk EntityKeyFactory) {
 	})
 
 	t.Run("a_given_id_wins_over_the_key", func(t *testing.T) {
-		s, orgID := mk(t)
+		s, orgID, _ := mk(t)
 		row, _, err := s.FindOrCreate(ctx, orgID, "github", scope, "acme/key#4", "uuid-k4", "pr", "t", "")
 		if err != nil {
 			t.Fatalf("create: %v", err)
@@ -119,7 +125,7 @@ func RunEntityKeyConformance(t *testing.T, mk EntityKeyFactory) {
 	})
 
 	t.Run("scope_separates_identical_keys_and_ids", func(t *testing.T) {
-		s, orgID := mk(t)
+		s, orgID, _ := mk(t)
 		a, createdA, err := s.FindOrCreate(ctx, orgID, "github", "ws-one", "acme/key#5", "uuid-k5", "pr", "a", "")
 		if err != nil || !createdA {
 			t.Fatalf("create in ws-one: created=%v err=%v", createdA, err)
@@ -178,6 +184,11 @@ type EntityIdentitySeeder struct {
 	// the duplicate merge exists to fold. Raw SQL because no write may produce
 	// it; the backend restores the requirement when the test ends.
 	ForgetExternalID func(t *testing.T, entityID string)
+
+	// SetCreatedAt rewrites an entity's created_at, in the layout the
+	// dialect stores it in. The duplicate merge keeps the older row, and
+	// two rows a subtest creates back to back can share an instant.
+	SetCreatedAt func(t *testing.T, entityID string, at time.Time)
 
 	// Conversation inserts a conversation, on a task and entity of its own,
 	// and returns its id, for memory links to name.
@@ -573,6 +584,7 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 			t.Fatalf("create older: %v", err)
 		}
 		seed.ForgetExternalID(t, older.ID)
+		seed.SetCreatedAt(t, older.ID, time.Now().Add(-time.Hour))
 		older, _ = s.Entities.GetSystem(ctx, orgID, older.ID)
 		olderTask := seed.Task(t, older.ID, "dup")
 		if _, err := s.Entities.MarkClosed(ctx, orgID, older.ID); err != nil {
@@ -696,6 +708,7 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 			t.Fatalf("create older: %v", err)
 		}
 		seed.ForgetExternalID(t, older.ID)
+		seed.SetCreatedAt(t, older.ID, time.Now().Add(-time.Hour))
 		older, _ = s.Entities.GetSystem(ctx, orgID, older.ID)
 		newer, _, err := s.Entities.FindOrCreateJiraSystem(ctx, orgID, jiraScope, "NEW-2", "10002", TestJiraProject, "Newer", jiraScope+"/browse/NEW-2")
 		if err != nil {

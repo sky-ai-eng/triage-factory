@@ -1,8 +1,10 @@
 package delegate
 
 import (
+	"reflect"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentprompt"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -74,4 +76,44 @@ func TestSystemUpdate_ALineThatNoLongerAppliesIsOneLine(t *testing.T) {
 func firstLine(s string) string {
 	line, _, _ := strings.Cut(strings.TrimSpace(s), "\n")
 	return line
+}
+
+// TestSystemComposition_ATextPostgresCannotStoreIsMadeStorable: a knowledge
+// line or a file name in a run tree an agent owns can carry NUL or invalid
+// UTF-8, which Postgres refuses in the saved blocks and parts alike, so a
+// native compaction's commit would fail on every claim. The composition makes
+// them storable, and the block it sends renders the parts it saves.
+func TestSystemComposition_ATextPostgresCannotStoreIsMadeStorable(t *testing.T) {
+	knowledge := "Team knowledge staged for this run.\n  notes\xff.md — H\x00e\x00l\x00l\x00o"
+	c := systemComposition{
+		spec:       nativeSpec(agentprompt.SurfaceMachinist),
+		mission:    "review the pull request\x00",
+		runContext: runContextLines("", "", "", "", "", "", "tfac/<ticket-id>", "", "", knowledge),
+		tools:      sourceDocs{kinds: []string{"github"}}.toolParts(agentprompt.RuntimeNative),
+	}
+	blocks := c.blocks()
+
+	storable := func(name, s string) {
+		t.Helper()
+		if strings.ContainsRune(s, 0) || !utf8.ValidString(s) {
+			t.Errorf("%s holds a NUL or invalid UTF-8: %q", name, s)
+		}
+	}
+	storable("block 2", blocks.Block)
+	var listing string
+	for _, p := range blocks.Parts.Conversation {
+		storable(p.Key, p.Text)
+		if p.Key == partKnowledge {
+			listing = p.Text
+		}
+	}
+	if listing != "Team knowledge staged for this run.\n  notes�.md — Hello" {
+		t.Errorf("knowledge part = %q, want the listing with the NULs removed and the invalid byte replaced", listing)
+	}
+	if !strings.Contains(blocks.Block, listing) {
+		t.Error("block 2 does not render the knowledge part it saves")
+	}
+	if !reflect.DeepEqual(blocks.Parts, c.parts()) {
+		t.Error("the parts saved with the blocks differ from the parts a later claim compares")
+	}
 }

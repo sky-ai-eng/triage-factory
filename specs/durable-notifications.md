@@ -184,7 +184,7 @@ var LinearTeamUnreadable = notify.Condition(notify.ConditionSpec[LinearTeam]{
 
 - Upserts the open occurrence under the partial unique index (coalescing), bumping `last_seen_at` and `seen_count` and refreshing title, body, actions and params.
 - Resolves the audience; inserts rows for audiences newly named and resolves open rows for audiences no longer named (`resolved_reason = 'audience_removed'`) — so a team that stops tracking a subject stops being told about it.
-- Sets `escalated_at` on a priority increase.
+- Sets `escalated_at` on a priority increase, and `escalated_seen_count` to the `seen_count` it wrote. The write reports an escalation by those counts, not by `escalated_at` equalling `last_seen_at`, because a bump can land in the same clock tick as the escalation before it.
 - Stores `P` as the row's `params` and hands it back typed to action handlers.
 - Writes each resolved row's `resolution`: its kind's `Resolved`, from the params the row was last raised with, in the transaction that resolves it. A `Resolved` that fails is counted and leaves the row without one; the resolution stands.
 - Sends the websocket ping on open, escalation and resolution only.
@@ -239,6 +239,7 @@ Postgres changes go into the baseline; SQLite gets a forward migration. Both beh
 | `first_seen_at`, `last_seen_at` | timestamptz      |                                                                                     |
 | `seen_count`                    | integer          |                                                                                     |
 | `escalated_at`                  | timestamptz      | `first_seen_at` until the priority first increases.                                 |
+| `escalated_seen_count`          | integer          | `seen_count` as of `escalated_at`. CHECK: between 1 and `seen_count`.               |
 | `resolved_at`                   | timestamptz NULL |                                                                                     |
 | `resolved_reason`               | text NULL        | `cleared` \| `source_off` \| `audience_removed`                                     |
 | `resolution`                    | text NULL        | Why the row resolved, in a sentence its kind renders. NULL while open.              |

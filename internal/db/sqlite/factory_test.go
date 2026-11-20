@@ -203,6 +203,10 @@ func newSQLiteFactorySeeder(conn *sql.DB) dbtest.FactorySeeder {
 				t.Fatalf("close entity %s: %v", entityID, err)
 			}
 		},
+		SetEntityCreatedAt: func(t *testing.T, entityID string, at time.Time) {
+			t.Helper()
+			dbtest.MustUpdate(t, conn, `UPDATE entities SET created_at = ? WHERE id = ?`, at.UTC(), entityID)
+		},
 		SetEntityKind: func(t *testing.T, entityID, kind string) {
 			t.Helper()
 			if _, err := conn.Exec(`UPDATE entities SET kind = ? WHERE id = ?`, kind, entityID); err != nil {
