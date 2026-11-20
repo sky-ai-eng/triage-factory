@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -431,6 +432,61 @@ func TestDeploymentWebhook_UnsignedOrMalformed_NotLogged(t *testing.T) {
 	}
 	if got := sumByAttr(t, r.metrics, "slack.webhook.signature.mismatches", "names_app"); len(got) != 0 {
 		t.Errorf("signature mismatches = %v, want none", got)
+	}
+}
+
+// TestDeploymentWebhook_SignatureVerdictsCounted: every delivery to the
+// deployment endpoint is counted by its signature verdict under the deployment
+// app, whichever app the body names, so a clock more than five minutes off
+// shows as stale deliveries with none verified.
+func TestDeploymentWebhook_SignatureVerdictsCounted(t *testing.T) {
+	r := newDeploymentIngestRig(t, deploymentRow(deployTestOrgID, deployTestWorkspace, true))
+	body := mustJSON(t, map[string]any{"type": "url_verification", "challenge": "c"})
+	otherApp := mustJSON(t, eventCallbackPayload(deployTestWorkspace, "A0OLDAPP01", "Ev-1", mentionInner("C1", "U1", "1.0")))
+	fresh := nowTimestamp()
+	stale := strconv.FormatInt(time.Now().Add(-10*time.Minute).Unix(), 10)
+	ahead := strconv.FormatInt(time.Now().Add(10*time.Minute).Unix(), 10)
+
+	for _, tc := range []struct {
+		name, timestamp, sig string
+		body                 []byte
+		wantStatus           int
+	}{
+		{"verified", fresh, sign(deployTestSecret, fresh, body), body, http.StatusOK},
+		{"another secret", fresh, sign("another-apps-secret", fresh, body), body, http.StatusUnauthorized},
+		{"another app", fresh, sign("old-apps-secret", fresh, otherApp), otherApp, http.StatusUnauthorized},
+		{"stale", stale, sign(deployTestSecret, stale, body), body, http.StatusUnauthorized},
+		{"ahead of the clock", ahead, sign(deployTestSecret, ahead, body), body, http.StatusUnauthorized},
+		{"unsigned", "", "", body, http.StatusUnauthorized},
+	} {
+		if rec := postDeploymentWebhook(t, r.webhook, tc.body, tc.timestamp, tc.sig); rec.Code != tc.wantStatus {
+			t.Errorf("%s: status = %d, want %d", tc.name, rec.Code, tc.wantStatus)
+		}
+	}
+
+	want := map[string]int64{"verified": 1, "mismatch": 2, "stale": 2, "malformed": 1}
+	if got := sumByAttr(t, r.metrics, "slack.webhook.deployment.deliveries", "signature"); !maps.Equal(got, want) {
+		t.Errorf("deployment deliveries by signature = %v; want %v", got, want)
+	}
+	if got := sumByAttr(t, r.metrics, "slack.webhook.deployment.deliveries", "app_id"); !maps.Equal(got, map[string]int64{deployTestAppID: 6}) {
+		t.Errorf("deployment deliveries by app = %v; want {%s: 6}", got, deployTestAppID)
+	}
+
+	for _, tc := range []struct {
+		name string
+		app  deploymentApp
+	}{
+		{"no deployment app", deploymentApp{}},
+		{"Socket Mode deployment app", socketDeploymentApp()},
+	} {
+		off := newDeploymentIngestRig(t)
+		off.webhook.deployment = tc.app
+		if rec := postDeploymentWebhook(t, off.webhook, body, fresh, sign(deployTestSecret, fresh, body)); rec.Code != http.StatusNotFound {
+			t.Errorf("%s: status = %d, want 404", tc.name, rec.Code)
+		}
+		if got := sumByAttr(t, off.metrics, "slack.webhook.deployment.deliveries", "signature"); len(got) != 0 {
+			t.Errorf("%s: deployment deliveries = %v; want none", tc.name, got)
+		}
 	}
 }
 
