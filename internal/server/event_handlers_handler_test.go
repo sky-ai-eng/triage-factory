@@ -672,6 +672,27 @@ func TestHandleEventHandlersList_RefusesAudienceAndCreator(t *testing.T) {
 	}
 }
 
+// TestHandleEventHandlersList_TokenIsBoundToItsFilters: a page token minted
+// under one kind is refused under another, so a walk cannot continue into a
+// different result set.
+func TestHandleEventHandlersList_TokenIsBoundToItsFilters(t *testing.T) {
+	s := newTestServer(t)
+	configureEventSources(t, s)
+	createUserRuleWithSort(t, s, "a", 0)
+	createUserRuleWithSort(t, s, "b", 1)
+	first := httpxtest.DecodeList[map[string]any](t, doJSON(t, s, http.MethodPost, "/api/event-handlers/list",
+		map[string]any{"kind": "rule", "page_size": 1}))
+	if first.NextPageToken == "" {
+		t.Fatal("kind=rule with page_size 1 minted no next page token")
+	}
+	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/list",
+		map[string]any{"kind": "notify", "page_size": 1, "page_token": first.NextPageToken})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("token minted under kind=rule reused under kind=notify = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	assertFieldError(t, rec, "page_token")
+}
+
 // --- helpers --------------------------------------------------------------
 
 func createUserRule(t *testing.T, s *Server) string {

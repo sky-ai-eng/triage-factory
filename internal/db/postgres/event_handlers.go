@@ -26,10 +26,10 @@ import (
 //
 //   - app   — tf_app, RLS-active. Every CRUD method runs here.
 //   - admin — supabase_admin, BYPASSRLS. Seed runs here because the
-//     event_handlers_insert / event_handlers_update RLS policies gate
-//     on creator_user_id = tf.current_user_id() (or admin-on-org for
-//     UPDATE); boot-time Seed has no JWT claims and would otherwise
-//     fail the WITH CHECK on every shipped row.
+//     event_handlers_insert RLS policy gates on
+//     creator_user_id = tf.current_user_id() and on team write; boot-time
+//     Seed has no JWT claims and would otherwise fail the WITH CHECK on
+//     every shipped row.
 //
 // Inside WithTx both fields point at the same *sql.Tx, and inTx is
 // true. Seed inside WithTx is rejected: escaping to the admin pool

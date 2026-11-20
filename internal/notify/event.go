@@ -103,8 +103,8 @@ func Event(s EventSpec) *EventKind {
 	return &EventKind{render: s.Render, resolved: s.Resolved, example: s.Example, exampleClosedBy: s.ExampleClosedBy}
 }
 
-// Raise writes the event's rows: one for each team a matched rule is on. A
-// failure is logged and counted, and writes nothing.
+// Raise writes the event's rows: one for each team a matched rule is on that
+// has members. A failure is logged and counted, and writes nothing.
 func (k *EventKind) Raise(ctx context.Context, orgID string, r EventRaise) {
 	if len(r.Rules) == 0 {
 		return

@@ -215,8 +215,8 @@ func TestLocal_EventRaise(t *testing.T) {
 	}
 }
 
-// A row an earlier build wrote carries team_rule in its params, which nothing
-// reads now: its resolution still decodes them and describes it.
+// A stored row's params may carry team_rule, which EventParams does not have:
+// its resolution still decodes them and describes it.
 func TestLocal_EventRowWithTeamRuleParamsResolves(t *testing.T) {
 	stores, hub, conn := localBackend(t)
 	ctx := context.Background()
