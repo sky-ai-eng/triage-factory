@@ -240,8 +240,10 @@ var TaskListStatuses = []string{
 //     key — the default order has no direction to flip — and the HTTP layer
 //     refuses that combination rather than silently ignoring it.
 type TaskListFilter struct {
-	Statuses       []string
-	IDs            []string
+	Statuses []string
+	IDs      []string
+	// EntityIDs keeps the tasks on these entities. Empty = every entity.
+	EntityIDs      []string
 	TeamIDs        []string
 	OnlyUnclaimed  bool
 	IncludeSnoozed bool
@@ -528,21 +530,6 @@ type TaskStore interface {
 	// regardless of event type. Used by entity lifecycle to close
 	// everything when the underlying entity (PR / ticket) closes.
 	FindActiveByEntity(ctx context.Context, orgID, entityID string) ([]domain.Task, error)
-
-	// ListActiveRefsForEntities returns minimal active-task refs
-	// (id, entity_id, event_type, dedup_key) for any entity in
-	// entityIDs. Used by the factory snapshot to attach pending
-	// tasks per entity in a single round-trip — no entity JOIN,
-	// no priority columns. Chunks internally on SQLite's
-	// variable-bind limit.
-	//
-	// teamIDs is the factory's per-page team filter (same shape as
-	// Queued): empty = the viewer's union, non-empty narrows the refs to
-	// those teams via the same RLS-mirroring predicate as Queued. Without
-	// it the station drawer would surface (and let you delegate) task
-	// refs outside the selected team scope even when the entity belt was
-	// filtered. Postgres-only effect; SQLite is N=1 and ignores it.
-	ListActiveRefsForEntities(ctx context.Context, orgID string, entityIDs []string, teamIDs []string) ([]domain.PendingTaskRef, error)
 
 	// EntityIDsWithActiveTasks returns the set of entity IDs with
 	// at least one non-terminal task, scoped to the given entity

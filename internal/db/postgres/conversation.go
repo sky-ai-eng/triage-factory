@@ -1595,11 +1595,10 @@ func endConversation(ctx context.Context, q queryer, orgID, conversationID strin
 // --- Queries ---
 
 // pgConversationColumns is the SELECT list scanned into a domain.Conversation
-// via scanConversation. Owned here on ConversationStore; sibling Postgres
-// stores that need to project a conversation (e.g.
-// factoryReadStore.ActiveConversations) already use their own copy because
-// they also project task+entity JOINs. Keeping this here keeps the simple
-// "just the conversation" projection uncoupled from those.
+// via scanConversation. Owned here on ConversationStore; a sibling Postgres
+// store that needs to project a conversation beside task+entity JOINs uses
+// its own copy. Keeping this here keeps the simple "just the conversation"
+// projection uncoupled from those.
 // task_id/status/team_id COALESCE to ” because a
 // non-delegation conversation may carry NULLs there; the claim-derived
 // fields (incl. duration/turns telemetry) come from the `cl` lateral and
@@ -2217,6 +2216,16 @@ func pgConversationListWhere(orgID string, filter db.ConversationListFilter) (st
 		args = append(args, pgUUIDArray(ids))
 		where += fmt.Sprintf(` AND r.team_id = ANY($%d)`, len(args))
 	}
+	if len(filter.EntityIDs) > 0 {
+		// The task's entity, through a correlated EXISTS so a conversation is
+		// one row however its task is reached.
+		ids := filterValidUUIDs(filter.EntityIDs)
+		if len(ids) == 0 {
+			return "", nil, false
+		}
+		args = append(args, pgUUIDArray(ids))
+		where += fmt.Sprintf(` AND EXISTS (SELECT 1 FROM tasks et WHERE et.id = r.task_id AND et.org_id = r.org_id AND et.entity_id = ANY($%d::uuid[]))`, len(args))
+	}
 	if len(filter.Statuses) > 0 {
 		// One placeholder per value rather than an array literal: these are
 		// client-supplied names, and a placeholder needs no quoting rules to
@@ -2467,33 +2476,6 @@ func (s *conversationStore) ListResumableWorktreePathsSystem(ctx context.Context
 		paths = append(paths, p)
 	}
 	return paths, rows.Err()
-}
-
-func (s *conversationStore) EntitiesWithOpenConversations(ctx context.Context, orgID string, entityIDs []string) (map[string]struct{}, error) {
-	out := make(map[string]struct{})
-	if len(entityIDs) == 0 {
-		return out, nil
-	}
-	rows, err := s.q.QueryContext(ctx, `
-		SELECT DISTINCT t.entity_id
-		FROM conversations r
-		JOIN tasks t ON t.id = r.task_id AND t.org_id = r.org_id
-		WHERE r.org_id = $1
-		  AND r.status = 'open' AND r.completed_at IS NULL
-		  AND t.entity_id = ANY($2)
-	`, orgID, entityIDs)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		out[id] = struct{}{}
-	}
-	return out, rows.Err()
 }
 
 // --- Transcript / messages ---

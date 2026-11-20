@@ -4593,53 +4593,6 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
-	t.Run("EntitiesWithOpenConversations_EmptyInputFastPath", func(t *testing.T) {
-		store, orgID, _, _ := mk(t)
-		got, err := store.EntitiesWithOpenConversations(context.Background(), orgID, nil)
-		if err != nil {
-			t.Fatalf("nil: %v", err)
-		}
-		if len(got) != 0 {
-			t.Errorf("nil input: %d entries, want 0", len(got))
-		}
-		got, err = store.EntitiesWithOpenConversations(context.Background(), orgID, []string{})
-		if err != nil {
-			t.Fatalf("empty: %v", err)
-		}
-		if len(got) != 0 {
-			t.Errorf("empty input: %d entries, want 0", len(got))
-		}
-	})
-
-	t.Run("EntitiesWithOpenConversations_FiltersByStatus", func(t *testing.T) {
-		store, orgID, _, seed := mk(t)
-		ctx := context.Background()
-		entA := seed.Entity(t, "ewa-a")
-		entB := seed.Entity(t, "ewa-b")
-		evA := seed.Event(t, entA, domain.EventGitHubPROpened)
-		evB := seed.Event(t, entB, domain.EventGitHubPROpened)
-		taskA := seed.Task(t, entA, domain.EventGitHubPROpened, evA)
-		taskB := seed.Task(t, entB, domain.EventGitHubPROpened, evB)
-
-		// A has an open conversation; B has only a running one.
-		convA := seedConversationForTaskTest(t, orgID, taskA, "running", seed)
-		if _, err := HolderPark(store, ctx, orgID, convA, db.ParkTurnIncomplete()); err != nil {
-			t.Fatalf("open A: %v", err)
-		}
-		_ = seedConversationForTaskTest(t, orgID, taskB, "running", seed)
-
-		got, err := store.EntitiesWithOpenConversations(ctx, orgID, []string{entA, entB})
-		if err != nil {
-			t.Fatalf("EntitiesWithOpenConversations: %v", err)
-		}
-		if _, ok := got[entA]; !ok {
-			t.Errorf("entA missing from open set")
-		}
-		if _, ok := got[entB]; ok {
-			t.Errorf("entB leaked — only entA has an open conversation")
-		}
-	})
-
 	// Every caller in the repo leaves Delivered nil and WindowState "": the
 	// insert stamps created_at and the schema defaults for what the caller
 	// leaves unset (delivered, the active window, no seq), and keeps an

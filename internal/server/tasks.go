@@ -343,6 +343,10 @@ type taskListRequest struct {
 	// holds the ids of the tasks it shows. Validated by taskListIDs. Empty =
 	// every id.
 	IDs []string `json:"ids"`
+	// EntityIDs narrows to the tasks on these entities, for a caller that
+	// holds the entities it shows and wants their work. Validated like IDs.
+	// Empty = every entity.
+	EntityIDs []string `json:"entity_ids"`
 	// CreatedBefore (RFC3339) is CreatedSince's other half: rows created at
 	// or before it. The pair is how a lane asks for a window rather than a
 	// ray, and either end may stand alone. It sits with the reader's own
@@ -471,6 +475,7 @@ func taskListIDs(v *httpx.Validation, raw []string) []string {
 type taskListFilterKey struct {
 	Statuses       []string `json:"statuses"`
 	IDs            []string `json:"ids"`
+	EntityIDs      []string `json:"entity_ids"`
 	TeamIDs        []string `json:"team_ids"`
 	OnlyUnclaimed  bool     `json:"only_unclaimed"`
 	IncludeSnoozed bool     `json:"include_snoozed"`
@@ -527,10 +532,11 @@ type taskCreateRequest struct {
 // resource a GET /api/tasks/{id} would.
 //
 // Three refusals, all before any write:
-//   - the entity must exist (404) and be active (409) — the factory snapshot's
-//     60s soft-close grace lets a chip ride the final animation hop after its
-//     entity flipped to merged/closed, and a task synthesized there would run
-//     to completion against a closed PR with no close-cascade to clean it up;
+//   - the entity must exist (404) and be active (409) — the factory keeps a
+//     closed entity on the floor for a minute so its chip can ride the final
+//     animation hop after it flipped to merged/closed, and a task synthesized
+//     there would run to completion against a closed PR with no close-cascade
+//     to clean it up;
 //   - the (entity, event_type, dedup_key) triple must resolve a real event
 //     (422). tasks.primary_event_id is NOT NULL: a task cannot exist without an
 //     anchor, and if nothing matches, the entity isn't at this station;
@@ -805,6 +811,7 @@ func (s *Server) handleTaskList(w http.ResponseWriter, r *http.Request) {
 	var v httpx.Validation
 	filter, laneKeys := resolveTaskLane(&v, req.taskLaneRequest)
 	filter.IDs = taskListIDs(&v, req.IDs)
+	filter.EntityIDs = canonicalIDList(&v, "entity_ids", "an entity", req.EntityIDs)
 	var createdBeforeKey string
 	filter.CreatedBefore, createdBeforeKey = parseTaskWindow(&v, "created_before", req.CreatedBefore)
 	filter.EventTypes = httpx.CanonicalStrings(req.EventTypes)
@@ -825,6 +832,7 @@ func (s *Server) handleTaskList(w http.ResponseWriter, r *http.Request) {
 	page := httpx.ResolveKeysetPage(&v, req.PageRequest, httpx.FilterFingerprint(taskListFilterKey{
 		Statuses:       filter.Statuses,
 		IDs:            filter.IDs,
+		EntityIDs:      filter.EntityIDs,
 		TeamIDs:        filter.TeamIDs,
 		OnlyUnclaimed:  filter.OnlyUnclaimed,
 		IncludeSnoozed: filter.IncludeSnoozed,

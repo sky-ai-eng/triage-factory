@@ -379,6 +379,15 @@ func pgTaskListWhere(orgID string, f db.TaskListFilter) (string, []any) {
 			clauses = append(clauses, "FALSE")
 		}
 	}
+	if len(f.EntityIDs) > 0 {
+		// The same drop-then-refuse as IDs: tasks.entity_id is a uuid column.
+		if ids := filterValidUUIDs(f.EntityIDs); len(ids) > 0 {
+			args = append(args, pgUUIDArray(ids))
+			clauses = append(clauses, fmt.Sprintf("t.entity_id = ANY($%d::uuid[])", len(args)))
+		} else {
+			clauses = append(clauses, "FALSE")
+		}
+	}
 	if f.OnlyUnclaimed {
 		clauses = append(clauses, "t.claimed_by_agent_id IS NULL AND t.claimed_by_user_id IS NULL")
 	}
@@ -556,43 +565,6 @@ func findActiveTasksByEntity(ctx context.Context, q queryer, orgID, entityID str
 		WHERE t.org_id = $1 AND t.entity_id = $2
 			AND t.status NOT IN ('done', 'dismissed')
 	`, orgID, entityID)
-}
-
-func (s *taskStore) ListActiveRefsForEntities(ctx context.Context, orgID string, entityIDs []string, teamIDs []string) ([]domain.PendingTaskRef, error) {
-	if len(entityIDs) == 0 {
-		return nil, nil
-	}
-	// Postgres has no comparable variable-bind cap to SQLite's 999/500;
-	// the array bind via lib/pq keeps the whole list in a single
-	// placeholder regardless of size, so no chunking is needed. The
-	// table is aliased t so the shared team-filter fragment (same
-	// RLS-mirroring predicate as Queued) applies — narrowing the refs to
-	// the selected teams keeps the station drawer in sync with a
-	// team-filtered entity belt.
-	args := []any{orgID, entityIDs}
-	teamClause, args := pgTaskTeamFilter(teamIDs, args)
-	rows, err := s.q.QueryContext(ctx, `
-		SELECT t.id, t.entity_id, t.event_type, t.dedup_key
-		FROM tasks t
-		WHERE t.org_id = $1
-			AND t.entity_id = ANY($2)
-			AND t.status NOT IN ('done', 'dismissed')`+teamClause+`
-		ORDER BY t.entity_id, t.event_type, t.created_at DESC
-	`, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	out := make([]domain.PendingTaskRef, 0, len(entityIDs))
-	for rows.Next() {
-		var ref domain.PendingTaskRef
-		if err := rows.Scan(&ref.ID, &ref.EntityID, &ref.EventType, &ref.DedupKey); err != nil {
-			return nil, err
-		}
-		out = append(out, ref)
-	}
-	return out, rows.Err()
 }
 
 func (s *taskStore) EntityIDsWithActiveTasks(ctx context.Context, orgID, source string) (map[string]struct{}, error) {
@@ -1540,8 +1512,7 @@ func (s *taskStore) OwnerTeamForLatestTaskInTypesSystem(ctx context.Context, org
 		return "", nil
 	}
 	// Admin pool: the router has no JWT claims. event_type = ANY($3) binds
-	// the slice as a single array placeholder (pgx native), same shape as
-	// ListActiveRefsForEntities' entity-id array. The team_id IS NOT NULL
+	// the slice as a single array placeholder (pgx native). The team_id IS NOT NULL
 	// filter excludes unowned priors; the caller's omission of
 	// review_requested from eventTypes excludes review tasks.
 	var teamID sql.NullString

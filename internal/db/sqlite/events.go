@@ -57,7 +57,7 @@ func recordEvent(ctx context.Context, q queryer, evt domain.Event) (string, erro
 	var occurredAt any
 	if !evt.OccurredAt.IsZero() {
 		// UTC at the bind, not just at the callers: occurred_at unions with
-		// created_at in the ORDER BY of the events feed and the factory belt,
+		// created_at in the ORDER BY of the chronological event reads,
 		// so one local-zone instant misplaces a row against every other.
 		occurredAt = evt.OccurredAt.UTC()
 	}

@@ -1,7 +1,7 @@
-// Snapshot-authoritative entity placement.
+// Read-authoritative entity placement.
 //
 // Single projection function used by both station tray counts AND
-// chip positions on the floor: given an entity from the snapshot,
+// chip positions on the floor: given an entity from the floor read,
 // the set of station-mapped event_types, a per-pair animation
 // duration source, and the current wall clock, returns whether the
 // entity is parked at a station or in transit between two stations
@@ -10,8 +10,8 @@
 // Tray counts and chip placement read this same function so the two
 // can never drift. Reload-stable rendering falls out for free —
 // `recent_events[]` (with both source-time `at` and insert-time
-// `detected_at`) on the snapshot encodes exactly enough state to
-// resume mid-animation after a refresh, with no client-side cache.
+// `detected_at`) on a possibly-moving entity encodes exactly enough
+// state to resume mid-animation after a refresh.
 //
 // ─── Chain handling ────────────────────────────────────────────────
 //
@@ -68,11 +68,11 @@ export function placeEntity(
   // in the chain or as the source — they don't move the chip.
   const station = (entity.recent_events ?? []).filter((e) => knownStations.has(e.event_type))
   if (station.length === 0) {
-    if (entity.current_event_type && knownStations.has(entity.current_event_type)) {
-      // Snapshot has the entity at a known station but no station
-      // event in recent history (truncated, very fresh, or weird
-      // ordering edge case). Park there with no animation.
-      return { kind: 'parked', station: entity.current_event_type }
+    if (entity.latest_event_type && knownStations.has(entity.latest_event_type)) {
+      // The entity's latest event has a station and no history was read
+      // for it (not possibly mid-ride), or none came back. Park there
+      // with no animation.
+      return { kind: 'parked', station: entity.latest_event_type }
     }
     return null
   }

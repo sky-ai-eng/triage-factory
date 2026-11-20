@@ -18,11 +18,11 @@ import (
 )
 
 // TestTeamActivityStore_SQLite runs the shared conformance suite against the
-// SQLite impl, reusing the factory seeder — the two stores share their
-// definition of a team's flow. teamID is the local default and ignored by
-// the impl: local is N=1 and unscoped, the same posture as the belt.
+// SQLite impl, reusing the flow seeder — the node and the entity reads share
+// their definition of a team's flow. teamID is the local default and ignored
+// by the impl: local is N=1 and unscoped, the same posture as the entity list.
 func TestTeamActivityStore_SQLite(t *testing.T) {
-	dbtest.RunTeamActivityConformance(t, func(t *testing.T) (db.TeamActivityStore, string, string, dbtest.FactorySeeder) {
+	dbtest.RunTeamActivityConformance(t, func(t *testing.T) (db.TeamActivityStore, string, string, dbtest.FlowSeeder) {
 		t.Helper()
 		conn := openTeamActivityTestDB(t)
 		stores := sqlitestore.New(conn)
@@ -44,7 +44,7 @@ func TestTeamActivityStore_SQLite(t *testing.T) {
 		seed.Event(t, untracked, domain.EventGitHubPROpened, "", now.Add(-time.Hour), time.Time{})
 
 		got, err := stores.TeamActivity.TeamActivity(context.Background(),
-			runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, now.Add(-2*time.Hour), now)
+			runmode.LocalDefaultOrgID, []string{runmode.LocalDefaultTeamID}, now.Add(-2*time.Hour), now)
 		if err != nil {
 			t.Fatalf("TeamActivity: %v", err)
 		}
@@ -63,7 +63,7 @@ func TestTeamActivityStore_SQLite(t *testing.T) {
 		stores := sqlitestore.New(openTeamActivityTestDB(t))
 		now := time.Now().UTC()
 		got, err := stores.TeamActivity.TeamActivity(context.Background(),
-			runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, now.Add(-time.Hour), now)
+			runmode.LocalDefaultOrgID, []string{runmode.LocalDefaultTeamID}, now.Add(-time.Hour), now)
 		if err != nil {
 			t.Fatalf("TeamActivity: %v", err)
 		}
@@ -92,19 +92,19 @@ func openTeamActivityTestDB(t *testing.T) *sql.DB {
 		t.Fatalf("bootstrap schema: %v", err)
 	}
 	if _, err := conn.Exec(
-		`INSERT INTO prompts (id, name, body, creator_user_id, team_id) VALUES (?, 'Factory Test', 'body', ?, ?)`,
-		factoryTestPromptID, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID,
+		`INSERT INTO prompts (id, name, body, creator_user_id, team_id) VALUES (?, 'Flow Test', 'body', ?, ?)`,
+		flowTestPromptID, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID,
 	); err != nil {
 		t.Fatalf("seed prompt: %v", err)
 	}
 	return conn
 }
 
-// newSQLiteTeamActivitySeeder is the factory seeder plus TrackedEntity, which
+// newSQLiteTeamActivitySeeder is the flow seeder plus TrackedEntity, which
 // writes the local team's tracking row for each new unit — the one table the
-// tracked-set cut reads that the factory seeder never needs.
-func newSQLiteTeamActivitySeeder(conn *sql.DB) dbtest.FactorySeeder {
-	seed := newSQLiteFactorySeeder(conn)
+// tracked-set cut reads that the flow seeder never needs.
+func newSQLiteTeamActivitySeeder(conn *sql.DB) dbtest.FlowSeeder {
+	seed := newSQLiteFlowSeeder(conn)
 	const workspace = "ws-test"
 	seed.TrackedEntity = func(t *testing.T, source string) (string, string) {
 		t.Helper()
@@ -115,7 +115,7 @@ func newSQLiteTeamActivitySeeder(conn *sql.DB) dbtest.FactorySeeder {
 		var err error
 		switch source {
 		case "github":
-			// A repository of its own: the factory seeder's Entity puts every
+			// A repository of its own: the flow seeder's Entity puts every
 			// pull request in one.
 			repo := strings.ToLower(key)
 			sourceID := "octo/" + repo + "#1"

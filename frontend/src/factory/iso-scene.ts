@@ -52,7 +52,7 @@ import { buildRoutingTable, type RoutingTable } from './iso-routing'
 import type { Router } from './iso-router'
 import type { Station } from './iso-station'
 import type { TransitPlacement } from './snapshot-chips'
-import type { FactoryEntity, FactorySnapshot, FactoryStation } from '../types'
+import type { FactoryEntity, FactoryFloor, FactoryRun } from '../types'
 
 const FLOOR_CELL = 80
 const FLOOR_SIZE = 4800 // 60 cells — extra room for downstream additions
@@ -777,10 +777,10 @@ const stationSpec = (
   d: STATION_D * FLOOR_CELL,
   h: STATION_H,
   // The station's stable id IS its event_type. Click hit-testing,
-  // the snapshot reconciler, and the routing table all key off this
-  // value, so /api/factory/snapshot's `stations[event_type]` map
-  // lines up 1:1 with our 12 stations without an intermediate slug
-  // layer.
+  // the floor reconciler, and the routing table all key off this
+  // value, so the floor's runs and lifetime counters, keyed by event
+  // type, line up 1:1 with our 12 stations without an intermediate
+  // slug layer.
   id: eventType,
   queuedCount: queued,
   conversationCount: conversations,
@@ -859,6 +859,26 @@ const CHANGES_REQUESTED = stationSpec(
 )
 const CLOSED = stationSpec(CLOSED_COL, CLOSED_ROW, 2, 0, 'Closed', 'github:pr:closed')
 const MERGED = stationSpec(MERGED_COL, MERGED_ROW, 1, 0, 'Merged', 'github:pr:merged')
+
+/** The event types the floor has a station for. The floor reads an entity's
+ *  history only when its latest event is missing from here or recent, so the
+ *  page hands this to the reads (lib/factoryFloor). */
+export const STATION_EVENT_TYPES: ReadonlySet<string> = new Set(
+  [
+    PR_OPENED,
+    READY_FOR_REVIEW,
+    NEW_COMMITS,
+    MERGE_CONFLICTS,
+    CI_PASSED,
+    CI_FAILED,
+    REVIEW_REQUESTED,
+    REVIEW_APPROVED,
+    REVIEW_COMMENTED,
+    CHANGES_REQUESTED,
+    CLOSED,
+    MERGED,
+  ].map((spec) => spec.id ?? ''),
+)
 
 // ─── Mergers / Splitters ──────────────────────────────────────────
 
@@ -1351,10 +1371,9 @@ export interface ClickedStationInfo {
   /** Entities parked at this station with no active run. Drives
    *  the drawer's intake-tray chip list. */
   queued: FactoryEntity[]
-  /** Active runs at this station — same shape as the snapshot's
-   *  `stations[event_type].runs` array. Drives the drawer's main-
-   *  tray chip list. */
-  runs: FactoryStation['runs']
+  /** Active runs at this station, from the floor's `runs[event_type]`.
+   *  Drives the drawer's main-tray chip list. */
+  runs: FactoryRun[]
 }
 
 export interface IsoSceneHandle {
@@ -1376,11 +1395,11 @@ export interface IsoSceneHandle {
    *  per-station hash so consumers don't re-render on no-ops.
    *  Returns an unsubscribe function. */
   onStationDataChange: (stationId: string, cb: (info: ClickedStationInfo) => void) => () => void
-  /** Hand the scene the latest /api/factory/snapshot payload. The
+  /** Hand the scene the latest floor read (lib/factoryFloor). The
    *  scene's per-frame reconciler then projects every entity to
    *  either a station (driving tray counts) or a transit (driving
    *  chip meshes). Backend is the source of truth for both. */
-  applySnapshot: (snapshot: FactorySnapshot) => void
+  applyFloor: (floor: FactoryFloor) => void
   /** Enter ambient cinematic mode — the camera detaches from user
    *  input and begins an eased, auto-advancing scenic tour. `reduced`
    *  (from prefers-reduced-motion) collapses it to a single slow drift. */
@@ -2477,7 +2496,7 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
   // Built AFTER all `.next` wiring above so every segment.next array
   // is populated. BFS from each station's east-output segment to
   // every other station's west-input segment yields the itinerary
-  // (and per-pair travel duration) the snapshot reconciler uses for
+  // (and per-pair travel duration) the floor reconciler uses for
   // chip placement.
   const routingTable: RoutingTable = buildRoutingTable(
     stationRows
@@ -2490,20 +2509,20 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
     BELT_WORLD_SPEED,
   )
 
-  // ─── Snapshot reconciler ───────────────────────────────────────
+  // ─── Floor reconciler ──────────────────────────────────────────
   // Single source of truth for what's parked where and what's in
-  // flight. Runs every frame off the latest snapshot:
+  // flight. Runs every frame off the latest floor read:
   //   1. project each entity via placeEntity → parked|transit
   //   2. update tray counts / click-replay data only when changed
   //   3. reconcile chip meshes against the live transit set
   //
   // The same projection drives both station counts and chip
   // positions, so they cannot drift out of sync. WS events on the
-  // page just trigger a snapshot refetch — they don't drive any
-  // visual state directly.
+  // page just trigger a re-read — they don't drive any visual state
+  // directly.
   const knownStations = new Set<string>(stationsByEvent.keys())
   const chipController = renderer.getSnapshotChipController()
-  let latestSnapshot: FactorySnapshot | null = null
+  let latestFloor: FactoryFloor | null = null
   const lastTrayState = new Map<string, { queuedCount: number; conversationCount: number }>()
 
   // Live drawer feed. Per-station observer sets fire when the
@@ -2520,12 +2539,12 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
   }
 
   const reconcile = (): void => {
-    if (!latestSnapshot) return
+    if (!latestFloor) return
     const now = Date.now()
     const transits = new Map<string, TransitPlacement>()
     const parkedByStation = new Map<string, FactoryEntity[]>()
 
-    for (const e of latestSnapshot.entities) {
+    for (const e of latestFloor.entities) {
       const p = placeEntity(e, knownStations, routingTable.getDuration, now)
       if (!p) continue
       if (p.kind === 'parked') {
@@ -2548,8 +2567,7 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
     // is always refreshed so a same-count-different-entities case
     // (one entity in, one out) reflects in the next drawer open.
     for (const [eventType, row] of stationsByEvent) {
-      const fs = latestSnapshot.stations[eventType]
-      const runs = fs?.runs ?? []
+      const runs = latestFloor.runs[eventType] ?? []
       const conversationEntityIds = new Set(runs.map((r) => r.task.entity_id))
       const allParked = parkedByStation.get(eventType) ?? []
       const queued = allParked.filter((e) => !conversationEntityIds.has(e.id))
@@ -2568,8 +2586,8 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
       }
       // Lifetime counter: the station-handle API exposes this for every
       // station, so we update it unconditionally here with the latest
-      // snapshot value when present.
-      row.handle.setLifetimeCount(fs?.items_lifetime ?? 0)
+      // floor value when present.
+      row.handle.setLifetimeCount(latestFloor.lifetime[eventType] ?? 0)
       row.data = {
         id: eventType,
         label: row.spec.label ?? eventType,
@@ -2895,8 +2913,8 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
         }
       }
     },
-    applySnapshot: (snapshot) => {
-      latestSnapshot = snapshot
+    applyFloor: (floor) => {
+      latestFloor = floor
       // Run a reconciliation right away so the first paint after a
       // refetch reflects the new data without waiting on the next
       // frame (matters mostly for the initial load, where the user
@@ -2915,14 +2933,14 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
   }
 }
 
-// Compute chip decoration (hue + short label) from a snapshot entity.
+// Compute chip decoration (hue + short label) from a floor entity.
 // The hue comes from the pull request's repository registry row, so every
 // chip of one repository shares a hue without any user config, and a
 // rename does not recolor them. The label is the PR number.
 function chipDecorFor(entity: FactoryEntity): { hue?: number; label?: string } {
   return {
     hue: entity.repository_id ? hashHue(entity.repository_id) : undefined,
-    label: entity.number != null ? `#${entity.number}` : undefined,
+    label: entity.pull_request ? `#${entity.pull_request.number}` : undefined,
   }
 }
 

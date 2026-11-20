@@ -10,17 +10,18 @@ import (
 )
 
 // TeamActivityStoreFactory builds a fresh TeamActivityStore plus the fixture
-// kit for one subtest. It reuses FactorySeeder deliberately: the node and the
-// factory belt share their definition of a team's flow (tracked-set entities,
+// kit for one subtest. It reuses FlowSeeder deliberately: the node and the
+// entity reads share their definition of a team's flow (tracked-set entities,
 // team-scoped tasks), so they share the seeding contract too — an entity the
-// seeder makes belt-visible is exactly one the node must count.
-type TeamActivityStoreFactory func(t *testing.T) (store db.TeamActivityStore, orgID, teamID string, seed FactorySeeder)
+// seeder makes visible to the entity list is exactly one the node must count.
+type TeamActivityStoreFactory func(t *testing.T) (store db.TeamActivityStore, orgID, teamID string, seed FlowSeeder)
 
 // RunTeamActivityConformance covers the read contract every
 // TeamActivityStore impl must hold: the window clips, the cuts agree on
 // totals, the by-source cut carries a row per external catalog source
 // regardless of traffic, the tracked-set cut carries a row per tracked unit
-// and no other, and system events (NULL entity) never count.
+// and no other, the event-type cut counts distinct entities once however
+// often they re-enter a type, and system events (NULL entity) never count.
 //
 // What it deliberately does NOT pin: slack's tracked set, which only
 // multi-mode has (local mode has no Slack), nor the scoping of the merged
@@ -59,7 +60,7 @@ func RunTeamActivityConformance(t *testing.T, mk TeamActivityStoreFactory) {
 		concluded := seed.Conversation(t, taskID, SeedConcluded)
 		seed.FinishConversation(t, concluded, domain.StatusOpen, now.Add(-30*time.Minute))
 
-		got, err := s.TeamActivity(ctx, orgID, teamID, since, until)
+		got, err := s.TeamActivity(ctx, orgID, []string{teamID}, since, until)
 		if err != nil {
 			t.Fatalf("TeamActivity: %v", err)
 		}
@@ -122,6 +123,62 @@ func RunTeamActivityConformance(t *testing.T, mk TeamActivityStoreFactory) {
 				t.Errorf("%s row carries LastPollAt from the store; poll times are the handler's", row.Source)
 			}
 		}
+
+		byType := map[string]domain.TeamActivityEventType{}
+		typeEvents, typeTasks := 0, 0
+		for _, row := range got.ByEventType {
+			byType[row.EventType] = row
+			typeEvents += row.Events
+			typeTasks += row.Tasks
+		}
+		if typeEvents != dayEvents || typeTasks != dayTasks {
+			t.Errorf("by_event_type sums = %d events / %d tasks, disagree with by_day %d/%d", typeEvents, typeTasks, dayEvents, dayTasks)
+		}
+		if row := byType[domain.EventGitHubPRCICheckFailed]; row.Events != 1 || row.Tasks != 1 || row.Entities != 1 {
+			t.Errorf("by_event_type[ci_check_failed] = %+v, want 1 event / 1 task / 1 entity", row)
+		}
+		if row, ok := byType[domain.EventGitHubPROpened]; ok {
+			t.Errorf("by_event_type carries %+v, an event type whose only event is before the window", row)
+		}
+		if _, ok := byType[domain.EventSystemPollCompleted]; ok {
+			t.Error("by_event_type counts a system event")
+		}
+	})
+
+	t.Run("by_event_type_counts_entities_once", func(t *testing.T) {
+		s, orgID, teamID, seed := mk(t)
+		now := time.Now().UTC()
+		a := seed.Entity(t, "type-a")
+		b := seed.Entity(t, "type-b")
+		seed.Event(t, a, domain.EventGitHubPROpened, "", now.Add(-time.Hour), time.Time{})
+		seed.Event(t, a, domain.EventGitHubPRCICheckFailed, "", now.Add(-50*time.Minute), time.Time{})
+		seed.Event(t, b, domain.EventGitHubPROpened, "", now.Add(-40*time.Minute), time.Time{})
+		// Re-entry: the same entity at the same type counts one entity.
+		seed.Event(t, b, domain.EventGitHubPRCICheckFailed, "", now.Add(-30*time.Minute), time.Time{})
+		seed.Event(t, b, domain.EventGitHubPRCICheckFailed, "", now.Add(-20*time.Minute), time.Time{})
+
+		got, err := s.TeamActivity(ctx, orgID, []string{teamID}, time.Time{}, now.Add(time.Minute))
+		if err != nil {
+			t.Fatalf("TeamActivity: %v", err)
+		}
+		want := map[string][2]int{
+			domain.EventGitHubPROpened:        {2, 2},
+			domain.EventGitHubPRCICheckFailed: {3, 2},
+		}
+		for _, row := range got.ByEventType {
+			w, ok := want[row.EventType]
+			if !ok {
+				t.Errorf("by_event_type carries %q, which no seeded event has", row.EventType)
+				continue
+			}
+			if row.Events != w[0] || row.Entities != w[1] {
+				t.Errorf("by_event_type[%s] = %d events / %d entities, want %d / %d", row.EventType, row.Events, row.Entities, w[0], w[1])
+			}
+			delete(want, row.EventType)
+		}
+		for et := range want {
+			t.Errorf("by_event_type is missing %s", et)
+		}
 	})
 
 	t.Run("by_tracked_is_the_tracked_set", func(t *testing.T) {
@@ -154,7 +211,7 @@ func RunTeamActivityConformance(t *testing.T, mk TeamActivityStoreFactory) {
 		issueTask := seed.Task(t, issue, domain.EventJiraIssueAssigned, "", issueEvent, "queued", now.Add(-2*time.Hour))
 		seed.Conversation(t, issueTask, domain.StatusFailed)
 
-		got, err := s.TeamActivity(ctx, orgID, teamID, since, until)
+		got, err := s.TeamActivity(ctx, orgID, []string{teamID}, since, until)
 		if err != nil {
 			t.Fatalf("TeamActivity: %v", err)
 		}
@@ -224,7 +281,7 @@ func RunTeamActivityConformance(t *testing.T, mk TeamActivityStoreFactory) {
 		seed.FinishConversation(t, conversationID, domain.StatusFailed, now.Add(-90*time.Minute))
 
 		// Nothing else the node buckets falls inside this window.
-		got, err := s.TeamActivity(ctx, orgID, teamID, now.Add(-3*time.Hour), now)
+		got, err := s.TeamActivity(ctx, orgID, []string{teamID}, now.Add(-3*time.Hour), now)
 		if err != nil {
 			t.Fatalf("TeamActivity: %v", err)
 		}
@@ -253,7 +310,7 @@ func RunTeamActivityConformance(t *testing.T, mk TeamActivityStoreFactory) {
 		onUntil := seed.Conversation(t, taskID, domain.StatusFailed)
 		seed.FinishConversation(t, onUntil, domain.StatusFailed, until)
 
-		got, err := s.TeamActivity(ctx, orgID, teamID, since, until)
+		got, err := s.TeamActivity(ctx, orgID, []string{teamID}, since, until)
 		if err != nil {
 			t.Fatalf("TeamActivity: %v", err)
 		}
@@ -277,7 +334,7 @@ func RunTeamActivityConformance(t *testing.T, mk TeamActivityStoreFactory) {
 		entityID := seed.Entity(t, "quiet")
 		seed.Event(t, entityID, domain.EventGitHubPRCICheckFailed, "", now.Add(-80*time.Hour), time.Time{})
 
-		got, err := s.TeamActivity(ctx, orgID, teamID, now.Add(-time.Hour), now)
+		got, err := s.TeamActivity(ctx, orgID, []string{teamID}, now.Add(-time.Hour), now)
 		if err != nil {
 			t.Fatalf("TeamActivity: %v", err)
 		}

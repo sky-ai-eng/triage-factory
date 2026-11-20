@@ -15,48 +15,47 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import PromptPicker from '../components/PromptPicker'
 import TeamScopeSelect from '../components/TeamScopeSelect'
 import { backToOrigin, toast } from '../components/Toast/toastStore'
-import { createIsoScene, type ClickedStationInfo, type IsoSceneHandle } from '../factory/iso-scene'
+import {
+  createIsoScene,
+  STATION_EVENT_TYPES,
+  type ClickedStationInfo,
+  type IsoSceneHandle,
+} from '../factory/iso-scene'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useOrgHref } from '../hooks/useOrgHref'
 import { useImmersive } from '../contexts/ChromeContext'
-import {
-  useTeams,
-  useTeamFilter,
-  pickerDefault,
-  noteWrittenTeam,
-  teamFilterQuery,
-} from '../hooks/useTeams'
-import type {
-  Conversation,
-  FactoryEntity,
-  FactorySnapshot,
-  ConversationStatusValue,
-  Task,
-} from '../types'
+import { useTeams, useTeamFilter, pickerDefault, noteWrittenTeam } from '../hooks/useTeams'
+import type { Conversation, FactoryEntity, ConversationStatusValue, Task } from '../types'
 import { isActiveStatus } from '../lib/conversationStatus'
 import { apiErrors, apiJSON, httpErrorMessage } from '../lib/apiClient'
 import { delegateTask } from '../lib/taskWrites'
+import { readFactoryFloor, readLifetimeCounts, type FloorHistoryCache } from '../lib/factoryFloor'
 
-// Production factory page — Babylon scene driven by /api/factory/snapshot.
-// The page itself does almost nothing visual: it fetches the snapshot,
-// hands it to the scene, and pipes WS frames into a debounced refetch.
+// Production factory page — Babylon scene driven by the generic entity,
+// event, task, and conversation reads (lib/factoryFloor). The page itself
+// does almost nothing visual: it reads the floor, hands it to the scene, and
+// pipes WS frames into a debounced re-read.
 //
 // All entity placement (which station they're parked at, whether
 // they're mid-flight on a bridge and how far along) is derived inside
-// the scene by a per-frame reconciler reading the snapshot's
-// `current_event_type` + `last_event_at` + `recent_events`. The
-// backend is therefore authoritative for both station tray counts and
-// chip positions; the same projection feeds both, so they cannot drift.
-// See `factory/place-entity.ts` for the projection function.
+// the scene by a per-frame reconciler reading each entity's
+// `latest_event_type` + `recent_events`. The backend is therefore
+// authoritative for both station tray counts and chip positions; the
+// same projection feeds both, so they cannot drift. See
+// `factory/place-entity.ts` for the projection function.
 
-// Debounce window for snapshot refetches. The router publishes one
-// `event` WS frame per detection plus a batched `tasks_updated` per
-// poll cycle; collapsing those into one /api/factory/snapshot call
-// keeps server load down. Kept short so chip motion appears promptly
-// after the WS event lands — the snapshot determines when a transit
-// becomes visible (it carries the new last_event_at), and a long
+// Debounce window for floor re-reads. The router publishes one `event` WS
+// frame per detection plus a batched `tasks_updated` per poll cycle;
+// collapsing those into one read keeps server load down. Kept short so chip
+// motion appears promptly after the WS event lands — the read determines when
+// a transit becomes visible (it carries the new latest event), and a long
 // debounce delays that.
 const REFETCH_DEBOUNCE_MS = 250
+
+// How often the station counters are re-read. They count every entity that
+// ever reached a station, so one more arrival is not worth a read of the
+// whole history on every frame of floor traffic.
+const LIFETIME_REFRESH_MS = 60_000
 
 // Drop target ID for the conversations tray inside the station drawer. A
 // constant string is fine — the drawer only renders one station at a
@@ -97,6 +96,8 @@ export default function Factory() {
   const [pendingDelegate, setPendingDelegate] = useState<PendingDelegate | null>(null)
   const [draggingEntity, setDraggingEntity] = useState<FactoryEntity | null>(null)
   const [cinematic, setCinematic] = useState(false)
+  // How many pull requests the floor shows of how many the read matched.
+  const [floorCount, setFloorCount] = useState<{ shown: number; total: number } | null>(null)
 
   // Ask the frame to fade with the rest of the HUD. Declarative rather than a
   // call in enterCinematic/exitCinematic: navigating away mid-cinematic would
@@ -152,23 +153,46 @@ export default function Factory() {
     }
   }, [])
 
-  // Snapshot loader. The window-level callback is what the WS
-  // effect (next block) calls to schedule a debounced refetch
+  // Floor loader. The window-level callback is what the WS
+  // effect (next block) calls to schedule a debounced re-read
   // without forcing this effect's identity to change on every render.
   useEffect(() => {
     let cancelled = false
     let pending: ReturnType<typeof setTimeout> | null = null
+    // Each load is numbered so a slow read that lands after a newer one
+    // cannot put an older floor back on the scene.
+    let loadSeq = 0
+    const historyCache: FloorHistoryCache = new Map()
+    let lifetime: Record<string, number> = {}
+    let lifetimeReadAt = -Infinity
 
     const load = () => {
-      const q = teamFilterQuery(teamFilterRef.current)
-      apiJSON<FactorySnapshot>('/api/factory/snapshot' + (q ? `?${q}` : ''))
-        .then((data) => {
-          if (cancelled) return
-          sceneRef.current?.applySnapshot(data)
+      loadSeq += 1
+      const seq = loadSeq
+      const now = Date.now()
+      const lifetimeRead = now - lifetimeReadAt >= LIFETIME_REFRESH_MS ? readLifetimeCounts() : null
+      if (lifetimeRead) lifetimeReadAt = now
+      Promise.all([
+        readFactoryFloor({
+          teamIds: teamFilterRef.current,
+          stations: STATION_EVENT_TYPES,
+          cache: historyCache,
+          lifetime,
+          now,
+        }),
+        lifetimeRead,
+      ])
+        .then(([floor, counts]) => {
+          if (counts) lifetime = counts
+          if (cancelled || seq !== loadSeq) return
+          sceneRef.current?.applyFloor({ ...floor, lifetime })
+          setFloorCount({ shown: floor.entities.length, total: floor.total })
         })
         .catch((err) => {
+          // A failed counter read is tried again on the next load.
+          if (lifetimeRead) lifetimeReadAt = -Infinity
           if (cancelled) return
-          console.warn('[factory] snapshot load failed:', err)
+          console.warn('[factory] floor load failed:', err)
         })
     }
 
@@ -193,7 +217,7 @@ export default function Factory() {
 
   // WS frames are refetch hints only. Backend authority means we
   // don't try to drive any chip or count update directly from the
-  // event payload — the next snapshot carries the same information
+  // event payload — the next read carries the same information
   // in a form that's coherent with everything else on the floor.
   useWebSocket((evt) => {
     if (
@@ -207,7 +231,7 @@ export default function Factory() {
     }
   })
 
-  // Re-snapshot when the team filter changes — load() reads the latest
+  // Re-read when the team filter changes — load() reads the latest
   // filter via its ref, so the scheduled refetch picks up the new scope.
   useEffect(() => {
     const refetch = (window as unknown as { __factoryRefetch?: () => void }).__factoryRefetch
@@ -445,17 +469,29 @@ export default function Factory() {
             which costs the pixels they cover and buys a world that holds
             still. */}
         <div ref={containerRef} className="fixed inset-0 z-0" />
-        {/* Per-page team filter — narrows the entity belt.
-            Gated on ≥2 teams so solo users get no empty overlay box. */}
-        {teams.length >= 2 && (
-          <div
-            className={`absolute top-4 left-4 rounded-md bg-raised px-1 py-0.5 shadow transition-opacity duration-[var(--dur-content)] ${
-              cinematic ? 'pointer-events-none opacity-0' : 'opacity-100'
-            }`}
-          >
-            <TeamScopeSelect value={teamFilter} onChange={setTeamFilter} />
-          </div>
-        )}
+        <div
+          className={`absolute top-4 left-4 flex flex-col items-start gap-2 transition-opacity duration-[var(--dur-content)] ${
+            cinematic ? 'pointer-events-none opacity-0' : 'opacity-100'
+          }`}
+        >
+          {/* Per-page team filter — narrows the entity belt.
+              Gated on ≥2 teams so solo users get no empty overlay box. */}
+          {teams.length >= 2 && (
+            <div className="rounded-md bg-raised px-1 py-0.5 shadow">
+              <TeamScopeSelect value={teamFilter} onChange={setTeamFilter} />
+            </div>
+          )}
+          {/* The floor holds one page of pull requests; say so when the
+              teams have more than it shows. */}
+          {floorCount && floorCount.total > floorCount.shown && (
+            <div
+              className="rounded-md bg-raised px-3 py-1.5 text-label text-ink-2 shadow"
+              role="status"
+            >
+              Showing {floorCount.shown} of {floorCount.total} pull requests
+            </div>
+          )}
+        </div>
         <div
           className={`absolute right-4 bottom-4 flex items-center gap-2 transition-opacity duration-[var(--dur-content)] ${
             cinematic ? 'pointer-events-none opacity-0' : 'opacity-100'
@@ -811,14 +847,12 @@ function QueuedEntityRow({ entity }: { entity: FactoryEntity }) {
 // the old factory's StationDetailOverlay surfaced.
 function entityMeta(entity: FactoryEntity): { k: string; v: string }[] {
   const meta: { k: string; v: string }[] = []
-  if (entity.repo) meta.push({ k: 'repo', v: entity.repo })
-  if (entity.number != null) meta.push({ k: 'number', v: `#${entity.number}` })
-  if (entity.author) meta.push({ k: 'author', v: `@${entity.author}` })
-  if (entity.additions != null || entity.deletions != null) {
-    const add = entity.additions ?? 0
-    const del = entity.deletions ?? 0
-    meta.push({ k: 'diff', v: `+${add} −${del}` })
-  }
+  const pr = entity.pull_request
+  if (!pr) return meta
+  if (pr.repo) meta.push({ k: 'repo', v: pr.repo })
+  meta.push({ k: 'number', v: `#${pr.number}` })
+  if (pr.author) meta.push({ k: 'author', v: `@${pr.author}` })
+  meta.push({ k: 'diff', v: `+${pr.additions} −${pr.deletions}` })
   return meta
 }
 
@@ -886,7 +920,7 @@ function ConversationRow({ conversation, task }: { conversation: Conversation; t
 }
 
 function entityLabel(e: FactoryEntity): string {
-  if (e.number != null) return `#${e.number}`
+  if (e.pull_request) return `#${e.pull_request.number}`
   return e.source_id || e.id.slice(0, 8)
 }
 

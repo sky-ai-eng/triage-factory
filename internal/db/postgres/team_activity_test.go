@@ -18,9 +18,9 @@ import (
 )
 
 // TestTeamActivityStore_Postgres runs the shared conformance suite against
-// the Postgres impl, reusing the factory seeder and org graph — the node and
-// the belt share their definition of a team's flow (tracked-set entities,
-// team-scoped tasks). Wired against AdminDB like the factory suite: the
+// the Postgres impl, reusing the flow seeder and org graph — the node and the
+// entity reads share their definition of a team's flow (tracked-set entities,
+// team-scoped tasks). Wired against AdminDB like the entity read suite: the
 // node's predicates are subject-team-scoped rather than viewer-scoped, so
 // behavior is independent of the auth path and the RLS arms are covered by
 // the app-pool suites that own them.
@@ -39,11 +39,11 @@ func TestTeamActivityStore_Postgres(t *testing.T) {
 		return teamID
 	}
 
-	dbtest.RunTeamActivityConformance(t, func(t *testing.T) (db.TeamActivityStore, string, string, dbtest.FactorySeeder) {
+	dbtest.RunTeamActivityConformance(t, func(t *testing.T) (db.TeamActivityStore, string, string, dbtest.FlowSeeder) {
 		t.Helper()
 		h.Reset(t)
-		orgID, userID := seedPgFactoryOrg(t, h)
-		promptID := seedPgFactoryPrompt(t, h, orgID, userID)
+		orgID, userID := seedPgFlowOrg(t, h)
+		promptID := seedPgFlowPrompt(t, h, orgID, userID)
 		return stores.TeamActivity, orgID, teamOf(t, orgID), newPgTeamActivitySeeder(h, orgID, userID, promptID)
 	})
 
@@ -55,8 +55,8 @@ func TestTeamActivityStore_Postgres(t *testing.T) {
 	// entity is, and the cut has no row for it to land on.
 	t.Run("by_tracked_is_only_this_teams_tracked_set", func(t *testing.T) {
 		h.Reset(t)
-		orgID, userID := seedPgFactoryOrg(t, h)
-		promptID := seedPgFactoryPrompt(t, h, orgID, userID)
+		orgID, userID := seedPgFlowOrg(t, h)
+		promptID := seedPgFlowPrompt(t, h, orgID, userID)
 		seed := newPgTeamActivitySeeder(h, orgID, userID, promptID)
 		now := time.Now().UTC()
 		subject := teamOf(t, orgID)
@@ -75,7 +75,7 @@ func TestTeamActivityStore_Postgres(t *testing.T) {
 		theirs := seedPgGitHubEntityRaw(t, h, orgID, "acme", "theirs", 1)
 		seed.Event(t, theirs, domain.EventGitHubPROpened, "", now.Add(-time.Hour), time.Time{})
 
-		got, err := stores.TeamActivity.TeamActivity(context.Background(), orgID, subject, now.Add(-2*time.Hour), now)
+		got, err := stores.TeamActivity.TeamActivity(context.Background(), orgID, []string{subject}, now.Add(-2*time.Hour), now)
 		if err != nil {
 			t.Fatalf("TeamActivity: %v", err)
 		}
@@ -101,9 +101,9 @@ func TestTeamActivityStore_Postgres(t *testing.T) {
 	// to express.
 	t.Run("merged_counts_only_the_tracked_set", func(t *testing.T) {
 		h.Reset(t)
-		orgID, userID := seedPgFactoryOrg(t, h)
-		promptID := seedPgFactoryPrompt(t, h, orgID, userID)
-		seed := newPgFactorySeeder(h.AdminDB, orgID, userID, promptID)
+		orgID, userID := seedPgFlowOrg(t, h)
+		promptID := seedPgFlowPrompt(t, h, orgID, userID)
+		seed := newPgFlowSeeder(h.AdminDB, orgID, userID, promptID)
 		now := time.Now().UTC()
 
 		tracked := seed.Entity(t, "tracked")
@@ -112,7 +112,7 @@ func TestTeamActivityStore_Postgres(t *testing.T) {
 		seedPgEvent(t, h, orgID, untracked, domain.EventGitHubPRMerged, now.Add(-time.Hour))
 
 		got, err := stores.TeamActivity.TeamActivity(
-			context.Background(), orgID, teamOf(t, orgID), now.Add(-2*time.Hour), now)
+			context.Background(), orgID, []string{teamOf(t, orgID)}, now.Add(-2*time.Hour), now)
 		if err != nil {
 			t.Fatalf("TeamActivity: %v", err)
 		}
@@ -134,9 +134,9 @@ func TestTeamActivityStore_Postgres(t *testing.T) {
 	// and the node reads under an RLS-bypassed pool.
 	t.Run("failed_counts_only_the_owning_team", func(t *testing.T) {
 		h.Reset(t)
-		orgID, userID := seedPgFactoryOrg(t, h)
-		promptID := seedPgFactoryPrompt(t, h, orgID, userID)
-		seed := newPgFactorySeeder(h.AdminDB, orgID, userID, promptID)
+		orgID, userID := seedPgFlowOrg(t, h)
+		promptID := seedPgFlowPrompt(t, h, orgID, userID)
+		seed := newPgFlowSeeder(h.AdminDB, orgID, userID, promptID)
 		now := time.Now().UTC()
 		subject := teamOf(t, orgID)
 
@@ -159,7 +159,7 @@ func TestTeamActivityStore_Postgres(t *testing.T) {
 		}
 
 		got, err := stores.TeamActivity.TeamActivity(
-			context.Background(), orgID, subject, now.Add(-2*time.Hour), now)
+			context.Background(), orgID, []string{subject}, now.Add(-2*time.Hour), now)
 		if err != nil {
 			t.Fatalf("TeamActivity: %v", err)
 		}
@@ -172,14 +172,77 @@ func TestTeamActivityStore_Postgres(t *testing.T) {
 		}
 	})
 
+	// A team set's flow is the union of its teams' flows: an entity both teams
+	// track counts its events once, and its unit is one row of the tracked
+	// set; an entity only one of them tracks counts too.
+	t.Run("a_team_set_counts_the_union_once", func(t *testing.T) {
+		h.Reset(t)
+		orgID, userID := seedPgFlowOrg(t, h)
+		promptID := seedPgFlowPrompt(t, h, orgID, userID)
+		seed := newPgFlowSeeder(h.AdminDB, orgID, userID, promptID)
+		now := time.Now().UTC()
+		first := teamOf(t, orgID)
+		second := seedPgDefaultTeam(t, h, orgID, userID)
+
+		shared := seed.Entity(t, "shared")
+		seed.Event(t, shared, domain.EventGitHubPROpened, "", now.Add(-time.Hour), time.Time{})
+		var sharedRepo string
+		if err := h.AdminDB.QueryRow(`SELECT repository_id FROM entities WHERE id = $1`, shared).Scan(&sharedRepo); err != nil {
+			t.Fatalf("read repository_id: %v", err)
+		}
+		pgtest.MustExec(t, h.AdminDB, `INSERT INTO team_github_repos (team_id, repository_id, org_id) VALUES ($1, $2, $3)`, second, sharedRepo, orgID)
+		pgtest.SeedTrackedRepo(t, h, orgID, second, "acme", "second-only")
+		secondOnly := seedPgGitHubEntityRaw(t, h, orgID, "acme", "second-only", 1)
+		seedPgEvent(t, h, orgID, secondOnly, domain.EventGitHubPROpened, now.Add(-time.Hour))
+
+		got, err := stores.TeamActivity.TeamActivity(context.Background(), orgID, []string{first, second}, now.Add(-2*time.Hour), now)
+		if err != nil {
+			t.Fatalf("TeamActivity: %v", err)
+		}
+		for _, row := range got.BySource {
+			if row.Source == "github" && (row.Events == nil || *row.Events != 2) {
+				t.Errorf("github events = %v, want 2 — the shared entity once and the second team's own", row.Events)
+			}
+		}
+		if len(got.ByTracked) != 2 {
+			t.Errorf("by_tracked = %+v, want the shared repository once and the second team's own", got.ByTracked)
+		}
+		if len(got.ByEventType) != 1 || got.ByEventType[0].Events != 2 || got.ByEventType[0].Entities != 2 {
+			t.Errorf("by_event_type = %+v, want opened with 2 events from 2 entities", got.ByEventType)
+		}
+	})
+
+	// No team is a team set with no flow: zeros, and the by-source rows the
+	// shape always carries, never an error.
+	t.Run("no_teams_answers_zeros", func(t *testing.T) {
+		h.Reset(t)
+		orgID, userID := seedPgFlowOrg(t, h)
+		promptID := seedPgFlowPrompt(t, h, orgID, userID)
+		seed := newPgFlowSeeder(h.AdminDB, orgID, userID, promptID)
+		now := time.Now().UTC()
+		ent := seed.Entity(t, "unseen")
+		seed.Event(t, ent, domain.EventGitHubPROpened, "", now.Add(-time.Hour), time.Time{})
+
+		got, err := stores.TeamActivity.TeamActivity(context.Background(), orgID, nil, now.Add(-2*time.Hour), now)
+		if err != nil {
+			t.Fatalf("TeamActivity: %v", err)
+		}
+		if len(got.ByDay) != 0 || len(got.ByTracked) != 0 || len(got.ByEventType) != 0 {
+			t.Errorf("no teams = %+v, want no flow", got)
+		}
+		if len(got.BySource) == 0 {
+			t.Error("no teams dropped the by_source rows the shape always carries")
+		}
+	})
+
 	// A team's Slack flow is the channels it watches, whoever is primary
 	// there: the subject team watches one channel another team is primary
 	// in, and that channel's events are the subject's. A channel only the
 	// other team watches, and one nobody watches, are not.
 	t.Run("slack_counts_the_channels_the_team_watches", func(t *testing.T) {
 		h.Reset(t)
-		orgID, userID := seedPgFactoryOrg(t, h)
-		promptID := seedPgFactoryPrompt(t, h, orgID, userID)
+		orgID, userID := seedPgFlowOrg(t, h)
+		promptID := seedPgFlowPrompt(t, h, orgID, userID)
 		seed := newPgTeamActivitySeeder(h, orgID, userID, promptID)
 		now := time.Now().UTC().Truncate(time.Millisecond)
 		subject := teamOf(t, orgID)
@@ -201,7 +264,7 @@ func TestTeamActivityStore_Postgres(t *testing.T) {
 		nobodys := seedPgSlackChannel(t, h, orgID, "C-NOBODY")
 		seedPgEvent(t, h, orgID, seedPgSlackThread(t, h, orgID, nobodys, "C-NOBODY"), domain.EventSlackMessage, now.Add(-time.Hour))
 
-		got, err := stores.TeamActivity.TeamActivity(context.Background(), orgID, subject, now.Add(-2*time.Hour), now)
+		got, err := stores.TeamActivity.TeamActivity(context.Background(), orgID, []string{subject}, now.Add(-2*time.Hour), now)
 		if err != nil {
 			t.Fatalf("TeamActivity: %v", err)
 		}
@@ -223,10 +286,10 @@ func TestTeamActivityStore_Postgres(t *testing.T) {
 	})
 }
 
-// newPgTeamActivitySeeder is the factory seeder plus TrackedEntity, which
+// newPgTeamActivitySeeder is the flow seeder plus TrackedEntity, which
 // registers each new unit in the org's first team's tracked set.
-func newPgTeamActivitySeeder(h *pgtest.Harness, orgID, userID, promptID string) dbtest.FactorySeeder {
-	seed := newPgFactorySeeder(h.AdminDB, orgID, userID, promptID)
+func newPgTeamActivitySeeder(h *pgtest.Harness, orgID, userID, promptID string) dbtest.FlowSeeder {
+	seed := newPgFlowSeeder(h.AdminDB, orgID, userID, promptID)
 	seed.TrackedEntity = func(t *testing.T, source string) (string, string) {
 		t.Helper()
 		teamID := firstTeamForOrg(t, h, orgID)
@@ -268,7 +331,7 @@ func newPgTeamActivitySeeder(h *pgtest.Harness, orgID, userID, promptID string) 
 }
 
 // seedPgUntrackedEntity inserts an active GitHub PR entity whose repo is in
-// no team's tracked set — the counterpart to FactorySeeder.Entity, which
+// no team's tracked set — the counterpart to FlowSeeder.Entity, which
 // registers one. Returns the entity id.
 func seedPgUntrackedEntity(t *testing.T, h *pgtest.Harness, orgID, suffix string) string {
 	t.Helper()
@@ -309,7 +372,7 @@ func seedPgSlackThread(t *testing.T, h *pgtest.Harness, orgID, channelRow, chann
 	return id
 }
 
-// seedPgEvent inserts one entity-attached event. FactorySeeder.Event is
+// seedPgEvent inserts one entity-attached event. FlowSeeder.Event is
 // closed over the seeder's own org graph; this one takes any entity.
 func seedPgEvent(t *testing.T, h *pgtest.Harness, orgID, entityID, eventType string, createdAt time.Time) {
 	t.Helper()

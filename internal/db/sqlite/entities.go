@@ -209,11 +209,11 @@ func (s *entityStore) ListActive(ctx context.Context, orgID, source string) ([]d
 // mode — N=1, so there is no other team to scope away. The Postgres
 // impl applies the jira_project_status_rules team semi-join; SQLite
 // deliberately does not (see the interface doc on EntityStore for the
-// asymmetry rationale, which mirrors FactoryReadStore.Entities).
+// asymmetry rationale, which mirrors List).
 func (s *entityStore) ListActiveJiraTeamScoped(ctx context.Context, orgID, _ string) ([]domain.Entity, error) {
 	// teamID ignored: N=1 local mode has one team, so the deck's team
 	// filter has nothing to narrow (the frontend never renders it below
-	// 2 teams). Mirrors the FactoryReadStore.Entities asymmetry.
+	// 2 teams). Mirrors the List asymmetry.
 	return s.ListActive(ctx, orgID, "jira")
 }
 

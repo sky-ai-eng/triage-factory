@@ -2,15 +2,30 @@ package domain
 
 import "time"
 
-// TeamActivity is the store-side payload of the team activity node — the
-// windowed synthetic read GET /api/teams/{team_id}/activity. Cuts, not rows:
-// each slice is a fixed named aggregation over the same window, per the
-// synthetic-reads rule in the API design section of CLAUDE.md.
+// TeamActivity is the store-side payload of the activity node — the windowed
+// synthetic read GET /api/teams/{team_id}/activity, and GET /api/me/activity
+// over the union of the viewer's teams. Cuts, not rows: each slice is a fixed
+// named aggregation over the same window, per the synthetic-reads rule in the
+// API design section of CLAUDE.md.
 type TeamActivity struct {
 	ByDay       []TeamActivityDay
 	ByDaySource []TeamActivityDaySource
 	BySource    []TeamActivitySource
 	ByTracked   []TeamActivityTracked
+	ByEventType []TeamActivityEventType
+}
+
+// TeamActivityEventType is one event type's flow over the window: the events
+// of that type recorded, the tasks created at it, and the distinct entities
+// that sent at least one such event. Events and Entities count the rows the
+// by-source cut's events count, and Tasks the rows its tasks count, so an
+// event type's figures sum across types to the by-source totals (Entities
+// aside, since one entity sends events of many types).
+type TeamActivityEventType struct {
+	EventType string
+	Events    int
+	Tasks     int
+	Entities  int
 }
 
 // TeamActivityDay is one UTC calendar day's flow across every source:
