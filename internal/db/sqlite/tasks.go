@@ -721,7 +721,7 @@ func (s *taskStore) LatestEventIDSystem(ctx context.Context, orgID, taskID strin
 		JOIN events ev ON ev.id = te.event_id
 		WHERE te.task_id = ?
 		  AND te.kind IN ('spawned', 'bumped', 'injected')
-		ORDER BY ev.created_at DESC, ev.id DESC
+		ORDER BY ev.created_at DESC, ev.rowid DESC
 		LIMIT 1
 	`, taskID).Scan(&eventID)
 	if err == sql.ErrNoRows {
@@ -731,6 +731,34 @@ func (s *taskStore) LatestEventIDSystem(ctx context.Context, orgID, taskID strin
 		return "", err
 	}
 	return eventID, nil
+}
+
+// LatestEventAfterSystem orders by (created_at, rowid). A new row's rowid is
+// above every row present, so on a created_at tie, which a coarse clock makes
+// common, the later insert is the newer event.
+func (s *taskStore) LatestEventAfterSystem(ctx context.Context, orgID, taskID, eventID string) (string, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return "", err
+	}
+	var latestID string
+	err := s.q.QueryRowContext(ctx, `
+		SELECT te.event_id
+		FROM task_events te
+		JOIN events ev ON ev.id = te.event_id
+		JOIN events since ON since.id = ?
+		WHERE te.task_id = ?
+		  AND te.kind IN ('spawned', 'bumped', 'injected')
+		  AND (ev.created_at, ev.rowid) > (since.created_at, since.rowid)
+		ORDER BY ev.created_at DESC, ev.rowid DESC
+		LIMIT 1
+	`, eventID, taskID).Scan(&latestID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return latestID, nil
 }
 
 func (s *taskStore) StampAgentClaimIfUnclaimedSystem(ctx context.Context, orgID, taskID, agentID, actingTeamID string) (bool, error) {

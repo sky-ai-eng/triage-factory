@@ -1447,6 +1447,33 @@ func (s *taskStore) LatestEventIDSystem(ctx context.Context, orgID, taskID strin
 	return eventID, nil
 }
 
+// LatestEventAfterSystem compares created_at strictly. events records no
+// insertion order and its id is a random UUID, so nothing says which of two
+// events sharing a created_at came second; the id in the ORDER BY only makes
+// the pick among later events deterministic.
+func (s *taskStore) LatestEventAfterSystem(ctx context.Context, orgID, taskID, eventID string) (string, error) {
+	var latestID string
+	err := s.admin.QueryRowContext(ctx, `
+		SELECT te.event_id
+		FROM task_events te
+		JOIN events ev ON ev.org_id = te.org_id AND ev.id = te.event_id
+		JOIN events since ON since.org_id = te.org_id AND since.id = $3
+		WHERE te.org_id = $1
+		  AND te.task_id = $2
+		  AND te.kind IN ('spawned', 'bumped', 'injected')
+		  AND ev.created_at > since.created_at
+		ORDER BY ev.created_at DESC, ev.id DESC
+		LIMIT 1
+	`, orgID, taskID, eventID).Scan(&latestID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return latestID, nil
+}
+
 // MarkEventInjectedSystem flips the timeline row AND stamps the task's
 // agent claim in one transaction — see db.AgentClaimStamp for why the two
 // writes are inseparable. A stamp refusal (user owns it, bot already owns
