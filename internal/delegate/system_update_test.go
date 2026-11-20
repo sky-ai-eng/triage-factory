@@ -25,8 +25,7 @@ func partsFor(kinds []string) *domain.SystemParts {
 func TestSystemUpdate_ASourceTurnedOnArrivesWithItsWholeReference(t *testing.T) {
 	update := systemUpdateText(partsFor([]string{"github"}), partsFor([]string{"github", "jira"}))
 	for _, p := range agentprompt.ToolsReferenceParts(agentprompt.RuntimeNative, []string{"jira"}) {
-		want := `<part name="` + conversationPartName(partToolsPrefix+p.Key) + `" change="new">` + "\n" + strings.TrimSpace(p.Text) + "\n</part>"
-		if !strings.Contains(update, want) {
+		if want := updatePart(conversationPartName(partToolsPrefix+p.Key), strings.TrimSpace(p.Text), false); !strings.Contains(update, want) {
 			t.Errorf("the update does not give the %s verbs in full;\n%s", p.Key, update)
 		}
 	}
@@ -40,11 +39,8 @@ func TestSystemUpdate_ASourceTurnedOnArrivesWithItsWholeReference(t *testing.T) 
 // workspace verbs go with the last tracker.
 func TestSystemUpdate_ASourceTurnedOffIsOneLine(t *testing.T) {
 	update := systemUpdateText(partsFor([]string{"github", "jira"}), partsFor([]string{"github"}))
-	for _, want := range []string{
-		"The Jira verbs are no longer available to this run; do not use them.",
-		"The workspace verbs are no longer available to this run; do not use them.",
-	} {
-		if !strings.Contains(update, want) {
+	for _, key := range []string{partToolsPrefix + "jira", partToolsPrefix + agentprompt.ToolsWorkspaceKey} {
+		if want := goneLine(key, conversationPartName(key)); !strings.Contains(update, want) {
 			t.Errorf("the update is missing %q;\n%s", want, update)
 		}
 	}
@@ -70,7 +66,7 @@ func TestSystemUpdate_NothingChangedIsNoUpdate(t *testing.T) {
 func TestSystemUpdate_ALineThatNoLongerAppliesIsOneLine(t *testing.T) {
 	closed := &domain.SystemParts{Conversation: runContextLines("", "This task is closed.", "", "", "", "", "", "", "", "")}
 	update := systemUpdateText(closed, &domain.SystemParts{})
-	if !strings.Contains(update, "The run context's task-state line no longer applies.") || strings.Contains(update, "This task is closed.") {
+	if !strings.Contains(update, goneLine(partTaskState, conversationPartName(partTaskState))) || strings.Contains(update, "This task is closed.") {
 		t.Errorf("update =\n%s", update)
 	}
 }

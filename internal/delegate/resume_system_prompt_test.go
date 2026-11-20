@@ -123,28 +123,32 @@ func TestNativeReclaim_AChangeArrivesAsAnUpdateOfThatPartAlone(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		change func(*launchFixture, *testing.T)
+		key    string // the changed part's key
 		part   string // the name the update gives the part
-		text   string // the part's current text
+		holds  string // what the part's current text says
 	}{
 		{
 			name:   "the branch convention",
 			change: func(f *launchFixture, t *testing.T) { f.setBranchTemplate(t, "after-the-park/<ticket-id>") },
+			key:    partBranchConvention,
 			part:   conversationPartName(partBranchConvention),
-			text:   "Branch naming convention for this team: after-the-park/<ticket-id>",
+			holds:  "after-the-park/<ticket-id>",
 		},
 		{
 			name: "a verb reference",
 			change: func(f *launchFixture, t *testing.T) {
 				f.rewriteSavedPart(t, false, partToolsPrefix+"jira", "An earlier release's Jira verbs.")
 			},
-			part: conversationPartName(partToolsPrefix + "jira"),
-			text: strings.TrimSpace(jira.Text),
+			key:   partToolsPrefix + "jira",
+			part:  conversationPartName(partToolsPrefix + "jira"),
+			holds: strings.TrimSpace(jira.Text),
 		},
 		{
 			name:   "the shared prompt",
 			change: func(f *launchFixture, t *testing.T) { f.earlierRelease(t, "You are an earlier release's machinist.") },
+			key:    identity.Path,
 			part:   sharedPartName(identity.Path),
-			text:   identity.Text,
+			holds:  identity.Text,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -165,15 +169,30 @@ func TestNativeReclaim_AChangeArrivesAsAnUpdateOfThatPartAlone(t *testing.T) {
 			if n := strings.Count(update, "<part "); n != 1 {
 				t.Errorf("the update gives %d parts, want the one that changed;\n%s", n, update)
 			}
-			if !strings.Contains(update, `<part name="`+tc.part+`" change="replaces the earlier version">`+"\n"+tc.text+"\n</part>") {
+			current := append(append([]domain.SystemPart{}, system.current.Parts.Shared...), system.current.Parts.Conversation...)
+			changed := -1
+			for i, p := range current {
+				if p.Key == tc.key {
+					changed = i
+				}
+			}
+			if changed < 0 || !strings.Contains(current[changed].Text, tc.holds) {
+				t.Fatalf("the claim did not compose the change to %s", tc.part)
+			}
+			if !strings.Contains(update, updatePart(tc.part, current[changed].Text, true)) {
 				t.Errorf("the update does not give %s in its current text as a replacement;\n%s", tc.part, update)
 			}
-			if strings.Contains(update, "no longer") {
-				t.Errorf("the update withdraws a part nothing removed;\n%s", update)
+			for i, p := range current {
+				if i != changed && strings.Contains(update, p.Text) {
+					t.Errorf("the update carries %s, which did not change;\n%s", p.Key, update)
+				}
 			}
-			for _, other := range []string{"Run root", "review the failing check", "PR checkout"} {
-				if strings.Contains(update, other) {
-					t.Errorf("the update carries %q, which did not change;\n%s", other, update)
+			if strings.Contains(update, "review the failing check") {
+				t.Errorf("the update carries the mission, which is never compared;\n%s", update)
+			}
+			for _, p := range system.sent.Parts.Conversation {
+				if strings.Contains(update, goneLine(p.Key, conversationPartName(p.Key))) {
+					t.Errorf("the update withdraws %s, which nothing removed;\n%s", p.Key, update)
 				}
 			}
 			if got := system.systemUpdate(); got == nil || got.Content != update {
@@ -198,6 +217,29 @@ func TestNativeReclaim_MatchingBlocksAddNoUpdate(t *testing.T) {
 	system := f.nativeLaunchText(t, "review the failing check", "", replay).system
 	if system.update != "" || system.systemUpdate() != nil {
 		t.Errorf("a re-claim that composed what the conversation has adds an update;\n%s", system.update)
+	}
+}
+
+// TestNativeReclaim_AnEditedMissionDoesNotReachTheConversation: a prompt row
+// is the org's to edit, and a conversation parked while it changed keeps the
+// mission it was given, with no update about it, so it is never handed a
+// mission nobody gave it.
+func TestNativeReclaim_AnEditedMissionDoesNotReachTheConversation(t *testing.T) {
+	f := newLaunchFixture(t, "native-edited")
+	const launched = "review the failing check"
+	if disp := f.runNative(t, launched); disp.launchErr == nil {
+		t.Fatal("the fixture's tool host launched")
+	}
+	f.open(t)
+
+	const edited = "close the pull request without reading it"
+	replay := f.s.nativeClaimReplay(context.Background(), runmode.LocalDefaultOrgID, f.conv.ID)
+	system := f.nativeLaunchText(t, edited, "", replay).system
+	if !strings.Contains(system.sent.Block, launched) || strings.Contains(system.sent.Block, edited) {
+		t.Errorf("the re-claim does not send the mission its launch was given;\n%s", system.sent.Block)
+	}
+	if system.update != "" {
+		t.Errorf("an edited mission reached the conversation as an update;\n%s", system.update)
 	}
 }
 

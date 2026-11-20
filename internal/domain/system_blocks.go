@@ -19,7 +19,8 @@ type SystemBlocks struct {
 	Block string
 	// Parts are the parts Prompt and Block were composed from,
 	// conversations.system_parts. Nil on a row saved before parts were
-	// recorded, which leaves a claim nothing to compare with.
+	// recorded, which leaves a claim nothing to compare with; that claim saves
+	// the parts it composed beside the Block it found.
 	Parts *SystemParts
 }
 

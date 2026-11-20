@@ -798,9 +798,9 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 // opening comes first, as a native engagement's does (mintOpeningRows): a
 // model that knows nothing reads what the task is before what happened to
 // it. They are flushed only once the turn's own rows are written, so a
-// refused write leaves them staged, and opts.OnOpeningUnsent puts them back
-// on the queue if the message never reaches the agent; it is nil when no
-// note was flushed.
+// refused write leaves them staged. If the message never reaches the agent,
+// opts.OnOpeningUnsent puts them back on the queue and withdraws the system
+// update the message carries; it is nil when there is neither.
 //
 // A conversation a person works in (interactive) opens on the person's own
 // messages rather than a mission, so its opening ends with what they have
@@ -835,7 +835,7 @@ func (s *Spawner) composeLaunchTurn(
 			return err
 		}
 		notes, unsent := s.stagedInjectionsForEngagement(ctx, orgID, conversationID)
-		opts.OnOpeningUnsent = unsent
+		opts.OnOpeningUnsent = allOf(unsent, s.withdrawUnsentUpdate(orgID, update))
 		opts.OpeningBlocks = nil
 		opts.Message = joinTurnText(workspaceNote, notes, note, updateText)
 		return nil
@@ -860,6 +860,7 @@ func (s *Spawner) composeLaunchTurn(
 	}
 	if updateText != "" {
 		blocks = append(blocks, agentproc.ContentBlock{Type: "text", Text: updateText})
+		opts.OnOpeningUnsent = allOf(unsent, s.withdrawUnsentUpdate(orgID, update))
 	}
 	opts.Message = ""
 	opts.OpeningBlocks = blocks
@@ -878,6 +879,44 @@ func (s *Spawner) recordLaunchUpdate(sink *conversationSink, conversationID, cre
 		return "", err
 	}
 	return update.Content, nil
+}
+
+// withdrawUnsentUpdate is the opening's undo for the system-update row it
+// carries, nil when it carries none: the row says the session received the
+// change, so an opening that never reached the agent takes it back, and the
+// next claim sends the change again.
+func (s *Spawner) withdrawUnsentUpdate(orgID string, update *domain.Message) func() {
+	if update == nil || update.ID == 0 || s.conversations == nil {
+		return nil
+	}
+	conversationID, id := update.ConversationID, update.ID
+	return func() {
+		ctx, cancel := context.WithTimeout(context.Background(), detachedWriteDeadline)
+		defer cancel()
+		if err := s.conversations.WithdrawSystemUpdateSystem(ctx, orgID, conversationID, id); err != nil {
+			delegateLog.Warn("withdrawing a system update the agent never received failed; the next claim will not send the change again",
+				"conversation", conversationID, "message", id, "error", err)
+		}
+	}
+}
+
+// allOf is a callback that runs every non-nil fn in order, nil when none is
+// set.
+func allOf(fns ...func()) func() {
+	var set []func()
+	for _, fn := range fns {
+		if fn != nil {
+			set = append(set, fn)
+		}
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	return func() {
+		for _, fn := range set {
+			fn()
+		}
+	}
 }
 
 // sdkClaimReplay is what an SDK launch inherits from its conversation: whether

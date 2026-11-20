@@ -280,8 +280,9 @@ func resolveCLIPath(text, binaryPath string) string {
 	return strings.ReplaceAll(text, "triagefactory exec", binaryPath+" exec")
 }
 
-// runContext renders what the framework prompt refers to but cannot contain:
-// the facts of this particular run. agentprompt.Build is byte-identical for a
+// runContextLines are what the framework prompt refers to but cannot contain:
+// the facts of this particular run, one part per fact present, keyed by which
+// fact it is, in the order <run_context> renders them (renderRunContext). agentprompt.Build is byte-identical for a
 // fixed Spec so the fleet shares one cached prefix, which leaves anything that
 // differs between two runs — what this one is pointed at, where its tree and
 // the checkout its setup built are, what the team calls its branches — to
@@ -320,14 +321,9 @@ func resolveCLIPath(text, binaryPath string) string {
 // block, because it is a listing rather than a line — and only when the run
 // tree holds something, so a run with no knowledge behind it says nothing
 // about knowledge at all.
-func runContext(scope, taskState, siblingWork, runRoot, prCheckout, baseCheckout, branchTemplate, runURL, sourceNotes, knowledge string) string {
-	return renderRunContext(runContextLines(scope, taskState, siblingWork, runRoot, prCheckout, baseCheckout, branchTemplate, runURL, sourceNotes, knowledge))
-}
-
-// runContextLines is runContext before the join: one part per fact present,
-// keyed by which fact it is, in the order the block renders them. A re-claim
-// compares them one by one (systemUpdateText), so each line it reports
-// changed is the line and nothing around it.
+//
+// A re-claim compares the lines one by one (systemUpdateText), so each line
+// it reports changed is the line and nothing around it.
 func runContextLines(scope, taskState, siblingWork, runRoot, prCheckout, baseCheckout, branchTemplate, runURL, sourceNotes, knowledge string) []domain.SystemPart {
 	var lines []domain.SystemPart
 	add := func(key, text string) {

@@ -3023,6 +3023,16 @@ func (s *conversationStore) LatestSystemUpdateSystem(ctx context.Context, orgID,
 	return &msgs[0], nil
 }
 
+// WithdrawSystemUpdateSystem — see the interface doc.
+func (s *conversationStore) WithdrawSystemUpdateSystem(ctx context.Context, orgID, conversationID string, id int) error {
+	_, err := s.admin.ExecContext(ctx, `
+		UPDATE messages SET delivered = false, window_state = 'inactive'
+		WHERE org_id = $1 AND conversation_id = $2 AND id = $3
+		  AND role = 'system' AND subtype = $4 AND window_state = 'active'
+	`, orgID, conversationID, id, domain.MessageSubtypeSystemUpdate)
+	return err
+}
+
 // OpeningTaskContextSystem — see the interface doc. Reads every window state,
 // on the admin pool for the reason ListForAssemblySystem does: its callers are
 // claims driving a conversation with no request identity.

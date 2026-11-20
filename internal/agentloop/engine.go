@@ -181,7 +181,9 @@ type Params struct {
 	// after the engagement's first drain, so it follows the input that started
 	// the claim and precedes the first call, and every later call sends it
 	// back unchanged. Nil writes none, and so does a compaction committing
-	// before the drain, since Current then carries the change itself.
+	// before the drain whose blocks are saved, since Current then carries the
+	// change itself. When that save fails, the engagement keeps sending the
+	// blocks it started with and writes the update after the drain as usual.
 	SystemUpdate *SystemUpdate
 
 	// HasBlueprint offers the flow-control tool. True for a delegation,

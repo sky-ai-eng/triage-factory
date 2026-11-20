@@ -174,9 +174,8 @@ func (c claimSystem) systemUpdate() *agentloop.SystemUpdate {
 //   - An opened row with no parts is an SDK conversation an earlier release
 //     saved, or one whose first claim's save did not land. It is sent the
 //     shared prompt this claim composed and the block it holds (or the
-//     composed one, when it holds none), which is what every claim of such a
-//     conversation sent before, and those are saved with the composed parts,
-//     so the next claim can compare.
+//     composed one, when it holds none), and those are saved with the
+//     composed parts, so the next claim can compare.
 //   - A row this claim could not read is sent what the claim composed and is
 //     left alone: it may hold the first claim's blocks, and a transient
 //     failure must not overwrite them.
@@ -263,14 +262,8 @@ func systemUpdateText(last, now *domain.SystemParts) string {
 		is := make(map[string]bool, len(after))
 		for _, p := range after {
 			is[p.Key] = true
-			old, had := was[p.Key]
-			switch {
-			case had && old == p.Text:
-				continue
-			case had:
-				given = append(given, fmt.Sprintf("<part name=%q change=\"replaces the earlier version\">\n%s\n</part>", name(p.Key), p.Text))
-			default:
-				given = append(given, fmt.Sprintf("<part name=%q change=\"new\">\n%s\n</part>", name(p.Key), p.Text))
+			if old, had := was[p.Key]; !had || old != p.Text {
+				given = append(given, updatePart(name(p.Key), p.Text, had))
 			}
 		}
 		for _, p := range before {
@@ -292,6 +285,16 @@ func systemUpdateText(last, now *domain.SystemParts) string {
 		sections = append(sections, strings.Join(gone, "\n"))
 	}
 	return "<system-update>\n" + strings.Join(sections, "\n\n") + "\n</system-update>"
+}
+
+// updatePart is how an update gives a part in its current text: replacing the
+// earlier version of it, or new.
+func updatePart(name, text string, replaces bool) string {
+	change := "new"
+	if replaces {
+		change = "replaces the earlier version"
+	}
+	return fmt.Sprintf("<part name=%q change=%q>\n%s\n</part>", name, change, text)
 }
 
 // goneLine is the one line an update gives a part that no longer applies.
@@ -382,13 +385,17 @@ func withPartsFrom(lines []domain.SystemPart, base []domain.SystemPart, keys ...
 // the branch convention, the run URL, the sources and their verbs, the
 // knowledge the tree holds, and the step-ending note — and carries the parts
 // only a setup knows (the scope and the checkouts) over from what the
-// conversation last received. The mission is never compared.
+// conversation last received. The mission is never compared. finalStep is
+// whether the conversation is its blueprint's last step, and finalRead false
+// when the blueprint run could not be read to say: the step-ending note is
+// then carried over too, since a guess either way would tell the session
+// something about its step that nothing established.
 //
 // A row this resume cannot read sends the framework blocks alone, with no
 // update, which is what a resume of a conversation that saved no block sends.
 // A row from before the parts were saved is sent what it holds, and saved with
 // the parts this resume composed, so the next claim can compare.
-func (s *Spawner) resumeClaimSystem(ctx context.Context, conv *domain.Conversation, task domain.Task, cwd string, finalStep bool) claimSystem {
+func (s *Spawner) resumeClaimSystem(ctx context.Context, conv *domain.Conversation, task domain.Task, cwd string, finalStep, finalRead bool) claimSystem {
 	orgID := conv.OrgID
 	spec := sdkSpec(surfaceFor(conv.Type))
 	saved, err := s.conversations.SystemBlocksSystem(ctx, orgID, conv.ID)
@@ -403,8 +410,12 @@ func (s *Spawner) resumeClaimSystem(ctx context.Context, conv *domain.Conversati
 	if saved.Parts != nil {
 		base = s.lastReceivedParts(ctx, orgID, conv.ID, saved.Parts)
 	}
+	withStepEnd := !finalStep
+	if !finalRead {
+		withStepEnd = hasPart(base, partStepEnd)
+	}
 	stepEnd := ""
-	if conv.BlueprintRunID != "" && !finalStep {
+	if conv.BlueprintRunID != "" && withStepEnd {
 		stepEnd = agentprompt.NonTerminalCompletion()
 	}
 	sources := s.sourceDocsFor(ctx, orgID, conv.CreatorUserID, conv.ID, ownSourceKind(task))
@@ -434,6 +445,19 @@ func (s *Spawner) resumeClaimSystem(ctx context.Context, conv *domain.Conversati
 		return claimSystem{sent: sent, current: current}
 	}
 	return claimSystem{sent: saved, current: current, update: systemUpdateText(base, current.Parts)}
+}
+
+// hasPart reports whether parts holds a conversation part keyed key.
+func hasPart(parts *domain.SystemParts, key string) bool {
+	if parts == nil {
+		return false
+	}
+	for _, p := range parts.Conversation {
+		if p.Key == key {
+			return true
+		}
+	}
+	return false
 }
 
 // ownSourceKind is the source a task's own entity is in, which sourceDocsFor

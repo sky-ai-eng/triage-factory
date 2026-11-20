@@ -9,8 +9,8 @@
 -- message instead.
 --
 -- Rows saved before this migration hold no shared prompt and no parts. The
--- next claim of one sends the framework prompt it composes, as every claim did
--- before, and saves it with the parts.
+-- next claim of one sends the framework prompt it composes and saves it, with
+-- the parts that claim composed, which the claims after it compare with.
 
 ALTER TABLE conversations ADD COLUMN system_prompt TEXT NOT NULL DEFAULT '';
 ALTER TABLE conversations ADD COLUMN system_parts TEXT;

@@ -2997,6 +2997,57 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
+	t.Run("WithdrawSystemUpdate_TakesBackOnlyThatUpdate", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		conversationID := seedConversationForTest(t, orgID, seed, "running")
+		otherConversationID := seedConversationForTest(t, orgID, seed, "running")
+
+		insert := func(convID string, msg domain.Message) int {
+			t.Helper()
+			msg.ConversationID = convID
+			id, err := store.InsertMessageSystem(ctx, orgID, &msg)
+			if err != nil {
+				t.Fatalf("InsertMessageSystem: %v", err)
+			}
+			return int(id)
+		}
+		update := func(content string) domain.Message {
+			return domain.Message{Role: "system", Subtype: domain.MessageSubtypeSystemUpdate, Content: content}
+		}
+		delivered := true
+		received := insert(conversationID, update("received"))
+		unsent := insert(conversationID, update("never sent"))
+		note := insert(conversationID, domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionSystemNote, Content: "a note", Delivered: &delivered})
+		other := insert(otherConversationID, update("another conversation's"))
+
+		for _, id := range []int{unsent, note, other} {
+			if err := store.WithdrawSystemUpdateSystem(ctx, orgID, conversationID, id); err != nil {
+				t.Fatalf("WithdrawSystemUpdateSystem(%d): %v", id, err)
+			}
+		}
+
+		if got, err := store.LatestSystemUpdateSystem(ctx, orgID, conversationID); err != nil || got == nil || got.ID != received {
+			t.Errorf("LatestSystemUpdateSystem = (%+v, %v), want row %d, the update the conversation received", got, err, received)
+		}
+		if got, err := store.LatestSystemUpdateSystem(ctx, orgID, otherConversationID); err != nil || got == nil || got.ID != other {
+			t.Errorf("another conversation's update was withdrawn: (%+v, %v)", got, err)
+		}
+		msgs, err := store.MessagesForConversations(ctx, orgID, []string{conversationID})
+		if err != nil {
+			t.Fatalf("MessagesForConversations: %v", err)
+		}
+		visible := map[int]bool{}
+		for _, m := range msgs {
+			visible[m.ID] = true
+		}
+		for id, want := range map[int]bool{received: true, unsent: false, note: true} {
+			if visible[id] != want {
+				t.Errorf("row %d visible = %v, want %v", id, visible[id], want)
+			}
+		}
+	})
+
 	// The half of SetExecutorForClaimSystem's contract that is NOT the fence,
 	// so both dialects owe it: it writes the claim the caller named and mints
 	// nothing. Its unfenced twin does neither — it resolves the active claim

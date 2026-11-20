@@ -1063,6 +1063,24 @@ type ConversationStore interface {
 	// Newest is the highest assembly key, COALESCE(seq, id).
 	LatestSystemUpdateSystem(ctx context.Context, orgID, conversationID string) (*domain.Message, error)
 
+	// WithdrawSystemUpdateSystem takes back a system-update row whose text
+	// never reached the model. The named row, when it is an active
+	// system-update row of the conversation, flips undelivered and inactive,
+	// which marks a row that never happened: the transcript reads and
+	// LatestSystemUpdateSystem both skip it, so the next claim compares with
+	// what the conversation did receive and sends the change again. Any other
+	// id is left alone.
+	//
+	// The caller is an SDK launch whose opening input carried the update and
+	// was never sent (agentproc.RunOptions.OnOpeningUnsent). Unfenced, as the
+	// staged notes the same input carried are restored unfenced: it runs as
+	// the engagement ends, and only the engagement that wrote the row knows
+	// its id.
+	//
+	// Exempt from the returned-row rule: an undo its caller fires and never
+	// reads back.
+	WithdrawSystemUpdateSystem(ctx context.Context, orgID, conversationID string, id int) error
+
 	// EndConversationSystem is EndConversation on the admin pool — see the
 	// app-pool door for the predicate, the return shape and the miss
 	// semantics. The delegate failure paths are its callers: a conversation
@@ -1206,8 +1224,10 @@ type ConversationStore interface {
 	// conversations.system_block (the conversation's own block: the run's
 	// facts, its verb reference, its mission and its step addendum) and
 	// conversations.system_parts (the parts both were composed from), exactly
-	// as composed. All three are written together, so the parts always
-	// describe the blocks beside them.
+	// as composed. All three are written together, so the parts describe the
+	// blocks beside them, with one exception: a row saved before parts were
+	// recorded keeps its block, and its next claim saves beside it the parts
+	// that claim composed, which is what the claims after it compare with.
 	//
 	// Written by the claim that launches the conversation, on either runtime,
 	// and by a native engagement whose compaction committed; read by every

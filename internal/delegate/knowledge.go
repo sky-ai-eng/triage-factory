@@ -11,13 +11,16 @@ package delegate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"unicode/utf8"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -160,11 +163,25 @@ func (s *Spawner) knowledgeForClaim(ctx context.Context, orgID, teamID, cwd stri
 // Each contributing team's directory is labelled by the team's name where the
 // team is still active, and by its directory otherwise: the files are there
 // to read either way. A file that cannot be read is listed without a summary.
+//
+// The tree belongs to the sandbox identity by now, so the agent can have put
+// anything in it. Only regular files are listed, and each is read through a
+// handle on the knowledge root that cannot reach past it, so a link the agent
+// planted cannot put a file outside the tree into the prompt, and a pipe
+// cannot hold the claim on its open.
 func (s *Spawner) stagedKnowledgeListing(ctx context.Context, orgID, teamID, cwd string) string {
-	root := filepath.Join(cwd, scratchDirName, knowledgeDirName)
+	root, err := os.OpenRoot(filepath.Join(cwd, scratchDirName, knowledgeDirName))
+	if err != nil {
+		if !os.IsNotExist(err) {
+			delegateLog.Warn("open the run tree's knowledge failed; the listing leaves it out", "cwd", cwd, "error", err)
+		}
+		return ""
+	}
+	defer func() { _ = root.Close() }()
+
 	staged := stagedKnowledge{}
 	add := func(dir, label string) {
-		entries := listStagedKnowledgeFiles(filepath.Join(root, filepath.FromSlash(dir)))
+		entries := listStagedKnowledgeFiles(root, dir)
 		if len(entries) == 0 {
 			return
 		}
@@ -173,9 +190,9 @@ func (s *Spawner) stagedKnowledgeListing(ctx context.Context, orgID, teamID, cwd
 	}
 	add(knowledgeTeamDirName, "your team's knowledge base")
 
-	dirs, err := os.ReadDir(filepath.Join(root, knowledgeOrgDirName))
-	if err != nil && !os.IsNotExist(err) {
-		delegateLog.Warn("list the run tree's knowledge failed; the listing leaves other teams' knowledge out", "path", root, "error", err)
+	dirs, err := fs.ReadDir(root.FS(), knowledgeOrgDirName)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		delegateLog.Warn("list the run tree's knowledge failed; the listing leaves other teams' knowledge out", "cwd", cwd, "error", err)
 	}
 	onDisk := map[string]bool{}
 	for _, d := range dirs {
@@ -205,20 +222,17 @@ func (s *Spawner) stagedKnowledgeListing(ctx context.Context, orgID, teamID, cwd
 	return renderKnowledgeManifest(staged)
 }
 
-// listStagedKnowledgeFiles is every file under dir, by its slash-separated
-// path relative to dir, with the summary staging would have given it, sorted
-// by path.
-func listStagedKnowledgeFiles(dir string) []stagedEntry {
+// listStagedKnowledgeFiles is every regular file under dir, a slash-separated
+// path in root, by its path relative to dir, with the summary staging would
+// have given it, sorted by path.
+func listStagedKnowledgeFiles(root *os.Root, dir string) []stagedEntry {
 	var entries []stagedEntry
-	_ = filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
+	_ = fs.WalkDir(root.FS(), dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || !d.Type().IsRegular() {
 			return nil
 		}
-		rel, relErr := filepath.Rel(dir, p)
-		if relErr != nil {
-			return nil
-		}
-		entries = append(entries, stagedEntry{path: filepath.ToSlash(rel), summary: stagedFileSummary(p)})
+		rel := strings.TrimPrefix(p, dir+"/")
+		entries = append(entries, stagedEntry{path: rel, summary: stagedFileSummary(root, p)})
 		return nil
 	})
 	sort.Slice(entries, func(i, j int) bool { return entries[i].path < entries[j].path })
@@ -226,16 +240,21 @@ func listStagedKnowledgeFiles(dir string) []stagedEntry {
 }
 
 // stagedFileSummary reads as much of a staged file as copyKnowledgeFile keeps
-// for its summary, and summarizes it the same way.
-func stagedFileSummary(p string) string {
-	f, err := os.Open(p)
+// for its summary, and summarizes it the same way. Opened without blocking and
+// checked again once open, since the walk's look at the entry and the open are
+// two moments the agent can act between.
+func stagedFileSummary(root *os.Root, name string) string {
+	f, err := root.OpenFile(filepath.FromSlash(name), os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return ""
 	}
 	defer func() { _ = f.Close() }()
-	head := make([]byte, 4*knowledgeSummaryMaxLen)
-	n, _ := io.ReadFull(f, head)
-	return firstLineSummary(string(head[:n]))
+	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
+		return ""
+	}
+	head := &headCapture{limit: 4 * knowledgeSummaryMaxLen}
+	_, _ = io.Copy(head, io.LimitReader(f, int64(head.limit)))
+	return firstLineSummary(head.String())
 }
 
 // clearStagedKnowledge empties the knowledge tree so this launch can rebuild

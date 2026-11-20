@@ -640,6 +640,19 @@ func (s *conversationStore) LatestSystemUpdateSystem(ctx context.Context, orgID,
 	return &msgs[0], nil
 }
 
+// WithdrawSystemUpdateSystem — see the interface doc.
+func (s *conversationStore) WithdrawSystemUpdateSystem(ctx context.Context, orgID, conversationID string, id int) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	_, err := s.q.ExecContext(ctx, `
+		UPDATE messages SET delivered = 0, window_state = 'inactive'
+		WHERE conversation_id = ? AND id = ?
+		  AND role = 'system' AND subtype = ? AND window_state = 'active'
+	`, conversationID, id, domain.MessageSubtypeSystemUpdate)
+	return err
+}
+
 func (s *conversationStore) SetExecutorSystem(ctx context.Context, orgID, conversationID, executorID string, bootEpoch int64) (*domain.ExecutorClaim, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err

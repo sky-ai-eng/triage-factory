@@ -520,16 +520,17 @@ func finalBlueprintStepOf(cfg runConfig) bool {
 // resumedStepIsFinal is finalBlueprintStep for a conversation a resume is
 // about to drive, read from its blueprint run: the resume path holds no plan
 // of its own. True when there is no blueprint run to read, or the read fails,
-// for the reason finalBlueprintStep gives.
-func (s *Spawner) resumedStepIsFinal(ctx context.Context, orgID string, conv *domain.Conversation) bool {
+// for the reason finalBlueprintStep gives; read is false when the read failed,
+// so a caller that must not act on that default can tell.
+func (s *Spawner) resumedStepIsFinal(ctx context.Context, orgID string, conv *domain.Conversation) (final, read bool) {
 	if s.blueprints == nil || conv.BlueprintRunID == "" {
-		return true
+		return true, true
 	}
 	br, err := s.blueprints.GetRunSystem(ctx, orgID, conv.BlueprintRunID)
 	if err != nil || br == nil {
-		return true
+		return true, false
 	}
-	return finalBlueprintStep(br, conv.BlueprintStepIndex)
+	return finalBlueprintStep(br, conv.BlueprintStepIndex), true
 }
 
 // taskHasUnresolvedDeliverables reports whether any conversation on the task holds

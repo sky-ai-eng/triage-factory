@@ -1615,6 +1615,14 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 		return
 	}
 
+	// The system blocks this turn is resumed with, and what changed in them
+	// since the session last heard them. Composed ahead of the flush below, so
+	// the knowledge it stages does not stand between the person's messages
+	// being taken off the queue and the session receiving them.
+	final, finalRead := s.resumedStepIsFinal(stepCtx, orgID, conv)
+	finalStep := blueprintRunID != "" && final
+	system := s.resumeClaimSystem(stepCtx, conv, *task, resumeCwd, finalStep, finalRead)
+
 	// Past every hand-back: this claim now owns the conversation's outcome, so
 	// the queued rows become this turn's message, and the turn starts.
 	s.startTurn(stepCtx, conv.ID, conv.ClaimID)
@@ -1642,12 +1650,12 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 	// risk losing anything staged in the gap).
 	prepends, prependsUnsent := s.stagedInjectionsForEngagement(stepCtx, orgID, conv.ID)
 
-	// What changed in the system blocks since the session last heard them,
-	// after the message that starts this turn. The append stays the one the
-	// session was started with; a fence refusal leaves the update out with its
-	// row, as it does the workspace note.
-	finalStep := blueprintRunID != "" && s.resumedStepIsFinal(stepCtx, orgID, conv)
-	system := s.resumeClaimSystem(stepCtx, conv, *task, resumeCwd, finalStep)
+	// What changed in the system blocks goes after the message that starts
+	// this turn. The append stays the one the session was started with; a
+	// fence refusal leaves the update out with its row, as it does the
+	// workspace note, and an opening that never reaches the session takes the
+	// row back with the notes it carried.
+	//
 	// The verbs in it name the binary the resumed process runs, as the
 	// append's do. A path this process cannot resolve leaves them as written,
 	// and the resume refuses to start for the same reason.
@@ -1661,6 +1669,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 		update.UserID = userID
 		if !s.insertClaimNote(stepCtx, orgID, conv.ClaimID, update) {
 			updateText = update.Content
+			prependsUnsent = allOf(prependsUnsent, s.withdrawUnsentUpdate(orgID, update))
 		}
 	}
 	message := joinTurnText(note, prepends, agentMessage, updateText)

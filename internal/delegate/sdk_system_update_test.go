@@ -3,6 +3,7 @@ package delegate
 import (
 	"context"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -110,28 +111,59 @@ func TestSDKResume_SendsTheBlocksItsFirstClaimSent(t *testing.T) {
 	}
 
 	message := resumed.opts.Message
-	at := strings.Index(message, "<system-update>")
+	rows := f.systemRows(t)
+	if len(rows) != 1 {
+		t.Fatalf("system rows = %+v, want one update", rows)
+	}
+	update := rows[0].Content
+	at := strings.Index(message, update)
 	if at < 0 {
-		t.Fatalf("the resume's message carries no update;\n%s", message)
+		t.Fatalf("the resume's message does not carry the update its row records;\n%s", message)
 	}
 	if strings.Index(message, "which test?") > at {
 		t.Error("the update precedes the person's message; it belongs after the input that starts the claim")
 	}
-	update := message[at:]
-	for _, want := range []string{
-		"Branch naming convention for this team: after-the-park/SKY-1440-resume",
-		`name="` + sharedPartName(agentprompt.Sections(sdkSpec(agentprompt.SurfaceWorkbench))[0].Path) + `"`,
-	} {
-		if !strings.Contains(update, want) {
-			t.Errorf("the update is missing %q;\n%s", want, update)
+	now, ok := partsFromMetadata(rows[0].Metadata)
+	if !ok {
+		t.Fatal("the update row records no parts")
+	}
+	section := agentprompt.Sections(sdkSpec(agentprompt.SurfaceWorkbench))[0]
+	if got, want := changedParts(saved.Parts, now), []string{section.Path, partBranchConvention}; !slices.Equal(got, want) {
+		t.Errorf("the update brings the session to parts that changed %v, want %v", got, want)
+	}
+	if !strings.Contains(update, "after-the-park/SKY-1440-resume") {
+		t.Errorf("the update does not carry the new branch convention;\n%s", update)
+	}
+	if want := resolveCLIPath(systemUpdateText(saved.Parts, now), agentBinary(t)); update != want {
+		t.Errorf("the update is not what changed since the session's blocks;\n%s", update)
+	}
+}
+
+// changedParts are the keys of the parts that differ between two
+// compositions, shared then conversation, each in its composition's order.
+func changedParts(before, after *domain.SystemParts) []string {
+	var keys []string
+	diff := func(b, a []domain.SystemPart) {
+		was := map[string]string{}
+		for _, p := range b {
+			was[p.Key] = p.Text
+		}
+		is := map[string]bool{}
+		for _, p := range a {
+			is[p.Key] = true
+			if old, had := was[p.Key]; !had || old != p.Text {
+				keys = append(keys, p.Key)
+			}
+		}
+		for _, p := range b {
+			if !is[p.Key] {
+				keys = append(keys, p.Key)
+			}
 		}
 	}
-	if n := strings.Count(update, "<part "); n != 2 {
-		t.Errorf("the update gives %d parts, want the two that changed;\n%s", n, update)
-	}
-	if rows := f.systemRows(t); len(rows) != 1 || !strings.Contains(message, rows[0].Content) {
-		t.Errorf("system rows = %+v, want the one update the message carries", rows)
-	}
+	diff(before.Shared, after.Shared)
+	diff(before.Conversation, after.Conversation)
+	return keys
 }
 
 // TestSDKResume_MatchingBlocksAddNoUpdate: nothing changed, so the resume's
@@ -149,11 +181,11 @@ func TestSDKResume_MatchingBlocksAddNoUpdate(t *testing.T) {
 	if want := sdkSystemPrompt(saved, agentBinary(t)); resumed.opts.SystemPrompt != want {
 		t.Error("the resume's append is not the one its session was started with")
 	}
-	if strings.Contains(resumed.opts.Message, "<system-update>") {
-		t.Errorf("a resume that composed what the session has carries an update;\n%s", resumed.opts.Message)
-	}
 	if rows := f.systemRows(t); len(rows) != 0 {
 		t.Errorf("system rows = %d, want none", len(rows))
+	}
+	if msg := resumed.opts.Message; !strings.HasSuffix(msg, "which test?") {
+		t.Errorf("the resume's message carries something after the person's;\n%s", msg)
 	}
 }
 
@@ -227,6 +259,11 @@ func TestRunAgent_ALaterLaunchSendsItsSavedBlocks(t *testing.T) {
 				t.Error("the re-claim rewrote the saved blocks")
 			}
 
+			rows := f.systemRows(t)
+			if len(rows) != 1 {
+				t.Fatalf("system rows = %+v, want one update", rows)
+			}
+			update := rows[0].Content
 			var input, before string
 			if tc.loseSession {
 				blocks := launched.opts.OpeningBlocks
@@ -245,15 +282,101 @@ func TestRunAgent_ALaterLaunchSendsItsSavedBlocks(t *testing.T) {
 				}
 			} else {
 				input = launched.opts.Message
-				note, at := strings.Index(input, domain.SessionContinuationNote), strings.Index(input, "<system-update>")
+				note, at := strings.Index(input, domain.SessionContinuationNote), strings.Index(input, update)
 				if note < 0 || at < note {
 					t.Fatalf("the opening input does not carry the update after the continuation note;\n%s", input)
 				}
-				input = input[at:]
 			}
-			if !strings.HasPrefix(input, "<system-update>") || !strings.Contains(input, "Branch naming convention for this team: after-the-park/SKY-1440-crash") {
+			if !strings.HasSuffix(input, update) || !strings.Contains(update, "after-the-park/SKY-1440-crash") {
 				t.Errorf("the opening input does not end with the update carrying the new branch convention;\n%s", input)
 			}
+
+			// The opening never reaching the agent takes the update back, so
+			// the next claim compares with what the session holds.
+			if launched.opts.OnOpeningUnsent == nil {
+				t.Fatal("the opening carries an update and has no undo for it")
+			}
+			launched.opts.OnOpeningUnsent()
+			if rows := f.systemRows(t); len(rows) != 0 {
+				t.Errorf("system rows after an unsent opening = %+v, want the update withdrawn", rows)
+			}
+			if got, err := f.stores.Conversations.LatestSystemUpdateSystem(ctx, org, f.conv.ID); err != nil || got != nil {
+				t.Errorf("LatestSystemUpdateSystem after an unsent opening = (%+v, %v), want none", got, err)
+			}
 		})
+	}
+}
+
+// TestSDKResume_AnOpeningThatNeverReachedTheSessionSendsTheUpdateAgain: a
+// resume whose message never reached the session takes its update row back
+// with the notes it carried, so the next resume tells the session the change.
+func TestSDKResume_AnOpeningThatNeverReachedTheSessionSendsTheUpdateAgain(t *testing.T) {
+	f := newInteractiveFixture(t, "1440-unsent")
+	f.setBranchTemplate(t, "at-launch/<ticket-id>")
+	sdkFirstTurn(t, f, "sess-1440-unsent")
+	f.setBranchTemplate(t, "after-the-park/<ticket-id>")
+
+	unsent := f.endTurn(t, "sess-1440-unsent", "it was the retry")
+	f.s.dispatchClaimedConversation(context.Background(), f.claim(t, "which test?"), time.Now())
+	if len(f.systemRows(t)) != 1 || unsent.opts.OnOpeningUnsent == nil {
+		t.Fatal("staging failed: the resume carries no update to take back")
+	}
+	unsent.opts.OnOpeningUnsent()
+	if rows := f.systemRows(t); len(rows) != 0 {
+		t.Fatalf("system rows after an unsent opening = %+v, want the update withdrawn", rows)
+	}
+
+	next := f.endTurn(t, "sess-1440-unsent", "the retry has a timeout")
+	f.s.dispatchClaimedConversation(context.Background(), f.claim(t, "how long?"), time.Now())
+	rows := f.systemRows(t)
+	if len(rows) != 1 || !strings.Contains(rows[0].Content, "after-the-park/SKY-1440-unsent") {
+		t.Fatalf("system rows = %+v, want the change sent again", rows)
+	}
+	if !strings.Contains(next.opts.Message, rows[0].Content) {
+		t.Errorf("the next resume's message does not carry the update;\n%s", next.opts.Message)
+	}
+}
+
+// TestSDKResume_AnUnreadableRowSendsTheFrameworkBlocksAlone: a resume that
+// cannot read what its session was started with sends the framework blocks,
+// tells the session nothing, and leaves the row alone.
+func TestSDKResume_AnUnreadableRowSendsTheFrameworkBlocksAlone(t *testing.T) {
+	database := newDelegateTestDB(t)
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+	conv := &domain.Conversation{ID: "r-does-not-exist", OrgID: runmode.LocalDefaultOrgID, Type: domain.ConversationTypeInteractive}
+
+	system := s.resumeClaimSystem(context.Background(), conv, domain.Task{ID: "t-none"}, t.TempDir(), true, true)
+	want := domain.SystemBlocks{Prompt: agentprompt.Build(sdkSpec(agentprompt.SurfaceWorkbench))}
+	if system.sent.Prompt != want.Prompt || system.sent.Block != "" || system.sent.Parts != nil {
+		t.Errorf("sent = %+v, want the framework blocks alone", system.sent)
+	}
+	if system.update != "" || system.stamp {
+		t.Errorf("an unreadable row produced an update or a save: %+v", system)
+	}
+}
+
+// TestSDKResume_AnUnreadableBlueprintRunKeepsTheStepEndingNote: whether a step
+// is its blueprint's last is read from the blueprint run, and a resume that
+// cannot read it keeps the step-ending note the session holds rather than
+// telling a step that its handoff no longer applies.
+func TestSDKResume_AnUnreadableBlueprintRunKeepsTheStepEndingNote(t *testing.T) {
+	database := newDelegateTestDB(t)
+	seedConversation(t, database, "r-step", "sess-step", "/tmp/wt-step")
+	claimID := markEngaged(t, database, "r-step")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+	ctx := context.Background()
+	conv := &domain.Conversation{ID: "r-step", OrgID: runmode.LocalDefaultOrgID, ClaimID: claimID, BlueprintRunID: "br-step"}
+	task, cwd := domain.Task{ID: "t-step"}, t.TempDir()
+
+	// The session was started as a step with another after it.
+	if first := s.resumeClaimSystem(ctx, conv, task, cwd, false, true); !hasPart(first.current.Parts, partStepEnd) {
+		t.Fatal("staging failed: a non-final step composed no step-ending note")
+	}
+
+	if got := s.resumeClaimSystem(ctx, conv, task, cwd, true, false); got.update != "" {
+		t.Errorf("a resume that could not read its blueprint run changed the step's ending;\n%s", got.update)
+	}
+	if got := s.resumeClaimSystem(ctx, conv, task, cwd, true, true); !strings.Contains(got.update, goneLine(partStepEnd, conversationPartName(partStepEnd))) {
+		t.Errorf("a resume that read its step is final kept the step-ending note;\n%s", got.update)
 	}
 }
