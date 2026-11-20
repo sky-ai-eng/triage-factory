@@ -53,6 +53,10 @@ type EventStoreSeeder struct {
 	// suffix is appended to source_id so multiple seeds per subtest
 	// don't collide on the active-key unique index.
 	Entity func(t *testing.T, suffix string) string
+
+	// SetCreatedAt rewrites an event's created_at, in the layout the
+	// dialect stores it in.
+	SetCreatedAt func(t *testing.T, eventID string, at time.Time)
 }
 
 // RunEventStoreConformance covers the EventStore contract every
@@ -190,6 +194,33 @@ func RunEventStoreConformance(t *testing.T, mk EventStoreFactory) {
 		}
 		if got.ID != lastID {
 			t.Errorf("Latest.ID = %q, want %q (last inserted of 8 same-burst records)", got.ID, lastID)
+		}
+	})
+
+	// Two writes can share both timestamps: a source time reported to the
+	// second, and a created_at on a coarse clock. The later insert wins.
+	t.Run("Latest_breaks_a_full_tie_by_insertion", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		entityID := seed.Entity(t, "latest-tie")
+		eid := entityID
+		at := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+		var lastID string
+		for i := 0; i < 4; i++ {
+			id, err := s.Record(ctx, orgID, domain.Event{
+				EntityID: &eid, EventType: domain.EventGitHubPRCICheckPassed, OccurredAt: at,
+			})
+			if err != nil {
+				t.Fatalf("Record %d: %v", i, err)
+			}
+			seed.SetCreatedAt(t, id, at)
+			lastID = id
+		}
+		got, err := s.LatestForEntityTypeAndDedupKey(ctx, orgID, entityID, domain.EventGitHubPRCICheckPassed, "")
+		if err != nil || got == nil {
+			t.Fatalf("Latest: got=%v err=%v", got, err)
+		}
+		if got.ID != lastID {
+			t.Errorf("Latest.ID = %q, want %q, the last of 4 records sharing both timestamps", got.ID, lastID)
 		}
 	})
 

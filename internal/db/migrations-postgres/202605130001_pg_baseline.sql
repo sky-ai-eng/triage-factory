@@ -778,7 +778,10 @@ CREATE TABLE public.events (
     dedup_key text DEFAULT ''::text NOT NULL,
     metadata_json jsonb,
     occurred_at timestamp with time zone,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    -- Insertion order, which breaks a created_at tie: two events can share a
+    -- timestamp, and id is a random UUID.
+    seq bigint GENERATED ALWAYS AS IDENTITY
 );
 
 

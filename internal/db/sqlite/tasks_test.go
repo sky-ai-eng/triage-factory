@@ -751,8 +751,23 @@ func TestTaskRequestedReviewer_SQLite(t *testing.T) {
 // TestTaskLatestEvent_SQLite runs the LatestEventIDSystem suite against the
 // SQLite TaskStore.
 func TestTaskLatestEvent_SQLite(t *testing.T) {
-	dbtest.RunTaskLatestEventConformance(t, func(t *testing.T) (db.Stores, string, string) {
+	dbtest.RunTaskLatestEventConformance(t, func(t *testing.T) dbtest.TaskLatestEventFixture {
 		t.Helper()
-		return sqlitestore.New(openSQLiteForTest(t)), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID
+		conn := openSQLiteForTest(t)
+		return dbtest.TaskLatestEventFixture{
+			Stores: sqlitestore.New(conn),
+			OrgID:  runmode.LocalDefaultOrgID,
+			TeamID: runmode.LocalDefaultTeamID,
+			SetCreatedAt: func(t *testing.T, eventID string, at time.Time) {
+				t.Helper()
+				res, err := conn.Exec(`UPDATE events SET created_at = ? WHERE id = ?`, at.UTC(), eventID)
+				if err != nil {
+					t.Fatalf("set created_at: %v", err)
+				}
+				if n, _ := res.RowsAffected(); n != 1 {
+					t.Fatalf("set created_at: %d rows for event %s, want 1", n, eventID)
+				}
+			},
+		}
 	})
 }

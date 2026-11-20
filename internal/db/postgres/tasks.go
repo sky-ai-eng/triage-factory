@@ -1435,7 +1435,7 @@ func (s *taskStore) LatestEventIDSystem(ctx context.Context, orgID, taskID strin
 		WHERE te.org_id = $1
 		  AND te.task_id = $2
 		  AND te.kind IN ('spawned', 'bumped', 'injected')
-		ORDER BY ev.created_at DESC, ev.id DESC
+		ORDER BY ev.created_at DESC, ev.seq DESC
 		LIMIT 1
 	`, orgID, taskID).Scan(&eventID)
 	if err == sql.ErrNoRows {
@@ -1445,6 +1445,29 @@ func (s *taskStore) LatestEventIDSystem(ctx context.Context, orgID, taskID strin
 		return "", err
 	}
 	return eventID, nil
+}
+
+func (s *taskStore) LatestEventAfterSystem(ctx context.Context, orgID, taskID, eventID string) (string, error) {
+	var latestID string
+	err := s.admin.QueryRowContext(ctx, `
+		SELECT te.event_id
+		FROM task_events te
+		JOIN events ev ON ev.org_id = te.org_id AND ev.id = te.event_id
+		JOIN events since ON since.org_id = te.org_id AND since.id = $3
+		WHERE te.org_id = $1
+		  AND te.task_id = $2
+		  AND te.kind IN ('spawned', 'bumped', 'injected')
+		  AND (ev.created_at, ev.seq) > (since.created_at, since.seq)
+		ORDER BY ev.created_at DESC, ev.seq DESC
+		LIMIT 1
+	`, orgID, taskID, eventID).Scan(&latestID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return latestID, nil
 }
 
 // MarkEventInjectedSystem flips the timeline row AND stamps the task's
