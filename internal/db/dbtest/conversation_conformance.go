@@ -106,6 +106,12 @@ type ConversationSeeder struct {
 	// read the newest stamp a row carries, which is what that shape is for.
 	BackdateCompletedAt func(t *testing.T, conversationID string, age time.Duration)
 
+	// BackdateParkedAt is BackdateStartedAt for the park stamp, which is
+	// also a park's identity to the pause notice: a subtest that parks again
+	// ages the first park, so the second has a parked_at of its own whatever
+	// the clock's resolution.
+	BackdateParkedAt func(t *testing.T, conversationID string, age time.Duration)
+
 	// ClaimRows returns the conversation's claims rows oldest-first, so
 	// the suite can assert mint/release bookkeeping.
 	ClaimRows func(t *testing.T, conversationID string) []ClaimRow
@@ -145,6 +151,12 @@ type ConversationSeeder struct {
 	// holds to `age` ago, so a claim minted after it is newer by more than
 	// any column's resolution.
 	BackdateClaimedAt func(t *testing.T, conversationID string, age time.Duration)
+
+	// AgeClaims moves the conversation's queued_at and its claims'
+	// claimed_at and released_at d earlier, as ClaimPredicateHarness.Age
+	// does, so a release after it is later than every earlier one whatever
+	// the clock's resolution.
+	AgeClaims func(t *testing.T, conversationID string, d time.Duration)
 
 	// BlueprintRun mints a blueprint + blueprint_run pair against the
 	// given taskID and returns the blueprint_run id. Every conversation
@@ -1391,6 +1403,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if _, err := store.SetExecutorSystem(ctx, orgID, twice, "", 0); err != nil {
 			t.Fatalf("release the first engagement: %v", err)
 		}
+		// The first engagement is aged, so the second is the newer whatever
+		// the clock's resolution.
+		seed.AgeClaims(t, twice, time.Second)
 		if _, err := store.SetExecutorSystem(ctx, orgID, twice, "exec-2", 2); err != nil {
 			t.Fatalf("SetExecutorSystem exec-2: %v", err)
 		}
@@ -3288,6 +3303,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Helper()
 			// The empty stamp releases the active claim; without it the next
 			// mint would update in place instead of starting an engagement.
+			// The claims so far are aged first, so the release is the newest
+			// on the clock: the predecessor is read by release time.
+			seed.AgeClaims(t, conversationID, time.Second)
 			if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "", 0); err != nil {
 				t.Fatalf("release before minting %s: %v", executorID, err)
 			}
@@ -6098,6 +6116,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		conversationID := seedConversationForTaskTest(t, orgID, taskID, "", seed)
 		park(conversationID)
+		seed.BackdateParkedAt(t, conversationID, time.Minute)
 		// The awaiting-person test applies: a trigger fired this one.
 		fired := seed.Conversation(t, domain.Conversation{
 			TaskID: taskID, PromptID: conversationTestPrompt(t), Model: "m",
