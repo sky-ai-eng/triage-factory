@@ -2,6 +2,7 @@ package dbtest
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -29,8 +30,10 @@ var blueprintLocks = []struct {
 // RunBlueprintLockConformance pins BlueprintStore.GetForShare and
 // GetForUpdate by what their callers rely on: each reads the live blueprint as
 // Get does; a write that holds a blueprint to reference it waits for a retire
-// that held it first, and then reads it as absent; and outside a write
-// transaction, where nothing would hold the row, both are refused.
+// that held it first, and then reads it as absent; outside a write
+// transaction, where nothing would hold the row, both are refused; and
+// EventHandlers.Update, which holds a blueprint it attaches the same way,
+// refuses an attach that waited on a retire.
 func RunBlueprintLockConformance(t *testing.T, mk BlueprintLockFactory) {
 	for _, lock := range blueprintLocks {
 		t.Run(lock.name+"_reads_the_live_blueprint", func(t *testing.T) {
@@ -155,6 +158,88 @@ func RunBlueprintLockConformance(t *testing.T, mk BlueprintLockFactory) {
 			}
 		case <-time.After(10 * time.Second):
 			t.Fatal("GetForShare never answered after the retire committed")
+		}
+	})
+
+	// EventHandlers.Update holds a blueprint it attaches by its own read of
+	// the row, not the caller's: a caller writing back a blueprint from an
+	// older read has not held it. The attach waits for a retire in flight and
+	// is then refused, leaving the handler as it was.
+	t.Run("a_handler_update_attaching_it_waits_for_a_retire_and_is_refused", func(t *testing.T) {
+		stores, orgID, userID, teamID := mk(t)
+		ctx := t.Context()
+		id := seedLockBlueprint(t, stores, orgID, userID, teamID, "retired")
+		handler := domain.EventHandler{
+			ID: uuid.NewString(), Mode: domain.EventHandlerModeWatch, EventType: domain.EventGitHubPROpened,
+			Source: domain.EventHandlerSourceUser, Name: "attaches late", DefaultPriority: 0.5, BreakerThreshold: 4,
+		}
+		if err := stores.Tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+			_, err := tx.EventHandlers.Create(ctx, orgID, teamID, handler)
+			return err
+		}); err != nil {
+			t.Fatalf("seed handler: %v", err)
+		}
+
+		held, release := make(chan struct{}), make(chan struct{})
+		retire := make(chan error, 1)
+		go func() {
+			retire <- stores.Tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+				if _, err := tx.Blueprints.GetForUpdate(ctx, orgID, id); err != nil {
+					return err
+				}
+				if err := tx.EventHandlers.DetachBlueprint(ctx, orgID, id); err != nil {
+					return err
+				}
+				if err := tx.Blueprints.Delete(ctx, orgID, id); err != nil {
+					return err
+				}
+				close(held)
+				<-release
+				return nil
+			})
+		}()
+		select {
+		case <-held:
+		case err := <-retire:
+			t.Fatalf("the retire ended before holding the blueprint: %v", err)
+		}
+
+		attach := handler
+		attach.BlueprintID = id
+		update := make(chan error, 1)
+		go func() {
+			update <- stores.Tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+				_, err := tx.EventHandlers.Update(ctx, orgID, attach)
+				return err
+			})
+		}()
+		select {
+		case err := <-update:
+			t.Fatalf("the attaching Update answered while the retire held the blueprint: %v", err)
+		case <-time.After(200 * time.Millisecond):
+		}
+		close(release)
+		if err := <-retire; err != nil {
+			t.Fatalf("retire: %v", err)
+		}
+		select {
+		case err := <-update:
+			if !errors.Is(err, db.ErrEventHandlerBlueprintChanged) {
+				t.Fatalf("attaching Update after the retire committed = %v; want ErrEventHandlerBlueprintChanged", err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("the attaching Update never answered after the retire committed")
+		}
+		var stored *domain.EventHandler
+		if err := stores.Tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
+			var err error
+			stored, err = tx.EventHandlers.Get(ctx, orgID, handler.ID)
+			return err
+		}); err != nil || stored == nil {
+			t.Fatalf("read handler: %+v, %v", stored, err)
+		}
+		if stored.BlueprintID != "" {
+			t.Errorf("handler blueprint after the refused attach = %q; want none", stored.BlueprintID)
 		}
 	})
 }

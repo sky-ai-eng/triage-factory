@@ -1,7 +1,9 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -10,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/server/blueprints"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
@@ -80,6 +83,21 @@ func (r *blueprintRaceRig) wrappedBlueprint(t *testing.T, name string) (blueprin
 	return created.ID, created.FirstPromptID
 }
 
+// chainBlueprint creates a blueprint of two new prompts and returns its id and
+// both prompts'.
+func (r *blueprintRaceRig) chainBlueprint(t *testing.T) (blueprintID, head, tail string) {
+	t.Helper()
+	blueprintID = r.mustCreate(t, "/api/blueprints", map[string]any{"name": "Chain"}, "id")
+	head = r.mustCreate(t, "/api/prompts", map[string]any{"name": "head", "body": "b"}, "id")
+	tail = r.mustCreate(t, "/api/prompts", map[string]any{"name": "tail", "body": "b"}, "id")
+	if rec := r.do(http.MethodPut, "/api/blueprints/"+blueprintID+"/steps", map[string]any{
+		"steps": []map[string]any{{"step_prompt_id": head}, {"step_prompt_id": tail}},
+	}); rec.Code != http.StatusNoContent {
+		t.Fatalf("PUT steps = %d: %s", rec.Code, rec.Body.String())
+	}
+	return blueprintID, head, tail
+}
+
 // liveHandlerBlueprint reads a live handler's blueprint and mode off the admin
 // pool.
 func (r *blueprintRaceRig) liveHandlerBlueprint(t *testing.T, id string) (blueprintID *string, mode string) {
@@ -110,6 +128,29 @@ func (r *blueprintRaceRig) handlersOn(t *testing.T, blueprintID string) int {
 		t.Fatalf("count handlers on %s: %v", blueprintID, err)
 	}
 	return n
+}
+
+// heldLive is a holding transaction's lock read, refused unless it found the
+// blueprint live, so a broken fixture ends the holder at once.
+func heldLive(b *domain.Blueprint, err error) error {
+	if err != nil {
+		return err
+	}
+	if b == nil {
+		return errors.New("the blueprint was not live when the holder locked it")
+	}
+	return nil
+}
+
+// awaitHold waits until a holding transaction has its lock, failing the test
+// if the holder ends first.
+func awaitHold(t *testing.T, held <-chan struct{}, holder <-chan error) {
+	t.Helper()
+	select {
+	case <-held:
+	case err := <-holder:
+		t.Fatalf("the holding transaction ended before it held the blueprint: %v", err)
+	}
 }
 
 // awaitAnswer waits for a request started in the background, which has to be
@@ -170,9 +211,7 @@ func TestEventHandlerWrite_Postgres_WaitsForABlueprintDelete(t *testing.T) {
 			deleted := make(chan error, 1)
 			go func() {
 				deleted <- r.s.tx.WithTx(ctx, r.orgID, r.member, func(tx db.TxStores) error {
-					if b, err := tx.Blueprints.GetForUpdate(ctx, r.orgID, bp); err != nil || b == nil {
-						t.Errorf("the delete's hold = %+v, %v; want the live blueprint", b, err)
-						close(detached)
+					if err := heldLive(tx.Blueprints.GetForUpdate(ctx, r.orgID, bp)); err != nil {
 						return err
 					}
 					if err := tx.EventHandlers.DetachBlueprint(ctx, r.orgID, bp); err != nil {
@@ -183,7 +222,7 @@ func TestEventHandlerWrite_Postgres_WaitsForABlueprintDelete(t *testing.T) {
 					return tx.Blueprints.Delete(ctx, r.orgID, bp)
 				})
 			}()
-			<-detached
+			awaitHold(t, detached, deleted)
 
 			answered := make(chan *httptest.ResponseRecorder, 1)
 			go func() { answered <- tc.write(r, handlerID, bp) }()
@@ -217,14 +256,7 @@ func TestBlueprintDelete_Postgres_DetachesAHandlerWrittenWhileItWaited(t *testin
 			return bp, "/api/prompts/" + p
 		}},
 		{"head_prompt_delete", func(t *testing.T, r *blueprintRaceRig) (string, string) {
-			bp := r.mustCreate(t, "/api/blueprints", map[string]any{"name": "Chain"}, "id")
-			head := r.mustCreate(t, "/api/prompts", map[string]any{"name": "head", "body": "b"}, "id")
-			tail := r.mustCreate(t, "/api/prompts", map[string]any{"name": "tail", "body": "b"}, "id")
-			if rec := r.do(http.MethodPut, "/api/blueprints/"+bp+"/steps", map[string]any{
-				"steps": []map[string]any{{"step_prompt_id": head}, {"step_prompt_id": tail}},
-			}); rec.Code != http.StatusNoContent {
-				t.Fatalf("PUT steps = %d: %s", rec.Code, rec.Body.String())
-			}
+			bp, head, _ := r.chainBlueprint(t)
 			return bp, "/api/prompts/" + head
 		}},
 	} {
@@ -240,9 +272,7 @@ func TestBlueprintDelete_Postgres_DetachesAHandlerWrittenWhileItWaited(t *testin
 			written := make(chan error, 1)
 			go func() {
 				written <- r.s.tx.WithTx(ctx, r.orgID, r.member, func(tx db.TxStores) error {
-					if b, err := tx.Blueprints.GetForShare(ctx, r.orgID, bp); err != nil || b == nil {
-						t.Errorf("the handler write's hold = %+v, %v; want the live blueprint", b, err)
-						close(held)
+					if err := heldLive(tx.Blueprints.GetForShare(ctx, r.orgID, bp)); err != nil {
 						return err
 					}
 					close(held)
@@ -255,7 +285,7 @@ func TestBlueprintDelete_Postgres_DetachesAHandlerWrittenWhileItWaited(t *testin
 					return err
 				})
 			}()
-			<-held
+			awaitHold(t, held, written)
 
 			answered := make(chan *httptest.ResponseRecorder, 1)
 			go func() { answered <- r.do(http.MethodDelete, deletePath, nil) }()
@@ -270,44 +300,119 @@ func TestBlueprintDelete_Postgres_DetachesAHandlerWrittenWhileItWaited(t *testin
 	}
 }
 
-// A prompt delete whose blueprint is retired by another write while the delete
-// waits to hold it answers 409 and changes nothing: it was composed against a
-// chain that no longer exists.
-func TestPromptDelete_Postgres_ConflictsWhenItsBlueprintIsRetiredWhileItWaits(t *testing.T) {
+// A prompt delete whose chain another write changes while the delete waits to
+// hold the owning blueprint answers 409 and changes nothing: the owner it read
+// is retired, or no longer holds the prompt, so the delete was asked against a
+// chain that no longer exists. On a split, acting anyway would retire the
+// owner as a one-step wrapper while it holds another prompt.
+func TestPromptDelete_Postgres_ConflictsWhenItsChainChangesWhileItWaits(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// setup makes the chain and returns its blueprint and the prompt to
+		// delete; change is the other write, made while holding the blueprint,
+		// and ownerLive is whether the blueprint survives it.
+		setup     func(t *testing.T, r *blueprintRaceRig) (blueprintID, promptID string)
+		change    func(ctx context.Context, tx db.TxStores, orgID, blueprintID string) error
+		ownerLive bool
+	}{
+		{"owner_retired", func(t *testing.T, r *blueprintRaceRig) (string, string) {
+			return r.wrappedBlueprint(t, "RetiredElsewhere")
+		}, func(ctx context.Context, tx db.TxStores, orgID, blueprintID string) error {
+			return tx.Blueprints.Delete(ctx, orgID, blueprintID)
+		}, false},
+		{"prompt_split_off", func(t *testing.T, r *blueprintRaceRig) (string, string) {
+			bp, _, tail := r.chainBlueprint(t)
+			return bp, tail
+		}, func(ctx context.Context, tx db.TxStores, orgID, blueprintID string) error {
+			_, err := tx.Blueprints.SplitAt(ctx, orgID, blueprintID, 1, uuid.NewString(), "tail")
+			return err
+		}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newBlueprintRaceRig(t)
+			ctx := t.Context()
+			bp, p := tc.setup(t, r)
+			var liveBefore bool
+			if err := r.h.AdminDB.QueryRow(`SELECT deleted_at IS NULL FROM blueprints WHERE id = $1`, bp).Scan(&liveBefore); err != nil || !liveBefore {
+				t.Fatalf("blueprint live before the race = %v, %v; want live", liveBefore, err)
+			}
+
+			held, release := make(chan struct{}), make(chan struct{})
+			changed := make(chan error, 1)
+			go func() {
+				changed <- r.s.tx.WithTx(ctx, r.orgID, r.member, func(tx db.TxStores) error {
+					if err := heldLive(tx.Blueprints.GetForUpdate(ctx, r.orgID, bp)); err != nil {
+						return err
+					}
+					if err := tc.change(ctx, tx, r.orgID, bp); err != nil {
+						return err
+					}
+					close(held)
+					<-release
+					return nil
+				})
+			}()
+			awaitHold(t, held, changed)
+
+			answered := make(chan *httptest.ResponseRecorder, 1)
+			go func() { answered <- r.do(http.MethodDelete, "/api/prompts/"+p, nil) }()
+			rec := r.awaitAnswer(t, answered, release, changed)
+			if rec.Code != http.StatusConflict {
+				t.Fatalf("DELETE prompt after its chain changed = %d: %s; want 409", rec.Code, rec.Body.String())
+			}
+			var (
+				promptDeleted    bool
+				blueprintDeleted bool
+			)
+			if err := r.h.AdminDB.QueryRow(`
+				SELECT (SELECT deleted_at IS NOT NULL FROM prompts WHERE id = $1),
+				       (SELECT deleted_at IS NOT NULL FROM blueprints WHERE id = $2)`, p, bp,
+			).Scan(&promptDeleted, &blueprintDeleted); err != nil {
+				t.Fatalf("read prompt and blueprint: %v", err)
+			}
+			if promptDeleted {
+				t.Error("the prompt was deleted by the refused delete")
+			}
+			if tc.ownerLive && blueprintDeleted {
+				t.Error("the refused delete retired the blueprint the prompt was split off")
+			}
+		})
+	}
+}
+
+// A blueprint another team owns is refused with 422 CROSS_TEAM_REF on create
+// and PATCH alike for a caller who may only read that team. The write does not
+// hold another team's blueprint: under the lock's row-level security it would
+// read as absent and answer 404 for a blueprint the caller can see.
+func TestEventHandlerWrite_Postgres_AnotherTeamsBlueprintIs422(t *testing.T) {
 	r := newBlueprintRaceRig(t)
 	ctx := t.Context()
-	bp, p := r.wrappedBlueprint(t, "RetiredElsewhere")
-
-	held, release := make(chan struct{}), make(chan struct{})
-	retired := make(chan error, 1)
-	go func() {
-		retired <- r.s.tx.WithTx(ctx, r.orgID, r.member, func(tx db.TxStores) error {
-			if b, err := tx.Blueprints.GetForUpdate(ctx, r.orgID, bp); err != nil || b == nil {
-				t.Errorf("the retire's hold = %+v, %v; want the live blueprint", b, err)
-				close(held)
-				return err
-			}
-			if err := tx.Blueprints.Delete(ctx, r.orgID, bp); err != nil {
-				return err
-			}
-			close(held)
-			<-release
-			return nil
-		})
-	}()
-	<-held
-
-	answered := make(chan *httptest.ResponseRecorder, 1)
-	go func() { answered <- r.do(http.MethodDelete, "/api/prompts/"+p, nil) }()
-	rec := r.awaitAnswer(t, answered, release, retired)
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("DELETE prompt after its blueprint was retired = %d: %s; want 409", rec.Code, rec.Body.String())
+	other := pgtest.SeedTeam(t, r.h, r.orgID, "other")
+	pgtest.MustExec(t, r.h.AdminDB, `INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'admin')`, r.admin, other)
+	pgtest.MustExec(t, r.h.AdminDB, `INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'viewer')`, r.member, other)
+	bp := uuid.NewString()
+	if err := r.s.tx.WithTx(ctx, r.orgID, r.admin, func(tx db.TxStores) error {
+		_, err := tx.Blueprints.Create(ctx, r.orgID, other, domain.Blueprint{ID: bp, Name: "theirs", Source: "user"})
+		return err
+	}); err != nil {
+		t.Fatalf("seed the other team's blueprint: %v", err)
 	}
-	var deletedAt *time.Time
-	if err := r.h.AdminDB.QueryRow(`SELECT deleted_at FROM prompts WHERE id = $1`, p).Scan(&deletedAt); err != nil {
-		t.Fatalf("read prompt: %v", err)
-	}
-	if deletedAt != nil {
-		t.Errorf("prompt deleted_at = %v after the refused delete; want it untouched", deletedAt)
+	handlerID := r.mustCreate(t, "/api/event-handlers", map[string]any{
+		"event_type": domain.EventGitHubPROpened, "team_id": r.teamID,
+	}, "id")
+
+	for route, rec := range map[string]*httptest.ResponseRecorder{
+		"create": r.do(http.MethodPost, "/api/event-handlers", map[string]any{
+			"event_type": domain.EventGitHubPROpened, "team_id": r.teamID, "blueprint_id": bp,
+		}),
+		"patch": r.do(http.MethodPatch, "/api/event-handlers/"+handlerID, map[string]any{"blueprint_id": bp}),
+	} {
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Errorf("%s naming another team's blueprint = %d: %s; want 422", route, rec.Code, rec.Body.String())
+			continue
+		}
+		if items := decodeErrorItems(t, rec); len(items) != 1 || items[0].Reason != httpx.ReasonCrossTeamRef || items[0].Field != "blueprint_id" {
+			t.Errorf("%s: errors = %+v; want one CROSS_TEAM_REF on blueprint_id", route, items)
+		}
 	}
 }

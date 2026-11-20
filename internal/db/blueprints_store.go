@@ -383,9 +383,9 @@ type BlueprintStore interface {
 	// write transaction begins IMMEDIATE and already holds the database's
 	// write lock.
 	//
-	// Both are refused outside a write transaction: outside any transaction
-	// nothing would hold the blueprint past the read, and a read transaction
-	// holds nothing a writer waits for.
+	// Call them on a write transaction's db.TxStores (WithTx). Outside a
+	// transaction, or in a read transaction, both are refused: nothing would
+	// hold the blueprint past the read, or nothing a writer waits for.
 	GetForShare(ctx context.Context, orgID string, id string) (*domain.Blueprint, error)
 	GetForUpdate(ctx context.Context, orgID string, id string) (*domain.Blueprint, error)
 

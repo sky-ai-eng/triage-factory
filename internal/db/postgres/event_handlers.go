@@ -230,9 +230,27 @@ func (s *eventHandlerStore) Update(ctx context.Context, orgID string, h domain.E
 	// holds under READ COMMITTED: an UPDATE that waited on a concurrent
 	// detach re-checks its WHERE against the detached row, while the EXISTS
 	// still reads the snapshot the statement began with, where a blueprint
-	// whose delete has not committed is live. That is why a caller attaching
-	// a blueprint holds it first (see the interface).
+	// whose delete has not committed is live.
+	//
+	// So an attach holds the blueprint first, with the share lock
+	// BlueprintStore.GetForShare takes, and decides that it attaches from cur
+	// rather than from the caller's read: h composed from an older read of
+	// the row can attach a blueprint the caller believes the row already
+	// holds, and so does not hold itself. In a transaction the lock lasts
+	// until commit; outside one it is released before the UPDATE runs.
 	attaches := h.BlueprintID != "" && h.BlueprintID != cur.BlueprintID
+	if attaches {
+		var live int
+		err := s.app.QueryRowContext(ctx,
+			`SELECT 1 FROM blueprints WHERE org_id = $1 AND id = $2 AND deleted_at IS NULL FOR SHARE`,
+			orgID, h.BlueprintID).Scan(&live)
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.EventHandler{}, db.ErrEventHandlerBlueprintChanged
+		}
+		if err != nil {
+			return domain.EventHandler{}, fmt.Errorf("hold blueprint %s: %w", h.BlueprintID, err)
+		}
+	}
 	updated, err := scanUpdatedEventHandlerPG(s.app.QueryRowContext(ctx, `
 		UPDATE event_handlers
 		SET mode = $1, scope_predicate_json = $2::jsonb, applies_to_unowned = $3,

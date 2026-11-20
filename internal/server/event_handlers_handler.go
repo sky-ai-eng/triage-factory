@@ -644,17 +644,16 @@ func handlerBlueprint(ctx context.Context, tx db.TxStores, orgID, teamID, bluepr
 
 // holdHandlerBlueprint reads the blueprint a handler write attaches again,
 // inside the transaction that writes the handler, and holds it until that
-// transaction ends (Blueprints.GetForShare): errBlueprintNotFound when it is
-// no longer live. A blueprint delete takes the blueprint the same way before
-// it detaches the blueprint's handlers, so the two run one after the other: a
-// delete that commits first answers here as a missing blueprint, and one that
-// commits second detaches the handler this write leaves on the blueprint.
+// transaction ends (BlueprintStore.GetForShare): errBlueprintNotFound when it
+// is no longer live. The route's first read of the blueprint can be stale by
+// the time the handler is written, and a handler written onto a deleted
+// blueprint runs its deleted steps.
 //
-// It is called only for a blueprint of the handler's own team. The lock's
-// row-level security is the blueprints UPDATE policy, which hides another
-// team's blueprint from a caller who may only read that team, and a write
-// naming another team's blueprint is refused with crossTeamBlueprintFault
-// already.
+// It is called only for a blueprint of the handler's own team: in Postgres
+// the lock's row-level security is the blueprints UPDATE policy, which hides
+// another team's blueprint from a caller who may only read that team, and a
+// write naming another team's blueprint is refused with
+// crossTeamBlueprintFault already.
 func holdHandlerBlueprint(ctx context.Context, tx db.TxStores, orgID, blueprintID string) error {
 	blueprint, err := tx.Blueprints.GetForShare(ctx, orgID, blueprintID)
 	if err != nil {
@@ -901,10 +900,9 @@ func (eh *eventHandlersHandler) handleEventHandlerUpdate(w http.ResponseWriter, 
 	if bad.Flush(w, http.StatusBadRequest) {
 		return
 	}
-	// A write that attaches a blueprint holds it in the write's transaction
-	// (holdHandlerBlueprint), as the create does. One that keeps the blueprint
-	// the handler already has does not need to: the store guards that write
-	// on the blueprint it read (db.ErrEventHandlerBlueprintChanged).
+	// The write holds a blueprint the body attaches (holdHandlerBlueprint), as
+	// the create does, so one deleted after the read below answers 404 like a
+	// missing one.
 	var hold string
 	if updated.BlueprintID != "" && updated.BlueprintID != existing.BlueprintID {
 		var crossTeam bool

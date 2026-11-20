@@ -369,9 +369,8 @@ func (h *Handler) handleBlueprintDelete(w http.ResponseWriter, r *http.Request) 
 	var found bool
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		// Held until commit, before the detach below reads which handlers
-		// reference the blueprint: a handler write that attaches it holds it
-		// too (Blueprints.GetForShare), so a handler written before this
-		// delete is detached by it, and one written after answers 404.
+		// reference the blueprint, so that set cannot gain a handler before
+		// the delete lands (BlueprintStore.GetForUpdate).
 		existing, e := tx.Blueprints.GetForUpdate(r.Context(), orgID, id)
 		if e != nil || existing == nil {
 			return e
