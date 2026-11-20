@@ -26,10 +26,10 @@ import (
 //
 //   - app   — tf_app, RLS-active. Every CRUD method runs here.
 //   - admin — supabase_admin, BYPASSRLS. Seed runs here because the
-//     event_handlers_insert / event_handlers_update RLS policies gate
-//     on creator_user_id = tf.current_user_id() (or admin-on-org for
-//     UPDATE); boot-time Seed has no JWT claims and would otherwise
-//     fail the WITH CHECK on every shipped row.
+//     event_handlers_insert RLS policy gates on
+//     creator_user_id = tf.current_user_id() and on team write; boot-time
+//     Seed has no JWT claims and would otherwise fail the WITH CHECK on
+//     every shipped row.
 //
 // Inside WithTx both fields point at the same *sql.Tx, and inTx is
 // true. Seed inside WithTx is rejected: escaping to the admin pool
@@ -63,7 +63,7 @@ const pgEventHandlerColumns = `id, kind, event_type, scope_predicate_json::text,
        name, default_priority, sort_order,
        blueprint_id, breaker_threshold, min_autonomy_suitability,
        user_modified, created_at, updated_at,
-       COALESCE(creator_user_id::text, ''), COALESCE(notify_audience, '')`
+       COALESCE(creator_user_id::text, '')`
 
 // pgHandlerKindOrder orders the kinds rules, triggers, notify rules: the
 // router reads rules before triggers, and a list reads them in that order.
@@ -334,7 +334,7 @@ func (s *eventHandlerStore) Create(ctx context.Context, orgID, teamID string, h 
 			INSERT INTO event_handlers
 				(id, org_id, creator_user_id, team_id, kind, event_type,
 				 scope_predicate_json, enabled, source,
-				 name, notify_audience,
+				 name,
 				 created_at, updated_at)
 			VALUES (
 				$1, $2,
@@ -342,12 +342,12 @@ func (s *eventHandlerStore) Create(ctx context.Context, orgID, teamID string, h 
 				$3::uuid,
 				'notify', $4,
 				$5::jsonb, $6, 'user',
-				$7, $8,
+				$7,
 				now(), now()
 			)
 			RETURNING `+pgEventHandlerColumns,
 			h.ID, orgID, teamID, h.EventType, pred, h.Enabled,
-			h.Name, h.Audience))
+			h.Name))
 	}
 	return domain.EventHandler{}, fmt.Errorf("postgres event_handlers Create: unknown kind %q", h.Kind)
 }
@@ -404,12 +404,12 @@ func (s *eventHandlerStore) Update(ctx context.Context, orgID string, h domain.E
 		return scanUpdatedEventHandlerPG(s.app.QueryRowContext(ctx, `
 			UPDATE event_handlers
 			SET scope_predicate_json = $1::jsonb, enabled = $2,
-			    name = $3, notify_audience = $4,
-			    user_modified = user_modified OR $5,
+			    name = $3,
+			    user_modified = user_modified OR $4,
 			    updated_at = now()
-			WHERE org_id = $6 AND id = $7 AND kind = 'notify' AND deleted_at IS NULL
+			WHERE org_id = $5 AND id = $6 AND kind = 'notify' AND deleted_at IS NULL
 			RETURNING `+pgEventHandlerColumns,
-			pred, h.Enabled, h.Name, h.Audience,
+			pred, h.Enabled, h.Name,
 			contentChanged,
 			orgID, h.ID))
 	}
@@ -751,14 +751,6 @@ func (s *eventHandlerStore) buildListWhere(orgID string, f db.EventHandlerListFi
 		args = append(args, f.TeamID)
 		where += fmt.Sprintf(" AND team_id = $%d", len(args))
 	}
-	if f.Audience != "" {
-		args = append(args, f.Audience)
-		where += fmt.Sprintf(" AND notify_audience = $%d", len(args))
-	}
-	if f.CreatorUserID != "" {
-		args = append(args, f.CreatorUserID)
-		where += fmt.Sprintf(" AND creator_user_id = $%d", len(args))
-	}
 	if len(f.GatedEventTypes) > 0 {
 		args = append(args, f.GatedEventTypes)
 		where += fmt.Sprintf(" AND NOT (event_type = ANY($%d))", len(args))
@@ -817,7 +809,7 @@ func scanEventHandlerFromAny(scanFn func(dst ...any) error) (domain.EventHandler
 		&nameNS, &defPriority, &sortOrder,
 		&blueprintID, &breakerNS, &minAutonomyNS,
 		&h.UserModified, &h.CreatedAt, &h.UpdatedAt,
-		&h.CreatorUserID, &h.Audience,
+		&h.CreatorUserID,
 	); err != nil {
 		return h, err
 	}

@@ -29,8 +29,8 @@ var ErrNoSuchEventHandler = errors.New("no live event handler with that id")
 //	kind="trigger" — auto-delegation; creates a task and fires a blueprint.
 //	                 Carries blueprint_id, breaker_threshold,
 //	                 min_autonomy_suitability.
-//	kind="notify"  — tells its audience about a matching event; creates no
-//	                 task. Carries name and notify_audience.
+//	kind="notify"  — tells its team's members about a matching event;
+//	                 creates no task. Carries name.
 //
 // Per-kind CHECK constraints on the event_handlers table enforce that each
 // row populates exactly its kind's required fields and leaves the other
@@ -73,15 +73,6 @@ type EventHandlerListFilter struct {
 	// (team_id NOT NULL, no org-visible tier), so this is a plain team
 	// filter. The SQLite impl ignores it — local mode is single-team.
 	TeamID string
-	// Audience keeps the notify rules with this audience
-	// (domain.NotifyAudienceCreator or NotifyAudienceTeam). Rules and
-	// triggers carry no audience, so a set Audience leaves only notify rules.
-	// "" is no filter.
-	Audience string
-	// CreatorUserID keeps the handlers this user authored, compared as
-	// stored (the canonical id). Shipped handlers have no creator, so a set
-	// CreatorUserID leaves only user-authored ones. "" is no filter.
-	CreatorUserID string
 	// GatedEventTypes are event types this org is not entitled to; handlers
 	// bound to one are hidden. Rows persist regardless of entitlement state —
 	// this is visibility only.
@@ -205,9 +196,7 @@ type EventHandlerStore interface {
 	// deleted_at IS NULL, so a soft-deleted row is indistinguishable from a
 	// hard-deleted one to every caller except the sync and the rows that
 	// reference it. A deleted trigger never fires again (the firing worker
-	// skips a queued firing whose trigger it cannot read), and the
-	// one-trigger-per-blueprint index excludes it, so its blueprint can take a
-	// new trigger.
+	// skips a queued firing whose trigger it cannot read).
 	//
 	// Exempt from the returned-row rule: it is a delete. The soft arm leaves a
 	// row, but one every read path filters out — precisely the row a caller
@@ -241,17 +230,15 @@ type EventHandlerStore interface {
 	// UPDATE, preserving the handler row — and its id, which runs /
 	// blueprint_runs / pending_firings FK-reference — so run history and the
 	// event-trigger fence survive the move (a delete+recreate would orphan that
-	// history and trip the FK). Trigger-only: the WHERE pins kind='trigger', so a
-	// rule id is a no-op. The caller validates that the new blueprint exists, is
-	// same-team, and is not already triggered; the one-trigger-per-blueprint
-	// partial-unique index is the hard backstop. Always stamps
+	// history and trip the FK). Trigger-only: the WHERE pins kind='trigger'.
+	// The caller validates that the new blueprint exists and is same-team; the
+	// blueprint may already have other triggers. Always stamps
 	// user_modified=true — a user-initiated retarget must never be silently
 	// reverted by a later sync pass (which re-resolves an unmodified trigger's
 	// blueprint binding from the shipped slug on every boot).
 	//
-	// Returns the retargeted row, or ErrNoSuchEventHandler — which is now what
-	// a rule id gets, rather than the silent no-op the kind filter used to
-	// produce.
+	// Returns the retargeted row, or ErrNoSuchEventHandler when no live trigger
+	// carries the id.
 	RetargetBlueprint(ctx context.Context, orgID string, id string, newBlueprintID string) (domain.EventHandler, error)
 
 	// Sync brings teamID's unmodified copies of shippedHandlers up to current
@@ -478,13 +465,7 @@ var ShippedEventHandlers = []ShippedEventHandler{
 		BreakerThreshold:       2,
 		MinAutonomySuitability: 0.0,
 	},
-	// No became_atomic trigger ships for either tracker: a blueprint is fired
-	// by exactly one event (the partial-unique
-	// event_handlers_one_trigger_per_blueprint index), and each implementation
-	// blueprint is already claimed by its tracker's assigned trigger. A
-	// decomposition-resolved issue still surfaces as a task via its
-	// became-atomic rule; auto-delegating it is a user-authored trigger on its
-	// own blueprint (or a blueprint copy).
+	// No became_atomic trigger ships for either tracker.
 	{
 		// review_requested only fires when the session user is added
 		// to the PR's review-request list, so the event is already

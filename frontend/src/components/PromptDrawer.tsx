@@ -377,7 +377,7 @@ export default function PromptDrawer({
                   onChange={(e) => setName(e.target.value)}
                   disabled={readOnly}
                   placeholder="e.g. Thorough Code Review"
-                  className="w-full px-3 py-2 rounded-lg border border-line-1 bg-raised text-body text-ink-1 placeholder:text-ink-3 focus:outline-none focus:border-warm/40 focus:ring-1 focus:ring-warm/20 transition-colors disabled:opacity-60"
+                  className="w-full px-3 py-2 rounded-lg border border-line-1 bg-raised text-body text-ink-1 placeholder:text-ink-3 focus:border-warm/40 focus:ring-1 focus:ring-warm/20 transition-colors disabled:opacity-60"
                 />
               </div>
 
@@ -390,7 +390,7 @@ export default function PromptDrawer({
                   disabled={readOnly}
                   placeholder="Describe what the agent should do..."
                   rows={16}
-                  className="w-full px-3 py-2.5 rounded-lg border border-line-1 bg-raised text-body text-ink-1 font-mono leading-relaxed placeholder:text-ink-3 focus:outline-none focus:border-warm/40 focus:ring-1 focus:ring-warm/20 transition-colors resize-y disabled:opacity-60"
+                  className="w-full px-3 py-2.5 rounded-lg border border-line-1 bg-raised text-body text-ink-1 font-mono leading-relaxed placeholder:text-ink-3 focus:border-warm/40 focus:ring-1 focus:ring-warm/20 transition-colors resize-y disabled:opacity-60"
                 />
                 <p className="text-label text-ink-3 mt-1.5">
                   Every run automatically receives the task's context.

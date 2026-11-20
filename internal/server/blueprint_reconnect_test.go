@@ -162,18 +162,21 @@ func TestEventHandlerRetarget_MovesTriggerPreservingID(t *testing.T) {
 	}
 }
 
-func TestEventHandlerRetarget_AlreadyTriggeredRejected(t *testing.T) {
+func TestEventHandlerRetarget_OntoTriggeredBlueprint(t *testing.T) {
 	s := newTestServer(t)
 	from, _ := createWrappedBlueprint(t, s, "From")
 	to, _ := createWrappedBlueprint(t, s, "To")
 	trigID := attachTrigger(t, s, from, "github:pr:ci_check_failed")
-	attachTrigger(t, s, to, "github:pr:ci_check_failed") // `to` already has its own trigger
+	resident := attachTrigger(t, s, to, "github:pr:review_changes_requested")
 
 	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/"+trigID+"/retarget", map[string]any{
 		"blueprint_id": to,
 	})
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("retarget onto triggered blueprint: expected 409, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("retarget onto triggered blueprint: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := triggerIDsForBlueprint(t, s, to); len(got) != 2 || !got[trigID] || !got[resident] {
+		t.Errorf("triggers on the target = %v, want %s and the moved %s", got, resident, trigID)
 	}
 }
 

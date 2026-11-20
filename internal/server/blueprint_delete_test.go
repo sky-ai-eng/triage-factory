@@ -59,6 +59,25 @@ func TestBlueprintDelete_CascadesPromptsAndTrigger(t *testing.T) {
 	}
 }
 
+// TestBlueprintDelete_DeletesEveryTrigger: a blueprint with two triggers takes
+// both with it.
+func TestBlueprintDelete_DeletesEveryTrigger(t *testing.T) {
+	s := newTestServer(t)
+	configureEventSources(t, s)
+	bp, _ := createWrappedBlueprint(t, s, "TwoEvents")
+	first := attachTrigger(t, s, bp, "github:pr:ci_check_failed")
+	second := attachTrigger(t, s, bp, "github:pr:review_changes_requested")
+
+	if del := doJSON(t, s, http.MethodDelete, "/api/blueprints/"+bp, nil); del.Code != http.StatusOK {
+		t.Fatalf("delete blueprint: expected 200, got %d: %s", del.Code, del.Body.String())
+	}
+	for _, trigger := range []string{first, second} {
+		if g := doJSON(t, s, http.MethodGet, "/api/event-handlers/"+trigger, nil); g.Code != http.StatusNotFound {
+			t.Errorf("GET trigger %s after blueprint delete = %d, want 404", trigger, g.Code)
+		}
+	}
+}
+
 // TestBlueprintDelete_NotFound covers the missing + already-deleted cases — both
 // 404 by re-read (Get filters soft-deleted rows). A second delete of the same id
 // must not 500 on the now-soft-deleted row.

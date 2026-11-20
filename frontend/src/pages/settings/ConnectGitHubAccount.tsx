@@ -96,7 +96,7 @@ export default function ConnectGitHubAccount({
           placeholder="acme-corp"
           autoComplete="off"
           spellCheck={false}
-          className="w-full rounded-xl border border-line-1 bg-ground px-3 py-2 text-body text-ink-1 placeholder:text-ink-4 focus:border-warm/40 focus:outline-none"
+          className="w-full rounded-xl border border-line-1 bg-ground px-3 py-2 text-body text-ink-1 placeholder:text-ink-4 focus:border-warm/40"
         />
       </label>
       <p className="text-reported leading-relaxed text-ink-3">

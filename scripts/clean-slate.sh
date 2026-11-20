@@ -84,12 +84,13 @@ if [ -d ~/.triagefactory/projects ]; then
   # ~/.triagefactory/projects/<id>/ leaves behind
   # ~/.claude/projects/<encoded(<cwd>)>/<sessionID>.jsonl. Walk each
   # project ID dir and delete its encoded session entry BEFORE removing
-  # the projects tree (mirrors removeClaudeProjectSessions in
-  # cmd/uninstall/uninstall.go — keep the two in sync).
+  # the projects tree. The tr is Claude Code's rule for an ASCII path of at
+  # most 200 characters; encodeClaudeProjectDir in
+  # internal/worktree/claude_session.go is the full rule.
   for dir in ~/.triagefactory/projects/*; do
     [ -d "$dir" ] || continue
     resolved=$(cd "$dir" && pwd -P) || continue
-    encoded=$(printf '%s' "$resolved" | tr '/.' '-')
+    encoded=$(printf '%s' "$resolved" | LC_ALL=C tr -c 'A-Za-z0-9' '-')
     rm -rf ~/.claude/projects/"$encoded"
   done
   rm -rf ~/.triagefactory/projects

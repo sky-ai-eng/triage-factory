@@ -46,6 +46,9 @@ groups:
       # verified-delivery condition rules out while Slack is delivering; in a
       # quiet window a single forged request can still fire it. A warning: the
       # cause can be outside TF.
+      #
+      # TODO(TFAC-1510): the counts are summed across control pods, so one pod
+      # with a wrong secret is hidden by the other pods' verified deliveries.
       - alert: SlackSigningSecretMismatch
         expr: |
           (
@@ -57,7 +60,7 @@ groups:
             ) > 0
           )
           unless on (app_id)
-          sum by (app_id) (increase(tf_slack_ingest_events_total[15m])) > 0
+          sum by (app_id) (increase(tf_slack_webhook_deployment_deliveries_total{signature="verified"}[15m])) > 0
         labels:
           severity: warning
         annotations:
@@ -71,6 +74,48 @@ groups:
             fail within an hour. A forged request also counts, so check the
             secret before changing it. Each control pod logs a WARN line for
             these, at most one a minute.
+
+      # A control pod refused deliveries to the deployment app's Events API
+      # endpoint because their timestamp is more than five minutes from its
+      # clock, and verified none. A host clock that far off refuses every
+      # delivery that reaches its pod. One running fast usually breaks GitHub
+      # App tokens too, so UpstreamFailingFleetWide may fire first; one running
+      # slow breaks only this. Grouped by pod, because each pod checks the
+      # timestamp against its own host's clock: one host can drift while the
+      # others keep verifying, and that pod is what the operator fixes. Anyone
+      # can replay or forge a stale request, which the verified-delivery
+      # condition rules out while Slack is delivering to the pod; in a quiet
+      # window a single one can still fire it, so it is a warning.
+      - alert: SlackDeploymentDeliveriesStale
+        expr: |
+          (
+            sum by (instance, app_id) (increase(tf_slack_webhook_deployment_deliveries_total{signature="stale"}[15m])) > 0
+            or
+            sum by (instance, app_id) (
+              tf_slack_webhook_deployment_deliveries_total{signature="stale"}
+              unless last_over_time(tf_slack_webhook_deployment_deliveries_total{signature="stale"}[15m] offset 15m)
+            ) > 0
+          )
+          unless on (instance, app_id)
+          sum by (instance, app_id) (increase(tf_slack_webhook_deployment_deliveries_total{signature="verified"}[15m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Control pod {{ $labels.instance }} is refusing the deployment Slack app's deliveries as stale"
+          description: >-
+            In the last 15 minutes, control pod {{ $labels.instance }} refused
+            deliveries for app {{ $labels.app_id }} at /api/webhooks/slack
+            because their timestamp was more than five minutes from its clock,
+            and verified none. If that pod's host clock is that far off, every
+            delivery that reaches the pod fails, and once that is more than 95%
+            of the app's deliveries within an hour, Slack turns the app's event
+            subscriptions off. Compare the host's clock with the real time and
+            fix its time sync. A replayed or forged request also counts, so
+            check the clock before changing anything.
+
+      # TODO(TFAC-1509): nothing alerts on the deployment app's endpoint
+      # refusing every delivery as malformed, which is what a proxy in front
+      # of control that drops Slack's signature headers causes.
 
       # Slack sent app_rate_limited: the app went past the Events API's
       # 30,000 events per workspace per hour, and Slack drops the deliveries
@@ -153,8 +198,9 @@ groups:
       # A delivery is counted only once it names a workspace and app
       # connected to the org in its URL, so a forged one has to know all
       # three. The deployment app's endpoint is not counted here; it has
-      # SlackSigningSecretMismatch. Each control pod counts the deliveries it
-      # served, and the sums add the pods up.
+      # SlackSigningSecretMismatch and SlackDeploymentDeliveriesStale. Each
+      # control pod counts the deliveries it served, and the sums add the pods
+      # up.
       - alert: SlackDeliveriesRefusedFleetWide
         expr: |
           (

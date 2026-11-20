@@ -4,11 +4,10 @@ import { X } from 'lucide-react'
 import PredicateEditor from './PredicateEditor'
 import EventTypeOptions from './EventTypeOptions'
 import TeamPicker from './TeamPicker'
-import type { NotifyHandler, NotifyAudience, EventType } from '../types'
+import type { NotifyHandler, EventType } from '../types'
 import { toast } from './Toast/toastStore'
 import { useTeams, pickerDefault, noteWrittenTeam } from '../hooks/useTeams'
 import { useEventSources } from '../hooks/useEventSources'
-import { useMe } from '../hooks/useDeploymentConfig'
 import { apiJSON, httpErrorMessage } from '../lib/apiClient'
 import {
   createNotifyRule,
@@ -25,9 +24,6 @@ const NOTIFY_SOURCES = ['github', 'jira', 'linear']
 interface NotifyRuleEditorProps {
   open: boolean
   rule: NotifyHandler | null // null = create mode
-  // writable is false when the viewer may read the rule but not change it:
-  // another person's team rule, for a member who is not a team admin.
-  writable: boolean
   onClose: () => void
   onSaved: () => void
   onDeleted?: () => void
@@ -36,7 +32,6 @@ interface NotifyRuleEditorProps {
 export default function NotifyRuleEditor({
   open,
   rule,
-  writable,
   onClose,
   onSaved,
   onDeleted,
@@ -45,14 +40,12 @@ export default function NotifyRuleEditor({
   const [eventType, setEventType] = useState('')
   const [name, setName] = useState('')
   const [predicate, setPredicate] = useState<Record<string, unknown>>({})
-  const [audience, setAudience] = useState<NotifyAudience>('creator')
   const [originalPredicateJSON, setOriginalPredicateJSON] = useState<string | null>(null)
   const [eventTypes, setEventTypes] = useState<EventType[]>([])
   const [saving, setSaving] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [error, setError] = useState('')
   const { canProduce } = useEventSources()
-  const { me } = useMe()
 
   const { teams, lastActingTeamId, loaded: teamsLoaded } = useTeams()
   const [team, setTeam] = useState('')
@@ -63,16 +56,6 @@ export default function NotifyRuleEditor({
   // The team the rule is (or will be) on. '' is the sole team, which the
   // server resolves.
   const ruleTeam = rule ? rule.team_id : team || (teams.length === 1 ? teams[0].id : '')
-  const teamAdmin = teams.find((t) => t.id === ruleTeam)?.role === 'admin'
-  // A team audience is a team admin's. A new rule's audience is derived from
-  // the team it is on now, however that team was picked, so a team the
-  // viewer does not administer never submits a team audience.
-  const chosenAudience: NotifyAudience = !isEdit && !teamAdmin ? 'creator' : audience
-  // "Just me" is the creator: on someone else's personal rule, opened by a
-  // team admin, it is that person rather than the viewer. Until the viewer is
-  // known it is not someone else's.
-  const othersRule =
-    rule !== null && !!me && !!rule.creator_user_id && rule.creator_user_id !== me.id
 
   useEffect(() => {
     if (!open) return
@@ -91,7 +74,6 @@ export default function NotifyRuleEditor({
     if (!open) return
     setEventType(rule?.event_type ?? '')
     setName(rule?.name ?? '')
-    setAudience(rule?.audience ?? 'creator')
     setOriginalPredicateJSON(rule?.scope_predicate_json ?? null)
     let parsed: Record<string, unknown> = {}
     if (rule?.scope_predicate_json) {
@@ -120,7 +102,6 @@ export default function NotifyRuleEditor({
       if (isEdit && rule) {
         const patch: NotifyRulePatch = {}
         if (name.trim() !== rule.name) patch.name = name.trim()
-        if (audience !== rule.audience) patch.audience = audience
         if (predicateJSON !== originalPredicateJSON) {
           patch.scope_predicate = hasPredicate ? predicate : null
         }
@@ -129,7 +110,6 @@ export default function NotifyRuleEditor({
         await createNotifyRule({
           event_type: eventType,
           name: name.trim(),
-          audience: chosenAudience,
           team_id: team,
           ...(hasPredicate ? { scope_predicate: predicate } : {}),
         })
@@ -146,18 +126,7 @@ export default function NotifyRuleEditor({
     } finally {
       setSaving(false)
     }
-  }, [
-    eventType,
-    name,
-    predicate,
-    audience,
-    chosenAudience,
-    team,
-    isEdit,
-    rule,
-    originalPredicateJSON,
-    onSaved,
-  ])
+  }, [eventType, name, predicate, team, isEdit, rule, originalPredicateJSON, onSaved])
 
   const handleDelete = useCallback(async () => {
     if (!rule) return
@@ -177,7 +146,7 @@ export default function NotifyRuleEditor({
   }, [rule, onDeleted, onClose])
 
   const fieldClass =
-    'w-full px-3 py-2 rounded-lg border border-line-1 bg-raised text-body text-ink-1 placeholder:text-ink-3 focus:outline-none focus:border-warm/40 focus:ring-1 focus:ring-warm/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed'
+    'w-full px-3 py-2 rounded-lg border border-line-1 bg-raised text-body text-ink-1 placeholder:text-ink-3 focus:border-warm/40 focus:ring-1 focus:ring-warm/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed'
 
   return (
     <AnimatePresence>
@@ -207,11 +176,8 @@ export default function NotifyRuleEditor({
                 </button>
               </div>
 
-              {/* The div scrolls and the fieldset only disables: a fieldset as
-                  the scroll container paints its content past its own box,
-                  under the footer. */}
               <div className="flex-1 overflow-y-auto px-6 py-4 min-h-0">
-                <fieldset disabled={!writable} className="min-w-0 space-y-5">
+                <div className="min-w-0 space-y-5">
                   {!isEdit && <TeamPicker value={team} onChange={setTeam} label="Team" />}
                   <div>
                     <label
@@ -257,39 +223,9 @@ export default function NotifyRuleEditor({
                       type="text"
                       value={name}
                       onChange={(e) => setName(e.target.value)}
-                      placeholder="e.g. CI failed on my PR"
+                      placeholder="e.g. CI failed on a PR"
                       className={fieldClass}
                     />
-                  </div>
-
-                  <div>
-                    <span className="block text-ui font-medium text-ink-2 mb-1.5">Tell</span>
-                    <div className="space-y-1.5">
-                      <label className="flex items-center gap-2 text-body text-ink-2 cursor-pointer">
-                        <input
-                          type="radio"
-                          name="notify-audience"
-                          checked={chosenAudience === 'creator'}
-                          onChange={() => setAudience('creator')}
-                        />
-                        {othersRule ? 'Only the person who made it' : 'Just me'}
-                      </label>
-                      <label className="flex items-center gap-2 text-body text-ink-2 cursor-pointer">
-                        <input
-                          type="radio"
-                          name="notify-audience"
-                          checked={chosenAudience === 'team'}
-                          disabled={!teamAdmin}
-                          onChange={() => setAudience('team')}
-                        />
-                        Everyone on the team
-                      </label>
-                    </div>
-                    {!teamAdmin && (
-                      <p className="text-reported text-ink-3 mt-1.5">
-                        Only a team admin can make a rule that notifies the whole team.
-                      </p>
-                    )}
                   </div>
 
                   {eventType && (
@@ -306,16 +242,16 @@ export default function NotifyRuleEditor({
                         />
                       </div>
                       <p className="text-reported text-ink-3 mt-1.5">
-                        Leave all fields on &ldquo;Any&rdquo; to be told about every event of this
-                        type on what the team tracks.
+                        Leave all fields on &ldquo;Any&rdquo; to tell the team about every event of
+                        this type on what it tracks.
                       </p>
                     </div>
                   )}
-                </fieldset>
+                </div>
               </div>
 
               <div className="px-6 py-4 border-t border-line-1 flex items-center shrink-0">
-                {isEdit && writable && (
+                {isEdit && (
                   <button
                     onClick={handleDelete}
                     disabled={deleting}
@@ -330,17 +266,15 @@ export default function NotifyRuleEditor({
                     onClick={onClose}
                     className="text-body font-medium text-ink-3 hover:text-ink-2 transition-colors"
                   >
-                    {writable ? 'Cancel' : 'Close'}
+                    Cancel
                   </button>
-                  {writable && (
-                    <button
-                      onClick={handleSave}
-                      disabled={saving || !eventType || !name.trim() || (!isEdit && !teamsLoaded)}
-                      className="text-body font-semibold text-warm-ink bg-warm hover:bg-warm/90 disabled:opacity-50 disabled:cursor-not-allowed px-5 py-2 rounded-full transition-colors"
-                    >
-                      {saving ? 'Saving…' : isEdit ? 'Save' : 'Create'}
-                    </button>
-                  )}
+                  <button
+                    onClick={handleSave}
+                    disabled={saving || !eventType || !name.trim() || (!isEdit && !teamsLoaded)}
+                    className="text-body font-semibold text-warm-ink bg-warm hover:bg-warm/90 disabled:opacity-50 disabled:cursor-not-allowed px-5 py-2 rounded-full transition-colors"
+                  >
+                    {saving ? 'Saving…' : isEdit ? 'Save' : 'Create'}
+                  </button>
                 </div>
               </div>
             </div>

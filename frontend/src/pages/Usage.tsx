@@ -1270,7 +1270,7 @@ function CapRow({ team, spend }: { team: UsageTeamCap; spend: number }) {
               if (e.key === 'Enter') void save()
             }}
             onBlur={() => void save()}
-            className="w-[108px] rounded-[4px] border border-line-1 bg-transparent py-1 pl-5 pr-2 font-mono text-reported tabular-nums text-ink-1 transition-colors focus:border-warm focus:outline-none"
+            className="w-[108px] rounded-[4px] border border-line-1 bg-transparent py-1 pl-5 pr-2 font-mono text-reported tabular-nums text-ink-1 transition-colors focus:border-warm"
           />
         </span>
         <CapStatus status={status} dirty={dirty} error={error} />

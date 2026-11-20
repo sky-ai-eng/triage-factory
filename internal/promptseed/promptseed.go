@@ -43,9 +43,8 @@ var prSecurityReview string
 //go:embed prompts/pr-correctness-review.txt
 var prCorrectnessReview string
 
-// One implementation body ships as two prompts, one per tracker. Each is
-// wrapped by its own blueprint because a blueprint is fired by exactly one
-// trigger, and each tracker's assignment event needs a trigger of its own.
+// One implementation body ships as two prompts, one per tracker, each wrapped
+// by its own blueprint and fired by its tracker's assignment trigger.
 //
 //go:embed prompts/issue-implement.txt
 var issueImplement string

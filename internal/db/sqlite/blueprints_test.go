@@ -395,8 +395,6 @@ func TestBlueprintStore_SQLite_FiringCarriesTaskClaim(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Agents.Create: %v", err)
 	}
-	// event_handlers.blueprint_id is UNIQUE — one trigger per blueprint — so
-	// each arm gets its own pair.
 	seedTrigger := func(t *testing.T, suffix string) {
 		t.Helper()
 		insertBlueprintForTest(t, conn, "claim-bp-"+suffix, "Claim BP "+suffix)

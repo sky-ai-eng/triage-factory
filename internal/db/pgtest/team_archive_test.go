@@ -173,106 +173,128 @@ func TestRLS_ArchivedTeamBlocksWrites(t *testing.T) {
 	}
 }
 
+// teamRows is one of each team-owned row a person reads: a blueprint, a
+// prompt, an event handler and a team-visibility task.
+type teamRows struct{ blueprint, prompt, handler, task string }
+
+// seedTeamRows writes one of each of teamRows on teamID, authored by userID.
+func seedTeamRows(t *testing.T, h *Harness, orgID, userID, teamID, suffix string) teamRows {
+	t.Helper()
+	var r teamRows
+	if err := h.AdminDB.QueryRow(`
+		INSERT INTO blueprints (org_id, creator_user_id, team_id, name, source)
+		VALUES ($1, $2, $3, $4, 'user') RETURNING id
+	`, orgID, userID, teamID, "bp-"+suffix).Scan(&r.blueprint); err != nil {
+		t.Fatalf("seed blueprint %s: %v", suffix, err)
+	}
+	if err := h.AdminDB.QueryRow(`
+		INSERT INTO prompts (org_id, creator_user_id, team_id, name, body, source)
+		VALUES ($1, $2, $3, $4, 'mission', 'user') RETURNING id
+	`, orgID, userID, teamID, "prompt-"+suffix).Scan(&r.prompt); err != nil {
+		t.Fatalf("seed prompt %s: %v", suffix, err)
+	}
+	if err := h.AdminDB.QueryRow(`
+		INSERT INTO event_handlers (org_id, creator_user_id, team_id, kind, event_type, name, default_priority, sort_order)
+		VALUES ($1, $2, $3, 'rule', 'github:pr:opened', $4, 0.5, 0) RETURNING id
+	`, orgID, userID, teamID, "rule-"+suffix).Scan(&r.handler); err != nil {
+		t.Fatalf("seed rule %s: %v", suffix, err)
+	}
+	r.task = seedMarketplaceStatsTask(t, h, orgID, userID, teamID)
+	return r
+}
+
+// expectTeamRows lists every kind of teamRows as userID, in one
+// claims-carrying transaction, and checks whether each of rows is visible.
+func expectTeamRows(t *testing.T, h *Harness, orgID, userID, when string, rows teamRows, want bool) {
+	t.Helper()
+	ctx := context.Background()
+	all := map[string]bool{}
+	if err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
+		st := pgstore.NewForTx(tx, SecretKey)
+		bps, _, err := st.Blueprints.List(ctx, orgID, db.BlueprintListFilter{}, db.ListOpts{Limit: 200})
+		if err != nil {
+			return fmt.Errorf("blueprints: %w", err)
+		}
+		for _, x := range bps {
+			all[x.ID] = true
+		}
+		prompts, _, err := st.Prompts.List(ctx, orgID, db.PromptListFilter{}, db.ListOpts{Limit: 200})
+		if err != nil {
+			return fmt.Errorf("prompts: %w", err)
+		}
+		for _, x := range prompts {
+			all[x.ID] = true
+		}
+		handlers, _, err := st.EventHandlers.List(ctx, orgID, db.EventHandlerListFilter{}, db.ListOpts{Limit: 200})
+		if err != nil {
+			return fmt.Errorf("event handlers: %w", err)
+		}
+		for _, x := range handlers {
+			all[x.ID] = true
+		}
+		tasks, _, err := st.Tasks.List(ctx, orgID, db.TaskListFilter{Statuses: []string{"queued"}}, db.ListOpts{Limit: 200})
+		if err != nil {
+			return fmt.Errorf("tasks: %w", err)
+		}
+		for _, x := range tasks {
+			all[x.ID] = true
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("%s: list as %s: %v", when, userID, err)
+	}
+	for kind, id := range map[string]string{"blueprint": rows.blueprint, "prompt": rows.prompt, "event handler": rows.handler, "task": rows.task} {
+		if all[id] != want {
+			t.Errorf("%s: %s %s visible = %v, want %v", when, kind, id, all[id], want)
+		}
+	}
+}
+
 // TestRLS_ArchivedTeamHidesItsRows pins the read half of team archive: for a
 // person's request, membership in an archived team grants no read of its
-// blueprints, prompts, event handlers or team-visibility tasks, and neither
-// does having written them — the creator arm of the blueprint, prompt and
-// event-handler policies is cut by tf.team_active. Restoring the team brings
-// every row back, because archiving keeps the memberships.
+// blueprints, prompts, event handlers or team-visibility tasks, including the
+// ones they wrote. Restoring the team brings every row back, because
+// archiving keeps the memberships.
 func TestRLS_ArchivedTeamHidesItsRows(t *testing.T) {
 	h := Shared(t)
 	h.Reset(t)
-	ctx := context.Background()
 
 	orgID, alice, teamA := SeedOrgWithUser(t, h, "alice")
 	teamB := SeedTeam(t, h, orgID, "team-b")
 	MustExec(t, h.AdminDB, `INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'admin')`, alice, teamB)
+	a := seedTeamRows(t, h, orgID, alice, teamA, "a")
+	b := seedTeamRows(t, h, orgID, alice, teamB, "b")
 
-	type teamRows struct{ blueprint, prompt, handler, task string }
-	seed := func(teamID, suffix string) teamRows {
-		var r teamRows
-		if err := h.AdminDB.QueryRow(`
-			INSERT INTO blueprints (org_id, creator_user_id, team_id, name, source)
-			VALUES ($1, $2, $3, $4, 'user') RETURNING id
-		`, orgID, alice, teamID, "bp-"+suffix).Scan(&r.blueprint); err != nil {
-			t.Fatalf("seed blueprint %s: %v", suffix, err)
-		}
-		if err := h.AdminDB.QueryRow(`
-			INSERT INTO prompts (org_id, creator_user_id, team_id, name, body, source)
-			VALUES ($1, $2, $3, $4, 'mission', 'user') RETURNING id
-		`, orgID, alice, teamID, "prompt-"+suffix).Scan(&r.prompt); err != nil {
-			t.Fatalf("seed prompt %s: %v", suffix, err)
-		}
-		if err := h.AdminDB.QueryRow(`
-			INSERT INTO event_handlers (org_id, creator_user_id, team_id, kind, event_type, name, default_priority, sort_order)
-			VALUES ($1, $2, $3, 'rule', 'github:pr:opened', $4, 0.5, 0) RETURNING id
-		`, orgID, alice, teamID, "rule-"+suffix).Scan(&r.handler); err != nil {
-			t.Fatalf("seed rule %s: %v", suffix, err)
-		}
-		r.task = seedMarketplaceStatsTask(t, h, orgID, alice, teamID)
-		return r
-	}
-	a := seed(teamA, "a")
-	b := seed(teamB, "b")
-
-	// visible reads every list as alice, in one claims-carrying transaction.
-	visible := func() map[string]bool {
-		t.Helper()
-		all := map[string]bool{}
-		if err := h.WithUser(t, alice, orgID, func(tx *sql.Tx) error {
-			st := pgstore.NewForTx(tx, SecretKey)
-			bps, _, err := st.Blueprints.List(ctx, orgID, db.BlueprintListFilter{}, db.ListOpts{Limit: 200})
-			if err != nil {
-				return fmt.Errorf("blueprints: %w", err)
-			}
-			for _, x := range bps {
-				all[x.ID] = true
-			}
-			prompts, _, err := st.Prompts.List(ctx, orgID, db.PromptListFilter{}, db.ListOpts{Limit: 200})
-			if err != nil {
-				return fmt.Errorf("prompts: %w", err)
-			}
-			for _, x := range prompts {
-				all[x.ID] = true
-			}
-			handlers, _, err := st.EventHandlers.List(ctx, orgID, db.EventHandlerListFilter{}, db.ListOpts{Limit: 200})
-			if err != nil {
-				return fmt.Errorf("event handlers: %w", err)
-			}
-			for _, x := range handlers {
-				all[x.ID] = true
-			}
-			tasks, _, err := st.Tasks.List(ctx, orgID, db.TaskListFilter{Statuses: []string{"queued"}}, db.ListOpts{Limit: 200})
-			if err != nil {
-				return fmt.Errorf("tasks: %w", err)
-			}
-			for _, x := range tasks {
-				all[x.ID] = true
-			}
-			return nil
-		}); err != nil {
-			t.Fatalf("list as alice: %v", err)
-		}
-		return all
-	}
-	expect := func(when string, rows teamRows, want bool) {
-		t.Helper()
-		all := visible()
-		for kind, id := range map[string]string{"blueprint": rows.blueprint, "prompt": rows.prompt, "event handler": rows.handler, "task": rows.task} {
-			if all[id] != want {
-				t.Errorf("%s: %s %s visible = %v, want %v", when, kind, id, all[id], want)
-			}
-		}
-	}
-
-	expect("both active", a, true)
-	expect("both active", b, true)
+	expectTeamRows(t, h, orgID, alice, "both active", a, true)
+	expectTeamRows(t, h, orgID, alice, "both active", b, true)
 
 	MustExec(t, h.AdminDB, `UPDATE teams SET deleted_at = now() WHERE id = $1`, teamB)
-	expect("B archived", a, true)
-	expect("B archived", b, false)
+	expectTeamRows(t, h, orgID, alice, "B archived", a, true)
+	expectTeamRows(t, h, orgID, alice, "B archived", b, false)
 
 	MustExec(t, h.AdminDB, `UPDATE teams SET deleted_at = NULL WHERE id = $1`, teamB)
-	expect("B restored", a, true)
-	expect("B restored", b, true)
+	expectTeamRows(t, h, orgID, alice, "B restored", a, true)
+	expectTeamRows(t, h, orgID, alice, "B restored", b, true)
+}
+
+// TestRLS_LeavingATeamHidesItsRows: a person who leaves a team reads none of
+// its blueprints, prompts, event handlers or team-visibility tasks, including
+// the ones they wrote, while the teams they are still on stay readable.
+func TestRLS_LeavingATeamHidesItsRows(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	orgID, alice, teamA := SeedOrgWithUser(t, h, "alice")
+	teamB := SeedTeam(t, h, orgID, "team-b")
+	MustExec(t, h.AdminDB, `INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'member')`, alice, teamB)
+	// Every team keeps an admin, so B has one besides alice.
+	bob := SeedUser(t, h, "bob")
+	AddOrgMember(t, h, bob, orgID, teamB, "member", "admin")
+	a := seedTeamRows(t, h, orgID, alice, teamA, "a")
+	b := seedTeamRows(t, h, orgID, alice, teamB, "b")
+	expectTeamRows(t, h, orgID, alice, "on both teams", b, true)
+
+	MustExec(t, h.AdminDB, `DELETE FROM memberships WHERE user_id = $1 AND team_id = $2`, alice, teamB)
+	expectTeamRows(t, h, orgID, alice, "left B", a, true)
+	expectTeamRows(t, h, orgID, alice, "left B", b, false)
 }

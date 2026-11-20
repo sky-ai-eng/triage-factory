@@ -234,7 +234,7 @@ function MemberRow({
               ? "You can't change your own role here"
               : undefined
         }
-        className="rounded-lg border border-line-1 bg-ground px-2.5 py-1.5 text-ui text-ink-2 transition-colors focus:border-warm/40 focus:outline-none focus:ring-2 focus:ring-warm/30 disabled:cursor-not-allowed disabled:opacity-50"
+        className="rounded-lg border border-line-1 bg-ground px-2.5 py-1.5 text-ui text-ink-2 transition-colors focus:border-warm/40 focus:ring-2 focus:ring-warm/30 disabled:cursor-not-allowed disabled:opacity-50"
       >
         {/* Keep the current role selectable even if it's outside the adapter's
             primary vocab (defensive against legacy values). */}

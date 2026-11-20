@@ -66,7 +66,7 @@ type Credentials struct {
 func For(org domain.OrgSettings, multiMode bool) Credentials {
 	return Credentials{
 		host:  domain.EffectiveLLMAuthMethod(org.LLMAuthMethod, multiMode) == domain.LLMAuthSystem,
-		bound: boundProviders(org),
+		bound: BoundProviders(org),
 	}
 }
 
@@ -121,10 +121,6 @@ func (c Credentials) BringsOwn() bool { return !c.host }
 //
 // It is "no provider passes Has" rather than its own rule, so it can never
 // disagree with the per-provider answer.
-//
-// TODO(TFAC-888): in local mode a bound credential is not the one a run
-// authenticates with, so this can only report that something is bound. Once
-// local reads the org's own material, bound and used are the same credential.
 func (c Credentials) Ready() error {
 	for _, provider := range modelcatalog.SupportedProviders() {
 		if c.Has(provider) {
@@ -167,12 +163,15 @@ func (c Credentials) Check(model string) error {
 // condition Check exempts from the credential rule.
 func (c Credentials) anyBound() bool { return len(c.bound) > 0 }
 
-// boundProviders reads the org's own providers off the two settings refs rather
+// BoundProviders reads the org's own providers off the two settings refs rather
 // than the vault: the refs record what is bound and are already loaded wherever
 // this is called. The Bedrock ref covers all three of its shapes including role
 // mode, which stores no secret — a caller looking for a key would call it
 // unconfigured.
-func boundProviders(org domain.OrgSettings) map[string]bool {
+//
+// A local run resolves its credential from the same answer, so the provider a
+// badge or a refusal names is the one the run authenticates with.
+func BoundProviders(org domain.OrgSettings) map[string]bool {
 	out := map[string]bool{}
 	if org.AnthropicAPIKeyRef != "" {
 		out[modelcatalog.ProviderAnthropic] = true

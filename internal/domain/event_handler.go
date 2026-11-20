@@ -18,10 +18,10 @@ import (
 //	                 required. default_priority, sort_order must be nil.
 //	                 A trigger always fires a blueprint (length >= 1); a
 //	                 single prompt is just a 1-step blueprint.
-//	kind="notify"  — tells its audience about a matching event through a
-//	                 notification, and creates no task. name and audience
-//	                 are required; every rule- and trigger-only field must
-//	                 be nil. Always user-authored.
+//	kind="notify"  — tells its team's members about a matching event
+//	                 through a notification, and creates no task. name is
+//	                 required; every rule- and trigger-only field must be
+//	                 nil. Always user-authored.
 //
 // The CHECK constraints on event_handlers enforce the shape pair at the
 // SQL level; both backends rely on it.
@@ -69,7 +69,7 @@ type EventHandler struct {
 	// stays absent from team-handler responses that never set it.
 	SystemSlug string `json:"system_slug,omitempty"`
 	// CreatorUserID is the user who authored a user-source handler, empty for
-	// a shipped one. A personal notify rule tells this user.
+	// a shipped one. It is attribution only.
 	CreatorUserID string    `json:"creator_user_id,omitempty"`
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
@@ -92,10 +92,6 @@ type EventHandler struct {
 	TriggerType            string   `json:"trigger_type"` // V1: only "event"
 	BreakerThreshold       *int     `json:"breaker_threshold"`
 	MinAutonomySuitability *float64 `json:"min_autonomy_suitability"`
-
-	// Notify-only (empty for rules and triggers): who the rule tells,
-	// NotifyAudienceCreator or NotifyAudienceTeam.
-	Audience string `json:"audience,omitempty"`
 }
 
 // EventHandler kinds.
@@ -112,13 +108,6 @@ const (
 func NotifyRuleSource(eventType string) bool {
 	return strings.HasPrefix(eventType, "github:") || strings.HasPrefix(eventType, "jira:") || strings.HasPrefix(eventType, "linear:")
 }
-
-// Notify rule audiences. A personal rule tells its creator, while they are a
-// member of the rule's team; a team rule tells the team's members.
-const (
-	NotifyAudienceCreator = "creator"
-	NotifyAudienceTeam    = "team"
-)
 
 // EventHandler sources. Mirrors prompts.source — system rows are
 // admin-managed; user rows are user-authored.

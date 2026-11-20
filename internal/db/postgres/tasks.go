@@ -1937,9 +1937,9 @@ func reassignClaimToUser(ctx context.Context, q queryer, orgID, taskID, fromUser
 // breakerFailureSQL is a run, over the caller's aliases for a blueprint_runs
 // row and its task, that counts toward its trigger's breaker: event-fired,
 // failed or aborted, and with no run on the same entity that resets the
-// breaker started at or after it — a completed run of the same blueprint, or
-// a completed run a person started, of any blueprint. Its SQLite twin is the
-// same predicate without the org on the joins.
+// breaker started at or after it — a completed run of the same trigger and
+// blueprint, or a completed run a person started, of any blueprint. Its
+// SQLite twin is the same predicate without the org on the joins.
 func breakerFailureSQL(run, task string) string {
 	return run + `.trigger_type = 'event'
 		AND ` + run + `.status IN ('failed', 'aborted')
@@ -1949,11 +1949,12 @@ func breakerFailureSQL(run, task string) string {
 			WHERE ok.org_id = ` + run + `.org_id
 			  AND okt.entity_id = ` + task + `.entity_id
 			  AND ok.status = 'completed'
-			  AND (ok.trigger_type = 'manual' OR ok.blueprint_id = ` + run + `.blueprint_id)
+			  AND (ok.trigger_type = 'manual'
+			       OR (ok.trigger_id = ` + run + `.trigger_id AND ok.blueprint_id = ` + run + `.blueprint_id))
 			  AND ok.started_at >= ` + run + `.started_at)`
 }
 
-func (s *taskStore) BreakerStreakSystem(ctx context.Context, orgID, entityID, blueprintID string) (domain.BreakerStreak, error) {
+func (s *taskStore) BreakerStreakSystem(ctx context.Context, orgID, entityID, triggerID string) (domain.BreakerStreak, error) {
 	var streak domain.BreakerStreak
 	var conversationID sql.NullString
 	err := s.admin.QueryRowContext(ctx, `
@@ -1962,12 +1963,13 @@ func (s *taskStore) BreakerStreakSystem(ctx context.Context, orgID, entityID, bl
 		         WHERE c.org_id = br.org_id AND c.blueprint_run_id = br.id
 		         ORDER BY c.started_at DESC, c.id DESC LIMIT 1)
 		FROM blueprint_runs br
+		JOIN event_handlers h ON h.org_id = br.org_id AND h.id = br.trigger_id AND h.blueprint_id = br.blueprint_id
 		JOIN tasks t ON t.id = br.task_id AND t.org_id = br.org_id
-		WHERE br.org_id = $1 AND t.entity_id = $2 AND br.blueprint_id = $3
+		WHERE br.org_id = $1 AND t.entity_id = $2 AND h.id = $3
 		  AND `+breakerFailureSQL("br", "t")+`
 		ORDER BY br.started_at DESC, br.id DESC
 		LIMIT 1
-	`, orgID, entityID, blueprintID).Scan(&streak.Failures, &conversationID)
+	`, orgID, entityID, triggerID).Scan(&streak.Failures, &conversationID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.BreakerStreak{}, nil
 	}
@@ -1982,7 +1984,7 @@ func (s *taskStore) ListTrippedBreakersSystem(ctx context.Context, orgID string)
 	rows, err := s.admin.QueryContext(ctx, `
 		SELECT h.id::text, t.entity_id::text
 		FROM event_handlers h
-		JOIN blueprint_runs br ON br.org_id = h.org_id AND br.blueprint_id = h.blueprint_id
+		JOIN blueprint_runs br ON br.org_id = h.org_id AND br.trigger_id = h.id AND br.blueprint_id = h.blueprint_id
 		JOIN tasks t ON t.id = br.task_id AND t.org_id = br.org_id
 		JOIN entities e ON e.id = t.entity_id AND e.org_id = t.org_id AND e.state = 'active'
 		WHERE h.org_id = $1 AND h.kind = 'trigger' AND h.enabled AND h.deleted_at IS NULL

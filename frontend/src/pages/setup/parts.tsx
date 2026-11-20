@@ -74,7 +74,7 @@ export function ChoiceCards<T extends string>({
             aria-checked={isSelected}
             tabIndex={i === tabbable ? 0 : -1}
             onClick={() => onChoose(opt.kind)}
-            className={`group flex flex-col gap-1 rounded-lg text-left outline-none transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-warm/50 ${pad}`}
+            className={`group flex flex-col gap-1 rounded-lg text-left transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-warm/50 ${pad}`}
           >
             <span className="flex items-center gap-1.5">
               <span

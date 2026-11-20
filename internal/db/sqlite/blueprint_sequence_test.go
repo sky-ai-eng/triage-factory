@@ -45,9 +45,8 @@ func sqliteSequenceScaffold(t *testing.T) (db.BlueprintStore, dbtest.BlueprintSe
 	insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: promptID, Name: "Step 0", Body: "b", Source: "user"})
 
 	n := 0
-	// Each firing brings its own blueprint and trigger:
-	// event_handlers_one_trigger_per_blueprint means a second trigger needs
-	// a second blueprint, and the suite stages several firings per test.
+	// Each firing brings its own blueprint and trigger, so two firings in one
+	// test never meet at the (triggering_event_id, trigger_id) replay fence.
 	newFiring := func(t *testing.T, taskID string, manual bool) domain.BlueprintRun {
 		t.Helper()
 		n++

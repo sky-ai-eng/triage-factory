@@ -94,12 +94,12 @@ const FADE_LAYERS = Array.from({ length: FADE_N }, (_, k) => {
 const FETCH_AHEAD_SCREENS = 2
 
 const searchInputClass =
-  'w-full rounded-lg bg-transparent py-1.5 pl-7 pr-7 text-body text-ink-1 placeholder:text-ink-3 outline-none transition-colors focus:bg-[var(--color-raised)]/40'
+  'w-full rounded-lg bg-transparent py-1.5 pl-7 pr-7 text-body text-ink-1 placeholder:text-ink-3 transition-colors focus:bg-[var(--color-raised)]/40'
 
 const dateInputClass =
-  'flex-1 rounded-lg bg-[var(--color-raised)]/70 px-2 py-1 text-reported text-ink-1 outline-none transition-[box-shadow] focus:shadow-[0_0_0_2px_var(--color-warm-2)]'
+  'flex-1 rounded-lg bg-[var(--color-raised)]/70 px-2 py-1 text-reported text-ink-1 transition-[box-shadow] focus:shadow-[0_0_0_2px_var(--color-warm-2)]'
 const timeInputClass =
-  'w-[5.5rem] rounded-lg bg-[var(--color-raised)]/70 px-2 py-1 text-reported text-ink-1 outline-none transition-[box-shadow] focus:shadow-[0_0_0_2px_var(--color-warm-2)] disabled:opacity-40'
+  'w-[5.5rem] rounded-lg bg-[var(--color-raised)]/70 px-2 py-1 text-reported text-ink-1 transition-[box-shadow] focus:shadow-[0_0_0_2px_var(--color-warm-2)] disabled:opacity-40'
 
 // Split / join the stored datetime-local string ("YYYY-MM-DDTHH:mm") into its
 // date and time halves. The time is optional in the UI — a bare date stores

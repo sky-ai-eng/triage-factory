@@ -164,7 +164,7 @@ export default function Onboarding() {
                 maxLength={200}
                 placeholder="Organization name"
                 autoFocus
-                className="w-full bg-raised border border-line-1 focus:border-warm focus:outline-none text-ink-1 placeholder:text-ink-3 rounded-xl px-4 py-2.5 text-body transition-colors disabled:opacity-50"
+                className="w-full bg-raised border border-line-1 focus:border-warm text-ink-1 placeholder:text-ink-3 rounded-xl px-4 py-2.5 text-body transition-colors disabled:opacity-50"
               />
               <button
                 type="submit"

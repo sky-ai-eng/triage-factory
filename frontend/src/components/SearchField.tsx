@@ -29,7 +29,7 @@ export default function SearchField({
         placeholder={placeholder}
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="w-full border-0 border-b border-line-1 bg-transparent py-2.5 pl-6 pr-2 text-body text-ink-1 placeholder:text-ink-3 outline-none transition-colors focus:border-warm"
+        className="w-full border-0 border-b border-line-1 bg-transparent py-2.5 pl-6 pr-2 text-body text-ink-1 placeholder:text-ink-3 transition-colors focus:border-warm"
       />
     </div>
   )

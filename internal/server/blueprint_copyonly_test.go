@@ -285,6 +285,18 @@ func triggersForBlueprint(t *testing.T, s *Server, blueprintID string) []map[str
 	return out
 }
 
+// triggerIDsForBlueprint returns the ids of the trigger handlers bound to
+// blueprintID.
+func triggerIDsForBlueprint(t *testing.T, s *Server, blueprintID string) map[string]bool {
+	t.Helper()
+	out := map[string]bool{}
+	for _, h := range triggersForBlueprint(t, s, blueprintID) {
+		id, _ := h["id"].(string)
+		out[id] = true
+	}
+	return out
+}
+
 // stepPromptIDs returns the ordered step prompt ids of a request-visible
 // blueprint.
 func stepPromptIDs(t *testing.T, s *Server, blueprintID string) []string {

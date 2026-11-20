@@ -11,57 +11,32 @@ import (
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 )
 
-// TestPollReadinessStore_Postgres_ReadyLifecycle pins the org-scoped
-// readiness gate's core contract: not ready until a poll completes, a
-// restart clears readiness until a fresh completion lands, and a stale
-// (pre-restart) completion is ignored.
-func TestPollReadinessStore_Postgres_ReadyLifecycle(t *testing.T) {
-	h := pgtest.Shared(t)
-	h.Reset(t)
-	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
-	ctx := context.Background()
-	const orgID = "22222222-2222-2222-2222-222222222222"
-
-	if ready, err := stores.PollReadiness.Ready(ctx, orgID, "jira"); err != nil || ready {
-		t.Fatalf("Ready before any poll: ready=%v err=%v, want false/nil", ready, err)
-	}
-
-	if err := stores.PollReadiness.MarkPollComplete(ctx, orgID, "jira", time.Time{}); err != nil {
-		t.Fatal(err)
-	}
-	if ready, err := stores.PollReadiness.Ready(ctx, orgID, "jira"); err != nil || !ready {
-		t.Fatalf("Ready after first completion: ready=%v err=%v, want true/nil", ready, err)
-	}
-
-	restartedAt := time.Now()
-	if err := stores.PollReadiness.MarkRestarted(ctx, orgID, "jira"); err != nil {
-		t.Fatal(err)
-	}
-	if ready, err := stores.PollReadiness.Ready(ctx, orgID, "jira"); err != nil || ready {
-		t.Fatalf("Ready right after restart: ready=%v err=%v, want false/nil", ready, err)
-	}
-
-	// A completion whose startedAt precedes the restart is a straggler
-	// from before it — must not flip readiness back to true.
-	if err := stores.PollReadiness.MarkPollComplete(ctx, orgID, "jira", restartedAt.Add(-time.Minute)); err != nil {
-		t.Fatal(err)
-	}
-	if ready, err := stores.PollReadiness.Ready(ctx, orgID, "jira"); err != nil || ready {
-		t.Fatalf("Ready after stale pre-restart completion: ready=%v err=%v, want false/nil", ready, err)
-	}
-
-	// A completion whose startedAt is after the restart is the real thing.
-	if err := stores.PollReadiness.MarkPollComplete(ctx, orgID, "jira", restartedAt.Add(time.Minute)); err != nil {
-		t.Fatal(err)
-	}
-	if ready, err := stores.PollReadiness.Ready(ctx, orgID, "jira"); err != nil || !ready {
-		t.Fatalf("Ready after fresh post-restart completion: ready=%v err=%v, want true/nil", ready, err)
-	}
-
-	// github is a distinct source — unaffected by jira's rows.
-	if ready, err := stores.PollReadiness.Ready(ctx, orgID, "github"); err != nil || ready {
-		t.Fatalf("Ready for a different source: ready=%v err=%v, want false/nil", ready, err)
-	}
+// TestPollReadinessStore_Postgres_ReadyConformance runs the shared readiness
+// contract against the Postgres impl.
+func TestPollReadinessStore_Postgres_ReadyConformance(t *testing.T) {
+	dbtest.RunPollReadinessReadyConformance(t, func(t *testing.T) (db.PollReadinessStore, string, dbtest.PollReadinessSeeder) {
+		h := pgtest.Shared(t)
+		h.Reset(t)
+		orgID, _, _ := pgtest.SeedOrgWithUser(t, h, "readiness")
+		return pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey).PollReadiness, orgID, dbtest.PollReadinessSeeder{
+			RestartedAt: func(t *testing.T, orgID, source string) time.Time {
+				t.Helper()
+				var at time.Time
+				if err := h.AdminDB.QueryRow(`SELECT restarted_at FROM poll_readiness WHERE org_id = $1 AND source = $2`,
+					orgID, source).Scan(&at); err != nil {
+					t.Fatalf("read restarted_at: %v", err)
+				}
+				return at
+			},
+			SetLastPollAt: func(t *testing.T, orgID, source string, at time.Time) {
+				t.Helper()
+				if _, err := h.AdminDB.Exec(`UPDATE poll_readiness SET last_poll_at = $3 WHERE org_id = $1 AND source = $2`,
+					orgID, source, at); err != nil {
+					t.Fatalf("set last_poll_at: %v", err)
+				}
+			},
+		}
+	})
 }
 
 // TestPollReadinessStore_Postgres_AnnouncePendingIsAtomicOneShot pins the

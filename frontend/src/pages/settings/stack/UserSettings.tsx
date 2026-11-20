@@ -135,7 +135,7 @@ function GitHubIdentitySection({ orgId }: { orgId: string | null }) {
                   if (e.key === 'Enter') void submitPat()
                 }}
                 aria-invalid={!!patError || undefined}
-                className={`w-full rounded-xl border bg-ground px-4 py-2.5 text-body text-ink-1 placeholder-ink-3 transition-colors focus:outline-none focus:ring-2 focus:ring-warm/30 ${
+                className={`w-full rounded-xl border bg-ground px-4 py-2.5 text-body text-ink-1 placeholder-ink-3 transition-colors focus:ring-2 focus:ring-warm/30 ${
                   patError ? 'border-alarm/50' : 'border-line-1 focus:border-warm/40'
                 }`}
               />
@@ -302,7 +302,7 @@ function JiraIdentitySection({ orgId }: { orgId: string | null }) {
                       if (patError) setPatError(null)
                     }}
                     aria-invalid={!!patError || undefined}
-                    className={`w-full rounded-xl border bg-ground px-4 py-2.5 text-body text-ink-1 placeholder-ink-3 transition-colors focus:outline-none focus:ring-2 focus:ring-warm/30 ${
+                    className={`w-full rounded-xl border bg-ground px-4 py-2.5 text-body text-ink-1 placeholder-ink-3 transition-colors focus:ring-2 focus:ring-warm/30 ${
                       patError ? 'border-alarm/50' : 'border-line-1 focus:border-warm/40'
                     }`}
                   />
@@ -324,7 +324,7 @@ function JiraIdentitySection({ orgId }: { orgId: string | null }) {
                       if (e.key === 'Enter') void submit()
                     }}
                     aria-invalid={!!patError || undefined}
-                    className={`w-full rounded-xl border bg-ground px-4 py-2.5 text-body text-ink-1 placeholder-ink-3 transition-colors focus:outline-none focus:ring-2 focus:ring-warm/30 ${
+                    className={`w-full rounded-xl border bg-ground px-4 py-2.5 text-body text-ink-1 placeholder-ink-3 transition-colors focus:ring-2 focus:ring-warm/30 ${
                       patError ? 'border-alarm/50' : 'border-line-1 focus:border-warm/40'
                     }`}
                   />
@@ -360,7 +360,7 @@ function JiraIdentitySection({ orgId }: { orgId: string | null }) {
                     if (e.key === 'Enter') void submit()
                   }}
                   aria-invalid={!!patError || undefined}
-                  className={`w-full rounded-xl border bg-ground px-4 py-2.5 text-body text-ink-1 placeholder-ink-3 transition-colors focus:outline-none focus:ring-2 focus:ring-warm/30 ${
+                  className={`w-full rounded-xl border bg-ground px-4 py-2.5 text-body text-ink-1 placeholder-ink-3 transition-colors focus:ring-2 focus:ring-warm/30 ${
                     patError ? 'border-alarm/50' : 'border-line-1 focus:border-warm/40'
                   }`}
                 />
