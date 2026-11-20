@@ -232,9 +232,6 @@ export default function Board() {
     in_progress: inProgressList,
     done: doneList,
   }
-  const queued = queuedList.items
-  const inProgress = inProgressList.items
-  const done = doneList.items
   // The loaders are stable across renders; the list objects around them are
   // not. The fetchers close over these rather than the lists so their own
   // identity stays stable — the WS refresh and the mount effect both key off
@@ -1060,6 +1057,12 @@ export default function Board() {
     in_progress: lanePaging(inProgressList, views.in_progress),
     done: lanePaging(doneList, views.done),
   }
+  // The cards each lane shows. A failed lane shows none of what it holds, so
+  // its items stay out of the lookups below that a gesture resolves through:
+  // a card on another lane must not resolve to a hidden copy of itself.
+  const queued = views.queued === 'failed' ? NO_TASKS : queuedList.items
+  const inProgress = views.in_progress === 'failed' ? NO_TASKS : inProgressList.items
+  const done = views.done === 'failed' ? NO_TASKS : doneList.items
 
   const allTasks = useMemo(() => {
     const map = new Map<string, Task>()
@@ -2052,6 +2055,10 @@ interface LaneReads {
 }
 
 const NO_READS: LaneReads = { answered: null, failed: null }
+
+// What a failed lane shows, held at module level so the lookups built from
+// the lanes keep their identity while a lane stays failed.
+const NO_TASKS: Task[] = []
 
 type LaneView = 'loading' | 'failed' | 'page'
 
