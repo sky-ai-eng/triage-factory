@@ -244,6 +244,15 @@ export default function Board() {
   const loadInProgress = inProgressList.load
   const loadDone = doneList.load
   const [loading, setLoading] = useState(true)
+  // Whether each lane has had a page applied. A lane's placeholders stay until
+  // its own page lands, not until the mount read returns: a read superseded
+  // by a newer one (the snoozed toggle, the team scope, a websocket refresh)
+  // returns no page, and the lane has nothing to show until the newer one does.
+  const [landed, setLanded] = useState<Record<ColumnId, boolean>>({
+    queued: false,
+    in_progress: false,
+    done: false,
+  })
 
   // Presence: the board is an answer-capable surface for permission
   // prompts (it renders + answers them inline), so report it while mounted and
@@ -320,6 +329,9 @@ export default function Board() {
   // server. Memoized on the team so the cards' memo boundary holds.
   const searchMembers = useMemo(() => teamRosterSearch(rosterTeamId), [rosterTeamId])
   const [currentUserID, setCurrentUserID] = useState<string>('')
+  // Whether /api/me has answered, either way: the viewer's saved lane state
+  // is keyed by their id, and a failed read falls back to the anonymous key.
+  const [meSettled, setMeSettled] = useState(false)
 
   // multi-team. teamFilter is the per-page read scope (threaded
   // into every lane fetch as team_id); `teams` backs the row
@@ -503,6 +515,7 @@ export default function Board() {
       if (meRes && typeof meRes === 'object' && 'id' in meRes) {
         setCurrentUserID((meRes as { id: string }).id ?? '')
       }
+      setMeSettled(true)
     })()
   }, [])
 
@@ -651,6 +664,7 @@ export default function Board() {
           .catch(() => {}),
       ])
       fetchedRef.current[col] = signature
+      if (page) setLanded((prev) => (prev[col] ? prev : { ...prev, [col]: true }))
       return page?.items ?? []
     },
     [laneBody, loaderFor],
@@ -1180,6 +1194,17 @@ export default function Board() {
     [fetchTasks, noteWritten, pendingClaim, taskRefFor],
   )
 
+  // The board's shape belongs to the viewer: their teams decide whether there
+  // is a board at all and whether the team scope row sits above it, and their
+  // saved collapse map and lane filters decide which lanes are open and what
+  // the mastheads hold. The lanes render once all of that is known, so nothing
+  // moves after they paint and nothing typed into a masthead is overwritten.
+  // The teams are read by their list rather than `teamsLoaded`, which a
+  // refresh clears while the list stays, and the board must not blank for it.
+  const prefsLoaded =
+    meSettled && collapsedOwnerID === currentUserID && filtersOwnerID === currentUserID
+  const boardShown = teams.length > 0 && prefsLoaded
+
   // The lane viewport (the scroller) and the strip inside it, which is
   // `max-content` wide so its own box grows with the lanes — as a plain flex
   // child its box would match the scroller and its children merely overflow,
@@ -1207,6 +1232,7 @@ export default function Board() {
     setEdgeFade((prev) => (prev.left === left && prev.right === right ? prev : { left, right }))
   }, [])
   useEffect(() => {
+    if (!boardShown) return
     recomputeFade()
     const onResize = () => recomputeFade()
     window.addEventListener('resize', onResize)
@@ -1233,7 +1259,7 @@ export default function Board() {
       cancelAnimationFrame(raf)
       ro.disconnect()
     }
-  }, [recomputeFade])
+  }, [boardShown, recomputeFade])
 
   // Centered-lane geometry. We want the viewport center to land on the midpoint
   // of the *open* (expanded) columns — one open → that column; two → their
@@ -1279,7 +1305,7 @@ export default function Board() {
   // next frame until it sticks, bounded so an unreachable target cannot spin.
   useLayoutEffect(() => {
     const el = scrollRef.current
-    if (!el) return
+    if (!el || !boardShown) return
     let raf = 0
     const park = (tries: number) => {
       el.scrollLeft = lane.targetScroll
@@ -1290,7 +1316,7 @@ export default function Board() {
     }
     park(PARK_TRIES)
     return () => cancelAnimationFrame(raf)
-  }, [lane, recomputeFade])
+  }, [lane, boardShown, recomputeFade])
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
 
@@ -1522,6 +1548,9 @@ export default function Board() {
       </>
     )
   }
+  if (!boardShown) return <GlassBackdrop />
+
+  const lanesPending = ALL_COLUMNS.some((col) => !laneSettled(lists[col], landed[col]))
 
   // Per-column header extras. (Queued's snoozed toggle now lives inside the
   // filter panel — see the `snooze` prop below — not as a header button.)
@@ -1570,7 +1599,7 @@ export default function Board() {
             fades dissolve columns into the page at whichever edge still has
             more to scroll — painted over the lane, never a mask on it. */}
         <div className="relative min-h-0 flex-1">
-          {loading && (
+          {lanesPending && (
             <span className="sr-only" role="status">
               Loading board…
             </span>
@@ -1580,7 +1609,7 @@ export default function Board() {
           <div
             ref={scrollRef}
             onScroll={recomputeFade}
-            aria-busy={loading}
+            aria-busy={lanesPending}
             className="h-full overflow-x-auto pb-3 pt-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
           >
             <div
@@ -1618,7 +1647,7 @@ export default function Board() {
                         : undefined
                     }
                   >
-                    {loading ? (
+                    {!laneSettled(lists[colId], landed[colId]) ? (
                       <LaneSkeleton cards={SKELETON_CARDS[colId]} />
                     ) : (
                       <ColumnContents
@@ -1788,6 +1817,8 @@ function ColumnContents({
   onRetry: (task: Task) => void
 } & Omit<PickerProps, 'pickerReadOnly'>) {
   if (tasks.length === 0) {
+    // TODO(TFAC-1525): a lane whose read failed with nothing held reaches this
+    // branch too and says it is empty; it should show the lane's error.
     return <EmptyColumn>{narrowed ? 'No matches' : emptyLabelFor(colId)}</EmptyColumn>
   }
 
@@ -1974,11 +2005,15 @@ const SortableCard = memo(function SortableCard({
   )
 })
 
-// The lanes are mounted from the first paint, so the board keeps its shape
-// (the mastheads, the centring, and any collapsed rails) while the first read
-// is out, and the first page replaces these cards in place. The counts differ
-// per lane so the three do not read as one column repeated.
+// A lane holds these until its first page lands, so the board has its shape
+// while the reads are out and the cards replace them in place. The counts
+// differ per lane so the three do not read as one column repeated.
 const SKELETON_CARDS: Record<ColumnId, number> = { queued: 3, in_progress: 2, done: 4 }
+
+// A lane is settled once a page has landed in it or its read failed.
+function laneSettled(list: PagedList<Task>, landed: boolean): boolean {
+  return landed || list.error !== ''
+}
 
 function LaneSkeleton({ cards }: { cards: number }) {
   return (

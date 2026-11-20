@@ -676,11 +676,10 @@ export function TaskCard({
   )
 }
 
-// The card a lane holds before its first page lands. Its bars sit in the line
-// boxes a typical card fills (a title, two summary lines, the footer's
-// readout), for the same reason the pending summary's do: so the lane does not
-// jump when real cards replace them. `n` varies the lengths so a lane of them
-// does not read as one card repeated.
+// The card a lane holds before its first page lands. Each bar takes the
+// height of the line it stands for, so the lane does not jump when real cards
+// replace these. `n` varies the lengths so a lane of them does not read as one
+// card repeated.
 export function TaskCardSkeleton({ n = 0 }: { n?: number }) {
   const title = ['72%', '58%', '80%'][n % 3]
   const summary = ['88%', '94%', '76%'][n % 3]

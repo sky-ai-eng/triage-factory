@@ -276,6 +276,116 @@ async function unassignHeld() {
   fireEvent.click(picker.getByRole('option', { name: 'Unassign' }))
 }
 
+/** Holds every lane read until the test releases it. `held[i]` answers the
+ *  i-th read sent, as the unheld stub would have. */
+function holdLaneReads(): Array<() => void> {
+  const answer = api.apiList.getMockImplementation()!
+  const held: Array<() => void> = []
+  api.apiList.mockImplementation(
+    (path: string, body: Record<string, unknown>) =>
+      new Promise((resolve, reject) => {
+        held.push(() => {
+          answer(path, body).then(resolve, reject)
+        })
+      }),
+  )
+  return held
+}
+
+describe('the board while it loads', () => {
+  it('paints its lanes with placeholder cards in each, until the reads land', async () => {
+    const held = holdLaneReads()
+    renderBoard()
+    await screen.findByLabelText('Search Queued')
+    expect(screen.getByRole('status')).toHaveTextContent('Loading board…')
+    const lanes = document.querySelectorAll('.bc-col')
+    expect(lanes).toHaveLength(3)
+    for (const lane of lanes) {
+      expect(lane.querySelectorAll('[data-skeleton]').length).toBeGreaterThan(0)
+    }
+
+    await act(async () => held.forEach((answer) => answer()))
+    await screen.findByText(FREE.title)
+    expect(document.querySelectorAll('[data-skeleton]')).toHaveLength(0)
+    expect(screen.queryByRole('status')).toBeNull()
+  })
+
+  it('opens its lanes as the viewer left them, so none collapses after it paints', async () => {
+    localStorage.setItem('sky330.board.collapsed.v1.u1', JSON.stringify({ done: true }))
+    try {
+      const answer = api.apiJSON.getMockImplementation()!
+      let me: () => void = () => {}
+      const meHeld = new Promise<void>((resolve) => (me = resolve))
+      api.apiJSON.mockImplementation(async (path: string, init?: unknown) => {
+        if (path === '/api/me') await meHeld
+        return answer(path, init)
+      })
+      renderBoard()
+      await waitFor(() => expect(listBodies.length).toBe(3))
+      expect(screen.queryByLabelText('Search Queued')).toBeNull()
+
+      await act(async () => me())
+      // The first paint with lanes in it already has Done collapsed.
+      await screen.findByLabelText('Search Queued')
+      expect(screen.queryByLabelText('Search Done')).toBeNull()
+      expect(screen.getByRole('button', { name: 'Expand Done' })).toBeInTheDocument()
+    } finally {
+      localStorage.removeItem('sky330.board.collapsed.v1.u1')
+    }
+  })
+
+  it('paints no lanes before the teams load, so a viewer on no team never sees one', async () => {
+    teamsStore.current = { ...ONE_TEAM, teams: [], loaded: false }
+    const { rerender } = renderBoard()
+    await waitFor(() => expect(api.apiJSON).toHaveBeenCalledWith('/api/me'))
+    await waitFor(() => expect(listBodies.length).toBe(3))
+    expect(screen.queryByLabelText('Search Queued')).toBeNull()
+
+    teamsStore.current = ONE_TEAM
+    rerender(
+      <MemoryRouter>
+        <Board />
+      </MemoryRouter>,
+    )
+    await screen.findByText(FREE.title)
+  })
+
+  it('schedules no frames while a viewer on no team sees the empty state', async () => {
+    teamsStore.current = { ...ONE_TEAM, teams: [], loaded: true }
+    const frames = vi.spyOn(window, 'requestAnimationFrame')
+    try {
+      renderBoard()
+      await screen.findByText(/not on a team yet/)
+      await waitFor(() => expect(listBodies.length).toBe(3))
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 100)))
+      expect(frames).not.toHaveBeenCalled()
+    } finally {
+      frames.mockRestore()
+    }
+  })
+
+  it("keeps a lane's placeholders while a newer read stands in for its first", async () => {
+    const held = holdLaneReads()
+    renderBoard()
+    await screen.findByLabelText('Search Queued')
+    const queued = document.querySelectorAll('.bc-col')[0] as HTMLElement
+    fireEvent.click(within(queued).getByRole('button', { name: 'Sort & filter' }))
+    fireEvent.click(within(queued).getByRole('button', { name: 'Show snoozed' }))
+    await waitFor(() => expect(held).toHaveLength(4))
+
+    // The mount reads land; Queued's is discarded, since the snoozed read
+    // replaced it, and that one is still out.
+    await act(async () => held.slice(0, 3).forEach((answer) => answer()))
+    await screen.findByText(HELD.title)
+    expect(within(queued).queryByText('Queue is empty')).toBeNull()
+    expect(queued.querySelectorAll('[data-skeleton]').length).toBeGreaterThan(0)
+
+    await act(async () => held[3]())
+    await within(queued).findByText(FREE.title)
+    expect(queued.querySelectorAll('[data-skeleton]')).toHaveLength(0)
+  })
+})
+
 describe('the board lanes', () => {
   it('renders Queued, In Progress and Done — neither Claimed nor In Review', async () => {
     renderBoard()
@@ -284,29 +394,6 @@ describe('the board lanes', () => {
     }
     expect(screen.queryAllByText('Claimed')).toHaveLength(0)
     expect(screen.queryAllByText('In Review')).toHaveLength(0)
-  })
-
-  it('keeps its lanes while the first read is out, with placeholder cards in them', async () => {
-    let land: () => void = () => {}
-    const landed = new Promise<void>((resolve) => (land = resolve))
-    const answer = api.apiList.getMockImplementation()!
-    api.apiList.mockImplementation(async (path: string, body: Record<string, unknown>) => {
-      await landed
-      return answer(path, body)
-    })
-    renderBoard()
-    expect(screen.getByLabelText('Search Queued')).toBeInTheDocument()
-    expect(screen.getByRole('status')).toHaveTextContent('Loading board…')
-    const lanes = document.querySelectorAll('.bc-col')
-    expect(lanes).toHaveLength(3)
-    for (const lane of lanes) {
-      expect(lane.querySelectorAll('[data-skeleton]').length).toBeGreaterThan(0)
-    }
-
-    await act(async () => land())
-    await screen.findByText(FREE.title)
-    expect(document.querySelectorAll('[data-skeleton]')).toHaveLength(0)
-    expect(screen.queryByRole('status')).toBeNull()
   })
 
   it('asks for three lanes, and the Queued lane asks for the whole queue', async () => {
