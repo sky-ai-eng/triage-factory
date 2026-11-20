@@ -387,14 +387,7 @@ describe('the board while it loads', () => {
   })
 
   it('says a lane could not load when its first read fails, not that it is empty', async () => {
-    const answer = api.apiList.getMockImplementation()!
-    api.apiList.mockImplementation(async (path: string, body: Record<string, unknown>) => {
-      if ((body.statuses as string[]).includes('queued')) {
-        listBodies.push(body)
-        throw new HttpError(500, '')
-      }
-      return answer(path, body)
-    })
+    failLaneReads((statuses) => statuses.includes('queued'))
     renderBoard()
     const queued = (await screen.findByLabelText('Search Queued')).closest('.bc-col') as HTMLElement
     expect(await within(queued).findByRole('alert')).toHaveTextContent('Could not load the queue.')
@@ -404,19 +397,73 @@ describe('the board while it loads', () => {
     await screen.findByText(HELD.title)
   })
 
+  it('says a collapsed lane could not load when its first read fails', async () => {
+    localStorage.setItem('sky330.board.collapsed.v1.u1', JSON.stringify({ done: true }))
+    try {
+      failLaneReads((statuses) => statuses.includes('done'))
+      renderBoard()
+      expect(
+        await screen.findByRole('button', {
+          name: 'Expand Done. Could not load the finished tasks.',
+        }),
+      ).toBeInTheDocument()
+    } finally {
+      localStorage.removeItem('sky330.board.collapsed.v1.u1')
+    }
+  })
+
   it('keeps the cards a lane holds when a refresh fails', async () => {
     renderBoard()
     const queued = (await screen.findByLabelText('Search Queued')).closest('.bc-col') as HTMLElement
     await within(queued).findByText(FREE.title)
 
-    api.apiList.mockRejectedValue(new HttpError(500, ''))
-    await act(async () => ws.handler?.({ type: 'tasks_updated' }))
-    await waitFor(() => expect(api.apiList.mock.calls.length).toBeGreaterThanOrEqual(6))
-    await act(async () => {})
+    await failRefresh()
     expect(within(queued).getByText(FREE.title)).toBeInTheDocument()
     expect(within(queued).queryByRole('alert')).toBeNull()
   })
+
+  it('keeps the empty state a lane read when a refresh fails', async () => {
+    renderBoard()
+    const done = (await screen.findByLabelText('Search Done')).closest('.bc-col') as HTMLElement
+    await within(done).findByText('Nothing done in last 7 days')
+
+    await failRefresh()
+    expect(within(done).getByText('Nothing done in last 7 days')).toBeInTheDocument()
+    expect(within(done).queryByRole('alert')).toBeNull()
+  })
+
+  it('says a lane could not load when a read for a new query fails, not the old answer', async () => {
+    renderBoard()
+    const queued = (await screen.findByLabelText('Search Queued')).closest('.bc-col') as HTMLElement
+    await within(queued).findByText(FREE.title)
+
+    failLaneReads((statuses) => statuses.includes('snoozed'))
+    fireEvent.click(within(queued).getByRole('button', { name: 'Sort & filter' }))
+    fireEvent.click(within(queued).getByRole('button', { name: 'Show snoozed' }))
+    expect(await within(queued).findByRole('alert')).toHaveTextContent('Could not load the queue.')
+    expect(within(queued).queryByText(FREE.title)).toBeNull()
+  })
 })
+
+/** Fails every lane read whose statuses match, and answers the rest as the
+ *  unheld stub would. */
+function failLaneReads(match: (statuses: string[]) => boolean) {
+  const answer = api.apiList.getMockImplementation()!
+  api.apiList.mockImplementation(async (path: string, body: Record<string, unknown>) => {
+    if (!match(body.statuses as string[])) return answer(path, body)
+    listBodies.push(body)
+    throw new HttpError(500, '')
+  })
+}
+
+/** Fails every lane's next read, delivers the push that refreshes the board,
+ *  and waits for the three reads to fail. */
+async function failRefresh() {
+  api.apiList.mockRejectedValue(new HttpError(500, ''))
+  await act(async () => ws.handler?.({ type: 'tasks_updated' }))
+  await waitFor(() => expect(api.apiList.mock.calls.length).toBeGreaterThanOrEqual(6))
+  await act(async () => {})
+}
 
 describe('the board lanes', () => {
   it('renders Queued, In Progress and Done — neither Claimed nor In Review', async () => {

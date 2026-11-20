@@ -10,6 +10,7 @@ import {
   type MotionValue,
 } from 'motion/react'
 import {
+  AlertTriangle,
   ArrowDown,
   ArrowUp,
   ChevronDown,
@@ -436,19 +437,24 @@ function TraceLayer({
 export function CollapsedColumn({
   title,
   count,
+  failed,
   onExpand,
 }: {
   title: string
   count: number
+  // The lane's error when its read failed. A rail with no count reads as an
+  // empty lane, so a failed one says it failed instead.
+  failed?: string
   onExpand: () => void
 }) {
   const reduce = !!useReducedMotion()
   const [hovered, setHovered] = useState(false)
+  const label = failed ? `Expand ${title}. ${failed}` : `Expand ${title}`
   return (
     <button
       type="button"
-      aria-label={`Expand ${title}`}
-      title={`Expand ${title}`}
+      aria-label={label}
+      title={label}
       onClick={onExpand}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
@@ -464,14 +470,16 @@ export function CollapsedColumn({
             : { duration: 0.2 }
         }
       >
-        {count > 0 && (
+        {failed ? (
+          <AlertTriangle size={14} aria-hidden className="text-alarm" />
+        ) : count > 0 ? (
           <span
             className="text-reported font-medium tabular-nums text-ink-3 [writing-mode:vertical-rl]"
             style={{ textOrientation: 'mixed' }}
           >
             {count}
           </span>
-        )}
+        ) : null}
         <span
           className="text-body font-medium tracking-wide text-ink-2 decoration-ink-3 underline-offset-4 [writing-mode:vertical-rl] group-hover:underline"
           style={{ textOrientation: 'mixed' }}

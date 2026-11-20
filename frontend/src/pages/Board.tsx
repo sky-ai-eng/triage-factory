@@ -244,15 +244,19 @@ export default function Board() {
   const loadInProgress = inProgressList.load
   const loadDone = doneList.load
   const [loading, setLoading] = useState(true)
-  // Whether each lane has had a page applied. A lane's placeholders stay until
-  // its own page lands, not until the mount read returns: a read superseded
-  // by a newer one (the snoozed toggle, the team scope, a websocket refresh)
-  // returns no page, and the lane has nothing to show until the newer one does.
-  const [landed, setLanded] = useState<Record<ColumnId, boolean>>({
-    queued: false,
-    in_progress: false,
-    done: false,
+  // What each lane's reads have come to, which decides what the lane shows
+  // (laneView). A lane's placeholders stay until its own page lands, not until
+  // the mount read returns: a read superseded by a newer one (the snoozed
+  // toggle, the team scope, a websocket refresh) comes to nothing, and the
+  // lane has nothing to show until the newer one does.
+  const [laneReads, setLaneReads] = useState<Record<ColumnId, LaneReads>>({
+    queued: NO_READS,
+    in_progress: NO_READS,
+    done: NO_READS,
   })
+  // Each lane's reads, counted as they are sent, so a read that comes back
+  // with no page can tell whether a newer one superseded it or it failed.
+  const laneReadSeq = useRef<Record<ColumnId, number>>({ queued: 0, in_progress: 0, done: 0 })
 
   // Presence: the board is an answer-capable surface for permission
   // prompts (it renders + answers them inline), so report it while mounted and
@@ -634,11 +638,12 @@ export default function Board() {
   const fetchedRef = useRef<Record<ColumnId, string>>({ queued: '', in_progress: '', done: '' })
 
   // One lane's read: its page and, beside it, its facet. A lane that fails
-  // keeps whatever it was showing rather than taking the others down with it
-  // — the board is three independent reads, not one. The hook holds each
-  // lane's items, so a failed refresh paints the previous page instead of
-  // blanking the lane; a failed facet read keeps the previous chip set, since
-  // the chips are a menu and a stale menu beats an empty one.
+  // does not take the others down with it — the board is three independent
+  // reads, not one. The hook holds each lane's items, so a failed refresh
+  // paints the previous page instead of blanking the lane, while a failed read
+  // of a different query shows the lane's error, since the held page does not
+  // answer it. A failed facet read keeps the previous chip set, since the chips
+  // are a menu and a stale menu beats an empty one.
   const fetchLane = useCallback(
     async (col: ColumnId): Promise<Task[]> => {
       // The signature is taken with the body, not after the read: the
@@ -646,8 +651,20 @@ export default function Board() {
       // record has to say what was sent, not what is current.
       const signature = filterSignature(filtersRef.current[col])
       const body = laneBody(col)
+      const query = laneQuery(body)
+      const seq = ++laneReadSeq.current[col]
       const [page] = await Promise.all([
-        loaderFor(col)(body),
+        // The outcome is recorded as soon as the page read settles, not after
+        // the facet read beside it, so a slow facet cannot land this read's
+        // outcome over a newer read's.
+        loaderFor(col)(body).then((landed) => {
+          if (landed) {
+            setLaneReads((prev) => ({ ...prev, [col]: { answered: query, failed: null } }))
+          } else if (seq === laneReadSeq.current[col]) {
+            setLaneReads((prev) => ({ ...prev, [col]: { ...prev[col], failed: query } }))
+          }
+          return landed
+        }),
         apiJSON<TaskFacetsResponse>(TASK_FACETS_PATH, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -664,7 +681,6 @@ export default function Board() {
           .catch(() => {}),
       ])
       fetchedRef.current[col] = signature
-      if (page) setLanded((prev) => (prev[col] ? prev : { ...prev, [col]: true }))
       return page?.items ?? []
     },
     [laneBody, loaderFor],
@@ -1032,12 +1048,17 @@ export default function Board() {
     }
   }, [conversations, dropPermissionConversation])
 
+  const views: Record<ColumnId, LaneView> = {
+    queued: laneView(laneReads.queued),
+    in_progress: laneView(laneReads.in_progress),
+    done: laneView(laneReads.done),
+  }
   // Each column's paging, as the column tail reads it. Rebuilt per render (the
   // lists change every load); the loader inside is stable.
   const paging: Record<ColumnId, LanePaging> = {
-    queued: lanePaging(queuedList),
-    in_progress: lanePaging(inProgressList),
-    done: lanePaging(doneList),
+    queued: lanePaging(queuedList, views.queued),
+    in_progress: lanePaging(inProgressList, views.in_progress),
+    done: lanePaging(doneList, views.done),
   }
 
   const allTasks = useMemo(() => {
@@ -1550,7 +1571,7 @@ export default function Board() {
   }
   if (!boardShown) return <GlassBackdrop />
 
-  const lanesPending = ALL_COLUMNS.some((col) => !laneSettled(lists[col], landed[col]))
+  const lanesPending = ALL_COLUMNS.some((col) => views[col] === 'loading')
 
   // Per-column header extras. (Queued's snoozed toggle now lives inside the
   // filter panel — see the `snooze` prop below — not as a header button.)
@@ -1626,6 +1647,7 @@ export default function Board() {
                     // the same total the open lane's tail counts against — not
                     // how much of it happens to be fetched.
                     count={paging[colId].total ?? paging[colId].shown}
+                    failed={views[colId] === 'failed' ? lists[colId].error : undefined}
                     onExpand={() => toggleCollapse(colId)}
                   />
                 ) : (
@@ -1647,9 +1669,9 @@ export default function Board() {
                         : undefined
                     }
                   >
-                    {!laneSettled(lists[colId], landed[colId]) ? (
+                    {views[colId] === 'loading' ? (
                       <LaneSkeleton cards={SKELETON_CARDS[colId]} />
-                    ) : !landed[colId] ? (
+                    ) : views[colId] === 'failed' ? (
                       <LaneError>{lists[colId].error}</LaneError>
                     ) : (
                       <ColumnContents
@@ -1745,8 +1767,19 @@ export default function Board() {
 }
 
 // lanePaging is the column tail's view of a paged list: what is held, what the
-// query matches, and the ask for the next page.
-function lanePaging(list: PagedList<Task>): LanePaging {
+// query matches, and the ask for the next page. A failed lane shows none of
+// what it holds, so it counts nothing and asks for no further page: the held
+// items may answer an older query, and their next page would answer it too.
+function lanePaging(list: PagedList<Task>, view: LaneView): LanePaging {
+  if (view === 'failed') {
+    return {
+      shown: 0,
+      total: null,
+      hasMore: false,
+      loading: list.loading,
+      onNearEnd: list.loadMore,
+    }
+  }
   return {
     shown: list.items.length,
     total: list.total,
@@ -2010,9 +2043,32 @@ const SortableCard = memo(function SortableCard({
 // differ per lane so the three do not read as one column repeated.
 const SKELETON_CARDS: Record<ColumnId, number> = { queued: 3, in_progress: 2, done: 4 }
 
-// A lane is settled once a page has landed in it or its read failed.
-function laneSettled(list: PagedList<Task>, landed: boolean): boolean {
-  return landed || list.error !== ''
+// LaneReads is what a lane's reads have come to: the query its held page
+// answers, null until a page lands, and the query of its latest read when that
+// read failed, null once a page answers.
+interface LaneReads {
+  answered: string | null
+  failed: string | null
+}
+
+const NO_READS: LaneReads = { answered: null, failed: null }
+
+type LaneView = 'loading' | 'failed' | 'page'
+
+// laneView is what a lane shows. A failed read of the query the held page
+// answers is a failed refresh, and the lane keeps its page; a failed read of
+// any other query, the first one included, leaves the lane with nothing that
+// answers what it was asked.
+function laneView(reads: LaneReads): LaneView {
+  if (reads.failed !== null && reads.failed !== reads.answered) return 'failed'
+  return reads.answered === null ? 'loading' : 'page'
+}
+
+// laneQuery is the question a lane's read asks. Done's window is left out: it
+// moves with the clock, and each read of the last seven days asks the same
+// question.
+function laneQuery(body: TaskListRequest): string {
+  return JSON.stringify({ ...body, closed_since: undefined })
 }
 
 function LaneSkeleton({ cards }: { cards: number }) {
@@ -2029,9 +2085,8 @@ function EmptyColumn({ children }: { children: React.ReactNode }) {
   return <p className="text-ui text-ink-3 text-center py-12">{children}</p>
 }
 
-// A lane whose read failed before any page landed has nothing to show, and its
-// empty state would tell the viewer they have no work there. A lane that has
-// landed keeps what it last read through a failed refresh instead.
+// A failed lane's empty state would tell the viewer they have no work there,
+// and its held cards may answer a query the viewer has since changed.
 function LaneError({ children }: { children: React.ReactNode }) {
   return (
     <p role="alert" className="text-ui text-alarm text-center py-12">
