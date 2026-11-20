@@ -387,9 +387,9 @@ $$;
 -- +goose StatementEnd
 
 
--- Whether target_team exists and is not archived. A select policy whose
--- creator arm grants a row without membership ANDs this in, so an archived
--- team's rows are hidden from the person who wrote them too.
+-- Whether target_team exists and is not archived. A select policy with an arm
+-- that grants a row without membership ANDs this in, so an archived team's
+-- rows stay hidden through that arm too.
 
 -- +goose StatementBegin
 CREATE FUNCTION tf.team_active(target_team uuid) RETURNS boolean
@@ -2968,7 +2968,7 @@ CREATE POLICY event_handlers_delete ON public.event_handlers FOR DELETE USING ((
 CREATE POLICY event_handlers_insert ON public.event_handlers FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id()) AND tf.user_can_write_team(team_id)));
 
 
-CREATE POLICY event_handlers_select ON public.event_handlers FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.team_active(team_id) AND ((creator_user_id = tf.current_user_id()) OR tf.user_in_team(team_id))));
+CREATE POLICY event_handlers_select ON public.event_handlers FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_in_team(team_id)));
 
 
 CREATE POLICY event_handlers_update ON public.event_handlers FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id)));
@@ -3124,7 +3124,7 @@ CREATE POLICY prompts_delete ON public.prompts FOR DELETE USING (((org_id = tf.c
 CREATE POLICY prompts_insert ON public.prompts FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id()) AND tf.user_can_write_team(team_id)));
 
 
-CREATE POLICY prompts_select ON public.prompts FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.team_active(team_id) AND ((creator_user_id = tf.current_user_id()) OR tf.user_in_team(team_id))));
+CREATE POLICY prompts_select ON public.prompts FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_in_team(team_id)));
 
 
 CREATE POLICY prompts_update ON public.prompts FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id)));
@@ -3879,8 +3879,7 @@ ALTER TABLE public.blueprints ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY blueprints_select ON public.blueprints FOR SELECT
   USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)
-          AND tf.team_active(team_id)
-          AND ((creator_user_id = tf.current_user_id()) OR tf.user_in_team(team_id))));
+          AND tf.user_in_team(team_id)));
 CREATE POLICY blueprints_insert ON public.blueprints FOR INSERT
   WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id()) AND tf.user_can_write_team(team_id)));
 CREATE POLICY blueprints_update ON public.blueprints FOR UPDATE
