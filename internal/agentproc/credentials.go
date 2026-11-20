@@ -606,7 +606,7 @@ func anthropicEnv(ctx context.Context, secrets SecretsReader, orgID string) (map
 		return nil, fmt.Errorf("resolve anthropic_api_key: %w", err)
 	}
 	if apiKey == "" {
-		return nil, fmt.Errorf("%w: org %s has no anthropic_api_key in vault", ErrProviderNotConfigured, orgID)
+		return nil, fmt.Errorf("%w: org %s has Anthropic connected but no API key is stored for it — reconnect it in Settings → Claude credentials", ErrProviderNotConfigured, orgID)
 	}
 	env := map[string]string{"ANTHROPIC_API_KEY": apiKey}
 	baseURL, err := secrets.Get(ctx, orgID, secretAnthropicBaseURL)
@@ -658,7 +658,7 @@ func bedrockEnv(ctx context.Context, secrets SecretsReader, orgID, model string)
 			return nil, fmt.Errorf("resolve aws_secret_access_key: %w", err)
 		}
 		if accessKey == "" || secretKey == "" {
-			return nil, fmt.Errorf("%w: org %s has no usable Bedrock credential in vault (a role-mode org resolves through the STS minter, not here)", ErrProviderNotConfigured, orgID)
+			return nil, fmt.Errorf("%w: org %s has Bedrock connected but no usable credential is stored for it — reconnect it in Settings → Claude credentials", ErrProviderNotConfigured, orgID)
 		}
 		env["AWS_ACCESS_KEY_ID"] = accessKey
 		env["AWS_SECRET_ACCESS_KEY"] = secretKey

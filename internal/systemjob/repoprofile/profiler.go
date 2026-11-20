@@ -35,7 +35,7 @@ type llmResolveFunc func(ctx context.Context, orgID, model string) (map[string]s
 // Profiler builds and persists AI-generated profiles for GitHub repositories.
 type Profiler struct {
 	resolver   github.Resolver         // per-(org, owner) GitHub client source — App-installation token in multi, keychain PAT in local.
-	secrets    agentproc.SecretsReader // per-org LLM-credential reader for the profiling model calls (nil in local → ambient subscription; system-door reader in multi).
+	secrets    agentproc.SecretsReader // per-org LLM-credential reader for the profiling model calls (system-door reader; in local, narrowed to the providers the org's settings bound).
 	llmResolve llmResolveFunc          // brain-side role-aware LLM resolver (nil in local/tests).
 	repos      db.RepositoryStore      // profile reads + upserts go through the store
 	orgs       db.OrgsStore            // iterate active orgs at the top of each profile run
@@ -586,7 +586,7 @@ func profileBatch(ctx context.Context, orgID, model string, batch []repoWithDocs
 	// JSON array below; cost + tokens land in system_llm_runs via Complete.
 	// LLMResolver routes a role-mode Bedrock org through internal/cred/llmcred so
 	// the direct call is signed with a minted short-lived STS session
-	// credential (TFAC-616); nil for local/ambient.
+	// credential (TFAC-616); nil in local, which cannot bind role mode.
 	result, err := recorder.Complete(ctx, systemllm.CompleteOptions{
 		OrgID:        orgID,
 		Job:          systemllm.JobRepoProfiler,
