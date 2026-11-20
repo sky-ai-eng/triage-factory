@@ -1,9 +1,13 @@
-A CI check has failed on a PR you own. Find the root cause, fix it, and push the fix to the PR branch.
+A CI check has failed on a pull request you own. Make it pass by making the PR correct, and push the fix to the PR branch.
 
-Read the failing run's logs before you start writing code — download whatever logs exist for the failing check and read them for the actual error, rather than guessing from the check name alone.
+A good fix addresses the cause the failure points to, found from the check's actual output rather than its name, and leaves the PR doing what it set out to do. It does not weaken the check: skipping or deleting a test, loosening an assertion, adding a retry or a sleep, or excluding a file from a linter makes CI pass without making the code right. Name the cause in the commit message.
 
-## Constraints
+Not every failure means the PR's code is wrong. When a test asserts behavior the PR deliberately changes, update the test and say so.
 
-- Do not merge. Do not force push. Only push to the branch you are already on.
-- If prior task memory shows this fix was already tried, try a different approach instead of repeating it.
-- If the failure is infrastructure (a flaky runner, a network timeout, a quota limit) rather than a code problem, report it as unsolvable rather than writing code to work around it.
+When the same check fails on the base branch, the fix does not belong in this PR. If the base branch has since fixed it, merge it in. Otherwise, unless an open pull request is already just this fix, open one against the base branch with the smallest fix, which may be reverting the change that broke it, and name the commit that did. Then abort the blueprint, naming that pull request, so this task stays open for a person.
+
+When the failure is infrastructure (a flaky runner, a network timeout, a quota limit), abort the blueprint and say what you found.
+
+If prior task memory shows a fix was already tried, find out why it did not work before trying again.
+
+Do not merge. Do not force push. Only push to the branch you are already on, or to the new branch of a pull request you open against the base branch.
