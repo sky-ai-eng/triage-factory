@@ -142,33 +142,22 @@ func (e *Engine) compactOnResume(ctx context.Context, params Params, spent *spen
 }
 
 // adoptCurrentSystem moves the engagement onto the system blocks its claim
-// composed (Params.Current) once a compaction has committed, and returns the
-// params every later call is built from.
+// composed (Params.Current), and returns the params every later call is built
+// from. Only a compaction whose commit landed may precede it: the commit saves
+// Current (commitCompaction), and the blocks the engagement sends from here
+// must be the ones the next claim reads back, or that claim replays this
+// engagement's thinking under other blocks.
 //
 // The blocks a conversation is sent stay the ones its earlier turns were sent,
 // because the provider binds each thinking block to them. A compaction flips
 // every delivered row a thinking block rides on, so from here nothing binds
 // them, and the claim's system update would otherwise survive only inside a
-// summary. So the newest blocks become the conversation's (SaveSystemBlocks),
-// and the update, now in them, is not written. A save that fails keeps the
-// engagement on the blocks it was sending: the next claim reads those back,
-// and they must be what this engagement's calls carried.
-func (e *Engine) adoptCurrentSystem(ctx context.Context, params Params) Params {
+// summary. The update, now in the blocks, is not written.
+func adoptCurrentSystem(params Params) Params {
 	if params.Current == nil {
 		return params
 	}
-	// TODO(TFAC-1512): the save is a second write after the compaction's
-	// transaction, so a failure or a crash between the two leaves the change
-	// only in the summary for this engagement and has the next claim deliver
-	// the update again. It belongs in the commit's own transaction.
-	if e.Hooks.SaveSystemBlocks != nil {
-		if err := e.Hooks.SaveSystemBlocks(ctx, *params.Current); err != nil {
-			e.warn("saving the conversation's system blocks after a compaction failed; the engagement keeps the blocks it was sending",
-				"conversation", params.ConversationID, "error", err)
-			return params
-		}
-	}
-	params.SystemPrompt, params.SystemAddendum = params.Current.Prompt, params.Current.Addendum
+	params.SystemPrompt, params.SystemAddendum = params.Current.Prompt, params.Current.Block
 	params.Current = nil
 	params.SystemUpdate = nil
 	return params
@@ -399,10 +388,14 @@ func withoutReasoning(rows []domain.Message) []domain.Message {
 }
 
 // commitCompaction composes the result row and commits the whole compaction
-// through the transcript's single fenced transaction.
+// through the transcript's single fenced transaction, which also saves the
+// blocks the claim composed (Params.Current) as the conversation's. The flip
+// and the save land together or not at all: a commit that fails leaves the
+// transcript, the saved blocks, and the blocks the engagement sends as they
+// were.
 func (e *Engine) commitCompaction(ctx context.Context, params Params, replyRow *domain.Message, summary string, span []int) error {
 	resultRow := composeResultRow(params, summary)
-	if err := e.Transcript.Compact(ctx, params.OrgID, params.ConversationID, replyRow, resultRow, span); err != nil {
+	if err := e.Transcript.Compact(ctx, params.OrgID, params.ConversationID, replyRow, resultRow, span, params.Current); err != nil {
 		return fmt.Errorf("commit compaction: %w", err)
 	}
 	e.info("conversation compacted",

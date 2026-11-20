@@ -116,28 +116,37 @@ func (s *blueprintStore) GetSystem(ctx context.Context, orgID string, id string)
 	return getBlueprint(ctx, s.admin, orgID, id, true)
 }
 
-// LockForReference takes FOR SHARE and not FOR KEY SHARE: a retire writes
-// deleted_at, a non-key column, and a key-share lock, which is all a
-// referencing row's foreign key check takes, lets that write through without
-// waiting. Under READ COMMITTED a lock that waited on a concurrent write
-// re-checks the WHERE against the row that write committed, so a reference
-// queued behind a retire reads the retire's deleted_at and finds no live row.
-func (s *blueprintStore) LockForReference(ctx context.Context, orgID string, id string) (*domain.Blueprint, error) {
+func (s *blueprintStore) GetLiveSystem(ctx context.Context, orgID string, id string) (*domain.Blueprint, error) {
+	return getBlueprint(ctx, s.admin, orgID, id, false)
+}
+
+func (s *blueprintStore) GetForShare(ctx context.Context, orgID string, id string) (*domain.Blueprint, error) {
+	return s.getLocked(ctx, orgID, id, "FOR SHARE")
+}
+
+func (s *blueprintStore) GetForUpdate(ctx context.Context, orgID string, id string) (*domain.Blueprint, error) {
+	return s.getLocked(ctx, orgID, id, "FOR UPDATE")
+}
+
+// getLocked is the live point read with a row lock. Under READ COMMITTED a
+// lock that waited re-checks the WHERE against the row the other transaction
+// committed, which is what makes a retired blueprint answer as absent here.
+func (s *blueprintStore) getLocked(ctx context.Context, orgID, id, lock string) (*domain.Blueprint, error) {
 	// Outside a transaction the lock would be released by the statement that
-	// took it, so a caller would hold nothing while believing it held the lock.
+	// took it, so a caller would hold nothing while believing it held the row.
 	tx, ok := s.app.(*sql.Tx)
 	if !ok {
-		return nil, errors.New("postgres: LockForReference needs a transaction's stores, whose commit releases the lock")
+		return nil, errors.New("postgres: a locking blueprint read needs a transaction's stores, whose commit releases the lock")
 	}
 	b, err := scanBlueprintRowPG(tx.QueryRowContext(ctx, `
 		SELECT `+pgBlueprintColumns+`
-		FROM blueprints WHERE org_id = $1 AND id = $2 AND deleted_at IS NULL FOR SHARE`,
-		orgID, id).Scan)
+		FROM blueprints WHERE org_id = $1 AND id = $2 AND deleted_at IS NULL
+		`+lock, orgID, id).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("lock blueprint: %w", err)
+		return nil, err
 	}
 	return &b, nil
 }

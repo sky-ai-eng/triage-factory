@@ -3,11 +3,11 @@ package delegate
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/agentloop"
 	"github.com/sky-ai-eng/triage-factory/internal/agentprompt"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -271,9 +271,9 @@ func TestNativeReclaim_ComparesWithTheNewestUpdate(t *testing.T) {
 }
 
 // TestNativeCompaction_SavesTheNewestBlocks: once a compaction commits,
-// nothing a thinking block is bound to is sent again, so the engine saves the
-// blocks the claim composed (Hooks.SaveSystemBlocks), and the next claim sends
-// those with nothing to update.
+// nothing a thinking block is bound to is sent again, so the commit saves the
+// blocks the claim composed with their parts, and the next claim sends those
+// with nothing to update.
 func TestNativeCompaction_SavesTheNewestBlocks(t *testing.T) {
 	f := newLaunchFixture(t, "native-compact-save")
 	f.setBranchTemplate(t, "at-launch/<ticket-id>")
@@ -287,19 +287,18 @@ func TestNativeCompaction_SavesTheNewestBlocks(t *testing.T) {
 		t.Fatal("staging failed: the re-claim has no update")
 	}
 
-	save := f.s.saveSystemBlocksHook(runmode.LocalDefaultOrgID, f.conv.ID, f.conv.ClaimID, system.current)
-	if err := save(context.Background(), agentloop.SystemBlocks{Prompt: system.current.Prompt, Addendum: system.current.Block}); err != nil {
-		t.Fatalf("save the newest blocks: %v", err)
-	}
+	f.compactSaving(t, &system.current)
 	saved := f.storedBlocks(t)
 	if saved.Prompt != system.current.Prompt || saved.Block != system.current.Block {
 		t.Error("the compaction did not make the newest blocks the saved ones")
+	}
+	if !reflect.DeepEqual(saved.Parts, system.current.Parts) {
+		t.Error("the compaction did not save the parts the newest blocks were composed from")
 	}
 	if !strings.Contains(saved.Block, "after-the-park/<ticket-id>") {
 		t.Errorf("the saved block 2 does not carry today's convention;\n%s", saved.Block)
 	}
 
-	f.compact(t)
 	next := f.nativeLaunchText(t, "review the failing check", "", f.s.nativeClaimReplay(context.Background(), runmode.LocalDefaultOrgID, f.conv.ID)).system
 	if next.sent.Block != system.current.Block || next.update != "" {
 		t.Errorf("the claim after the compaction sends (%q) with update %q, want the saved blocks and nothing to add", next.sent.Block, next.update)

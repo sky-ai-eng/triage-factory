@@ -54,13 +54,14 @@ func (r *recordingTxRunner) SyntheticClaimsWithReadTx(ctx context.Context, orgID
 	return r.TxRunner.SyntheticClaimsWithReadTx(ctx, orgID, userID, fn)
 }
 
-// recordingPromptStore embeds the real store and overrides Get +
-// GetSystem to count which one was reached. The non-spied methods
-// pass through via the embedded interface.
+// recordingPromptStore embeds the real store and overrides Get and the two
+// admin-pool reads, GetSystem and GetLiveSystem, to count which one was
+// reached. The non-spied methods pass through via the embedded interface.
 type recordingPromptStore struct {
 	db.PromptStore
-	getCalls       int
-	getSystemCalls int
+	getCalls           int
+	getSystemCalls     int
+	getLiveSystemCalls int
 }
 
 func (r *recordingPromptStore) Get(ctx context.Context, orgID, id string) (*domain.Prompt, error) {
@@ -71,6 +72,11 @@ func (r *recordingPromptStore) Get(ctx context.Context, orgID, id string) (*doma
 func (r *recordingPromptStore) GetSystem(ctx context.Context, orgID, id string) (*domain.Prompt, error) {
 	r.getSystemCalls++
 	return r.PromptStore.GetSystem(ctx, orgID, id)
+}
+
+func (r *recordingPromptStore) GetLiveSystem(ctx context.Context, orgID, id string) (*domain.Prompt, error) {
+	r.getLiveSystemCalls++
+	return r.PromptStore.GetLiveSystem(ctx, orgID, id)
 }
 
 // newRoutingTestSpawner spins up a Spawner whose tx + prompts stores
@@ -116,11 +122,11 @@ func TestResolvePrompt_ManualBranchesThroughSyntheticClaims(t *testing.T) {
 	// The actual Get inside the synthetic-claims door happens on the
 	// TxStores' tx-local PromptStore (constructed inside runTx, not
 	// the one we injected), so we can't assert getCalls here. The
-	// observable fact that GetSystem was NOT called on the spied
+	// observable fact that no admin-pool read was called on the spied
 	// store is the proof that the manual path didn't fall back to
 	// the admin pool.
-	if prompts.getSystemCalls != 0 {
-		t.Errorf("PromptStore.GetSystem called %d times; want 0 (manual must NOT bypass the RLS-active app pool)", prompts.getSystemCalls)
+	if n := prompts.getSystemCalls + prompts.getLiveSystemCalls; n != 0 {
+		t.Errorf("PromptStore admin-pool reads called %d times; want 0 (manual must NOT bypass the RLS-active app pool)", n)
 	}
 }
 
@@ -147,8 +153,9 @@ func TestResolvePrompt_EventStaysOnAdminPool(t *testing.T) {
 	if len(tx.synthCalls) != 0 {
 		t.Errorf("SyntheticClaimsWithTx called %d times; want 0 (event must stay on admin pool)", len(tx.synthCalls))
 	}
-	if prompts.getSystemCalls != 1 {
-		t.Errorf("PromptStore.GetSystem called %d times; want 1 (event must reach admin pool)", prompts.getSystemCalls)
+	if prompts.getLiveSystemCalls != 1 || prompts.getSystemCalls != 0 {
+		t.Errorf("PromptStore.GetLiveSystem called %d times, GetSystem %d; want 1 and 0 (event must reach the admin pool's live read)",
+			prompts.getLiveSystemCalls, prompts.getSystemCalls)
 	}
 }
 

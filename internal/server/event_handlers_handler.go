@@ -642,16 +642,27 @@ func handlerBlueprint(ctx context.Context, tx db.TxStores, orgID, teamID, bluepr
 	return blueprint, blueprint.TeamID != "" && teamID != "" && blueprint.TeamID != teamID, nil
 }
 
-// lockHandlerBlueprint keeps the blueprint a handler write will store live
-// until the write's transaction ends (Blueprints.LockForReference), and
-// reports whether it is live. A route's first read of the blueprint is in an
-// earlier transaction, so the blueprint can be retired or deleted by the time
-// the route writes. The write calls this right before it writes, once no
-// fault refuses the write: by then the blueprint is the handler's team's own,
-// a team the caller can write, as the lock's RLS requires.
-func lockHandlerBlueprint(ctx context.Context, tx db.TxStores, orgID, blueprintID string) (bool, error) {
-	blueprint, err := tx.Blueprints.LockForReference(ctx, orgID, blueprintID)
-	return blueprint != nil, err
+// holdHandlerBlueprint reads the blueprint a handler write attaches again,
+// inside the transaction that writes the handler, and holds it until that
+// transaction ends (BlueprintStore.GetForShare): errBlueprintNotFound when it
+// is no longer live. The route's first read of the blueprint can be stale by
+// the time the handler is written, and a handler written onto a deleted
+// blueprint runs its deleted steps.
+//
+// It is called only for a blueprint of the handler's own team: in Postgres
+// the lock's row-level security is the blueprints UPDATE policy, which hides
+// another team's blueprint from a caller who may only read that team, and a
+// write naming another team's blueprint is refused with
+// crossTeamBlueprintFault already.
+func holdHandlerBlueprint(ctx context.Context, tx db.TxStores, orgID, blueprintID string) error {
+	blueprint, err := tx.Blueprints.GetForShare(ctx, orgID, blueprintID)
+	if err != nil {
+		return err
+	}
+	if blueprint == nil {
+		return errBlueprintNotFound
+	}
+	return nil
 }
 
 // createEventHandlerRequest is the body of POST /api/event-handlers. event_type
@@ -736,11 +747,11 @@ func (eh *eventHandlersHandler) handleEventHandlerCreate(w http.ResponseWriter, 
 	// clean 422. Both reads share one tx so the blueprint's team and the
 	// acting team are read under the same claims. It only reads: the acting
 	// team is recorded as the caller's last-written one by the write itself
-	// (insertEventHandler), which a refused request never commits.
-	//
-	// TODO(TFAC-1517): in Postgres a blueprint delete detaches the blueprint's
-	// handlers before it writes the blueprint's row, so a create that locks
-	// the row before that write still lands on the deleted blueprint.
+	// (insertEventHandler), which a refused request never commits. The write
+	// reads the blueprint again (holdHandlerBlueprint), because a delete can
+	// commit between this read and the write, which the catalog check below
+	// keeps apart for as long as a call to Jira or Linear takes.
+	var hold string
 	if h.BlueprintID != "" {
 		var (
 			blueprint *domain.Blueprint
@@ -766,6 +777,8 @@ func (eh *eventHandlersHandler) handleEventHandlerCreate(w http.ResponseWriter, 
 		}
 		if crossTeam {
 			unproc.Add(crossTeamBlueprintFault)
+		} else {
+			hold = h.BlueprintID
 		}
 		if !writes.name {
 			h.Name = blueprint.Name
@@ -786,49 +799,46 @@ func (eh *eventHandlersHandler) handleEventHandlerCreate(w http.ResponseWriter, 
 			return
 		}
 	}
-	eh.insertEventHandler(w, r, orgID, userID, teamID, h, found, catalogFaults)
+	eh.insertEventHandler(w, r, orgID, userID, teamID, h, hold, found, catalogFaults)
 }
 
 // insertEventHandler resolves the acting team and writes the composed row,
 // answering 201 with the row the INSERT returned. pickedTeam is the team the
-// caller was gated on, found is the body's 422 faults, and catalogFaults are
-// what checkPredicateCatalog found in the predicate for that team; the
-// transaction answers them with the reference check's
+// caller was gated on, hold is the blueprint the write holds until it commits
+// (holdHandlerBlueprint), or "" for none, found is the body's 422 faults, and
+// catalogFaults are what checkPredicateCatalog found in the predicate for that
+// team; the transaction answers them with the reference check's
 // (checkPredicateReferences).
 //
 // The answer is the stored row, not the composed one: the write decides
 // team_id, source and both timestamps, so the struct handed in here is not a
 // picture of what landed.
-func (eh *eventHandlersHandler) insertEventHandler(w http.ResponseWriter, r *http.Request, orgID, userID, pickedTeam string, h domain.EventHandler, found, catalogFaults []httpx.ErrorItem) {
+func (eh *eventHandlersHandler) insertEventHandler(w http.ResponseWriter, r *http.Request, orgID, userID, pickedTeam string, h domain.EventHandler, hold string, found, catalogFaults []httpx.ErrorItem) {
 	var stored domain.EventHandler
 	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		teamID, e := teamscope.ResolveActing(r.Context(), tx.Teams, tx.Users, orgID, userID, pickedTeam)
 		if e != nil {
 			return e
 		}
+		if hold != "" {
+			if e := holdHandlerBlueprint(r.Context(), tx, orgID, hold); e != nil {
+				return e
+			}
+		}
 		if e := checkPredicateReferences(r.Context(), tx, orgID, teamID, h.EventType, h.ScopePredicateJSON, nil, found, catalogFaults); e != nil {
 			return e
-		}
-		// Read again, under lock: the read before the predicate catalog check
-		// is in an earlier transaction.
-		if h.BlueprintID != "" {
-			if live, e := lockHandlerBlueprint(r.Context(), tx, orgID, h.BlueprintID); e != nil {
-				return e
-			} else if !live {
-				return errBlueprintNotFound
-			}
 		}
 		stored, e = tx.EventHandlers.Create(r.Context(), orgID, teamID, h)
 		return e
 	}); err != nil {
+		if errors.Is(err, errBlueprintNotFound) {
+			notFound(w, "blueprint")
+			return
+		}
 		if teamscope.WriteIfSelectionError(w, err) {
 			return
 		}
 		if writeUnprocessableError(w, err) {
-			return
-		}
-		if errors.Is(err, errBlueprintNotFound) {
-			notFound(w, "blueprint")
 			return
 		}
 		eventHandlersLog.Error("create failed", "error", err)
@@ -890,8 +900,11 @@ func (eh *eventHandlersHandler) handleEventHandlerUpdate(w http.ResponseWriter, 
 	if bad.Flush(w, http.StatusBadRequest) {
 		return
 	}
-	attaches := updated.BlueprintID != "" && updated.BlueprintID != existing.BlueprintID
-	if attaches {
+	// The write holds a blueprint the body attaches (holdHandlerBlueprint), as
+	// the create does, so one deleted after the read below answers 404 like a
+	// missing one.
+	var hold string
+	if updated.BlueprintID != "" && updated.BlueprintID != existing.BlueprintID {
 		var crossTeam bool
 		if err := eh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 			var e error
@@ -907,6 +920,8 @@ func (eh *eventHandlersHandler) handleEventHandlerUpdate(w http.ResponseWriter, 
 		}
 		if crossTeam {
 			unproc.Add(crossTeamBlueprintFault)
+		} else {
+			hold = updated.BlueprintID
 		}
 	}
 	handlerRowFaults(&unproc, updated, writes)
@@ -918,31 +933,23 @@ func (eh *eventHandlersHandler) handleEventHandlerUpdate(w http.ResponseWriter, 
 	}
 	var stored domain.EventHandler
 	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		if hold != "" {
+			if e := holdHandlerBlueprint(r.Context(), tx, orgID, hold); e != nil {
+				return e
+			}
+		}
 		if e := checkPredicateReferences(r.Context(), tx, orgID, existing.TeamID, existing.EventType, updated.ScopePredicateJSON, existing.ScopePredicateJSON, found, catalogFaults); e != nil {
 			return e
-		}
-		// Locked whenever the row will hold a blueprint, not only when the body
-		// attaches one: existing can be stale, so a write that keeps the
-		// blueprint existing names can still attach it to the row as it is
-		// now. A blueprint the body attaches that is no longer live is a 404.
-		// One the body keeps does not refuse the write here, so a handler left
-		// on a retired blueprint can still have its other fields changed.
-		if updated.BlueprintID != "" {
-			if live, e := lockHandlerBlueprint(r.Context(), tx, orgID, updated.BlueprintID); e != nil {
-				return e
-			} else if !live && attaches {
-				return errBlueprintNotFound
-			}
 		}
 		var e error
 		stored, e = tx.EventHandlers.Update(r.Context(), orgID, updated)
 		return e
 	}); err != nil {
-		if writeUnprocessableError(w, err) {
-			return
-		}
 		if errors.Is(err, errBlueprintNotFound) {
 			notFound(w, "blueprint")
+			return
+		}
+		if writeUnprocessableError(w, err) {
 			return
 		}
 		// The row was loaded a moment ago, so a miss here means it was deleted

@@ -106,7 +106,20 @@ func TestPollReadinessStore_SQLite_LastPollTimes(t *testing.T) {
 // connection-status contract against the SQLite impl. The org is the local
 // sentinel, whose orgs row BootstrapSchemaForTest seeds.
 func TestPollReadinessStore_SQLite_ConnectionConformance(t *testing.T) {
-	dbtest.RunPollReadinessConnectionConformance(t, func(t *testing.T) (db.PollReadinessStore, string) {
-		return sqlitestore.New(newSQLiteForDeliverableTest(t)).PollReadiness, runmode.LocalDefaultOrgID
+	dbtest.RunPollReadinessConnectionConformance(t, func(t *testing.T) (db.PollReadinessStore, string, func(*testing.T, string, time.Duration)) {
+		conn := newSQLiteForDeliverableTest(t)
+		age := func(t *testing.T, source string, d time.Duration) {
+			t.Helper()
+			var changed time.Time
+			if err := conn.QueryRow(`SELECT connection_changed_at FROM poll_readiness WHERE org_id = ? AND source = ?`,
+				runmode.LocalDefaultOrgID, source).Scan(&changed); err != nil {
+				t.Fatalf("read connection_changed_at: %v", err)
+			}
+			if _, err := conn.Exec(`UPDATE poll_readiness SET connection_changed_at = ? WHERE org_id = ? AND source = ?`,
+				changed.Add(-d).UTC(), runmode.LocalDefaultOrgID, source); err != nil {
+				t.Fatalf("age the connection state: %v", err)
+			}
+		}
+		return sqlitestore.New(conn).PollReadiness, runmode.LocalDefaultOrgID, age
 	})
 }

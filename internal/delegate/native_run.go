@@ -301,7 +301,6 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 			// file, so every tool call is where the mirror looks.
 			AfterToolCall:       mirror.afterToolCall,
 			ShouldStopAfterTurn: s.turnEndNudges(orgID, conversationID, task, finalBlueprintStepOf(cfg), cfg.interactive),
-			SaveSystemBlocks:    s.saveSystemBlocksHook(orgID, conversationID, cfg.claimID, system.current),
 		}),
 		Activity: engineActivity{s.activityFor(conversationID)},
 		ActivityBounds: agentloop.ActivityBounds{
@@ -321,7 +320,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 		SwitchableModels: switchable,
 		SystemPrompt:     system.sent.Prompt,
 		SystemAddendum:   system.sent.Block,
-		Current:          &agentloop.SystemBlocks{Prompt: system.current.Prompt, Addendum: system.current.Block},
+		Current:          &system.current,
 		SystemUpdate:     system.systemUpdate(),
 		HasBlueprint:     cfg.hasBlueprint(),
 		// Derived from the very ceiling this jail was launched under, not from

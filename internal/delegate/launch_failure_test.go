@@ -145,6 +145,13 @@ const fixtureTaskContextRow = "<task_context>\nPull request owner/repo#7\n</task
 // afterwards, since then the test would not be about a compacted conversation.
 func (f *launchFixture) compact(t *testing.T) {
 	t.Helper()
+	f.compactSaving(t, nil)
+}
+
+// compactSaving is compact through the native loop's own transcript, with the
+// commit also saving blocks as the conversation's, nil saving none.
+func (f *launchFixture) compactSaving(t *testing.T, blocks *domain.SystemBlocks) {
+	t.Helper()
 	var span []int
 	for _, m := range f.transcript(t) {
 		if m.Delivered == nil || *m.Delivered {
@@ -154,8 +161,9 @@ func (f *launchFixture) compact(t *testing.T) {
 	tokens := 190_000
 	reply := &domain.Message{Role: "assistant", Content: "<summary>the work so far</summary>", InputTokens: &tokens}
 	summary := &domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionCompactionResult, Content: "<summary>the work so far</summary>"}
-	if err := f.stores.Conversations.CompactForClaimSystem(context.Background(), runmode.LocalDefaultOrgID, f.conv.ID, f.conv.ClaimID, reply, summary, span); err != nil {
-		t.Fatalf("CompactForClaimSystem: %v", err)
+	transcript := newNativeTranscript(f.s, runmode.LocalDefaultOrgID, f.conv.ID, f.conv.ClaimID)
+	if err := transcript.Compact(context.Background(), runmode.LocalDefaultOrgID, f.conv.ID, reply, summary, span, blocks); err != nil {
+		t.Fatalf("Compact: %v", err)
 	}
 	for _, m := range f.transcript(t) {
 		if m.Subtype == domain.MessageSubtypeInjectionTaskContext {

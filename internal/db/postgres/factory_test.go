@@ -285,6 +285,10 @@ func newPgFactorySeeder(conn *sql.DB, orgID, userID, promptID string) dbtest.Fac
 				t.Fatalf("close entity: %v", err)
 			}
 		},
+		SetEntityCreatedAt: func(t *testing.T, entityID string, at time.Time) {
+			t.Helper()
+			dbtest.MustUpdate(t, conn, `UPDATE entities SET created_at = $1 WHERE id = $2 AND org_id = $3`, at.UTC(), entityID, orgID)
+		},
 		SetEntityKind: func(t *testing.T, entityID, kind string) {
 			t.Helper()
 			if _, err := conn.Exec(
