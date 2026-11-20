@@ -57,7 +57,7 @@ pnpm), and the [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)
 ```bash
 git clone https://github.com/sky-ai-eng/triage-factory.git
 cd triage-factory
-cd frontend && pnpm install && pnpm run build && cd ..
+pnpm install && (cd frontend && pnpm run build)
 go build -o ./triagefactory .
 ./triagefactory
 ```

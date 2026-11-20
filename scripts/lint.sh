@@ -436,11 +436,11 @@ frontend_group() {
     corepack enable >/dev/null 2>&1 || true
   fi
   if ! command -v pnpm >/dev/null 2>&1; then
-    red "pnpm not found — run: corepack enable (version pinned in frontend/package.json)"
+    red "pnpm not found — run: corepack enable (version pinned in package.json at the repo root)"
     return 1
   fi
   if [[ ! -d node_modules ]]; then
-    red "frontend deps not installed — run: cd frontend && pnpm install"
+    red "frontend deps not installed — run: pnpm install (at the repo root)"
     return 1
   fi
 

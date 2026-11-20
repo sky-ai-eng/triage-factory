@@ -88,7 +88,7 @@ Every run's root is a plain folder (`worktree.RunRoot`), and every repository ch
 ### 10. Build order
 
 ```bash
-cd frontend && pnpm install --frozen-lockfile && pnpm run build && cd .. && go build -o ./triagefactory .
+pnpm install --frozen-lockfile && (cd frontend && pnpm run build) && go build -o ./triagefactory .
 ```
 
 ### 11. Same-task absorption: follow-up firings fold into a live run

@@ -82,13 +82,13 @@ jobs:
 
       - uses: pnpm/action-setup@v4
         with:
-          package_json_file: frontend/package.json
+          package_json_file: package.json
 
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
           cache: pnpm
-          cache-dependency-path: frontend/pnpm-lock.yaml
+          cache-dependency-path: pnpm-lock.yaml
 
       - uses: actions/setup-go@v5
         with:

@@ -1015,7 +1015,7 @@ func (s *Server) handleAPINotFound(w http.ResponseWriter, r *http.Request) {
 // index.html so that client-side routing works.
 func (s *Server) handleFrontend(w http.ResponseWriter, r *http.Request) {
 	if s.static == nil {
-		http.Error(w, "frontend not built — run: cd frontend && pnpm install && pnpm run build", http.StatusNotFound)
+		http.Error(w, "frontend not built — run: pnpm install && (cd frontend && pnpm run build)", http.StatusNotFound)
 		return
 	}
 

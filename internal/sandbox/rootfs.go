@@ -191,7 +191,7 @@ var apkPackages = []string{
 // pnpmVersion pins the pnpm release that installToolchain bakes into
 // the cached rootfs as an npm global (rootfs_linux.go's installPnpm),
 // so a sandboxed agent building this repo's frontend finds pnpm already
-// on PATH. Must match frontend/package.json's "packageManager" field —
+// on PATH. Must match the root package.json's "packageManager" field —
 // bump both together; because pnpm self-manages that field, an exact
 // match runs the baked binary with zero network. Folded into
 // rootfsCacheKeyFor's hash so a version bump invalidates existing

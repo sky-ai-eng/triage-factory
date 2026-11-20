@@ -30,7 +30,7 @@ func TestClassifyPath(t *testing.T) {
 		{"CHANGELOG.md", classDocs},
 
 		{"go.sum", classGenerated},
-		{"frontend/pnpm-lock.yaml", classGenerated},
+		{"pnpm-lock.yaml", classGenerated},
 		{"harness/Cargo.lock", classGenerated},
 		{"internal/agentproc/package-lock.json", classGenerated},
 		{"vendor/github.com/x/y/z.go", classGenerated},

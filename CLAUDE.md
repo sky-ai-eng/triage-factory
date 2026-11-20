@@ -10,9 +10,11 @@ Mannered prose substitutes metaphor and flourish for direct statement. Instead o
 
 ```bash
 # Full build — frontend first (Go embeds frontend/dist/), then the binary.
-# Frontend uses pnpm (pinned via the "packageManager" field; `corepack enable`
-# provisions it). The agentproc SDK runtime installer still uses npm by design.
-cd frontend && pnpm install && pnpm run build && cd ..
+# Frontend uses pnpm (pinned via the root package.json's "packageManager"
+# field; `corepack enable` provisions it). The repo root is the pnpm workspace,
+# so install there; scripts run in frontend/. The agentproc SDK runtime
+# installer still uses npm by design.
+pnpm install && (cd frontend && pnpm run build)
 go build -o ./triagefactory .
 
 # Run (default :3000, opens browser)

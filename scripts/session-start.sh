@@ -56,7 +56,7 @@ JSON
 } || true
 
 # pnpm isn't bundled with Node the way npm is — provision it via Corepack
-# (version pinned by frontend/package.json's packageManager field). Best-effort
+# (version pinned by the root package.json's packageManager field). Best-effort
 # under set -e: if the shim dir isn't writable the build below surfaces it.
 echo "[session-start] provisioning pnpm via corepack"
 corepack enable >>"$log" 2>&1 || true
@@ -64,7 +64,7 @@ corepack enable >>"$log" 2>&1 || true
 # REQUIRED: creates frontend/dist for the go:embed above. Without this the
 # root package (and therefore `go test ./...` / `go build .`) does not compile.
 echo "[session-start] frontend: pnpm install + vite build (creates frontend/dist)"
-( cd frontend && pnpm install --frozen-lockfile && pnpm run build ) >>"$log" 2>&1
+( pnpm install --frozen-lockfile && cd frontend && pnpm run build ) >>"$log" 2>&1
 
 # Best-effort: scripts/lint.sh + the repo's PostToolUse formatter need these.
 echo "[session-start] go tooling (goimports, golangci-lint)"
