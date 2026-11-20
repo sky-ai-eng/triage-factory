@@ -87,7 +87,14 @@ const (
 	// is the wrong path to wake it.
 	PendingFiringSkipTaskClosed      = "task_closed"
 	PendingFiringSkipTriggerDisabled = "trigger_disabled"
-	PendingFiringSkipBreakerTripped  = "breaker_tripped"
+	// PendingFiringSkipPredicateUnmatched: the firing's event does not match
+	// the trigger's scope predicate as the trigger holds it now, usually
+	// because a person narrowed the predicate while the firing waited. The
+	// router would not fire the trigger on the event if it arrived now, so
+	// the worker does not fire it either. A predicate the matcher cannot
+	// evaluate is no match, as it is for the router.
+	PendingFiringSkipPredicateUnmatched = "predicate_unmatched"
+	PendingFiringSkipBreakerTripped     = "breaker_tripped"
 	// PendingFiringSkipClaimChanged: the task is no longer bot-claimed at
 	// firing time — a user took it over or requeued it — so the commitment
 	// the queued row carried is no longer current, and firing would put a

@@ -11,6 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/workkinds"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -191,6 +192,47 @@ func (r *Router) newestEventSince(ctx context.Context, f domain.PendingFiring) (
 	return newer, nil
 }
 
+// firingEventMatches reports whether f's event matches trigger's scope
+// predicate as the trigger holds it now, read through the event's current
+// view as the router's match reads it (matchHandlers), so an id the source
+// has since replaced resolves the same way at both.
+//
+// The event is the row's own, not the task's newest. The run fires from the
+// row's event, and the (event, trigger) fence that makes a replay of the unit
+// a no-op is keyed on it, so it is the event the predicate has to match. A
+// later event that collapsed onto the row is not considered, so when the
+// row's event no longer matches, the later event starts no run either, even
+// one the predicate matches.
+//
+// A predicate the matcher cannot evaluate is no match, as it is for the
+// router, and is logged as the router logs it. A non-nil error is a read that
+// reached no verdict.
+func (r *Router) firingEventMatches(ctx context.Context, f domain.PendingFiring, trigger domain.EventHandler) (bool, error) {
+	ev, err := r.events.GetSystem(ctx, f.OrgID, f.TriggeringEventID)
+	if err != nil {
+		return false, fmt.Errorf("load event: %w", err)
+	}
+	if ev == nil {
+		// The row's foreign key holds the event, so a miss is a read that
+		// found nothing it should have, and requeueing parks it for a person.
+		return false, fmt.Errorf("event %s not found", f.TriggeringEventID)
+	}
+	metadataJSON, err := events.Current(ctx, f.OrgID, ev.EventType, ev.MetadataJSON)
+	if err != nil {
+		return false, fmt.Errorf("resolve event metadata: %w", err)
+	}
+	predJSON := ""
+	if trigger.ScopePredicateJSON != nil {
+		predJSON = *trigger.ScopePredicateJSON
+	}
+	matched, err := matchPredicate(ev.EventType, predJSON, metadataJSON)
+	if err != nil {
+		routerLog.ErrorContext(ctx, "firing-queue: event_handler predicate error", "firing_id", f.ID, "handler_id", trigger.ID, "error", err)
+		return false, nil
+	}
+	return matched, nil
+}
+
 // processFiring runs one claimed firing as one unit: renew the lease,
 // validate the firing against the world now, fire it, and write its terminal
 // under the receipt's fence. Done means done — the run committed and the row
@@ -369,9 +411,10 @@ func (r *Router) processFiring(ctx context.Context, cf dbpkg.ClaimedFiring) {
 	}
 
 	// Validate against live tables, not the firing row, so the worker
-	// reflects the world now: a close, a takeover, a disabled trigger or a
-	// tripped breaker since the row was admitted is a definitive skip, and a
-	// read that failed is a transient requeue.
+	// reflects the world now: a close, a takeover, a disabled trigger, a
+	// predicate the event no longer matches or a tripped breaker since the
+	// row was admitted is a definitive skip, and a read that failed is a
+	// transient requeue.
 	task, err := r.tasks.GetSystem(unitCtx, f.OrgID, f.TaskID)
 	if err != nil {
 		requeue(workitem.OutcomeTransient, fmt.Errorf("task lookup: %w", err))
@@ -416,6 +459,18 @@ func (r *Router) processFiring(ctx context.Context, cf dbpkg.ClaimedFiring) {
 			skip(domain.PendingFiringSkipTeamArchived)
 			return
 		}
+	}
+	// Before the breaker, whose read raises its notification: a firing the
+	// trigger no longer matches would not start a run whatever the breaker
+	// says.
+	matches, err := r.firingEventMatches(unitCtx, f, *trigger)
+	if err != nil {
+		requeue(workitem.OutcomeTransient, fmt.Errorf("match the trigger's predicate: %w", err))
+		return
+	}
+	if !matches {
+		skip(domain.PendingFiringSkipPredicateUnmatched)
+		return
 	}
 	tripped, err := r.breakerHolds(unitCtx, f.OrgID, *trigger, f.EntityID, task.EntitySourceID)
 	if err != nil {

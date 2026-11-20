@@ -18,6 +18,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/workitem"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
 	"github.com/sky-ai-eng/triage-factory/internal/notify/notifytest"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -217,7 +218,7 @@ func setupDrainScenarioN(t *testing.T, database *sql.DB, suffix string) (entityI
 		EventType:    domain.EventGitHubPRCICheckFailed,
 		EntityID:     &entityID,
 		DedupKey:     "build",
-		MetadataJSON: `{"check_name":"build"}`,
+		MetadataJSON: `{"check_name":"build","author_id":"9001"}`,
 	})
 	if err != nil {
 		t.Fatalf("record event: %v", err)
@@ -416,20 +417,30 @@ func TestFiringWorker_HandlerLeftAutomate(t *testing.T) {
 	requireSkipped(t, rows[0], domain.PendingFiringSkipTriggerDisabled)
 }
 
+// setTriggerPredicate writes a trigger's scope predicate directly, standing
+// in for a person's edit while a firing waits. An empty predicate clears it.
+func setTriggerPredicate(t *testing.T, database *sql.DB, triggerID, predicate string) {
+	t.Helper()
+	var stored any
+	if predicate != "" {
+		stored = predicate
+	}
+	if _, err := database.Exec(`UPDATE event_handlers SET scope_predicate_json = ? WHERE id = ?`, stored, triggerID); err != nil {
+		t.Fatalf("edit the trigger's predicate: %v", err)
+	}
+}
+
 // TestFiringWorker_RecordsTheTriggersPredicateAtTheFiring: a firing queued
 // before its trigger's predicate changed records the predicate the trigger
 // holds when the worker fires it, as it runs the blueprint the trigger runs
-// then. The breaker the worker checks before firing is the one the run then
-// counts toward, and the worker does not match the event again, so the run
-// counts under the new predicate even when its event would not match it.
+// then, so the breaker the worker checks before firing is the one the run
+// then counts toward.
 func TestFiringWorker_RecordsTheTriggersPredicateAtTheFiring(t *testing.T) {
 	database := newTestDB(t)
 	entityID, taskID, triggerID, eventID := setupDrainScenario(t, database)
 	enqueueFiring(t, database, entityID, taskID, triggerID, eventID)
-	const edited = `{"author_id_in":["583231"]}`
-	if _, err := database.Exec(`UPDATE event_handlers SET scope_predicate_json = ? WHERE id = ?`, edited, triggerID); err != nil {
-		t.Fatalf("edit the trigger's predicate: %v", err)
-	}
+	const edited = `{"author_id_in":["583231","9001"]}`
+	setTriggerPredicate(t, database, triggerID, edited)
 	drainOnce(t, drainRouter(database, sqlitestore.New(database).PendingFirings, &stubDelegator{db: database}))
 
 	f := firingsFor(t, database, entityID)[0]
@@ -440,6 +451,90 @@ func TestFiringWorker_RecordsTheTriggersPredicateAtTheFiring(t *testing.T) {
 	}
 	if recorded != edited {
 		t.Errorf("run's recorded predicate = %q, want the trigger's at the firing, %q", recorded, edited)
+	}
+}
+
+// TestFiringWorker_MatchesTheTriggersPredicateAtTheFiring: the worker matches
+// the firing's event against the trigger's predicate as the trigger holds it
+// when the worker fires, as the router would if the event arrived then. The
+// event's pull request is by author 9001, and the trigger had no predicate
+// when the firing was queued.
+func TestFiringWorker_MatchesTheTriggersPredicateAtTheFiring(t *testing.T) {
+	cases := []struct {
+		name      string
+		predicate string
+		fires     bool
+	}{
+		// A person narrowed the trigger to exclude the event's author.
+		{"narrowed_past_the_event", `{"author_id_in":["583231"]}`, false},
+		{"edited_and_still_matching", `{"author_id_in":["583231","9001"]}`, true},
+		// The matcher fails closed on a field the event type does not have,
+		// as it does for the router.
+		{"unreadable", `{"no_such_field":true}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			database := newTestDB(t)
+			rec := notifytest.Record(t)
+			entityID, taskID, triggerID, eventID := setupDrainScenario(t, database)
+			enqueueFiring(t, database, entityID, taskID, triggerID, eventID)
+			setTriggerPredicate(t, database, triggerID, tc.predicate)
+			if !tc.fires {
+				// A breaker that would hold, so the skip shows the predicate
+				// is decided first and its read raises no notification.
+				if _, err := database.Exec(`UPDATE event_handlers SET breaker_threshold = 0 WHERE id = ?`, triggerID); err != nil {
+					t.Fatalf("set breaker: %v", err)
+				}
+			}
+			stub := &stubDelegator{db: database}
+			drainOnce(t, drainRouter(database, sqlitestore.New(database).PendingFirings, stub))
+
+			f := firingsFor(t, database, entityID)[0]
+			if tc.fires {
+				requireFired(t, f)
+				if stub.calls != 1 {
+					t.Errorf("Delegate called %d times, want 1", stub.calls)
+				}
+				return
+			}
+			requireSkipped(t, f, domain.PendingFiringSkipPredicateUnmatched)
+			if stub.calls != 0 {
+				t.Errorf("Delegate called %d times on an event the trigger no longer matches", stub.calls)
+			}
+			rec.Inactive(t, runmode.LocalDefaultOrgID, kinds.BreakerTripped)
+		})
+	}
+}
+
+// TestFiringWorker_MatchesThroughTheCurrentView: the worker reads the event
+// through its type's current view, as the router does, so a predicate naming
+// the id the source uses now matches an event recorded under the id it
+// replaced. A view that cannot answer reached no verdict, and the row is
+// requeued rather than skipped.
+func TestFiringWorker_MatchesThroughTheCurrentView(t *testing.T) {
+	var viewErr error
+	events.RegisterCurrentView(domain.EventGitHubPRCICheckFailed, func(_ context.Context, _, meta string) (string, error) {
+		if viewErr != nil {
+			return "", viewErr
+		}
+		return strings.ReplaceAll(meta, `"author_id":"9001"`, `"author_id":"583231"`), nil
+	})
+	t.Cleanup(func() { events.ResetCurrentView(domain.EventGitHubPRCICheckFailed) })
+
+	database := newTestDB(t)
+	entityA, taskA, triggerA, eventA := setupDrainScenarioN(t, database, "a")
+	enqueueFiring(t, database, entityA, taskA, triggerA, eventA)
+	setTriggerPredicate(t, database, triggerA, `{"author_id_in":["583231"]}`)
+	drainOnce(t, drainRouter(database, sqlitestore.New(database).PendingFirings, &stubDelegator{db: database}))
+	requireFired(t, firingsFor(t, database, entityA)[0])
+
+	viewErr = errors.New("registry unreadable")
+	entityB, taskB, triggerB, eventB := setupDrainScenarioN(t, database, "b")
+	enqueueFiring(t, database, entityB, taskB, triggerB, eventB)
+	setTriggerPredicate(t, database, triggerB, `{"author_id_in":["583231"]}`)
+	drainOnce(t, drainRouter(database, sqlitestore.New(database).PendingFirings, &stubDelegator{db: database}))
+	if b := firingsFor(t, database, entityB)[0]; b.Status != workitem.StatusReady || b.LastOutcome != "transient" || b.SkipReason != "" {
+		t.Errorf("firing whose view failed = %+v, want ready with the transient outcome", b)
 	}
 }
 
