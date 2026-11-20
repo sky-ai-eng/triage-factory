@@ -59,15 +59,20 @@ body {
   padding: 2rem;
 }
 
-/* Links take the measurement hue, at zero specificity so any utility class
-   wins without a fight. The underline is deliberately NOT global: this app is
-   mostly nav pills and card links, where an underline reads as noise. Prose
-   surfaces opt in — see .review-markdown a below. */
-:where(a) {
-  color: var(--color-warm);
-}
-:where(a):hover {
-  color: var(--color-ink-1);
+/* Links take the measurement hue. The rules sit in the components layer so
+   that a text-* or hover:text-* class on a link wins: utilities are a later
+   layer, and unlayered CSS outranks every layer whatever its specificity. The
+   components layer still beats preflight's `a { color: inherit }`, which is in
+   the base layer. The underline is deliberately NOT global: this app is mostly
+   nav pills and card links, where an underline reads as noise. Prose surfaces
+   opt in — see .review-markdown a below. */
+@layer components {
+  :where(a) {
+    color: var(--color-warm);
+  }
+  :where(a):hover {
+    color: var(--color-ink-1);
+  }
 }
 
 /* Numbers that came from the system align. Not optional in a readout. */
