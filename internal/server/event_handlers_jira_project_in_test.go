@@ -58,11 +58,11 @@ func (r *jiraProjectInRig) track(t *testing.T, ids ...string) {
 	}
 }
 
-// createRule creates a rule of eventType with predicate and returns the
+// createRule creates a handler of eventType with predicate and returns the
 // response.
 func (r *jiraProjectInRig) createRule(t *testing.T, eventType string, predicate map[string]any) (int, map[string]any) {
 	t.Helper()
-	rec := doJSON(t, r.s, http.MethodPost, "/api/event-handlers/rules", map[string]any{
+	rec := doJSON(t, r.s, http.MethodPost, "/api/event-handlers", map[string]any{
 		"event_type":      eventType,
 		"name":            "scoped",
 		"scope_predicate": predicate,
@@ -78,7 +78,7 @@ func TestEventHandlerJiraProjectIn_CreateRefusesWhatTheTeamDoesNotTrack(t *testi
 	r := newJiraProjectInRig(t)
 	r.track(t, r.sky)
 	const unknownID = "00000000-0000-0000-0000-0000000000ff"
-	before := len(listEventHandlers(t, r.s, "rule"))
+	before := len(listEventHandlers(t, r.s))
 
 	code, got := r.createRule(t, domain.EventJiraIssueStatusChanged, map[string]any{
 		"jira_project_id_in": []string{r.sky, r.ops, "SKY", unknownID},
@@ -92,8 +92,8 @@ func TestEventHandlerJiraProjectIn_CreateRefusesWhatTheTeamDoesNotTrack(t *testi
 			t.Errorf("fault %d = %q, want it to name jira_project_id_in and %q", i, messages[i], want)
 		}
 	}
-	if after := len(listEventHandlers(t, r.s, "rule")); after != before {
-		t.Errorf("a refused create changed the rule count from %d to %d", before, after)
+	if after := len(listEventHandlers(t, r.s)); after != before {
+		t.Errorf("a refused create changed the handler count from %d to %d", before, after)
 	}
 }
 
@@ -166,23 +166,6 @@ func TestEventHandlerJiraProjectIn_PatchChecksOnlyAddedProjects(t *testing.T) {
 	_ = json.Unmarshal(stored.Body.Bytes(), &row)
 	if row["scope_predicate_json"] != kept {
 		t.Errorf("refused PATCH changed the predicate: %v, want %s", row["scope_predicate_json"], kept)
-	}
-}
-
-func TestEventHandlerJiraProjectIn_CreateTriggerRefusesUntrackedProjects(t *testing.T) {
-	r := newJiraProjectInRig(t)
-	r.track(t, r.sky)
-	seedBlueprintForTrigger(t, r.s, "p-jira-project-in")
-
-	rec := doJSON(t, r.s, http.MethodPost, "/api/event-handlers/triggers", map[string]any{
-		"event_type":      domain.EventJiraIssueAssigned,
-		"blueprint_id":    "p-jira-project-in",
-		"scope_predicate": map[string]any{"jira_project_id_in": []string{r.ops}},
-	})
-	var got map[string]any
-	_ = json.Unmarshal(rec.Body.Bytes(), &got)
-	if messages := repoInFaultMessages(t, rec.Code, got); len(messages) != 1 {
-		t.Errorf("faults = %q, want one", messages)
 	}
 }
 

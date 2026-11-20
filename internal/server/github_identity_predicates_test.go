@@ -22,11 +22,11 @@ func mapLocalGitHubTeam(t *testing.T, s *Server, githubTeamID, orgLogin, slug st
 	}
 }
 
-// createIdentityRule creates a rule on eventType with predicate and returns
+// createIdentityRule creates a handler on eventType with predicate and returns
 // the status and decoded body.
 func createIdentityRule(t *testing.T, s *Server, eventType string, predicate map[string]any) (int, map[string]any) {
 	t.Helper()
-	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/rules", map[string]any{
+	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers", map[string]any{
 		"event_type":      eventType,
 		"name":            "identity",
 		"scope_predicate": predicate,
@@ -70,7 +70,7 @@ func TestEventHandlerGitHubIdentities_CreateRefusesWhatCannotMatch(t *testing.T)
 	s := newTestServer(t)
 	configureEventSources(t, s)
 	mapLocalGitHubTeam(t, s, "11", "acme", "backend")
-	before := len(listEventHandlers(t, s, "rule"))
+	before := len(listEventHandlers(t, s))
 
 	code, got := createIdentityRule(t, s, domain.EventGitHubPRReviewRequested, map[string]any{
 		"author_id_in":         []string{"aidan", "583231"},
@@ -86,8 +86,8 @@ func TestEventHandlerGitHubIdentities_CreateRefusesWhatCannotMatch(t *testing.T)
 			t.Errorf("fault %d = %q, want it to name %s", i, messages[i], want)
 		}
 	}
-	if after := len(listEventHandlers(t, s, "rule")); after != before {
-		t.Errorf("a refused create changed the rule count from %d to %d", before, after)
+	if after := len(listEventHandlers(t, s)); after != before {
+		t.Errorf("a refused create changed the handler count from %d to %d", before, after)
 	}
 
 	code, got = createIdentityRule(t, s, domain.EventGitHubPRReviewApproved, map[string]any{"reviewer_id_in": []string{"alice"}})

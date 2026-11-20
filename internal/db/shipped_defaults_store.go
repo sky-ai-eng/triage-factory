@@ -34,10 +34,9 @@ type ShippedDefaultsStore interface {
 	//     steps are written only for freshly-inserted headers — an
 	//     existing team blueprint's step list is left untouched — each
 	//     step's prompt slug resolved via the phase-1 map.
-	//  3. Handlers: db.ShippedEventHandlers, rules enabled unless marked
-	//     Disabled, triggers disabled (shipped convention) — delegates to
-	//     EventHandlerStore.Seed, resolving each trigger's blueprint slug
-	//     through the phase-2 map.
+	//  3. Handlers: db.ShippedEventHandlers, each in its shipped mode —
+	//     delegates to EventHandlerStore.Seed, resolving each handler's
+	//     blueprint slug through the phase-2 map.
 	//
 	// Runs on the admin pool; must run OUTSIDE any WithTx — enforced by both
 	// dialects' impls.
@@ -50,7 +49,7 @@ type ShippedDefaultsStore interface {
 	// SyncShippedIntoTeam brings teamID's UNMODIFIED copies of the shipped
 	// defaults up to the current shipped content: shipped blueprints (see
 	// below), then db.ShippedEventHandlers via EventHandlerStore.Sync — run
-	// after the blueprint pass so a trigger's blueprint-slug re-resolution
+	// after the blueprint pass so a handler's blueprint-slug re-resolution
 	// sees post-sync blueprint ids. Each shipped blueprint is synced as one
 	// "sync unit" at a time. A unit is a shipped blueprint's header row + its
 	// ordered step list (prompt slugs + briefs) + every step prompt's content

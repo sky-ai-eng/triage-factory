@@ -225,15 +225,14 @@ var JiraStatusDrift = notify.Condition(notify.ConditionSpec[JiraStatusRule]{
 	},
 })
 
-// JiraHandlerFilter is one Jira task rule's, trigger's or notify rule's filter,
-// with the ids it names that are gone.
+// JiraHandlerFilter is one Jira event handler's filter, with the ids it names
+// that are gone.
 type JiraHandlerFilter struct {
 	HandlerID string `json:"handler_id"`
 	TeamID    string `json:"team_id"`
-	// HandlerKind is domain.EventHandlerKindRule, EventHandlerKindTrigger or
-	// EventHandlerKindNotify.
-	HandlerKind string `json:"handler_kind"`
-	RuleName    string `json:"rule_name"`  // display only; a trigger has none
+	// HandlerName is display only. Stored notifications carry it as
+	// rule_name.
+	HandlerName string `json:"rule_name"`
 	EventType   string `json:"event_type"` // display only
 	// The ids the filter names that are gone, by catalog. A status or an issue
 	// type is gone when no project the team tracks has it, a priority when the
@@ -246,8 +245,8 @@ type JiraHandlerFilter struct {
 	Stopped bool `json:"stopped"`
 }
 
-// JiraPredicateDrift is open while an enabled Jira task rule, trigger or
-// notify rule filters on a status, issue type or priority that is gone:
+// JiraPredicateDrift is open while a Jira event handler that is not off
+// filters on a status, issue type or priority that is gone:
 // deleted in Jira, dropped from a workflow, or left behind on a project the
 // team stopped tracking.
 // Nothing about the handler changes, so it silently stops matching what the
@@ -268,16 +267,8 @@ var JiraPredicateDrift = notify.Condition(notify.ConditionSpec[JiraHandlerFilter
 	Audience:    notify.TeamAdmins(func(d JiraHandlerFilter) string { return d.TeamID }),
 	Render: func(d JiraHandlerFilter, _ notify.Recipient) notify.Content {
 		subject := d.subject()
-		stopped, working := "It can't fire until the filter is changed.", "It still fires on the filter's other values."
-		link := notify.Link("Open trigger", notify.Routes.Trigger(d.HandlerID))
-		switch d.HandlerKind {
-		case domain.EventHandlerKindRule:
-			stopped, working = "It matches no event until the filter is changed.", "It still matches the filter's other values."
-			link = notify.Link("Open task rule", notify.Routes.TaskRule(d.HandlerID))
-		case domain.EventHandlerKindNotify:
-			stopped, working = "It tells no one until the filter is changed.", "It still matches the filter's other values."
-			link = notify.Link("Open notify rule", notify.Routes.NotifyRule(d.HandlerID))
-		}
+		stopped, working := "It matches no event until the filter is changed.", "It still matches the filter's other values."
+		link := notify.Link("Open event handler", notify.Routes.EventHandler(d.HandlerID))
 		var gone []string
 		if part := goneIDs(d.Statuses, "a status", "statuses", "no Jira project this team tracks has"); part != "" {
 			gone = append(gone, part)
@@ -304,7 +295,7 @@ var JiraPredicateDrift = notify.Condition(notify.ConditionSpec[JiraHandlerFilter
 			Actions: []notify.Action{link},
 		}
 	},
-	// A handler disabled or deleted resolves too: it filters on nothing.
+	// A handler turned off or deleted resolves too: it filters on nothing.
 	Resolved: func(d JiraHandlerFilter, r notify.Resolution) string {
 		switch r.Reason {
 		case domain.NotificationResolvedSourceOff:
@@ -312,13 +303,12 @@ var JiraPredicateDrift = notify.Condition(notify.ConditionSpec[JiraHandlerFilter
 		case domain.NotificationResolvedAudienceRemoved:
 			return noLongerApplies(r.Recipient)
 		}
-		return d.subject() + " no longer filters on Jira values that are gone, or was disabled or deleted."
+		return d.subject() + " no longer filters on Jira values that are gone, or was turned off or deleted."
 	},
 	Example: JiraHandlerFilter{
 		HandlerID:   "00000000-0000-0000-0000-000000000000",
 		TeamID:      "00000000-0000-0000-0000-000000000001",
-		HandlerKind: domain.EventHandlerKindRule,
-		RuleName:    "Ready for pickup",
+		HandlerName: "Ready for pickup",
 		EventType:   domain.EventJiraIssueStatusChanged,
 		Statuses:    []string{"10010", "10011"},
 		Priorities:  []string{"4"},
@@ -328,19 +318,10 @@ var JiraPredicateDrift = notify.Condition(notify.ConditionSpec[JiraHandlerFilter
 
 // subject is how copy names the handler.
 func (d JiraHandlerFilter) subject() string {
-	switch d.HandlerKind {
-	case domain.EventHandlerKindRule:
-		if d.RuleName != "" {
-			return `Task rule "` + d.RuleName + `"`
-		}
-		return "A task rule"
-	case domain.EventHandlerKindNotify:
-		if d.RuleName != "" {
-			return `Notify rule "` + d.RuleName + `"`
-		}
-		return "A notify rule"
+	if d.HandlerName != "" {
+		return `Event handler "` + d.HandlerName + `"`
 	}
-	return "The trigger on " + eventLabel(d.EventType)
+	return "The event handler on " + eventLabel(d.EventType)
 }
 
 // goneIDs is one catalog's gone ids for a predicate drift's copy, or "" when

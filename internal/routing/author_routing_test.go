@@ -56,12 +56,12 @@ func seedSystemRule(t *testing.T, database *sql.DB, teamID, eventType string) {
 	key := teamID[:8] + "-" + eventType[len(eventType)-6:]
 	if _, err := database.Exec(`
 		INSERT INTO event_handlers
-			(id, org_id, team_id, creator_user_id, kind, event_type,
-			 system_slug, scope_predicate_json, enabled, source, name, default_priority, sort_order,
+			(id, org_id, team_id, creator_user_id, mode, event_type,
+			 system_slug, scope_predicate_json, source, name, default_priority, sort_order,
 			 created_at, updated_at)
-		VALUES (?, ?, ?, NULL, 'rule', ?, ?, NULL, 1, 'system', 'sys rule', 0.75, 0, ?, ?)
+		VALUES (?, ?, ?, NULL, 'watch', ?, ?, NULL, 'system', 'sys rule', 0.75, 0, ?, ?)
 	`, "sys-"+key, runmode.LocalDefaultOrgID, teamID,
-		eventType, "system-rule-"+key, time.Now(), time.Now()); err != nil {
+		eventType, "system-handler-"+key, time.Now(), time.Now()); err != nil {
 		t.Fatalf("seed system rule (%s) for team %s: %v", eventType, teamID, err)
 	}
 }
@@ -334,10 +334,10 @@ func seedFlagOffCIRule(t *testing.T, database *sql.DB, teamID string) {
 	t.Helper()
 	if _, err := database.Exec(`
 		INSERT INTO event_handlers
-			(id, org_id, team_id, creator_user_id, kind, event_type,
-			 scope_predicate_json, enabled, source, applies_to_unowned, name, default_priority, sort_order,
+			(id, org_id, team_id, creator_user_id, mode, event_type,
+			 scope_predicate_json, source, applies_to_unowned, name, default_priority, sort_order,
 			 created_at, updated_at)
-		VALUES (?, ?, ?, ?, 'rule', ?, NULL, 1, 'user', 0, ?, 0.7, 100, ?, ?)
+		VALUES (?, ?, ?, ?, 'watch', ?, NULL, 'user', 0, ?, 0.7, 100, ?, ?)
 	`, "flagoff-"+teamID[:8], runmode.LocalDefaultOrgID, teamID, runmode.LocalDefaultUserID,
 		domain.EventGitHubPRCICheckFailed, "flag-off CI rule "+teamID[:8], time.Now(), time.Now()); err != nil {
 		t.Fatalf("seed flag-off CI rule for team %s: %v", teamID, err)
@@ -419,7 +419,7 @@ func TestAuthorCentric_TwoTeams_FiresDeterministically(t *testing.T) {
 	seedUserOnTeam(t, database, teamB, "aidan") // author on two teams → ambiguous owner
 
 	// Both teams fully opt into auto-delegation and have an immediate ci-fix
-	// trigger. No rules → both tie at the 0.5 trigger-default priority, so the
+	// automate handler. Both handlers carry priority 0.5 and tie, so the
 	// deterministic firing order falls to lowest team id.
 	enableTeamAutoDelegate(t, database, teamA, teamB)
 	seedImmediateTrigger(t, database, teamA, domain.EventGitHubPRCICheckFailed, "ci-a")
@@ -621,17 +621,17 @@ func TestAuthorCentric_ConsolidatedOwnerAnchorsNextEvent(t *testing.T) {
 // TestOwnerLadderRouting_AmbiguousOwner_OrdersByPriorityThenID is the unit-level
 // guard for the TFAC-514 change: an ambiguous owner (identity on multiple teams)
 // yields a NULL ownerTeam at creation but a populated, deterministically-ordered
-// orderedTeams — max matched-rule DefaultPriority desc, then lowest team id —
+// orderedTeams — max matched-handler DefaultPriority desc, then lowest team id —
 // so a multi-team-ambiguous event fires deterministically instead of not at all.
 func TestOwnerLadderRouting_AmbiguousOwner_OrdersByPriorityThenID(t *testing.T) {
-	hi, lo := floatPtr(0.9), floatPtr(0.5)
+	hi, lo := 0.9, 0.5
 	// team-z carries the higher-priority rule but the lexically later id;
 	// team-a the lower priority but earlier id. Priority must beat id order.
 	rules := []domain.EventHandler{
 		{TeamID: "team-z", Source: domain.EventHandlerSourceUser, DefaultPriority: hi},
 		{TeamID: "team-a", Source: domain.EventHandlerSourceUser, DefaultPriority: lo},
 	}
-	vis, owner, ordered, _, ok := ownerLadderRouting("", []string{"team-a", "team-z"}, rules, nil)
+	vis, owner, ordered, _, ok := ownerLadderRouting("", []string{"team-a", "team-z"}, rules)
 	if !ok {
 		t.Fatal("ownerLadderRouting ok=false, want a routable task")
 	}
@@ -650,14 +650,14 @@ func TestOwnerLadderRouting_AmbiguousOwner_OrdersByPriorityThenID(t *testing.T) 
 		{TeamID: "team-z", Source: domain.EventHandlerSourceUser, DefaultPriority: lo},
 		{TeamID: "team-a", Source: domain.EventHandlerSourceUser, DefaultPriority: lo},
 	}
-	_, _, tieOrdered, _, _ := ownerLadderRouting("", []string{"team-a", "team-z"}, tie, nil)
+	_, _, tieOrdered, _, _ := ownerLadderRouting("", []string{"team-a", "team-z"}, tie)
 	if len(tieOrdered) != 2 || tieOrdered[0] != "team-a" || tieOrdered[1] != "team-z" {
 		t.Errorf("tie orderedTeams = %v, want [team-a team-z] (equal priority → lowest team id)", tieOrdered)
 	}
 
 	// Resolved (unambiguous) owner: orderedTeams is exactly the owner — watcher
 	// teams get visibility but never firing rights.
-	_, _, resolvedOrdered, _, _ := ownerLadderRouting("team-a", []string{"team-a"}, rules, nil)
+	_, _, resolvedOrdered, _, _ := ownerLadderRouting("team-a", []string{"team-a"}, rules)
 	if len(resolvedOrdered) != 1 || resolvedOrdered[0] != "team-a" {
 		t.Errorf("resolved-owner orderedTeams = %v, want [team-a] only", resolvedOrdered)
 	}
@@ -671,14 +671,14 @@ func TestOwnerLadderRouting_AmbiguousOwner_OrdersByPriorityThenID(t *testing.T) 
 // consolidates ownership. This is the branch that supersedes 514's "external
 // never fires."
 func TestOwnerLadderRouting_ExternalAuthor_WatchersFireRanked(t *testing.T) {
-	hi, lo := floatPtr(0.9), floatPtr(0.5)
+	hi, lo := 0.9, 0.5
 	// Two opted-in watcher teams, no member owner (ownerSet empty). team-w1
 	// carries the higher priority but the later-or-equal id, so priority orders.
 	watchers := []domain.EventHandler{
 		{TeamID: "team-w2", AppliesToUnowned: true, DefaultPriority: lo},
 		{TeamID: "team-w1", AppliesToUnowned: true, DefaultPriority: hi},
 	}
-	vis, owner, ordered, _, ok := ownerLadderRouting("", nil, watchers, nil)
+	vis, owner, ordered, _, ok := ownerLadderRouting("", nil, watchers)
 	if !ok {
 		t.Fatal("ownerLadderRouting ok=false, want a routable task (the watchers surface it)")
 	}
@@ -695,36 +695,34 @@ func TestOwnerLadderRouting_ExternalAuthor_WatchersFireRanked(t *testing.T) {
 	// A flag-off rule contributes neither visibility nor firing for an external
 	// author: ownerSet empty + no opted-in watcher → no task at all.
 	flagOff := []domain.EventHandler{{TeamID: "team-x", DefaultPriority: hi}}
-	if _, _, _, _, ok2 := ownerLadderRouting("", nil, flagOff, nil); ok2 {
+	if _, _, _, _, ok2 := ownerLadderRouting("", nil, flagOff); ok2 {
 		t.Error("ownerLadderRouting ok=true for an external author with only a flag-off rule; want no task")
 	}
 
-	// Per-handler reach (TFAC-517 option 1): the opt-in can live on a TRIGGER,
-	// not just a rule — a team configures orphan reach + auto-delegation entirely
-	// on the prompts page. A flag-on trigger (in matchedTriggers, no rule) makes
-	// the team a watcher → visible AND in the firing order. Triggers carry no
-	// DefaultPriority, so the team ranks at the 0.5 fallback.
+	// Per-handler reach: the opt-in on an automating handler makes its team a
+	// watcher → visible AND in the firing order, with no other handler beside it.
 	trigOnly := []domain.EventHandler{
-		{TeamID: "team-trig", Kind: domain.EventHandlerKindTrigger, AppliesToUnowned: true},
+		{TeamID: "team-trig", Mode: domain.EventHandlerModeAutomate, AppliesToUnowned: true, DefaultPriority: lo},
 	}
-	tvis, _, tordered, _, tok := ownerLadderRouting("", nil, nil, trigOnly)
+	tvis, _, tordered, _, tok := ownerLadderRouting("", nil, trigOnly)
 	if !tok {
-		t.Fatal("ownerLadderRouting ok=false for a trigger-only watcher; want a routable task")
+		t.Fatal("ownerLadderRouting ok=false for an automating watcher; want a routable task")
 	}
 	if len(tvis) != 1 || tvis[0] != "team-trig" {
-		t.Errorf("visibleTeams = %v, want [team-trig] (the flag-on trigger's team)", tvis)
+		t.Errorf("visibleTeams = %v, want [team-trig] (the flag-on handler's team)", tvis)
 	}
 	if len(tordered) != 1 || tordered[0] != "team-trig" {
-		t.Errorf("orderedTeams = %v, want [team-trig] (a flag-on trigger fires on orphans)", tordered)
+		t.Errorf("orderedTeams = %v, want [team-trig] (a flag-on automating handler fires on orphans)", tordered)
 	}
 
-	// A flag-off trigger (no rule) does NOT reach an orphan — preserves the
-	// over-spawn fix: a plain match-all trigger must not fire on every PR.
+	// A flag-off automating handler does NOT reach an orphan — preserves the
+	// over-spawn fix: a plain match-all automate handler must not fire on every
+	// PR.
 	trigOff := []domain.EventHandler{
-		{TeamID: "team-trig", Kind: domain.EventHandlerKindTrigger},
+		{TeamID: "team-trig", Mode: domain.EventHandlerModeAutomate, DefaultPriority: lo},
 	}
-	if _, _, _, _, ok3 := ownerLadderRouting("", nil, nil, trigOff); ok3 {
-		t.Error("ownerLadderRouting ok=true for an external author with only a flag-off trigger; want no task")
+	if _, _, _, _, ok3 := ownerLadderRouting("", nil, trigOff); ok3 {
+		t.Error("ownerLadderRouting ok=true for an external author with only a flag-off automating handler; want no task")
 	}
 }
 
@@ -773,11 +771,10 @@ func TestAuthorCentric_ExternalAuthor_WatchTriggerFires(t *testing.T) {
 }
 
 // TestAuthorCentric_ExternalAuthor_WatchTriggerOnly_Fires is the per-handler
-// reach path (TFAC-517 option 1): team C opts into orphan reach with a flag-on
-// TRIGGER and NO companion task rule — the "configure it all on the prompts
-// page" experience. On an external/dependabot PR (no member owner) the trigger
-// both surfaces the task and fires, consolidating ownership onto C. Proves the
-// reach flag is honored on triggers, not just rules.
+// reach path: team C opts into orphan reach with one flag-on automate handler
+// and no other handler. On an external/dependabot PR (no member owner) that
+// handler both surfaces the task and fires, consolidating ownership onto C.
+// Proves the reach flag is honored on the automating handler itself.
 func TestAuthorCentric_ExternalAuthor_WatchTriggerOnly_Fires(t *testing.T) {
 	database := newTestDB(t)
 	seedHandlerFKTargets(t, database)
@@ -785,7 +782,7 @@ func TestAuthorCentric_ExternalAuthor_WatchTriggerOnly_Fires(t *testing.T) {
 
 	teamC := seedTeam(t, database, "watch-team")
 	enableTeamAutoDelegate(t, database, teamC)
-	// Flag-on trigger, NO rule — the trigger alone is the team's opt-in.
+	// One flag-on automate handler — it alone is the team's opt-in.
 	seedImmediateWatchTrigger(t, database, teamC, domain.EventGitHubPRCICheckFailed, "ci-c")
 
 	entityID := reviewEntity(t, database, "owner/repo#trigonly")
@@ -812,8 +809,8 @@ func TestAuthorCentric_ExternalAuthor_WatchTriggerOnly_Fires(t *testing.T) {
 }
 
 // TestAuthorCentric_ExternalAuthor_PlainTriggerNoReach guards the over-spawn
-// fix under option 1: a team with a plain (flag-off) trigger and no watch
-// handler must NOT reach an external PR — no task, no fire. Only the explicit
+// fix: a team with a plain (flag-off) automate handler and no other handler
+// must NOT reach an external PR — no task, no fire. Only the explicit
 // applies_to_unowned opt-in grants orphan reach.
 func TestAuthorCentric_ExternalAuthor_PlainTriggerNoReach(t *testing.T) {
 	database := newTestDB(t)
@@ -858,7 +855,7 @@ func TestAuthorCentric_TwoTeams_WatcherDoesNotStealOwnership(t *testing.T) {
 	seedUserOnTeam(t, database, teamB, "aidan") // author on A and B → ambiguous
 
 	// teamC is a pure watcher: a high-priority applies_to_unowned rule (would
-	// sort FIRST if it were in the firing order) plus an enabled trigger.
+	// sort FIRST if it were in the firing order) plus an automate handler.
 	seedMatchAllCIRule(t, database, teamC) // priority 0.7, applies_to_unowned=true
 	enableTeamAutoDelegate(t, database, teamA, teamB, teamC)
 	seedImmediateTrigger(t, database, teamA, domain.EventGitHubPRCICheckFailed, "ci-a")
@@ -936,10 +933,11 @@ func enableTeamAutoDelegate(t *testing.T, database *sql.DB, teams ...string) {
 	}
 }
 
-// seedImmediateTrigger seeds an enabled event trigger (min_autonomy_suitability
+// seedImmediateTrigger seeds an automate handler (min_autonomy_suitability
 // 0 → fires immediately, no post-scoring deferral) for eventType on teamID,
 // backed by its own team-owned prompt+blueprint (the same-team FK). idSuffix
-// disambiguates several triggers within one test.
+// disambiguates several handlers within one test. Its priority is 0.5, so
+// two teams that each hold only one tie and rank by team id.
 func seedImmediateTrigger(t *testing.T, database *sql.DB, teamID, eventType, idSuffix string) {
 	t.Helper()
 	pid := "p-" + idSuffix
@@ -947,18 +945,18 @@ func seedImmediateTrigger(t *testing.T, database *sql.DB, teamID, eventType, idS
 	bp := insertBlueprintForTeam(t, database, "bp-"+idSuffix, pid, teamID)
 	if _, err := database.Exec(`
 		INSERT INTO event_handlers
-			(id, org_id, team_id, creator_user_id, kind, event_type,
-			 scope_predicate_json, enabled, source, blueprint_id, breaker_threshold, min_autonomy_suitability, created_at, updated_at)
-		VALUES (?, ?, ?, ?, 'trigger', ?, NULL, 1, 'user', ?, 4, 0, datetime('now'), datetime('now'))
-	`, "trig-"+idSuffix, runmode.LocalDefaultOrgID, teamID, runmode.LocalDefaultUserID, eventType, bp); err != nil {
+			(id, org_id, team_id, creator_user_id, mode, event_type,
+			 scope_predicate_json, source, name, default_priority, blueprint_id, breaker_threshold, min_autonomy_suitability, created_at, updated_at)
+		VALUES (?, ?, ?, ?, 'automate', ?, NULL, 'user', ?, 0.5, ?, 4, 0, datetime('now'), datetime('now'))
+	`, "trig-"+idSuffix, runmode.LocalDefaultOrgID, teamID, runmode.LocalDefaultUserID, eventType, "trigger "+idSuffix, bp); err != nil {
 		t.Fatalf("seed trigger %s for %s: %v", idSuffix, teamID, err)
 	}
 }
 
 // seedImmediateWatchTrigger is seedImmediateTrigger with applies_to_unowned=1 —
-// a trigger that opts its team into reaching unowned entities (TFAC-517 option
-// 1). With no companion rule, this alone makes the team a watcher that fires on
-// orphan PRs, the "configure it all on the prompts page" path.
+// an automate handler that opts its team into reaching unowned entities. With
+// no other handler, this alone makes the team a watcher that fires on orphan
+// PRs.
 func seedImmediateWatchTrigger(t *testing.T, database *sql.DB, teamID, eventType, idSuffix string) {
 	t.Helper()
 	pid := "p-" + idSuffix
@@ -966,10 +964,10 @@ func seedImmediateWatchTrigger(t *testing.T, database *sql.DB, teamID, eventType
 	bp := insertBlueprintForTeam(t, database, "bp-"+idSuffix, pid, teamID)
 	if _, err := database.Exec(`
 		INSERT INTO event_handlers
-			(id, org_id, team_id, creator_user_id, kind, event_type,
-			 scope_predicate_json, enabled, source, applies_to_unowned, blueprint_id, breaker_threshold, min_autonomy_suitability, created_at, updated_at)
-		VALUES (?, ?, ?, ?, 'trigger', ?, NULL, 1, 'user', 1, ?, 4, 0, datetime('now'), datetime('now'))
-	`, "trig-"+idSuffix, runmode.LocalDefaultOrgID, teamID, runmode.LocalDefaultUserID, eventType, bp); err != nil {
+			(id, org_id, team_id, creator_user_id, mode, event_type,
+			 scope_predicate_json, source, applies_to_unowned, name, default_priority, blueprint_id, breaker_threshold, min_autonomy_suitability, created_at, updated_at)
+		VALUES (?, ?, ?, ?, 'automate', ?, NULL, 'user', 1, ?, 0.5, ?, 4, 0, datetime('now'), datetime('now'))
+	`, "trig-"+idSuffix, runmode.LocalDefaultOrgID, teamID, runmode.LocalDefaultUserID, eventType, "watch trigger "+idSuffix, bp); err != nil {
 		t.Fatalf("seed watch trigger %s for %s: %v", idSuffix, teamID, err)
 	}
 }

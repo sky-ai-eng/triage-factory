@@ -13,12 +13,12 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
 )
 
-// recheckJiraDrift checks a Jira task rule or trigger a save just changed for
-// filter values that are gone, so a save that removes them resolves the
-// team's notification at once rather than at the next hourly check, and one
-// that enables a handler naming them raises it. prior is the row before the
-// save; a save that changed neither the filter nor whether the handler is
-// enabled changes nothing the check reads, and is not checked.
+// recheckJiraDrift checks a Jira event handler a save just changed for filter
+// values that are gone, so a save that removes them resolves the team's
+// notification at once rather than at the next hourly check, and one that
+// turns on a handler naming them raises it. prior is the row before the save;
+// a save that changed neither the filter nor whether the handler is off
+// changes nothing the check reads, and is not checked.
 //
 // It runs once the write has committed and never fails it: whatever it cannot
 // read is left for the hourly check. It runs before the response is written
@@ -30,11 +30,12 @@ func (eh *eventHandlersHandler) recheckJiraDrift(ctx context.Context, orgID, use
 	if !strings.HasPrefix(stored.EventType, "jira:") {
 		return
 	}
-	if prior.Enabled == stored.Enabled && prior.Kind == stored.Kind && samePredicate(prior.ScopePredicateJSON, stored.ScopePredicateJSON) {
+	off := func(h domain.EventHandler) bool { return h.Mode == domain.EventHandlerModeOff }
+	if off(prior) == off(stored) && samePredicate(prior.ScopePredicateJSON, stored.ScopePredicateJSON) {
 		return
 	}
-	if !stored.Enabled {
-		// A disabled handler matches nothing by choice; nothing to read.
+	if off(stored) {
+		// A handler that is off matches nothing by choice; nothing to read.
 		kinds.JiraPredicateDrift.Set(ctx, orgID, kinds.JiraHandlerFilter{HandlerID: stored.ID}, false)
 		return
 	}
@@ -72,7 +73,7 @@ func samePredicate(a, b *string) bool {
 }
 
 // resolveJiraDriftOnDelete resolves the drift notification of a deleted Jira
-// task rule or trigger: a handler that no longer exists filters on nothing.
+// event handler: a handler that no longer exists filters on nothing.
 func resolveJiraDriftOnDelete(ctx context.Context, orgID string, h domain.EventHandler) {
 	if strings.HasPrefix(h.EventType, "jira:") {
 		kinds.JiraPredicateDrift.Set(ctx, orgID, kinds.JiraHandlerFilter{HandlerID: h.ID}, false)

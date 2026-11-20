@@ -389,23 +389,20 @@ func TestMultiTeam_Postgres(t *testing.T) {
 
 	t.Run("event_handlers_list_scoped_to_active_team", func(t *testing.T) {
 		// Mirror of the prompts narrowing for the binding graph's handlers
-		// (exercised with rules — same team_id predicate, no prompt FK
-		// needed). List(teamA) shows team A's handlers (plus org-visible
-		// team_id-NULL ones), never team B's.
-		priority := 0.5
-		sortOrder := 0
+		// (exercised with watch handlers — same team_id predicate, no
+		// blueprint FK needed). List(teamA) shows team A's handlers, never
+		// team B's.
 		mkRule := func(team, name string) string {
 			id := uuid.New().String()
 			if e := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
 				_, e := pgstore.NewForTx(tx, pgtest.SecretKey).EventHandlers.Create(ctx, orgID, team, domain.EventHandler{
-					ID:              id,
-					Kind:            domain.EventHandlerKindRule,
-					EventType:       domain.EventGitHubPRCICheckFailed,
-					Name:            name,
-					DefaultPriority: &priority,
-					SortOrder:       &sortOrder,
-					Enabled:         true,
-					Source:          domain.EventHandlerSourceUser,
+					ID:               id,
+					Mode:             domain.EventHandlerModeWatch,
+					EventType:        domain.EventGitHubPRCICheckFailed,
+					Name:             name,
+					DefaultPriority:  0.5,
+					BreakerThreshold: 4,
+					Source:           domain.EventHandlerSourceUser,
 				})
 				return e
 			}); e != nil {
@@ -425,19 +422,19 @@ func TestMultiTeam_Postgres(t *testing.T) {
 		}
 		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
 			store := pgstore.NewForTx(tx, pgtest.SecretKey).EventHandlers
-			a, _, e := store.List(ctx, orgID, db.EventHandlerListFilter{Kind: domain.EventHandlerKindRule, TeamID: teamA}, db.ListOpts{Limit: 200})
+			a, _, e := store.List(ctx, orgID, db.EventHandlerListFilter{TeamID: teamA}, db.ListOpts{Limit: 200})
 			if e != nil {
 				return e
 			}
 			if ga := handlerIDs(a); !ga[rA] || ga[rB] {
-				t.Errorf("List(rule, teamA): want A without B; got A=%v B=%v", ga[rA], ga[rB])
+				t.Errorf("List(teamA): want A without B; got A=%v B=%v", ga[rA], ga[rB])
 			}
-			b, _, e := store.List(ctx, orgID, db.EventHandlerListFilter{Kind: domain.EventHandlerKindRule, TeamID: teamB}, db.ListOpts{Limit: 200})
+			b, _, e := store.List(ctx, orgID, db.EventHandlerListFilter{TeamID: teamB}, db.ListOpts{Limit: 200})
 			if e != nil {
 				return e
 			}
 			if gb := handlerIDs(b); !gb[rB] || gb[rA] {
-				t.Errorf("List(rule, teamB): want B without A; got B=%v A=%v", gb[rB], gb[rA])
+				t.Errorf("List(teamB): want B without A; got B=%v A=%v", gb[rB], gb[rA])
 			}
 			return nil
 		})

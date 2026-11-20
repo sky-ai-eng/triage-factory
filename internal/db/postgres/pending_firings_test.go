@@ -270,8 +270,8 @@ func newPgPendingFiringsSeeder(h *pgtest.Harness, stores db.Stores, orgID, userI
 			t.Fatalf("seed task: %v", err)
 		}
 		if _, err := conn.Exec(`
-			INSERT INTO event_handlers (id, org_id, creator_user_id, team_id, kind, event_type, source, blueprint_id, breaker_threshold, min_autonomy_suitability, enabled, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, 'trigger', 'github:pr:ci_check_failed', 'user', $5, 4, 0, true, now(), now())
+			INSERT INTO event_handlers (id, org_id, creator_user_id, team_id, mode, event_type, name, source, blueprint_id, breaker_threshold, min_autonomy_suitability, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, 'automate', 'github:pr:ci_check_failed', 'Pending firing', 'user', $5, 4, 0, now(), now())
 		`, triggerID, orgID, userID, teamID, blueprintID); err != nil {
 			t.Fatalf("seed trigger: %v", err)
 		}

@@ -838,29 +838,37 @@ export interface EventType {
   supports_watch: boolean
 }
 
-// Event handlers — unified successor to the former TaskRule
-// + PromptTrigger types. The backend stores both in one event_handlers
-// table; the FE keeps split UI pages but consumes the discriminated
-// union below. Each member is fully typed: TS catches cross-kind
-// access at compile time, no nullable per-kind fields leak out of the
-// discriminator.
+// EventHandlerMode is what a matching event does: off nothing, notify tells
+// the team's members, watch makes a task, automate makes a task and runs the
+// handler's blueprint on it.
+export type EventHandlerMode = 'off' | 'notify' | 'watch' | 'automate'
 
-interface EventHandlerBase {
+// EventHandler is one team's answer to one event type. Every handler holds
+// every field in every mode; a mode reads the ones it needs.
+export interface EventHandler {
   id: string
   // team_id: the owning team. Immutable; the predicate editor reads its
   // tracked Slack channels for channel_in.
   team_id: string
   event_type: string
+  mode: EventHandlerMode
+  name: string
   scope_predicate_json: string | null
-  enabled: boolean
-  source: 'system' | 'user'
-  // applies_to_unowned: the explicit "watch" scope flag (TFAC-517). When true,
-  // the rule reaches entities the team doesn't own (e.g. PRs/issues authored by
+  default_priority: number
+  sort_order: number
+  // blueprint_id: the blueprint the handler runs in automate, null when it has
+  // none.
+  blueprint_id: string | null
+  breaker_threshold: number
+  min_autonomy_suitability: number
+  // applies_to_unowned: the explicit reach flag. When true, the handler
+  // reaches entities the team doesn't own (e.g. PRs/issues authored by
   // anyone), surfacing them to the team's board. Default off — visibility
   // otherwise rides ownership.
   applies_to_unowned: boolean
+  source: 'system' | 'user'
   // creator_user_id: who authored a user-source handler; absent on a shipped
-  // one. A personal notify rule tells this user.
+  // one.
   creator_user_id?: string
   created_at: string
   updated_at: string
@@ -873,36 +881,6 @@ interface EventHandlerBase {
   // unconfigured source is the reader's to fix, so it is explained rather than
   // hidden. Undefined means no claim; render as available.
   source_available?: boolean
-}
-
-export interface RuleHandler extends EventHandlerBase {
-  kind: 'rule'
-  name: string
-  default_priority: number
-  sort_order: number
-}
-
-export interface TriggerHandler extends EventHandlerBase {
-  kind: 'trigger'
-  blueprint_id: string
-  trigger_type: string
-  breaker_threshold: number
-  min_autonomy_suitability: number
-}
-
-// NotifyHandler: a notify rule, which tells its team's members.
-export interface NotifyHandler extends EventHandlerBase {
-  kind: 'notify'
-  name: string
-}
-
-export type EventHandler = RuleHandler | TriggerHandler | NotifyHandler
-
-export function isRule(h: EventHandler): h is RuleHandler {
-  return h.kind === 'rule'
-}
-export function isTrigger(h: EventHandler): h is TriggerHandler {
-  return h.kind === 'trigger'
 }
 
 export interface FieldSchema {

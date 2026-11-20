@@ -318,13 +318,12 @@ func TestBootstrapNewOrg_SeedsFullStack(t *testing.T) {
 	}
 }
 
-// TestSeedShippedIntoTeam_DistinctUUIDsAcrossTeams pins the TFAC-658
-// acceptance property that a fresh org's first team (BootstrapNewOrg) and a
-// later second team (BootstrapNewTeam) both get the full shipped set — as
-// their own distinct rows, not shared/aliased ids — plus the per-kind
-// enabled state (rules enabled, triggers disabled) and each copy's per-prompt
-// model, which a seeder that dropped it would silently change what every
-// seeded step runs on.
+// TestSeedShippedIntoTeam_DistinctUUIDsAcrossTeams pins the property that a
+// fresh org's first team (BootstrapNewOrg) and a later second team
+// (BootstrapNewTeam) both get the full shipped set — as their own distinct
+// rows, not shared/aliased ids — plus each handler's shipped mode and its
+// own team's blueprint copy, and each copy's per-prompt model, which a seeder
+// that dropped it would silently change what every seeded step runs on.
 func TestSeedShippedIntoTeam_DistinctUUIDsAcrossTeams(t *testing.T) {
 	conn := openInMemorySQLite(t)
 	stores := sqlitestore.New(conn)
@@ -385,23 +384,22 @@ func TestSeedShippedIntoTeam_DistinctUUIDsAcrossTeams(t *testing.T) {
 		t.Errorf("both teams' system-ci-fix blueprint share id %q; want distinct per-team UUIDs", b1.ID)
 	}
 
-	// Rules ship enabled; triggers ship disabled — on both teams.
-	handlerEnabled := func(team, slug string) bool {
-		t.Helper()
-		var enabled bool
+	// Each team's handler ships in watch and references that team's own copy
+	// of its blueprint.
+	for team, blueprintID := range map[string]string{team1: b1.ID, newTeamID: b2.ID} {
+		var mode string
+		var handlerBlueprintID sql.NullString
 		if err := conn.QueryRowContext(ctx,
-			`SELECT enabled FROM event_handlers WHERE org_id = ? AND team_id = ? AND system_slug = ?`, org, team, slug,
-		).Scan(&enabled); err != nil {
-			t.Fatalf("read handler %s/%s: %v", team, slug, err)
+			`SELECT mode, blueprint_id FROM event_handlers WHERE org_id = ? AND team_id = ? AND system_slug = ?`,
+			org, team, "system-handler-ci-check-failed",
+		).Scan(&mode, &handlerBlueprintID); err != nil {
+			t.Fatalf("read handler %s/system-handler-ci-check-failed: %v", team, err)
 		}
-		return enabled
-	}
-	for _, team := range []string{team1, newTeamID} {
-		if !handlerEnabled(team, "system-rule-ci-check-failed") {
-			t.Errorf("team %s: shipped rule system-rule-ci-check-failed is disabled; want enabled", team)
+		if mode != domain.EventHandlerModeWatch {
+			t.Errorf("team %s: system-handler-ci-check-failed mode = %q, want %q", team, mode, domain.EventHandlerModeWatch)
 		}
-		if handlerEnabled(team, "system-trigger-ci-fix") {
-			t.Errorf("team %s: shipped trigger system-trigger-ci-fix is enabled; want disabled (shipped convention)", team)
+		if handlerBlueprintID.String != blueprintID {
+			t.Errorf("team %s: system-handler-ci-check-failed blueprint_id = %v, want the team's system-ci-fix copy %s", team, handlerBlueprintID, blueprintID)
 		}
 	}
 }

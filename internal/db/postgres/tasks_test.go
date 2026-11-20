@@ -235,11 +235,10 @@ func TestTaskRuleOrder_Postgres(t *testing.T) {
 			},
 			SeedRule: func(t *testing.T, teamID, eventType string, sortOrder int) string {
 				t.Helper()
-				priority := 0.5
 				rule, err := stores.EventHandlers.Create(t.Context(), orgID, teamID, domain.EventHandler{
-					ID: uuid.New().String(), Kind: domain.EventHandlerKindRule,
-					EventType: eventType, Enabled: true,
-					Name: "rule " + teamID[:8], DefaultPriority: &priority, SortOrder: &sortOrder,
+					ID: uuid.New().String(), Mode: domain.EventHandlerModeWatch,
+					EventType: eventType,
+					Name:      "rule " + teamID[:8], DefaultPriority: 0.5, SortOrder: sortOrder, BreakerThreshold: 4,
 				})
 				if err != nil {
 					t.Fatalf("seed rule on team %s: %v", teamID, err)

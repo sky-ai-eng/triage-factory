@@ -86,7 +86,7 @@ func TestBlueprintMerge_TriggeredSourceRejected(t *testing.T) {
 	source, _ := createWrappedBlueprint(t, s, "TriggeredSource")
 	// The canvas cannot attach a trigger to a merge source, but a headless
 	// caller can, so the endpoint must refuse rather than corrupt state.
-	attachTrigger(t, s, source, "github:pr:ci_check_failed")
+	attachHandler(t, s, source, "github:pr:ci_check_failed")
 
 	rec := doJSON(t, s, http.MethodPost, "/api/blueprints/"+host+"/merge", map[string]any{
 		"source_blueprint_id": source,
@@ -220,54 +220,14 @@ func TestBlueprintSplit_AtEndsRejected(t *testing.T) {
 
 // --- A: many events per blueprint ------------------------------------------
 
-func TestEventHandlerCreate_SecondTriggerOnBlueprint(t *testing.T) {
+func TestEventHandlerCreate_SecondHandlerOnBlueprint(t *testing.T) {
 	s := newTestServer(t)
 	configureEventSources(t, s)
-	seedBlueprintForTrigger(t, s, "bp-two-triggers")
-	first := attachTrigger(t, s, "bp-two-triggers", "github:pr:ci_check_failed")
-	second := doJSON(t, s, http.MethodPost, "/api/event-handlers/triggers", map[string]any{
-		"event_type":               "github:pr:review_changes_requested",
-		"blueprint_id":             "bp-two-triggers",
-		"breaker_threshold":        3,
-		"min_autonomy_suitability": 0.0,
-	})
-	if second.Code != http.StatusCreated {
-		t.Fatalf("second trigger: expected 201, got %d: %s", second.Code, second.Body.String())
-	}
-	if got := triggerIDsForBlueprint(t, s, "bp-two-triggers"); len(got) != 2 || !got[first] {
-		t.Errorf("triggers on the blueprint = %v, want the first and the second", got)
-	}
-}
-
-func TestEventHandlerPromote_OntoTriggeredBlueprint(t *testing.T) {
-	s := newTestServer(t)
-	configureEventSources(t, s)
-	seedBlueprintForTrigger(t, s, "bp-promote-onto")
-	attachTrigger(t, s, "bp-promote-onto", "github:pr:ci_check_failed")
-	rule := doJSON(t, s, http.MethodPost, "/api/event-handlers/rules", map[string]any{
-		"event_type":       "github:pr:review_changes_requested",
-		"name":             "to-promote",
-		"default_priority": 0.5,
-		"sort_order":       0,
-	})
-	if rule.Code != http.StatusCreated {
-		t.Fatalf("create rule: %d: %s", rule.Code, rule.Body.String())
-	}
-	var r struct {
-		ID string `json:"id"`
-	}
-	_ = json.Unmarshal(rule.Body.Bytes(), &r)
-
-	prom := doJSON(t, s, http.MethodPost, "/api/event-handlers/"+r.ID+"/promote", map[string]any{
-		"blueprint_id":             "bp-promote-onto",
-		"breaker_threshold":        3,
-		"min_autonomy_suitability": 0.0,
-	})
-	if prom.Code != http.StatusOK {
-		t.Fatalf("promote onto triggered blueprint: expected 200, got %d: %s", prom.Code, prom.Body.String())
-	}
-	if got := triggerIDsForBlueprint(t, s, "bp-promote-onto"); len(got) != 2 || !got[r.ID] {
-		t.Errorf("triggers on the blueprint = %v, want the existing one and the promoted %s", got, r.ID)
+	seedHandlerBlueprint(t, s, "bp-two-handlers")
+	first := attachHandler(t, s, "bp-two-handlers", "github:pr:ci_check_failed")
+	second := attachHandler(t, s, "bp-two-handlers", "github:pr:review_changes_requested")
+	if got := handlerIDsForBlueprint(t, s, "bp-two-handlers"); len(got) != 2 || !got[first] || !got[second] {
+		t.Errorf("handlers on the blueprint = %v, want the first and the second", got)
 	}
 }
 

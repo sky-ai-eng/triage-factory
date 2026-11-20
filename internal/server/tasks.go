@@ -715,20 +715,20 @@ func (s *Server) handleTaskCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 // teamDefaultPriority is the priority a task gets at creation when no scorer has
-// run yet: the highest default among the enabled rules that both belong to
-// teamID and match this event, floored at 0.5. It mirrors the predicate-match
-// filter in internal/routing so a task minted by hand lands at the same priority
-// the router would have given one minted by a poll.
+// run yet: the highest default among the handlers that make a task, belong to
+// teamID and match this event, or 0.5 when none does. It mirrors the
+// predicate-match filter in internal/routing so a task minted by hand lands at
+// the same priority the router would have given one minted by a poll.
 //
-// Only rules belonging to the acting team (or org-visible system rules with no
-// team) count: a rule owned by another team must not lift the priority of a task
-// created for this one. The predicate gate stays for the same reason in the other
-// direction — iterating every enabled rule would inflate priority whenever a
-// high-priority rule's scope_predicate doesn't match this event's metadata.
-// Empty predJSON always matches, per the events package contract.
+// Only handlers belonging to the acting team count: a handler owned by another
+// team must not lift the priority of a task created for this one. The predicate
+// gate stays for the same reason in the other direction — iterating every
+// active handler would inflate priority whenever a high-priority handler's
+// scope_predicate doesn't match this event's metadata. Empty predJSON always
+// matches, per the events package contract.
 func teamDefaultPriority(ctx context.Context, tx db.TxStores, orgID, teamID, eventType string, primaryEvent *domain.Event, schema events.EventSchema, schemaOK bool) (float64, error) {
-	priority := 0.5
-	handlers, err := tx.EventHandlers.GetEnabledForEvent(ctx, orgID, eventType)
+	priority, matchedAny := 0.5, false
+	handlers, err := tx.EventHandlers.GetActiveForEvent(ctx, orgID, eventType)
 	if err != nil {
 		return 0, err
 	}
@@ -737,20 +737,15 @@ func teamDefaultPriority(ctx context.Context, tx db.TxStores, orgID, teamID, eve
 		return 0, err
 	}
 	for _, h := range handlers {
-		if h.Kind != domain.EventHandlerKindRule || h.DefaultPriority == nil {
-			// Trigger rows have no DefaultPriority; skip.
+		if !h.MakesTask() {
 			continue
 		}
-		// Multi-mode system rules are seeded per-team (visibility='team', real
-		// team_id), so this counts the acting team's own shipped rules and
-		// excludes siblings'.
 		if h.TeamID != "" && h.TeamID != teamID {
 			continue
 		}
 		if !schemaOK {
 			// No registered schema → the predicate can't be evaluated. Mirrors
-			// matchPredicate's quietly-permissive behavior: skip the rule and
-			// fall back to the floor.
+			// matchPredicate's quietly-permissive behavior: skip the handler.
 			continue
 		}
 		predJSON := ""
@@ -762,8 +757,8 @@ func teamDefaultPriority(ctx context.Context, tx db.TxStores, orgID, teamID, eve
 			tasksLog.Warn("event_handler predicate error, skipping", "event_handler", h.ID, "error", merr)
 			continue
 		}
-		if matched && *h.DefaultPriority > priority {
-			priority = *h.DefaultPriority
+		if matched && (!matchedAny || h.DefaultPriority > priority) {
+			priority, matchedAny = h.DefaultPriority, true
 		}
 	}
 	return priority, nil

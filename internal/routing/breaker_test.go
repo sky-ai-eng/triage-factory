@@ -178,7 +178,7 @@ func TestBreaker_AnEventStillReachesTheTasksLiveConversation(t *testing.T) {
 		seedFinishedRun(t, database, task.ID, trigger, "event", "failed", i)
 	}
 	streak, err := sqlitestore.New(database).Tasks.BreakerStreakSystem(context.Background(), runmode.LocalDefaultOrgID, entityID, trigger.ID)
-	if err != nil || streak.Failures < derefIntDefault(trigger.BreakerThreshold, 0) {
+	if err != nil || streak.Failures < trigger.BreakerThreshold {
 		t.Fatalf("streak = %+v (%v), want the breaker holding for threshold %v", streak, err, trigger.BreakerThreshold)
 	}
 	secondEventID, err := sqlitestore.New(database).Events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
@@ -240,8 +240,9 @@ func TestBreaker_APersonsCompletedRunResetsIt(t *testing.T) {
 	rec.Inactive(t, runmode.LocalDefaultOrgID, kinds.BreakerTripped)
 }
 
-// TestBreaker_TheSyncResolvesWhatTheGateNeverSees: turning the trigger off
-// fires nothing that would reach the gate, so the sync is what resolves it.
+// TestBreaker_TheSyncResolvesWhatTheGateNeverSees: moving the handler out of
+// automate fires nothing that would reach the gate, so the sync is what
+// resolves it.
 func TestBreaker_TheSyncResolvesWhatTheGateNeverSees(t *testing.T) {
 	database := newTestDB(t)
 	rec := notifytest.Record(t)
@@ -251,7 +252,7 @@ func TestBreaker_TheSyncResolvesWhatTheGateNeverSees(t *testing.T) {
 	drainOnce(t, r)
 	rec.Active(t, runmode.LocalDefaultOrgID, kinds.BreakerTripped)
 
-	setTriggerEnabledForTestRouting(t, database, trigger.ID, false)
+	setHandlerModeForTestRouting(t, database, trigger.ID, domain.EventHandlerModeWatch)
 	r.syncBreakers(context.Background())
 	rec.Inactive(t, runmode.LocalDefaultOrgID, kinds.BreakerTripped)
 }

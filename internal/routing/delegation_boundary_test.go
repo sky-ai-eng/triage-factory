@@ -228,15 +228,21 @@ func TestTryAutoDelegate_ARefusedRunIsASkip(t *testing.T) {
 		t.Fatalf("create the stepless blueprint: %v", err)
 	}
 	refused, err := stores.EventHandlers.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.EventHandler{
-		ID: "t-empty", Kind: domain.EventHandlerKindTrigger, BlueprintID: "bp-empty",
-		TriggerType: domain.TriggerTypeEvent, EventType: domain.EventGitHubPRCICheckFailed,
-		BreakerThreshold: intPtr(4), MinAutonomySuitability: floatPtr(0), Enabled: true,
+		ID:                     "t-empty",
+		Name:                   "t-empty",
+		DefaultPriority:        0.5,
+		Mode:                   domain.EventHandlerModeAutomate,
+		BlueprintID:            "bp-empty",
+		EventType:              domain.EventGitHubPRCICheckFailed,
+		BreakerThreshold:       4,
+		MinAutonomySuitability: 0,
 	})
 	if err != nil {
 		t.Fatalf("create the refused trigger: %v", err)
 	}
-	// Triggers rank newest first, so the refused one is tried before t-fence.
-	if _, err := database.Exec(`UPDATE event_handlers SET created_at = datetime('now', '+1 hour') WHERE id = 't-empty'`); err != nil {
+	// A team's handlers rank by sort_order, so the refused one is tried
+	// before t-fence.
+	if _, err := database.Exec(`UPDATE event_handlers SET sort_order = 1 WHERE id = 't-fence'`); err != nil {
 		t.Fatalf("rank the refused trigger first: %v", err)
 	}
 

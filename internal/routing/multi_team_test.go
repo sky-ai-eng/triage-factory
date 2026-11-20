@@ -53,12 +53,12 @@ func TestHandleEvent_MultipleTeams_OneTask(t *testing.T) {
 		ruleID := uuid.New().String()
 		if _, err := database.Exec(`
 			INSERT INTO event_handlers
-				(id, org_id, team_id, creator_user_id, kind, event_type,
-				 scope_predicate_json, enabled, source, applies_to_unowned,
+				(id, org_id, team_id, creator_user_id, mode, event_type,
+				 scope_predicate_json, source, applies_to_unowned,
 				 name, default_priority, sort_order,
 				 created_at, updated_at)
-			VALUES (?, ?, ?, ?, 'rule', ?,
-			        NULL, 1, 'user', 1,
+			VALUES (?, ?, ?, ?, 'watch', ?,
+			        NULL, 'user', 1,
 			        ?, 0.7, 100,
 			        ?, ?)
 		`, ruleID, runmode.LocalDefaultOrgID, teamID, runmode.LocalDefaultUserID, domain.EventGitHubPRCICheckFailed,
@@ -255,12 +255,12 @@ func TestHandleEvent_BecameAtomic_Suppressed(t *testing.T) {
 		ruleID := uuid.New().String()
 		if _, err := database.Exec(`
 			INSERT INTO event_handlers
-				(id, org_id, team_id, creator_user_id, kind, event_type,
-				 scope_predicate_json, enabled, source, applies_to_unowned,
+				(id, org_id, team_id, creator_user_id, mode, event_type,
+				 scope_predicate_json, source, applies_to_unowned,
 				 name, default_priority, sort_order,
 				 created_at, updated_at)
-			VALUES (?, ?, ?, ?, 'rule', ?,
-			        NULL, 1, 'user', 1,
+			VALUES (?, ?, ?, ?, 'watch', ?,
+			        NULL, 'user', 1,
 			        ?, 0.7, 100, ?, ?)
 		`, ruleID, runmode.LocalDefaultOrgID, teamID, runmode.LocalDefaultUserID, domain.EventJiraIssueBecameAtomic,
 			"became_atomic "+teamID[:8], time.Now(), time.Now()); err != nil {
@@ -353,16 +353,16 @@ func TestTryAutoDelegate_PerTeamBotGate(t *testing.T) {
 
 	trigger := domain.EventHandler{
 		ID:                     "trigger-gate",
-		Kind:                   domain.EventHandlerKindTrigger,
+		Name:                   "trigger-gate",
+		DefaultPriority:        0.5,
+		Mode:                   domain.EventHandlerModeAutomate,
 		BlueprintID:            "p-gate",
-		TriggerType:            domain.TriggerTypeEvent,
 		EventType:              domain.EventGitHubPRCICheckFailed,
-		BreakerThreshold:       intPtr(4),
-		MinAutonomySuitability: floatPtr(0),
-		Enabled:                true,
+		BreakerThreshold:       4,
+		MinAutonomySuitability: 0,
 	}
-	createTriggerForTestRouting(t, database, trigger)
-	// createTriggerForTestRouting remaps BlueprintID to the wrapping blueprint's
+	createHandlerForTestRouting(t, database, trigger)
+	// createHandlerForTestRouting remaps BlueprintID to the wrapping blueprint's
 	// id in the DB, but the local struct still holds the prompt id. This test
 	// calls tryAutoDelegate directly (bypassing HandleEvent's re-read from the
 	// handler store), so resolve the real blueprint id onto the local trigger —
@@ -456,26 +456,30 @@ func TestHandleEvent_MultipleTeams_OneBotRun(t *testing.T) {
 	// forbids team B's trigger from binding team A's p-onerun.
 	insertPromptForTeam(t, database, "p-onerun-b", teamB)
 
-	// teamA's immediate trigger (createTriggerForTestRouting hard-codes
+	// teamA's immediate trigger (createHandlerForTestRouting hard-codes
 	// LocalDefaultTeamID = teamA). jira:issue:available is the unassigned
 	// team-pool signal — it stays on the default handler-team routing path
 	// (not the assignee ladder), so two teams genuinely contend for it.
-	createTriggerForTestRouting(t, database, domain.EventHandler{
-		ID: "trigger-A-onerun", Kind: domain.EventHandlerKindTrigger,
-		BlueprintID: "p-onerun", TriggerType: domain.TriggerTypeEvent,
-		EventType: domain.EventJiraIssueAvailable, BreakerThreshold: intPtr(4),
-		MinAutonomySuitability: floatPtr(0), Enabled: true,
+	createHandlerForTestRouting(t, database, domain.EventHandler{
+		ID:                     "trigger-A-onerun",
+		Name:                   "trigger-A-onerun",
+		DefaultPriority:        0.5,
+		Mode:                   domain.EventHandlerModeAutomate,
+		BlueprintID:            "p-onerun",
+		EventType:              domain.EventJiraIssueAvailable,
+		BreakerThreshold:       4,
+		MinAutonomySuitability: 0,
 	})
 	// teamB's immediate trigger (raw insert for the second team), bound to
 	// team B's own blueprint copy wrapping its own prompt.
 	bpOnerunB := insertBlueprintForTeam(t, database, "bp-onerun-b", "p-onerun-b", teamB)
 	if _, err := database.Exec(`
 		INSERT INTO event_handlers
-			(id, org_id, team_id, creator_user_id, kind, event_type,
-			 scope_predicate_json, enabled, source,
+			(id, org_id, team_id, creator_user_id, mode, event_type,
+			 scope_predicate_json, source, name, default_priority,
 			 blueprint_id, breaker_threshold, min_autonomy_suitability,
 			 created_at, updated_at)
-		VALUES (?, ?, ?, ?, 'trigger', ?, NULL, 1, 'user', ?, 4, 0, datetime('now'), datetime('now'))
+		VALUES (?, ?, ?, ?, 'automate', ?, NULL, 'user', 'B trigger', 0.5, ?, 4, 0, datetime('now'), datetime('now'))
 	`, "trigger-B-onerun", runmode.LocalDefaultOrgID, teamB, runmode.LocalDefaultUserID,
 		domain.EventJiraIssueAvailable, bpOnerunB); err != nil {
 		t.Fatalf("seed team B trigger: %v", err)
@@ -568,29 +572,25 @@ func TestHandleEvent_OwnerDisabled_RunAttributedToActingTeam(t *testing.T) {
 	// Team B's own prompt copy for its trigger (same-team FK).
 	insertPromptForTeam(t, database, "p-attr-b", teamB)
 
-	// Team A is the owner via a high-priority rule, and also has a
-	// trigger (which is skipped because team A's bot is disabled).
-	if _, err := database.Exec(`
-		INSERT INTO event_handlers
-			(id, org_id, team_id, creator_user_id, kind, event_type,
-			 scope_predicate_json, enabled, source, name, default_priority, sort_order, created_at, updated_at)
-		VALUES (?, ?, ?, ?, 'rule', ?, NULL, 1, 'user', 'A rule', 0.9, 100, datetime('now'), datetime('now'))
-	`, "rule-A-attr", runmode.LocalDefaultOrgID, teamA, runmode.LocalDefaultUserID, domain.EventJiraIssueAvailable); err != nil {
-		t.Fatalf("seed team A rule: %v", err)
-	}
-	createTriggerForTestRouting(t, database, domain.EventHandler{
-		ID: "trigger-A-attr", Kind: domain.EventHandlerKindTrigger,
-		BlueprintID: "p-attr", TriggerType: domain.TriggerTypeEvent,
-		EventType: domain.EventJiraIssueAvailable, BreakerThreshold: intPtr(4),
-		MinAutonomySuitability: floatPtr(0), Enabled: true,
+	// Team A is the owner via its higher-priority automate handler, whose
+	// firing is skipped because team A's bot is disabled.
+	createHandlerForTestRouting(t, database, domain.EventHandler{
+		ID:                     "trigger-A-attr",
+		Name:                   "trigger-A-attr",
+		DefaultPriority:        0.9,
+		Mode:                   domain.EventHandlerModeAutomate,
+		BlueprintID:            "p-attr",
+		EventType:              domain.EventJiraIssueAvailable,
+		BreakerThreshold:       4,
+		MinAutonomySuitability: 0,
 	})
-	// Team B (lower priority) also has a trigger and IS enabled.
+	// Team B's automate handler ranks lower and its bot IS enabled.
 	bpAttrB := insertBlueprintForTeam(t, database, "bp-attr-b", "p-attr-b", teamB)
 	if _, err := database.Exec(`
 		INSERT INTO event_handlers
-			(id, org_id, team_id, creator_user_id, kind, event_type,
-			 scope_predicate_json, enabled, source, blueprint_id, breaker_threshold, min_autonomy_suitability, created_at, updated_at)
-		VALUES (?, ?, ?, ?, 'trigger', ?, NULL, 1, 'user', ?, 4, 0, datetime('now'), datetime('now'))
+			(id, org_id, team_id, creator_user_id, mode, event_type,
+			 scope_predicate_json, source, name, default_priority, blueprint_id, breaker_threshold, min_autonomy_suitability, created_at, updated_at)
+		VALUES (?, ?, ?, ?, 'automate', ?, NULL, 'user', 'B trigger', 0.5, ?, 4, 0, datetime('now'), datetime('now'))
 	`, "trigger-B-attr", runmode.LocalDefaultOrgID, teamB, runmode.LocalDefaultUserID,
 		domain.EventJiraIssueAvailable, bpAttrB); err != nil {
 		t.Fatalf("seed team B trigger: %v", err)

@@ -23,11 +23,10 @@ func TestDelegate_EventPath_StampsTriggerIDOnStepRun(t *testing.T) {
 
 	// The firing trigger + the event instance it fired on (the fenced
 	// blueprint_run insert requires both).
-	breaker, minSuit := 3, 0.5
 	trigID := "trigprov-handler"
 	if _, err := stores.EventHandlers.Create(t.Context(), org, runmode.LocalDefaultTeamID, domain.EventHandler{
-		ID: trigID, Kind: domain.EventHandlerKindTrigger, EventType: domain.EventGitHubPRCICheckFailed,
-		BlueprintID: bpID, BreakerThreshold: &breaker, MinAutonomySuitability: &minSuit, Enabled: true,
+		ID: trigID, Mode: domain.EventHandlerModeAutomate, EventType: domain.EventGitHubPRCICheckFailed,
+		Name: "CI fix", DefaultPriority: 0.5, BlueprintID: bpID, BreakerThreshold: 3, MinAutonomySuitability: 0.5,
 	}); err != nil {
 		t.Fatalf("EventHandlers.Create: %v", err)
 	}

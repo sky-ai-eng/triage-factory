@@ -8,13 +8,12 @@ import TriggerConfigPanel from './TriggerConfigPanel'
 import ViewOnlyBadge from './ViewOnlyBadge'
 import { useTeamRole } from '../hooks/useTeamRole'
 import { toast } from './Toast/toastStore'
-import type { EventHandler, TriggerHandler, RuleHandler } from '../types'
-import { apiJSON, apiListAll } from '../lib/apiClient'
-import { handlersBase } from '../lib/scope'
+import type { EventHandler } from '../types'
+import { countEventHandlers, getEventHandler, hasBlueprint } from '../lib/eventHandlers'
 
 // PromptsWorkspace is the single-team prompt/auto-delegation editor: the
-// BindingGraph canvas plus the drawers that create/edit prompts, triggers, and
-// task rules, and the forgiving banner that warns when an event type loses all
+// BindingGraph canvas plus the drawers that create/edit prompts and event
+// handlers, and the forgiving banner that warns when an event type loses all
 // coverage. Extracted from the standalone /prompts page (TFAC-445) so it can be
 // dropped into the /team page's Prompts tab unchanged — both surfaces are the
 // same editor over one team's rows; only the team-selection chrome differs (the
@@ -32,10 +31,10 @@ interface PromptsWorkspaceProps {
   // tab leaves them out (the page header owns both).
   toolbarLeft?: ReactNode
   toolbarRight?: ReactNode
-  // openTriggerId opens that trigger's config panel, as a link to it asks.
-  // onTriggerOpened is called once the trigger has been read, with its team,
-  // or null when there is no trigger to open, so the caller can switch to the
-  // team and drop the link.
+  // openTriggerId opens that event handler's config panel, as a link to it
+  // asks. onTriggerOpened is called once the handler has been read, with its
+  // team, or null when there is no handler to open, so the caller can switch
+  // to the team and drop the link.
   openTriggerId?: string | null
   onTriggerOpened?: (triggerTeam: string | null) => void
 }
@@ -67,19 +66,19 @@ export default function PromptsWorkspace({
   const { isViewer, roleForTeam, loaded: rolesLoaded } = useTeamRole()
   const readOnly = isViewer(teamId)
 
-  // Trigger config panel state. foreignTrigger is a linked trigger of a team
+  // Handler config panel state. foreignTrigger is a linked handler of a team
   // the viewer is not on: the page cannot switch to that team, so the panel
   // opens it read-only rather than by the active team's role.
-  const [editingTrigger, setEditingTrigger] = useState<TriggerHandler | null>(null)
+  const [editingTrigger, setEditingTrigger] = useState<EventHandler | null>(null)
   const [foreignTrigger, setForeignTrigger] = useState(false)
-  const openTrigger = useCallback((t: TriggerHandler | null, foreign = false) => {
+  const openTrigger = useCallback((t: EventHandler | null, foreign = false) => {
     setEditingTrigger(t)
     setForeignTrigger(foreign)
   }, [])
 
   // The read runs once per linked id: the callbacks it ends with are read
   // through refs, so a new identity for either neither refetches nor reports
-  // the trigger twice.
+  // the handler twice.
   const linkRef = useRef({ onTriggerOpened, roleForTeam })
   useEffect(() => {
     linkRef.current = { onTriggerOpened, roleForTeam }
@@ -87,12 +86,14 @@ export default function PromptsWorkspace({
   useEffect(() => {
     if (!openTriggerId) return
     let cancelled = false
-    apiJSON<EventHandler>(`${handlersBase()}/${encodeURIComponent(openTriggerId)}`)
+    getEventHandler(openTriggerId)
       .then((h) => {
         if (cancelled) return
         const { onTriggerOpened, roleForTeam } = linkRef.current
-        if (h.kind !== 'trigger') {
-          toast.error('That link is to a task rule, not a trigger.')
+        // The graph draws a handler only by its blueprint, so one with none
+        // has nowhere to open here.
+        if (!hasBlueprint(h)) {
+          toast.error('That event handler has no blueprint to show on the canvas.')
           onTriggerOpened?.(null)
           return
         }
@@ -101,7 +102,7 @@ export default function PromptsWorkspace({
       })
       .catch((err) => {
         if (cancelled) return
-        toast.failed(err, 'Could not open the linked trigger.')
+        toast.failed(err, 'Could not open the linked event handler.')
         linkRef.current.onTriggerOpened?.(null)
       })
     return () => {
@@ -138,26 +139,18 @@ export default function PromptsWorkspace({
     setGraphKey((k) => k + 1)
   }
 
-  // After a trigger is deleted, check if the event_type is still covered by
-  // any remaining triggers or enabled task_rules — scoped to the active
-  // team, since coverage is per-team. If not, show the banner.
+  // After a handler is deleted or detached, check whether the event_type
+  // still makes a task for the active team — coverage is per-team. If not,
+  // show the banner. One count-only read asks the question whole.
   const handleTriggerDeleted = useCallback(
     async (eventType: string) => {
-      const teamFilter = teamId ? { team_id: teamId } : {}
       try {
-        // Walked to completion on both: this asks whether ANY remaining handler
-        // still covers the event type, and a partial read would answer "no
-        // coverage" for a handler that simply sat on a later page.
-        const [triggersRes, rulesRes] = await Promise.all([
-          apiListAll<TriggerHandler>('/api/event-handlers/list', {
-            kind: 'trigger',
-            ...teamFilter,
-          }),
-          apiListAll<RuleHandler>('/api/event-handlers/list', { kind: 'rule', ...teamFilter }),
-        ])
-        const hasTrigger = triggersRes.some((t) => t.event_type === eventType && t.enabled)
-        const hasRule = rulesRes.some((r) => r.event_type === eventType && r.enabled)
-        if (!hasTrigger && !hasRule) {
+        const covering = await countEventHandlers({
+          ...(teamId ? { team_id: teamId } : {}),
+          event_type: eventType,
+          modes: ['watch', 'automate'],
+        })
+        if (covering === 0) {
           setBannerEventType(eventType)
         }
       } catch {
@@ -222,7 +215,7 @@ export default function PromptsWorkspace({
         onDeleted={handleDeleted}
       />
 
-      {/* Task rule editor — opened by forgiving banner's "Create task rule" action */}
+      {/* Event handler editor — opened by the forgiving banner's create action */}
       <TaskRuleEditor
         open={ruleEditorOpen}
         rule={null}
@@ -235,7 +228,7 @@ export default function PromptsWorkspace({
         }}
       />
 
-      {/* Trigger config panel — opened by clicking a trigger edge */}
+      {/* Handler config panel — opened by clicking a handler edge */}
       <TriggerConfigPanel
         open={editingTrigger !== null}
         trigger={editingTrigger}

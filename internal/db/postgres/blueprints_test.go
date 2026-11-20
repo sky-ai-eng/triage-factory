@@ -624,9 +624,9 @@ func TestBlueprintStore_Postgres_FiredRunCreatorUnderRLS(t *testing.T) {
 	eventRunID := uuid.NewString()
 	triggerID := uuid.NewString()
 	pgtest.MustExec(t, h.AdminDB, `
-		INSERT INTO event_handlers (id, org_id, team_id, creator_user_id, kind, event_type, enabled, source,
+		INSERT INTO event_handlers (id, org_id, team_id, creator_user_id, mode, event_type, name, source,
 		                            blueprint_id, breaker_threshold, min_autonomy_suitability, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, 'trigger', $5, true, 'user', $6, 4, 0, now(), now())
+		VALUES ($1, $2, $3, $4, 'automate', $5, 'Firing', 'user', $6, 4, 0, now(), now())
 	`, triggerID, orgID, pgBlueprintTeam(t, h, blueprintID), userID, domain.EventGitHubPRCICheckFailed, blueprintID)
 	var eventID string
 	if err := h.AdminDB.QueryRow(`SELECT primary_event_id::text FROM tasks WHERE id = $1`, taskID).Scan(&eventID); err != nil {

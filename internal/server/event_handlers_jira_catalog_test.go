@@ -92,7 +92,7 @@ func TestEventHandlerJiraCatalog_AcceptsIDsTheEditorOffers(t *testing.T) {
 // check's fault for an untracked project, and nothing is written.
 func TestEventHandlerJiraCatalog_RefusesNamesAndUntrackedIDs(t *testing.T) {
 	r := newJiraCatalogRig(t)
-	before := len(listEventHandlers(t, r.s, "rule"))
+	before := len(listEventHandlers(t, r.s))
 
 	code, got := r.createRule(t, domain.EventJiraIssueAvailable, map[string]any{
 		"jira_project_id_in": []string{r.ops},
@@ -108,8 +108,8 @@ func TestEventHandlerJiraCatalog_RefusesNamesAndUntrackedIDs(t *testing.T) {
 		fieldFault{"priority_id_in", "High"},
 		fieldFault{"priority_id_in", "99"},
 	)
-	if after := len(listEventHandlers(t, r.s, "rule")); after != before {
-		t.Errorf("a refused create changed the rule count from %d to %d", before, after)
+	if after := len(listEventHandlers(t, r.s)); after != before {
+		t.Errorf("a refused create changed the handler count from %d to %d", before, after)
 	}
 }
 
@@ -275,14 +275,3 @@ func TestEventHandlerJiraCatalog_TurnedOffSourceIsNotAsked(t *testing.T) {
 	}
 }
 
-// A trigger's predicate is checked like a rule's.
-func TestEventHandlerJiraCatalog_TriggerCreateIsChecked(t *testing.T) {
-	r := newJiraCatalogRig(t)
-	seedBlueprintForTrigger(t, r.s, "bp-jira-catalog")
-	code, got := r.do(t, http.MethodPost, "/api/event-handlers/triggers", map[string]any{
-		"event_type":      domain.EventJiraIssueAssigned,
-		"blueprint_id":    "bp-jira-catalog",
-		"scope_predicate": map[string]any{"status_id_in": []string{"In Progress"}},
-	})
-	wantFieldFaults(t, code, got, fieldFault{"status_id_in", "In Progress"})
-}

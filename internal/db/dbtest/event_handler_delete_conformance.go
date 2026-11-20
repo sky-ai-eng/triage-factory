@@ -40,15 +40,14 @@ func RunTriggerDeleteConformance(t *testing.T, factory TriggerDeleteFactory) {
 	t.Run("Delete_TriggerARunReferences", func(t *testing.T) {
 		fx := factory(t)
 		ctx := context.Background()
-		breaker, minAutonomy := 3, 0.0
 		blueprintID := fx.Blueprint(t)
 		trigger, err := fx.Handlers.Create(ctx, fx.OrgID, fx.TeamID, domain.EventHandler{
-			ID: uuid.New().String(), Kind: domain.EventHandlerKindTrigger,
+			ID: uuid.New().String(), Mode: domain.EventHandlerModeAutomate, Name: "ran",
 			BlueprintID: blueprintID, EventType: domain.EventGitHubPRCICheckFailed,
-			Enabled: true, BreakerThreshold: &breaker, MinAutonomySuitability: &minAutonomy,
+			DefaultPriority: 0.5, BreakerThreshold: 3,
 		})
 		if err != nil {
-			t.Fatalf("Create trigger: %v", err)
+			t.Fatalf("Create handler: %v", err)
 		}
 		conversationID := fx.Run(t, trigger.ID)
 
@@ -71,13 +70,13 @@ func RunTriggerDeleteConformance(t *testing.T, factory TriggerDeleteFactory) {
 		if bound, err := fx.Handlers.ListForBlueprint(ctx, fx.OrgID, blueprintID); err != nil || len(bound) != 0 {
 			t.Errorf("ListForBlueprint after Delete = %d rows, %v; want 0", len(bound), err)
 		}
-		enabled, err := fx.Handlers.GetEnabledForEvent(ctx, fx.OrgID, domain.EventGitHubPRCICheckFailed)
+		enabled, err := fx.Handlers.GetActiveForEvent(ctx, fx.OrgID, domain.EventGitHubPRCICheckFailed)
 		if err != nil {
-			t.Fatalf("GetEnabledForEvent: %v", err)
+			t.Fatalf("GetActiveForEvent: %v", err)
 		}
 		for _, h := range enabled {
 			if h.ID == trigger.ID {
-				t.Errorf("GetEnabledForEvent after Delete still includes trigger %s", trigger.ID)
+				t.Errorf("GetActiveForEvent after Delete still includes trigger %s", trigger.ID)
 			}
 		}
 

@@ -722,22 +722,23 @@ func TestChannelsHandler_FirstTrack_SeedsDefaultBlueprint(t *testing.T) {
 	if err := r.stor.Tx.WithTx(t.Context(), orgID, owner, func(tx db.TxStores) error {
 		var e error
 		handlers, _, e = tx.EventHandlers.List(t.Context(), orgID,
-			db.EventHandlerListFilter{Kind: domain.EventHandlerKindTrigger, TeamID: teamID}, db.ListOpts{Limit: 200})
+			db.EventHandlerListFilter{EventType: domain.EventSlackMessage, TeamID: teamID}, db.ListOpts{Limit: 200})
 		return e
 	}); err != nil {
 		t.Fatalf("list event handlers: %v", err)
 	}
-	var mention *domain.EventHandler
-	for i := range handlers {
-		if handlers[i].EventType == domain.EventSlackMessage {
-			mention = &handlers[i]
-		}
+	if len(handlers) != 1 {
+		t.Fatalf("slack:message handlers seeded = %d, want 1; handlers=%+v", len(handlers), handlers)
 	}
-	if mention == nil {
-		t.Fatalf("no slack:message trigger seeded; handlers=%+v", handlers)
+	mention := &handlers[0]
+	if mention.Mode != domain.EventHandlerModeAutomate {
+		t.Errorf("seeded handler mode = %q, want %q", mention.Mode, domain.EventHandlerModeAutomate)
 	}
-	if !mention.Enabled {
-		t.Errorf("seeded trigger Enabled = false, want true")
+	if mention.Name != "Slack assistant" {
+		t.Errorf("seeded handler name = %q, want %q", mention.Name, "Slack assistant")
+	}
+	if mention.DefaultPriority != 0.5 {
+		t.Errorf("seeded handler default_priority = %v, want 0.5", mention.DefaultPriority)
 	}
 	// jsonb round-trips through Postgres's own canonical formatting (e.g. a
 	// space after ":"), so compare decoded rather than as an exact string.
@@ -778,7 +779,7 @@ func TestChannelsHandler_FirstTrack_SeedsDefaultBlueprint(t *testing.T) {
 	}
 }
 
-func TestChannelsHandler_SecondPUT_NoDuplicateTrigger(t *testing.T) {
+func TestChannelsHandler_SecondPUT_NoDuplicateHandler(t *testing.T) {
 	r := newSlackChannelsRig(t)
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "chan-nodup")
 	r.listChannels(orgID, owner, "C1", "C2")
@@ -801,51 +802,34 @@ func TestChannelsHandler_SecondPUT_NoDuplicateTrigger(t *testing.T) {
 	if err := r.stor.Tx.WithTx(t.Context(), orgID, owner, func(tx db.TxStores) error {
 		var e error
 		handlers, _, e = tx.EventHandlers.List(t.Context(), orgID,
-			db.EventHandlerListFilter{Kind: domain.EventHandlerKindTrigger, TeamID: teamID}, db.ListOpts{Limit: 200})
+			db.EventHandlerListFilter{EventType: domain.EventSlackMessage, TeamID: teamID}, db.ListOpts{Limit: 200})
 		return e
 	}); err != nil {
 		t.Fatalf("list event handlers: %v", err)
 	}
-	count := 0
-	for _, h := range handlers {
-		if h.EventType == domain.EventSlackMessage {
-			count++
-		}
-	}
-	if count != 1 {
-		t.Errorf("slack:message triggers after second PUT = %d, want 1 (no duplicate)", count)
+	if len(handlers) != 1 {
+		t.Errorf("slack:message handlers after second PUT = %d, want 1 (no duplicate)", len(handlers))
 	}
 }
 
-func TestChannelsHandler_PreexistingTrigger_NoSeed(t *testing.T) {
+func TestChannelsHandler_PreexistingHandler_NoSeed(t *testing.T) {
 	r := newSlackChannelsRig(t)
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "chan-preexisting")
 	r.listChannels(orgID, owner, "C1")
 
-	// Team already configured its own slack:message trigger before ever
-	// tracking a channel.
-	promptID := "00000000-0000-0000-0000-0000000000c1"
-	blueprintID := "00000000-0000-0000-0000-0000000000c2"
+	// The team configured its own slack:message handler before ever tracking
+	// a channel, and turned it off. A handler in any mode is the team's
+	// answer to the event, so no default is seeded beside it.
+	preexistingID := "00000000-0000-0000-0000-0000000000c3"
 	if err := r.stor.Tx.WithTx(t.Context(), orgID, owner, func(tx db.TxStores) error {
-		if _, err := tx.Prompts.Create(t.Context(), orgID, teamID, domain.Prompt{ID: promptID, Name: "custom", Body: "custom body", Source: "user"}); err != nil {
-			return err
-		}
-		if _, err := tx.Blueprints.Create(t.Context(), orgID, teamID, domain.Blueprint{ID: blueprintID, Name: "custom", Source: "user"}); err != nil {
-			return err
-		}
-		if _, err := tx.Blueprints.ReplaceSteps(t.Context(), orgID, blueprintID, []string{promptID}, []string{""}); err != nil {
-			return err
-		}
-		threshold, minAutonomy := 5, 0.2
 		_, e := tx.EventHandlers.Create(t.Context(), orgID, teamID, domain.EventHandler{
-			ID: "00000000-0000-0000-0000-0000000000c3", Kind: domain.EventHandlerKindTrigger,
-			EventType: domain.EventSlackMessage, Enabled: true, Source: domain.EventHandlerSourceUser,
-			BlueprintID: blueprintID, TriggerType: domain.TriggerTypeEvent,
-			BreakerThreshold: &threshold, MinAutonomySuitability: &minAutonomy,
+			ID: preexistingID, Mode: domain.EventHandlerModeOff,
+			EventType: domain.EventSlackMessage, Source: domain.EventHandlerSourceUser,
+			Name: "custom", DefaultPriority: 0.5, BreakerThreshold: 5, MinAutonomySuitability: 0.2,
 		})
 		return e
 	}); err != nil {
-		t.Fatalf("seed pre-existing trigger: %v", err)
+		t.Fatalf("seed pre-existing handler: %v", err)
 	}
 
 	rec := httptest.NewRecorder()
@@ -859,19 +843,13 @@ func TestChannelsHandler_PreexistingTrigger_NoSeed(t *testing.T) {
 	if err := r.stor.Tx.WithTx(t.Context(), orgID, owner, func(tx db.TxStores) error {
 		var e error
 		handlers, _, e = tx.EventHandlers.List(t.Context(), orgID,
-			db.EventHandlerListFilter{Kind: domain.EventHandlerKindTrigger, TeamID: teamID}, db.ListOpts{Limit: 200})
+			db.EventHandlerListFilter{EventType: domain.EventSlackMessage, TeamID: teamID}, db.ListOpts{Limit: 200})
 		return e
 	}); err != nil {
 		t.Fatalf("list event handlers: %v", err)
 	}
-	count := 0
-	for _, h := range handlers {
-		if h.EventType == domain.EventSlackMessage {
-			count++
-		}
-	}
-	if count != 1 {
-		t.Errorf("slack:message triggers = %d, want 1 (pre-existing kept, no default seeded)", count)
+	if len(handlers) != 1 || handlers[0].ID != preexistingID {
+		t.Errorf("slack:message handlers = %+v, want only the pre-existing one (no default seeded)", handlers)
 	}
 }
 
@@ -890,7 +868,7 @@ func TestChannelsHandler_DefaultDeleted_NoReseed(t *testing.T) {
 	var seeded *domain.EventHandler
 	if err := r.stor.Tx.WithTx(t.Context(), orgID, owner, func(tx db.TxStores) error {
 		handlers, _, e := tx.EventHandlers.List(t.Context(), orgID,
-			db.EventHandlerListFilter{Kind: domain.EventHandlerKindTrigger, TeamID: teamID}, db.ListOpts{Limit: 200})
+			db.EventHandlerListFilter{EventType: domain.EventSlackMessage, TeamID: teamID}, db.ListOpts{Limit: 200})
 		if e != nil {
 			return e
 		}
@@ -901,13 +879,13 @@ func TestChannelsHandler_DefaultDeleted_NoReseed(t *testing.T) {
 		}
 		return nil
 	}); err != nil || seeded == nil {
-		t.Fatalf("find seeded trigger: %v (seeded=%v)", err, seeded)
+		t.Fatalf("find seeded handler: %v (seeded=%v)", err, seeded)
 	}
 
 	if err := r.stor.Tx.WithTx(t.Context(), orgID, owner, func(tx db.TxStores) error {
 		return tx.EventHandlers.Delete(t.Context(), orgID, seeded.ID)
 	}); err != nil {
-		t.Fatalf("delete seeded trigger: %v", err)
+		t.Fatalf("delete seeded handler: %v", err)
 	}
 
 	// The team is still tracking C1 (unchanged), so the prior set is
@@ -924,19 +902,13 @@ func TestChannelsHandler_DefaultDeleted_NoReseed(t *testing.T) {
 	if err := r.stor.Tx.WithTx(t.Context(), orgID, owner, func(tx db.TxStores) error {
 		var e error
 		handlers, _, e = tx.EventHandlers.List(t.Context(), orgID,
-			db.EventHandlerListFilter{Kind: domain.EventHandlerKindTrigger, TeamID: teamID}, db.ListOpts{Limit: 200})
+			db.EventHandlerListFilter{EventType: domain.EventSlackMessage, TeamID: teamID}, db.ListOpts{Limit: 200})
 		return e
 	}); err != nil {
 		t.Fatalf("list event handlers: %v", err)
 	}
-	count := 0
-	for _, h := range handlers {
-		if h.EventType == domain.EventSlackMessage {
-			count++
-		}
-	}
-	if count != 0 {
-		t.Errorf("slack:message triggers after delete + re-PUT = %d, want 0 (no resurrection)", count)
+	if len(handlers) != 0 {
+		t.Errorf("slack:message handlers after delete + re-PUT = %d, want 0 (no resurrection)", len(handlers))
 	}
 }
 

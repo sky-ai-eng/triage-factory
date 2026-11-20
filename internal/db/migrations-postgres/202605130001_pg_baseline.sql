@@ -735,22 +735,25 @@ CREATE TABLE public.event_handlers (
     org_id uuid NOT NULL,
     creator_user_id uuid,
     team_id uuid NOT NULL,
-    kind text NOT NULL,
+    -- What a matching event does: off nothing, notify tells the team's
+    -- members, watch makes a task, automate makes a task and runs the
+    -- handler's blueprint on it.
+    mode text NOT NULL,
     event_type text NOT NULL,
     scope_predicate_json jsonb,
-    enabled boolean DEFAULT true NOT NULL,
     source text DEFAULT 'user'::text NOT NULL,
-    -- Per-rule routing scope. TRUE adds the rule's team to a task's visibility even
-    -- for entities the team doesn't own; FALSE keeps visibility riding ownership.
-    -- Routing gates explicitWatchTeams on this column, not on source.
+    -- Per-handler routing scope. TRUE adds the handler's team to a task's
+    -- visibility even for entities the team doesn't own; FALSE keeps visibility
+    -- riding ownership. Routing gates explicitWatchTeams on this column, not on
+    -- source.
     applies_to_unowned boolean DEFAULT false NOT NULL,
     system_slug text,
-    name text,
-    default_priority double precision,
-    sort_order integer,
+    name text NOT NULL,
+    default_priority double precision DEFAULT 0.5 NOT NULL,
+    sort_order integer DEFAULT 0 NOT NULL,
     blueprint_id text,
-    breaker_threshold integer,
-    min_autonomy_suitability double precision,
+    breaker_threshold integer DEFAULT 4 NOT NULL,
+    min_autonomy_suitability double precision DEFAULT 0 NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     -- As on prompts and blueprints: user_modified is the shipped-content sync's
@@ -758,15 +761,13 @@ CREATE TABLE public.event_handlers (
     -- (org_id, team_id, system_slug) occupied so sync never resurrects the row.
     user_modified boolean DEFAULT false NOT NULL,
     deleted_at timestamp with time zone,
-    CONSTRAINT event_handlers_kind_check CHECK ((kind = ANY (ARRAY['rule'::text, 'trigger'::text, 'notify'::text]))),
-    -- A notify rule is user-authored, never shipped content, and tells its
-    -- team's members about an event without touching tasks.
-    CONSTRAINT event_handlers_notify_shape CHECK (((kind <> 'notify'::text) OR ((blueprint_id IS NULL) AND (breaker_threshold IS NULL) AND (min_autonomy_suitability IS NULL) AND (default_priority IS NULL) AND (sort_order IS NULL) AND (name IS NOT NULL) AND (source <> 'system'::text) AND (NOT applies_to_unowned)))),
-    CONSTRAINT event_handlers_rule_shape CHECK (((kind <> 'rule'::text) OR ((blueprint_id IS NULL) AND (breaker_threshold IS NULL) AND (min_autonomy_suitability IS NULL) AND (name IS NOT NULL) AND (default_priority IS NOT NULL) AND (sort_order IS NOT NULL)))),
+    CONSTRAINT event_handlers_mode_check CHECK ((mode = ANY (ARRAY['off'::text, 'notify'::text, 'watch'::text, 'automate'::text]))),
+    -- A handler runs a blueprint only in automate, and keeps one it has in
+    -- every other mode.
+    CONSTRAINT event_handlers_automate_has_blueprint CHECK (((mode <> 'automate'::text) OR (blueprint_id IS NOT NULL))),
     -- source is app-validated, not CHECK-constrained, so new provenance values are
     -- addable without DDL. The creator pairing below tolerates any non-system source.
-    CONSTRAINT event_handlers_system_has_no_creator CHECK ((((source = 'system'::text) AND (creator_user_id IS NULL)) OR ((source <> 'system'::text) AND (creator_user_id IS NOT NULL)))),
-    CONSTRAINT event_handlers_trigger_shape CHECK (((kind <> 'trigger'::text) OR ((blueprint_id IS NOT NULL) AND (breaker_threshold IS NOT NULL) AND (min_autonomy_suitability IS NOT NULL) AND (default_priority IS NULL) AND (sort_order IS NULL) AND (name IS NULL))))
+    CONSTRAINT event_handlers_system_has_no_creator CHECK ((((source = 'system'::text) AND (creator_user_id IS NULL)) OR ((source <> 'system'::text) AND (creator_user_id IS NOT NULL))))
 );
 
 
@@ -2162,10 +2163,10 @@ CREATE INDEX idx_entity_links_from_kind ON public.entity_links USING btree (from
 CREATE INDEX idx_entity_links_to_kind ON public.entity_links USING btree (to_entity_id, kind);
 
 
-CREATE INDEX idx_event_handlers_org_event_enabled ON public.event_handlers USING btree (org_id, event_type) WHERE (enabled = true);
+CREATE INDEX idx_event_handlers_org_event_active ON public.event_handlers USING btree (org_id, event_type) WHERE (mode <> 'off'::text);
 
 
-CREATE INDEX idx_event_handlers_org_kind ON public.event_handlers USING btree (org_id, kind);
+CREATE INDEX idx_event_handlers_org_mode ON public.event_handlers USING btree (org_id, mode);
 
 
 CREATE INDEX idx_event_handlers_blueprint ON public.event_handlers USING btree (org_id, blueprint_id) WHERE (blueprint_id IS NOT NULL);

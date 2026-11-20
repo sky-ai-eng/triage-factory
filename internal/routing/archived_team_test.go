@@ -227,10 +227,10 @@ func TestArchivedTeam_RegisteredSourceOwnerIsNoAnswer(t *testing.T) {
 	RegisterSource("fake", fakeSourceHooks(teamB, true))
 	if _, err := database.Exec(`
 		INSERT INTO event_handlers
-			(id, org_id, team_id, creator_user_id, kind, event_type,
-			 scope_predicate_json, enabled, source, applies_to_unowned, name, default_priority, sort_order,
+			(id, org_id, team_id, creator_user_id, mode, event_type,
+			 scope_predicate_json, source, applies_to_unowned, name, default_priority, sort_order,
 			 created_at, updated_at)
-		VALUES (?, ?, ?, ?, 'rule', ?, NULL, 1, 'user', 1, 'fake watch', 0.6, 100, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		VALUES (?, ?, ?, ?, 'watch', ?, NULL, 'user', 1, 'fake watch', 0.6, 100, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 	`, "fake-watch-"+teamA[:8], runmode.LocalDefaultOrgID, teamA, runmode.LocalDefaultUserID, fakeEventType); err != nil {
 		t.Fatalf("seed watch rule: %v", err)
 	}

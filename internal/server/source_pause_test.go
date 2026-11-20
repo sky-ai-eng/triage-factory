@@ -242,7 +242,7 @@ func TestEventHandlerCreate_RefusesDisabledSource(t *testing.T) {
 		t.Fatalf("PATCH: %d: %s", rec.Code, rec.Body.String())
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/rules", map[string]any{
+	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers", map[string]any{
 		"name":       "paused rule",
 		"event_type": domain.EventJiraIssueAssigned,
 	})

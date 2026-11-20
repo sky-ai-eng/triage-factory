@@ -65,16 +65,16 @@ func setupClaimScenario(t *testing.T, suffix string) claimScenario {
 
 	trigger := domain.EventHandler{
 		ID:                     "trig-" + suffix,
-		Kind:                   domain.EventHandlerKindTrigger,
+		Name:                   "trig-" + suffix,
+		DefaultPriority:        0.5,
+		Mode:                   domain.EventHandlerModeAutomate,
 		BlueprintID:            "p-" + suffix,
-		TriggerType:            domain.TriggerTypeEvent,
 		EventType:              domain.EventGitHubPRCICheckFailed,
-		BreakerThreshold:       intPtr(4),
-		MinAutonomySuitability: floatPtr(0),
-		Enabled:                true,
+		BreakerThreshold:       4,
+		MinAutonomySuitability: 0,
 	}
-	createTriggerForTestRouting(t, database, trigger)
-	// createTriggerForTestRouting remaps BlueprintID to the wrapping
+	createHandlerForTestRouting(t, database, trigger)
+	// createHandlerForTestRouting remaps BlueprintID to the wrapping
 	// blueprint; these tests call tryAutoDelegate directly, so resolve the
 	// real id onto the local struct for the blueprint_run's FK.
 	if err := database.QueryRow(`SELECT blueprint_id FROM event_handlers WHERE id = ?`, trigger.ID).Scan(&trigger.BlueprintID); err != nil {
@@ -187,15 +187,15 @@ func TestDefer_ClaimCommitsWithTheQueuedFiring(t *testing.T) {
 	createTestPrompt(t, s.db, domain.Prompt{ID: "p-defer-2", Name: "P2", Body: "x", Source: "user"})
 	second := domain.EventHandler{
 		ID:                     "trig-defer-2",
-		Kind:                   domain.EventHandlerKindTrigger,
+		Name:                   "trig-defer-2",
+		DefaultPriority:        0.5,
+		Mode:                   domain.EventHandlerModeAutomate,
 		BlueprintID:            "p-defer-2",
-		TriggerType:            domain.TriggerTypeEvent,
 		EventType:              domain.EventGitHubPRCICheckFailed,
-		BreakerThreshold:       intPtr(4),
-		MinAutonomySuitability: floatPtr(0),
-		Enabled:                true,
+		BreakerThreshold:       4,
+		MinAutonomySuitability: 0,
 	}
-	createTriggerForTestRouting(t, s.db, second)
+	createHandlerForTestRouting(t, s.db, second)
 	secondEvent, err := sqlitestore.New(s.db).Events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
 		EventType: domain.EventGitHubPRCICheckFailed, EntityID: &s.entity, DedupKey: "build",
 	})

@@ -21,8 +21,8 @@ import (
 //
 // The BlueprintSeeder inserts a system-source blueprint per requested slug;
 // event_handlers.blueprint_id has composite FKs to blueprints(id, org_id) AND
-// the same-team blueprints(id, team_id), so trigger fixtures need real
-// blueprint rows owned by the factory's team, and the seeder returns the
+// the same-team blueprints(id, team_id), so a handler fixture with a
+// blueprint needs a real blueprint row owned by the factory's team, and the seeder returns the
 // slug→blueprint-id map the harness threads into Seed / Create.
 func TestEventHandlerStore_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
@@ -40,7 +40,7 @@ func TestEventHandlerStore_Postgres(t *testing.T) {
 			t.Helper()
 			out := make(map[string]string, len(slugs))
 			for _, slug := range slugs {
-				// The trigger→blueprint same-team FK only needs a blueprint row to
+				// The handler→blueprint same-team FK only needs a blueprint row to
 				// exist; a plain user blueprint satisfies it (the shipped system-slug
 				// shape is exercised in the shipped-defaults sync suite). The id is a
 				// random UUID, captured for the FK wiring.
@@ -131,11 +131,10 @@ func TestArchivedTeamHandlers_Postgres(t *testing.T) {
 			},
 			SeedRule: func(t *testing.T, teamID string) string {
 				t.Helper()
-				priority, sortOrder := 0.5, 0
 				rule, err := stores.EventHandlers.Create(t.Context(), orgID, teamID, domain.EventHandler{
-					ID: uuid.New().String(), Kind: domain.EventHandlerKindRule,
-					EventType: domain.EventGitHubPRCICheckFailed, Enabled: true,
-					Name: "rule " + teamID[:8], DefaultPriority: &priority, SortOrder: &sortOrder,
+					ID: uuid.New().String(), Mode: domain.EventHandlerModeWatch,
+					EventType: domain.EventGitHubPRCICheckFailed,
+					Name:      "rule " + teamID[:8], DefaultPriority: 0.5, BreakerThreshold: 4,
 				})
 				if err != nil {
 					t.Fatalf("seed rule on team %s: %v", teamID, err)

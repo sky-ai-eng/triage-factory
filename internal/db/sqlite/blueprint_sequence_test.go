@@ -67,9 +67,9 @@ func sqliteSequenceScaffold(t *testing.T) (db.BlueprintStore, dbtest.BlueprintSe
 		}
 		triggerID := "trig-" + suffix
 		if _, err := conn.Exec(`
-			INSERT INTO event_handlers (id, kind, event_type, blueprint_id, breaker_threshold, min_autonomy_suitability, enabled, source, creator_user_id, team_id)
-			VALUES (?, 'trigger', ?, ?, 4, 0, 1, 'user', ?, ?)
-		`, triggerID, domain.EventGitHubPRCICheckFailed, bpID, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID); err != nil {
+			INSERT INTO event_handlers (id, mode, event_type, name, blueprint_id, breaker_threshold, min_autonomy_suitability, source, creator_user_id, team_id)
+			VALUES (?, 'automate', ?, ?, ?, 4, 0, 'user', ?, ?)
+		`, triggerID, domain.EventGitHubPRCICheckFailed, "Firing "+suffix, bpID, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID); err != nil {
 			t.Fatalf("seed trigger: %v", err)
 		}
 		var eventID string

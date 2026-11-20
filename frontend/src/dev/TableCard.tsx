@@ -49,7 +49,7 @@ const NOTES: TableRow[] = [
   {
     id: 'n3',
     title: 'Review requested: acme/api#4188',
-    body: 'Cache the org’s model catalog\nFrom the team rule "Reviews for Infra".',
+    body: 'Cache the org’s model catalog\nFrom the event handler "Reviews for Infra".',
     unread: true,
     pri: 'LOW',
   },

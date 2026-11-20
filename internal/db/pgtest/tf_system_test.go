@@ -866,14 +866,14 @@ func seedEventForEntity(t *testing.T, h *Harness, orgID, entityID, eventType str
 	return id
 }
 
-// seedTrigger inserts a minimal trigger-kind event_handlers row so
+// seedTrigger inserts a minimal event_handlers row in automate so
 // pending_firings' trigger_id FK resolves.
 func seedTrigger(t *testing.T, h *Harness, orgID, creatorID, teamID, blueprintID string) string {
 	t.Helper()
 	var id string
 	if err := h.AdminDB.QueryRow(`
-		INSERT INTO event_handlers (org_id, creator_user_id, team_id, kind, blueprint_id, event_type, breaker_threshold, min_autonomy_suitability)
-		VALUES ($1, $2, $3, 'trigger', $4, 'github:pr:opened', 4, 0.0) RETURNING id
+		INSERT INTO event_handlers (org_id, creator_user_id, team_id, mode, blueprint_id, event_type, name, breaker_threshold, min_autonomy_suitability)
+		VALUES ($1, $2, $3, 'automate', $4, 'github:pr:opened', 'trigger', 4, 0.0) RETURNING id
 	`, orgID, creatorID, teamID, blueprintID).Scan(&id); err != nil {
 		t.Fatalf("seed trigger: %v", err)
 	}

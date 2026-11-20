@@ -260,7 +260,7 @@ type failingHandlerStore struct {
 	err error
 }
 
-func (s failingHandlerStore) GetEnabledForEventSystem(context.Context, string, string) ([]domain.EventHandler, error) {
+func (s failingHandlerStore) GetActiveForEventSystem(context.Context, string, string) ([]domain.EventHandler, error) {
 	return nil, s.err
 }
 

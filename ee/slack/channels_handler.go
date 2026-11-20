@@ -300,13 +300,13 @@ func (h *channelsHandler) handlePut(w http.ResponseWriter, r *http.Request) {
 		}
 		// Default blueprint, first-track only: the prior set was empty, the
 		// new set isn't, and the team hasn't already configured its own
-		// slack:message trigger.
+		// slack:message handler.
 		if len(prior) == 0 && len(tracked) > 0 {
-			hasTrigger, e := teamHasSlackMessageTrigger(r.Context(), tx, orgID, teamID)
+			hasHandler, e := teamHasSlackMessageHandler(r.Context(), tx, orgID, teamID)
 			if e != nil {
 				return e
 			}
-			if !hasTrigger {
+			if !hasHandler {
 				if e := seedDefaultSlackMessageBlueprint(r.Context(), tx, orgID, teamID); e != nil {
 					return e
 				}
@@ -1014,26 +1014,17 @@ func diffChannelIDs(prior []slackstore.TeamChannel, desired []string) (added, re
 	return added, removed
 }
 
-// teamHasSlackMessageTrigger reports whether teamID already has a
-// slack:message trigger (any source — system or user). This replaces slug
-// idempotency for the default-blueprint seed: a team that configured its
-// own trigger is respected (no default forced beside it), and a team that
-// deleted the default doesn't get it resurrected on the next PUT.
-func teamHasSlackMessageTrigger(ctx context.Context, tx db.TxStores, orgID, teamID string) (bool, error) {
-	// Unwindowed (ListOpts zero Limit): this derives a per-channel set from
-	// the team's whole trigger list rather than browsing it, so a page would
-	// silently narrow what the channel is reported as tracking.
-	handlers, _, err := tx.EventHandlers.List(ctx, orgID,
-		db.EventHandlerListFilter{Kind: domain.EventHandlerKindTrigger, TeamID: teamID}, db.Unwindowed)
+// teamHasSlackMessageHandler reports whether teamID already has a live
+// slack:message event handler, in any mode and from any source. It is what
+// keeps the default-blueprint seed idempotent: a team that configured its own
+// handler is respected (no default forced beside it).
+func teamHasSlackMessageHandler(ctx context.Context, tx db.TxStores, orgID, teamID string) (bool, error) {
+	_, total, err := tx.EventHandlers.List(ctx, orgID,
+		db.EventHandlerListFilter{EventType: domain.EventSlackMessage, TeamID: teamID}, db.ListOpts{CountOnly: true})
 	if err != nil {
 		return false, err
 	}
-	for _, eh := range handlers {
-		if eh.EventType == domain.EventSlackMessage {
-			return true, nil
-		}
-	}
-	return false, nil
+	return total > 0, nil
 }
 
 // slackMessagePromptName/Body are the shipped-content for the default
@@ -1061,21 +1052,22 @@ const (
 		"the message to you wasn't in a thread."
 )
 
-// slackMessageTriggerBreakerThreshold / MinAutonomySuitability match the
-// shipped system triggers' defaults (see db.ShippedEventHandlers).
+// slackMessageHandlerBreakerThreshold / MinAutonomySuitability match the
+// shipped handlers' defaults (see db.ShippedEventHandlers).
 const (
-	slackMessageTriggerBreakerThreshold = 3
-	slackMessageTriggerMinAutonomy      = 0.0
+	slackMessageHandlerBreakerThreshold = 3
+	slackMessageHandlerMinAutonomy      = 0.0
 )
 
 // seedDefaultSlackMessageBlueprint creates, as user-source rows attributed
 // to the tracking admin (creator_user_id = them), a 1-step blueprint
-// wrapping a fresh prompt and a slack:message trigger scoped to any channel
+// wrapping a fresh prompt and a slack:message event handler in automate,
+// scoped to any channel
 // (predicate {"channel_in":[]}). Called inside the same tx as the tracking
 // write (handlePut) — see that call site's doc for why this is the
 // app-pool Create path rather than the admin-pool seeders.
 //
-// The trigger names no channels on purpose. An empty channel_in matches every
+// The handler names no channels on purpose. An empty channel_in matches every
 // channel the team tracks, because the routing hooks deliver a team's
 // handlers only messages from those, so the default follows the tracked set
 // as channels are added and removed. Seeding it with the channels tracked at
@@ -1105,22 +1097,19 @@ func seedDefaultSlackMessageBlueprint(ctx context.Context, tx db.TxStores, orgID
 	}
 
 	predicate := `{"channel_in":[]}`
-	threshold := slackMessageTriggerBreakerThreshold
-	minAutonomy := slackMessageTriggerMinAutonomy
 	if _, err := tx.EventHandlers.Create(ctx, orgID, teamID, domain.EventHandler{
 		ID:                     uuid.New().String(),
-		Kind:                   domain.EventHandlerKindTrigger,
+		Mode:                   domain.EventHandlerModeAutomate,
 		EventType:              domain.EventSlackMessage,
 		ScopePredicateJSON:     &predicate,
-		Enabled:                true,
 		Source:                 domain.EventHandlerSourceUser,
-		AppliesToUnowned:       false,
+		Name:                   slackMessagePromptName,
+		DefaultPriority:        0.5,
 		BlueprintID:            blueprintID,
-		TriggerType:            domain.TriggerTypeEvent,
-		BreakerThreshold:       &threshold,
-		MinAutonomySuitability: &minAutonomy,
+		BreakerThreshold:       slackMessageHandlerBreakerThreshold,
+		MinAutonomySuitability: slackMessageHandlerMinAutonomy,
 	}); err != nil {
-		return fmt.Errorf("seed slack message trigger: %w", err)
+		return fmt.Errorf("seed slack message handler: %w", err)
 	}
 	return nil
 }

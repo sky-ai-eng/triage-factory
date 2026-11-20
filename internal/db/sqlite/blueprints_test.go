@@ -343,8 +343,8 @@ func TestBlueprintStore_SQLite_ActorAgentRoundTrip(t *testing.T) {
 		t.Fatalf("read task event id: %v", err)
 	}
 	if _, err := conn.Exec(`
-		INSERT INTO event_handlers (id, kind, event_type, blueprint_id, breaker_threshold, min_autonomy_suitability, enabled, source, creator_user_id, team_id)
-		VALUES ('actor-trig', 'trigger', ?, 'actor-bp', 4, 0, 1, 'user', ?, ?)
+		INSERT INTO event_handlers (id, mode, event_type, name, blueprint_id, breaker_threshold, min_autonomy_suitability, source, creator_user_id, team_id)
+		VALUES ('actor-trig', 'automate', ?, 'Actor', 'actor-bp', 4, 0, 'user', ?, ?)
 	`, domain.EventGitHubPRCICheckFailed, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID); err != nil {
 		t.Fatalf("seed trigger: %v", err)
 	}
@@ -399,9 +399,9 @@ func TestBlueprintStore_SQLite_FiringCarriesTaskClaim(t *testing.T) {
 		t.Helper()
 		insertBlueprintForTest(t, conn, "claim-bp-"+suffix, "Claim BP "+suffix)
 		if _, err := conn.Exec(`
-			INSERT INTO event_handlers (id, kind, event_type, blueprint_id, breaker_threshold, min_autonomy_suitability, enabled, source, creator_user_id, team_id)
-			VALUES (?, 'trigger', ?, ?, 4, 0, 1, 'user', ?, ?)
-		`, "trig-"+suffix, domain.EventGitHubPRCICheckFailed, "claim-bp-"+suffix, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID); err != nil {
+			INSERT INTO event_handlers (id, mode, event_type, name, blueprint_id, breaker_threshold, min_autonomy_suitability, source, creator_user_id, team_id)
+			VALUES (?, 'automate', ?, ?, ?, 4, 0, 'user', ?, ?)
+		`, "trig-"+suffix, domain.EventGitHubPRCICheckFailed, "Claim "+suffix, "claim-bp-"+suffix, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID); err != nil {
 			t.Fatalf("seed trigger: %v", err)
 		}
 	}

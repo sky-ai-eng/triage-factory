@@ -22,8 +22,7 @@ type SpendStoreFixture struct {
 	TeamID  string
 	UserID  string
 	AgentID string
-	// TriggerID is a pre-seeded trigger event_handler (kind='trigger') in
-	// TeamID. The suite points an autonomous ConversationSpendFixture.TriggerID at it
+	// TriggerID is a pre-seeded event_handler in automate in TeamID. The suite points an autonomous ConversationSpendFixture.TriggerID at it
 	// so conversations.trigger_id has a valid FK target and the view's
 	// trigger_id column can be asserted (TFAC-478).
 	TriggerID string

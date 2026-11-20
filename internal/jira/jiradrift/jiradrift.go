@@ -264,12 +264,12 @@ func (p *Pass) Rules(ctx context.Context, orgID string, rules []domain.JiraProje
 	kinds.JiraStatusDrift.Sync(ctx, orgID, drifted, keep...)
 }
 
-// Handlers checks every handler in handlers, which is every enabled handler on
-// EventTypes in the org, and syncs kinds.JiraPredicateDrift over them. rules
-// is every team's status rules on the org's Jira site, which is what each
-// team tracks. A handler whose catalogs could not all be read is kept, and
-// every other open occurrence, including a handler deleted or disabled since,
-// resolves.
+// Handlers checks every handler in handlers, which is every handler on
+// EventTypes in the org that is not off, and syncs kinds.JiraPredicateDrift
+// over them. rules is every team's status rules on the org's Jira site, which
+// is what each team tracks. A handler whose catalogs could not all be read is
+// kept, and every other open occurrence, including a handler deleted or
+// turned off since, resolves.
 func (p *Pass) Handlers(ctx context.Context, orgID string, rules []domain.JiraProjectStatusRules, handlers []domain.EventHandler) {
 	byTeam := map[string][]domain.JiraProjectStatusRules{}
 	for _, r := range rules {
@@ -303,13 +303,14 @@ func (p *Pass) Handler(ctx context.Context, orgID string, h domain.EventHandler,
 // tracked projects by Jira ref, whether its filter names anything gone, and
 // whether the catalogs that decide it could all be read.
 //
-// A handler that is disabled, is not on a Jira event, or belongs to a team
-// tracking no project names nothing gone: a disabled handler matches nothing
-// by choice, and a team tracking no project receives no Jira event to match.
+// A handler that is off, is not on a Jira event, or belongs to a team
+// tracking no project names nothing gone: a handler that is off matches
+// nothing by choice, and a team tracking no project receives no Jira event to
+// match.
 func (p *Pass) handler(ctx context.Context, h domain.EventHandler, projects []string) (kinds.JiraHandlerFilter, bool, bool) {
-	out := kinds.JiraHandlerFilter{HandlerID: h.ID, TeamID: h.TeamID, HandlerKind: h.Kind, RuleName: h.Name, EventType: h.EventType}
+	out := kinds.JiraHandlerFilter{HandlerID: h.ID, TeamID: h.TeamID, HandlerName: h.Name, EventType: h.EventType}
 	fields := catalogFields(h.EventType)
-	if !h.Enabled || h.ScopePredicateJSON == nil || len(fields) == 0 || len(projects) == 0 {
+	if h.Mode == domain.EventHandlerModeOff || h.ScopePredicateJSON == nil || len(fields) == 0 || len(projects) == 0 {
 		return out, false, true
 	}
 	var predicate map[string]json.RawMessage

@@ -17,7 +17,7 @@ func TestBlueprintDuplicate_FullBlueprintAtomic(t *testing.T) {
 	s := newTestServer(t)
 	configureEventSources(t, s)
 	src, p := createChainBlueprint(t, s, "Src", 3)
-	attachTrigger(t, s, src, "github:pr:ci_check_failed")
+	attachHandler(t, s, src, "github:pr:ci_check_failed")
 
 	rec := doJSON(t, s, http.MethodPost, "/api/blueprints/duplicate", map[string]any{
 		"prompt_ids": []string{p[0], p[1], p[2]},
@@ -61,10 +61,10 @@ func TestBlueprintDuplicate_FullBlueprintAtomic(t *testing.T) {
 	if len(got) != 3 || got[0]["step_prompt_id"] != p[0] || got[2]["step_prompt_id"] != p[2] {
 		t.Fatalf("source mutated by duplicate: %+v", got)
 	}
-	if n := len(triggersForBlueprint(t, s, src)); n != 1 {
+	if n := len(handlersForBlueprint(t, s, src)); n != 1 {
 		t.Errorf("source blueprint triggers after duplication = %d, want 1", n)
 	}
-	if n := len(triggersForBlueprint(t, s, copyID)); n != 0 {
+	if n := len(handlersForBlueprint(t, s, copyID)); n != 0 {
 		t.Errorf("duplicated blueprint carried %d triggers; copies must always be trigger-less", n)
 	}
 }

@@ -476,8 +476,8 @@ func TestBaseline_SourceCHECKsDropped(t *testing.T) {
 	// event_handlers: source='imported' (not in the old enum) + a creator
 	// passes the harmonized source<>'system' pairing CHECK.
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO event_handlers (org_id, creator_user_id, team_id, kind, event_type, source, name, default_priority, sort_order)
-		VALUES ($1, $2, $3, 'rule', 'github:pr:opened', 'imported', 'imported-rule', 0.5, 0)
+		INSERT INTO event_handlers (org_id, creator_user_id, team_id, mode, event_type, source, name, default_priority, sort_order)
+		VALUES ($1, $2, $3, 'watch', 'github:pr:opened', 'imported', 'imported-rule', 0.5, 0)
 	`, orgA, alice, teamA); err != nil {
 		t.Errorf("INSERT event_handlers source='imported' with creator: %v (source CHECK must be dropped, pairing must tolerate non-system)", err)
 	}
@@ -485,8 +485,8 @@ func TestBaseline_SourceCHECKsDropped(t *testing.T) {
 	// The harmonized pairing still bites: source='imported' with NULL creator
 	// must fail the system_has_no_creator CHECK.
 	_, err := h.AdminDB.Exec(`
-		INSERT INTO event_handlers (org_id, creator_user_id, team_id, kind, event_type, source, name, default_priority, sort_order)
-		VALUES ($1, NULL, $2, 'rule', 'github:pr:opened', 'imported', 'imported-rule-2', 0.5, 0)
+		INSERT INTO event_handlers (org_id, creator_user_id, team_id, mode, event_type, source, name, default_priority, sort_order)
+		VALUES ($1, NULL, $2, 'watch', 'github:pr:opened', 'imported', 'imported-rule-2', 0.5, 0)
 	`, orgA, teamA)
 	if err == nil {
 		t.Fatalf("INSERT source='imported' with NULL creator succeeded; want system_has_no_creator CHECK failure")
@@ -846,7 +846,7 @@ func TestRLS_TeamSettingsIsTeamMemberOnly(t *testing.T) {
 // TestRLS_TeamVisibilityIsTeamScoped — a row with visibility='team'
 // must only be visible to members of that specific team_id, not to
 // every org member. Covers all three tables that use this pattern:
-// prompts, event_handlers (rule + trigger kinds).
+// prompts, event_handlers (one handler without a blueprint and one with).
 //
 // Subtle bug this guards against: in the EXISTS subquery,
 // `m.team_id = team_id` is ambiguous — SQL name resolution binds the
@@ -869,8 +869,8 @@ func TestRLS_TeamVisibilityIsTeamScoped(t *testing.T) {
 	AddOrgMember(t, h, carol, orgA, teamB, "member", "member")
 
 	// Seed one team-scoped row in each of the four tables.
-	// A trigger references a blueprint (FK to the same-team blueprints), so
-	// seed a teamA-owned blueprint for the trigger to point at.
+	// A handler in automate references a blueprint (FK to the same-team
+	// blueprints), so seed a teamA-owned blueprint for it to point at.
 	var teamBlueprintID string
 	if err := h.AdminDB.QueryRow(`
 		INSERT INTO blueprints (org_id, creator_user_id, team_id, name, source)
@@ -887,14 +887,14 @@ func TestRLS_TeamVisibilityIsTeamScoped(t *testing.T) {
 		t.Fatalf("seed team prompt: %v", err)
 	}
 	if err := h.AdminDB.QueryRow(`
-		INSERT INTO event_handlers (org_id, creator_user_id, team_id, kind, event_type, name, default_priority, sort_order)
-		VALUES ($1, $2, $3, 'rule', 'github:pr:opened', 'team-rule', 0.5, 0) RETURNING id
+		INSERT INTO event_handlers (org_id, creator_user_id, team_id, mode, event_type, name, default_priority, sort_order)
+		VALUES ($1, $2, $3, 'watch', 'github:pr:opened', 'team-rule', 0.5, 0) RETURNING id
 	`, orgA, alice, teamA).Scan(&teamRuleID); err != nil {
 		t.Fatalf("seed team rule: %v", err)
 	}
 	if err := h.AdminDB.QueryRow(`
-		INSERT INTO event_handlers (org_id, creator_user_id, team_id, kind, blueprint_id, event_type, breaker_threshold, min_autonomy_suitability)
-		VALUES ($1, $2, $3, 'trigger', $4, 'github:pr:opened', 4, 0.0) RETURNING id
+		INSERT INTO event_handlers (org_id, creator_user_id, team_id, mode, blueprint_id, event_type, name, breaker_threshold, min_autonomy_suitability)
+		VALUES ($1, $2, $3, 'automate', $4, 'github:pr:opened', 'team-trigger', 4, 0.0) RETURNING id
 	`, orgA, alice, teamA, teamBlueprintID).Scan(&teamTriggerID); err != nil {
 		t.Fatalf("seed team trigger: %v", err)
 	}
@@ -905,8 +905,8 @@ func TestRLS_TeamVisibilityIsTeamScoped(t *testing.T) {
 			label, query, id string
 		}{
 			{"prompts", `SELECT 1 FROM prompts WHERE id = $1`, teamPromptID},
-			{"event_handlers/rule", `SELECT 1 FROM event_handlers WHERE id = $1`, teamRuleID},
-			{"event_handlers/trigger", `SELECT 1 FROM event_handlers WHERE id = $1`, teamTriggerID},
+			{"event_handlers/watch", `SELECT 1 FROM event_handlers WHERE id = $1`, teamRuleID},
+			{"event_handlers/automate", `SELECT 1 FROM event_handlers WHERE id = $1`, teamTriggerID},
 		} {
 			var n int
 			if err := tx.QueryRow(c.query, c.id).Scan(&n); err != nil {
@@ -927,8 +927,8 @@ func TestRLS_TeamVisibilityIsTeamScoped(t *testing.T) {
 			label, query, id string
 		}{
 			{"prompts", `SELECT COUNT(*) FROM prompts WHERE id = $1`, teamPromptID},
-			{"event_handlers/rule", `SELECT COUNT(*) FROM event_handlers WHERE id = $1`, teamRuleID},
-			{"event_handlers/trigger", `SELECT COUNT(*) FROM event_handlers WHERE id = $1`, teamTriggerID},
+			{"event_handlers/watch", `SELECT COUNT(*) FROM event_handlers WHERE id = $1`, teamRuleID},
+			{"event_handlers/automate", `SELECT COUNT(*) FROM event_handlers WHERE id = $1`, teamTriggerID},
 		} {
 			var n int
 			if err := tx.QueryRow(c.query, c.id).Scan(&n); err != nil {
@@ -2366,8 +2366,8 @@ func TestRLS_TeamMembershipWithoutOrgAccessDenied(t *testing.T) {
 	}
 	var ehID string
 	if err := h.AdminDB.QueryRow(`
-		INSERT INTO event_handlers (org_id, creator_user_id, team_id, kind, event_type, name, default_priority, sort_order)
-		VALUES ($1, $2, $3, 'rule', 'github:pr:opened', 'r1', 0.5, 0) RETURNING id
+		INSERT INTO event_handlers (org_id, creator_user_id, team_id, mode, event_type, name, default_priority, sort_order)
+		VALUES ($1, $2, $3, 'watch', 'github:pr:opened', 'r1', 0.5, 0) RETURNING id
 	`, orgA, alice, teamA).Scan(&ehID); err != nil {
 		t.Fatalf("seed event_handler: %v", err)
 	}

@@ -130,15 +130,16 @@ func pgTaskTeamFilter(teamIDs []string, args []any) (string, []any) {
 }
 
 // pgTaskRuleOrderJoin mirrors the SQLite join of the same name: each task's
-// matching event_handler rule sort_order (the lowest, when several rules cover
-// the event type), so the list ordering can put "CI is broken" above "someone
-// asked for a review". The derived table is org-scoped so another org's rules
-// can't influence ordering — load-bearing in multi mode.
+// matching event handler sort_order (the lowest, when several handlers that
+// make a task cover the event type), so the list ordering can put "CI is
+// broken" above "someone asked for a review". The derived table is org-scoped
+// so another org's handlers can't influence ordering — load-bearing in multi
+// mode.
 const pgTaskRuleOrderJoin = `
 	LEFT JOIN (
 		SELECT org_id, event_type, MIN(sort_order) AS sort_order
 		FROM event_handlers
-		WHERE kind = 'rule' AND ` + pgMatchableHandler + `
+		WHERE mode IN ('watch', 'automate') AND ` + pgActiveHandler + `
 		GROUP BY org_id, event_type
 	) tr ON t.event_type = tr.event_type AND t.org_id = tr.org_id`
 
@@ -1987,7 +1988,7 @@ func (s *taskStore) ListTrippedBreakersSystem(ctx context.Context, orgID string)
 		JOIN blueprint_runs br ON br.org_id = h.org_id AND br.trigger_id = h.id AND br.blueprint_id = h.blueprint_id
 		JOIN tasks t ON t.id = br.task_id AND t.org_id = br.org_id
 		JOIN entities e ON e.id = t.entity_id AND e.org_id = t.org_id AND e.state = 'active'
-		WHERE h.org_id = $1 AND h.kind = 'trigger' AND h.enabled AND h.deleted_at IS NULL
+		WHERE h.org_id = $1 AND h.mode = 'automate' AND h.deleted_at IS NULL
 		  AND `+breakerFailureSQL("br", "t")+`
 		GROUP BY h.id, t.entity_id, h.breaker_threshold
 		HAVING COUNT(*) >= h.breaker_threshold

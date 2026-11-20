@@ -17,27 +17,16 @@ import (
 func TestEventHandlerPredicateFaults_EveryWriteRoute(t *testing.T) {
 	s := newTestServer(t)
 	configureEventSources(t, s)
-	seedBlueprintForTrigger(t, s, "p-predicate-faults")
-	ruleID := createUserRule(t, s)
+	handlerID := createWatchHandler(t, s)
 
 	routes := map[string]func(predicate map[string]any) *httptest.ResponseRecorder{
-		"create rule": func(predicate map[string]any) *httptest.ResponseRecorder {
-			return doJSON(t, s, http.MethodPost, "/api/event-handlers/rules", map[string]any{
+		"create": func(predicate map[string]any) *httptest.ResponseRecorder {
+			return doJSON(t, s, http.MethodPost, "/api/event-handlers", map[string]any{
 				"event_type": "github:pr:opened", "name": "faults", "scope_predicate": predicate,
 			})
 		},
-		"create trigger": func(predicate map[string]any) *httptest.ResponseRecorder {
-			return doJSON(t, s, http.MethodPost, "/api/event-handlers/triggers", map[string]any{
-				"event_type": "github:pr:ci_check_failed", "blueprint_id": "p-predicate-faults", "scope_predicate": predicate,
-			})
-		},
 		"patch": func(predicate map[string]any) *httptest.ResponseRecorder {
-			return doJSON(t, s, http.MethodPatch, "/api/event-handlers/"+ruleID, map[string]any{"scope_predicate": predicate})
-		},
-		"promote": func(predicate map[string]any) *httptest.ResponseRecorder {
-			return doJSON(t, s, http.MethodPost, "/api/event-handlers/"+ruleID+"/promote", map[string]any{
-				"blueprint_id": "p-predicate-faults", "scope_predicate": predicate,
-			})
+			return doJSON(t, s, http.MethodPatch, "/api/event-handlers/"+handlerID, map[string]any{"scope_predicate": predicate})
 		},
 	}
 	cases := map[string]struct {
@@ -82,10 +71,13 @@ func TestEventHandlerPredicateFaults_EveryWriteRoute(t *testing.T) {
 		}
 	}
 
-	// None of the refused writes touched the rule.
-	rec := doJSON(t, s, http.MethodGet, "/api/event-handlers/"+ruleID, nil)
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"kind":"rule"`) || !strings.Contains(rec.Body.String(), `"scope_predicate_json":null`) {
-		t.Errorf("rule after refused writes: %d %s", rec.Code, rec.Body.String())
+	// None of the refused writes touched the handler, or made one.
+	rec := doJSON(t, s, http.MethodGet, "/api/event-handlers/"+handlerID, nil)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"scope_predicate_json":null`) {
+		t.Errorf("handler after refused writes: %d %s", rec.Code, rec.Body.String())
+	}
+	if n := len(listEventHandlers(t, s)); n != 1 {
+		t.Errorf("handlers after refused writes = %d, want the one seeded", n)
 	}
 }
 
@@ -94,7 +86,7 @@ func TestEventHandlerPredicateFaults_EveryWriteRoute(t *testing.T) {
 func TestEventHandlerPredicateFaults_EnumMissIs422(t *testing.T) {
 	s := newTestServer(t)
 	configureEventSources(t, s)
-	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/rules", map[string]any{
+	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers", map[string]any{
 		"event_type":       "github:pr:mentioned",
 		"name":             "mentions",
 		"default_priority": 2,
@@ -121,10 +113,9 @@ func TestEventHandlerPredicateFaults_OneAnswerForEvery422(t *testing.T) {
 	s := newTestServer(t)
 	configureEventSources(t, s)
 	calls := stubPredicateReferenceCheck(t)
-	seedBlueprintForTrigger(t, s, "p-every-422")
 	seeded := labelRule(t, s, "ok")
 	if seeded.Code != http.StatusCreated {
-		t.Fatalf("seed rule: %d: %s", seeded.Code, seeded.Body.String())
+		t.Fatalf("seed handler: %d: %s", seeded.Code, seeded.Body.String())
 	}
 	var created map[string]any
 	_ = json.Unmarshal(seeded.Body.Bytes(), &created)
@@ -133,7 +124,7 @@ func TestEventHandlerPredicateFaults_OneAnswerForEvery422(t *testing.T) {
 	if want := (checkCall{teamID: runmode.LocalDefaultTeamID, predicate: stored, prior: "<nil>"}); len(*calls) != 1 || (*calls)[0] != want {
 		t.Errorf("calls after the seed = %+v, want one %+v", *calls, want)
 	}
-	rules := len(listEventHandlers(t, s, "rule"))
+	handlers := len(listEventHandlers(t, s))
 
 	predicate := map[string]any{"author_id_in": []string{"583231", "583231"}, "has_label": "forbidden"}
 	for _, tc := range []struct {
@@ -141,17 +132,11 @@ func TestEventHandlerPredicateFaults_OneAnswerForEvery422(t *testing.T) {
 		body                map[string]any
 		tuning, prior       string
 	}{
-		{"create rule", http.MethodPost, "/api/event-handlers/rules", map[string]any{
+		{"create", http.MethodPost, "/api/event-handlers", map[string]any{
 			"event_type": referenceCheckEventType, "name": "every 422", "default_priority": 2, "scope_predicate": predicate,
 		}, "default_priority", "<nil>"},
-		{"create trigger", http.MethodPost, "/api/event-handlers/triggers", map[string]any{
-			"event_type": referenceCheckEventType, "blueprint_id": "p-every-422", "breaker_threshold": -1, "scope_predicate": predicate,
-		}, "breaker_threshold", "<nil>"},
 		{"patch", http.MethodPatch, "/api/event-handlers/" + id, map[string]any{
-			"default_priority": 2, "scope_predicate": predicate,
-		}, "default_priority", stored},
-		{"promote", http.MethodPost, "/api/event-handlers/" + id + "/promote", map[string]any{
-			"blueprint_id": "p-every-422", "breaker_threshold": -1, "scope_predicate": predicate,
+			"breaker_threshold": -1, "scope_predicate": predicate,
 		}, "breaker_threshold", stored},
 	} {
 		t.Run(tc.route, func(t *testing.T) {
@@ -176,47 +161,39 @@ func TestEventHandlerPredicateFaults_OneAnswerForEvery422(t *testing.T) {
 		})
 	}
 
-	if n := len(listEventHandlers(t, s, "trigger")); n != 0 {
-		t.Errorf("refused writes left %d triggers", n)
-	}
-	if n := len(listEventHandlers(t, s, "rule")); n != rules {
-		t.Errorf("refused writes changed the rule count from %d to %d", rules, n)
+	if n := len(listEventHandlers(t, s)); n != handlers {
+		t.Errorf("refused writes changed the handler count from %d to %d", handlers, n)
 	}
 	rec := doJSON(t, s, http.MethodGet, "/api/event-handlers/"+id, nil)
 	if !strings.Contains(rec.Body.String(), `"scope_predicate_json":"{\"has_label\":\"ok\"}"`) {
-		t.Errorf("rule after refused writes: %s", rec.Body.String())
+		t.Errorf("handler after refused writes: %s", rec.Body.String())
 	}
 }
 
 // A blueprint another team owns is refused with the body's other 422s, on
-// both doors into trigger-hood.
+// create and PATCH alike.
 func TestEventHandlerPredicateFaults_CrossTeamBlueprintJoinsThe422s(t *testing.T) {
 	s := newTestServer(t)
 	configureEventSources(t, s)
 	other := seedTeam(t, s, runmode.LocalDefaultOrgID, "other")
-	seedBlueprintForTrigger(t, s, "p-other-team")
+	seedHandlerBlueprint(t, s, "p-other-team")
 	// The local store pins every blueprint it creates to the default team.
 	if _, err := s.db.ExecContext(t.Context(), `UPDATE blueprints SET team_id = ? WHERE id = ?`, other, "p-other-team"); err != nil {
 		t.Fatalf("move blueprint to the other team: %v", err)
 	}
-	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/rules", map[string]any{
-		"event_type": "github:pr:opened", "name": "to promote", "team_id": runmode.LocalDefaultTeamID,
+	id := createHandlerID(t, s, map[string]any{
+		"event_type": "github:pr:opened", "name": "to point elsewhere", "team_id": runmode.LocalDefaultTeamID,
 	})
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("seed rule: %d: %s", rec.Code, rec.Body.String())
-	}
-	var created map[string]any
-	_ = json.Unmarshal(rec.Body.Bytes(), &created)
 
 	for route, write := range map[string]func() *httptest.ResponseRecorder{
-		"create trigger": func() *httptest.ResponseRecorder {
-			return doJSON(t, s, http.MethodPost, "/api/event-handlers/triggers", map[string]any{
+		"create": func() *httptest.ResponseRecorder {
+			return doJSON(t, s, http.MethodPost, "/api/event-handlers", map[string]any{
 				"event_type": "github:pr:ci_check_failed", "blueprint_id": "p-other-team", "breaker_threshold": -1,
 				"team_id": runmode.LocalDefaultTeamID,
 			})
 		},
-		"promote": func() *httptest.ResponseRecorder {
-			return doJSON(t, s, http.MethodPost, "/api/event-handlers/"+created["id"].(string)+"/promote", map[string]any{
+		"patch": func() *httptest.ResponseRecorder {
+			return doJSON(t, s, http.MethodPatch, "/api/event-handlers/"+id, map[string]any{
 				"blueprint_id": "p-other-team", "breaker_threshold": -1,
 			})
 		},
@@ -238,12 +215,12 @@ func TestEventHandlerPredicateFaults_CrossTeamBlueprintJoinsThe422s(t *testing.T
 }
 
 // A list the row stores with a repeated entry does not block an edit that
-// re-sends it unchanged, as the trigger panel does on every save; an edit
+// re-sends it unchanged, as the handler editor does on every save; an edit
 // that changes the list is told to fix it.
 func TestEventHandlerPredicateFaults_StoredListKeptByAnEdit(t *testing.T) {
 	s := newTestServer(t)
 	configureEventSources(t, s)
-	id := createUserRule(t, s)
+	id := createWatchHandler(t, s)
 	const stored = `{"author_id_in":["123","123"]}`
 	if _, err := s.db.ExecContext(t.Context(), `UPDATE event_handlers SET scope_predicate_json = ? WHERE id = ?`, stored, id); err != nil {
 		t.Fatalf("store a repeated entry: %v", err)
