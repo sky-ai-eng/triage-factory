@@ -15,12 +15,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import PromptPicker from '../components/PromptPicker'
 import TeamScopeSelect from '../components/TeamScopeSelect'
 import { backToOrigin, toast } from '../components/Toast/toastStore'
-import {
-  createIsoScene,
-  STATION_EVENT_TYPES,
-  type ClickedStationInfo,
-  type IsoSceneHandle,
-} from '../factory/iso-scene'
+import { createIsoScene, type ClickedStationInfo, type IsoSceneHandle } from '../factory/iso-scene'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useOrgHref } from '../hooks/useOrgHref'
 import { useImmersive } from '../contexts/ChromeContext'
@@ -29,7 +24,12 @@ import type { Conversation, FactoryEntity, ConversationStatusValue, Task } from 
 import { isActiveStatus } from '../lib/conversationStatus'
 import { apiErrors, apiJSON, httpErrorMessage } from '../lib/apiClient'
 import { delegateTask } from '../lib/taskWrites'
-import { readFactoryFloor, readReachedCounts, type FloorHistoryCache } from '../lib/factoryFloor'
+import {
+  readFactoryFloor,
+  readReachedCounts,
+  type FloorHistoryCache,
+  type FloorRead,
+} from '../lib/factoryFloor'
 
 // Production factory page — Babylon scene driven by the generic entity,
 // event, task, and conversation reads (lib/factoryFloor). The page itself
@@ -164,34 +164,45 @@ export default function Factory() {
     // cannot put an older floor back on the scene.
     let loadSeq = 0
     const historyCache: FloorHistoryCache = new Map()
+    // The counters are read on their own schedule and applied to whichever
+    // floor is on the scene when they land, so neither read waits on, or
+    // fails with, the other.
+    let floor: FloorRead | null = null
     let reached: Record<string, number> = {}
     let reachedReadAt = -Infinity
+    const apply = () => {
+      if (floor) sceneRef.current?.applyFloor({ ...floor, reached })
+    }
+
+    const readCounters = (now: number) => {
+      reachedReadAt = now
+      readReachedCounts(now)
+        .then((counts) => {
+          if (cancelled) return
+          reached = counts
+          apply()
+        })
+        .catch((err) => {
+          // A failed counter read is tried again on the next load.
+          reachedReadAt = -Infinity
+          if (cancelled) return
+          console.warn('[factory] station counter read failed:', err)
+        })
+    }
 
     const load = () => {
       loadSeq += 1
       const seq = loadSeq
       const now = Date.now()
-      const reachedRead = now - reachedReadAt >= REACHED_REFRESH_MS ? readReachedCounts(now) : null
-      if (reachedRead) reachedReadAt = now
-      Promise.all([
-        readFactoryFloor({
-          teamIds: teamFilterRef.current,
-          stations: STATION_EVENT_TYPES,
-          cache: historyCache,
-          reached,
-          now,
-        }),
-        reachedRead,
-      ])
-        .then(([floor, counts]) => {
-          if (counts) reached = counts
+      if (now - reachedReadAt >= REACHED_REFRESH_MS) readCounters(now)
+      readFactoryFloor({ teamIds: teamFilterRef.current, cache: historyCache, now })
+        .then((read) => {
           if (cancelled || seq !== loadSeq) return
-          sceneRef.current?.applyFloor({ ...floor, reached })
-          setFloorCount({ shown: floor.entities.length, total: floor.total })
+          floor = read
+          apply()
+          setFloorCount({ shown: read.entities.length, total: read.total })
         })
         .catch((err) => {
-          // A failed counter read is tried again on the next load.
-          if (reachedRead) reachedReadAt = -Infinity
           if (cancelled) return
           console.warn('[factory] floor load failed:', err)
         })

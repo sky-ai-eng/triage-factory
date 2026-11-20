@@ -99,10 +99,18 @@ type EventStore interface {
 // EventListFilter narrows EventStore.List. Every field is optional; an empty
 // one narrows nothing.
 type EventListFilter struct {
+	// IDs keeps the events with these ids.
+	IDs []string
 	// EntityIDs keeps the events of these entities.
 	EntityIDs []string
 	// Since keeps the events recorded at or after it (events.created_at).
 	Since *time.Time
+	// PerEntity, when positive, keeps each entity's PerEntity newest recorded
+	// events under the other filters, so a read naming many entities gets a
+	// tail of each however busy one of them is. The rank is taken over the
+	// filtered set before a keyset cut, so it does not move between pages
+	// of one walk unless an event arrives.
+	PerEntity int
 }
 
 // ListedEvent is one row of EventStore.List: the event and its position in

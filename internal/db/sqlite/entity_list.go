@@ -21,8 +21,10 @@ const sqliteListedEntityCols = `e.id, e.source, e.scope, e.source_id, COALESCE(e
        (SELECT ev.created_at FROM events ev WHERE ev.entity_id = e.id ORDER BY ev.created_at DESC, ev.rowid DESC LIMIT 1)`
 
 // sqliteEntityListWhere renders db.EntityListFilter as a WHERE body over the
-// alias e plus its args. TeamIDs is not read: this dialect is N=1, and its
-// one team's tracked set is everything the local tracker discovered.
+// alias e plus its args. This dialect is N=1, and its one team's tracked set
+// is everything the local tracker discovered, so TeamIDs keeps every entity
+// when it names that team and none when it names only teams that do not
+// exist: a filter naming nobody's team must not widen to every entity.
 func sqliteEntityListWhere(f db.EntityListFilter) (string, []any) {
 	clauses := []string{"1=1"}
 	var args []any
@@ -48,6 +50,11 @@ func sqliteEntityListWhere(f db.EntityListFilter) (string, []any) {
 		// compare as instants whatever width each was written at.
 		clauses = append(clauses, "(e.closed_at IS NULL OR julianday(e.closed_at) >= julianday(?))")
 		args = append(args, f.ClosedSince.UTC())
+	}
+	if len(f.TeamIDs) > 0 {
+		placeholders, a := inListArgs(f.TeamIDs)
+		clauses = append(clauses, "EXISTS (SELECT 1 FROM teams tm WHERE tm.id IN ("+placeholders+"))")
+		args = append(args, a...)
 	}
 	return strings.Join(clauses, " AND "), args
 }
@@ -105,6 +112,11 @@ func (s *entityStore) List(ctx context.Context, orgID string, f db.EntityListFil
 func sqliteEventListWhere(f db.EventListFilter) (string, []any) {
 	clauses := []string{"ev.entity_id IS NOT NULL"}
 	var args []any
+	if len(f.IDs) > 0 {
+		placeholders, a := inListArgs(f.IDs)
+		clauses = append(clauses, "ev.id IN ("+placeholders+")")
+		args = append(args, a...)
+	}
 	if len(f.EntityIDs) > 0 {
 		placeholders, a := inListArgs(f.EntityIDs)
 		clauses = append(clauses, "ev.entity_id IN ("+placeholders+")")
@@ -122,8 +134,23 @@ func (s *eventStore) List(ctx context.Context, orgID string, f db.EventListFilte
 		return nil, 0, err
 	}
 	where, args := sqliteEventListWhere(f)
+	from := `FROM events ev WHERE ` + where
+	// pos is the row's position in the list's order: its rowid, which the
+	// ranked form below carries out of its subquery under a name.
+	pos := "ev.rowid"
+	if f.PerEntity > 0 {
+		// Ranked before the keyset cut below, so a row's rank is the same on
+		// every page of one walk.
+		from = `FROM (
+			SELECT ev.*, ev.rowid AS pos,
+			       ROW_NUMBER() OVER (PARTITION BY ev.entity_id ORDER BY ev.rowid DESC) AS entity_rank
+			` + from + `
+		) ev WHERE ev.entity_rank <= ?`
+		args = append(args, f.PerEntity)
+		pos = "ev.pos"
+	}
 	var total int
-	if err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM events ev WHERE `+where, args...).Scan(&total); err != nil {
+	if err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) `+from, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	if opts.CountOnly {
@@ -134,15 +161,14 @@ func (s *eventStore) List(ctx context.Context, orgID string, f db.EventListFilte
 		if err != nil {
 			return nil, 0, err
 		}
-		where += " AND ev.rowid < ?"
+		from += " AND " + pos + " < ?"
 		args = append(args, after)
 	}
 	query := `
 		SELECT ev.id, ev.entity_id, ev.event_type, ev.dedup_key,
-		       COALESCE(ev.metadata_json, ''), ev.occurred_at, ev.created_at, ev.rowid
-		FROM events ev
-		WHERE ` + where + `
-		ORDER BY ev.rowid DESC`
+		       COALESCE(ev.metadata_json, ''), ev.occurred_at, ev.created_at, ` + pos + `
+		` + from + `
+		ORDER BY ` + pos + ` DESC`
 	if opts.Limit > 0 {
 		query += ` LIMIT ?`
 		args = append(args, opts.Limit)

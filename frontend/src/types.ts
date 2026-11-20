@@ -1385,12 +1385,10 @@ export interface FactoryRecentEvent {
 /** An entity as the factory floor draws it: the entity resource plus what
  *  the floor reads beside it. */
 export interface FactoryEntity extends EntityResource {
-  /** The entity's recent events, oldest first, when the floor read them: for
-   *  an entity that may be mid-ride, or whose latest event has no station.
-   *  Empty otherwise, and the entity parks at its latest event's station.
-   *  The reconciler walks it as an animation chain, so a poll cycle that
-   *  emitted two events in sequence (new_commits → ci_passed) shows both
-   *  transitions rather than teleporting to the latest. */
+  /** The entity's last ~10 events, oldest first. The reconciler walks them
+   *  as an animation chain, so a poll cycle that emitted two events in
+   *  sequence (new_commits → ci_passed) shows both transitions rather than
+   *  teleporting to the latest. */
   recent_events: FactoryRecentEvent[]
   /** Open tasks on this entity, grouped by event_type. Drives the station
    *  drawer's drag-to-delegate flow: dropping on the runs tray reads the

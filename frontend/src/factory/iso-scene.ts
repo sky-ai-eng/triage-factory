@@ -860,26 +860,6 @@ const CHANGES_REQUESTED = stationSpec(
 const CLOSED = stationSpec(CLOSED_COL, CLOSED_ROW, 2, 0, 'Closed', 'github:pr:closed')
 const MERGED = stationSpec(MERGED_COL, MERGED_ROW, 1, 0, 'Merged', 'github:pr:merged')
 
-/** The event types the floor has a station for. The floor reads an entity's
- *  history only when its latest event is missing from here or recent, so the
- *  page hands this to the reads (lib/factoryFloor). */
-export const STATION_EVENT_TYPES: ReadonlySet<string> = new Set(
-  [
-    PR_OPENED,
-    READY_FOR_REVIEW,
-    NEW_COMMITS,
-    MERGE_CONFLICTS,
-    CI_PASSED,
-    CI_FAILED,
-    REVIEW_REQUESTED,
-    REVIEW_APPROVED,
-    REVIEW_COMMENTED,
-    CHANGES_REQUESTED,
-    CLOSED,
-    MERGED,
-  ].map((spec) => spec.id ?? ''),
-)
-
 // ─── Mergers / Splitters ──────────────────────────────────────────
 
 // Merger: 2 inputs (west = spawner intake, south = CI Failed

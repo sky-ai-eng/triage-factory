@@ -10,8 +10,8 @@
 // Tray counts and chip placement read this same function so the two
 // can never drift. Reload-stable rendering falls out for free —
 // `recent_events[]` (with both source-time `at` and insert-time
-// `detected_at`) on a possibly-moving entity encodes exactly enough
-// state to resume mid-animation after a refresh.
+// `detected_at`) on each entity encodes exactly enough state to resume
+// mid-animation after a refresh.
 //
 // ─── Chain handling ────────────────────────────────────────────────
 //
@@ -69,9 +69,9 @@ export function placeEntity(
   const station = (entity.recent_events ?? []).filter((e) => knownStations.has(e.event_type))
   if (station.length === 0) {
     if (entity.latest_event_type && knownStations.has(entity.latest_event_type)) {
-      // The entity's latest event has a station and no history was read
-      // for it (not possibly mid-ride), or none came back. Park there
-      // with no animation.
+      // The entity's latest event has a station but no station event is
+      // in its recent history (very fresh, or an ordering edge case).
+      // Park there with no animation.
       return { kind: 'parked', station: entity.latest_event_type }
     }
     return null

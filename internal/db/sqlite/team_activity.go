@@ -12,8 +12,9 @@ import (
 // teamActivityStore is the SQLite impl of db.TeamActivityStore. Local mode
 // is N=1 — the team is the org — so every count is unscoped (the same
 // posture as the entity list) and every source's event count is defined,
-// which is why the cuts leave EventsDefinedFor nil. The team set is not read
-// for the same reason.
+// which is why the cuts leave EventsDefinedFor nil. A non-empty team set is
+// the org's one team for the same reason, and an empty one answers zeros as
+// it does on Postgres.
 type teamActivityStore struct{ q queryer }
 
 func newTeamActivityStore(q queryer) db.TeamActivityStore {
@@ -31,9 +32,12 @@ const sqliteTeamActivityUnitKey = `COALESCE(CASE e.source
 		WHEN 'linear' THEN e.linear_team_id
 	END, '')`
 
-func (s *teamActivityStore) TeamActivity(ctx context.Context, orgID string, _ []string, since, until time.Time) (domain.TeamActivity, error) {
+func (s *teamActivityStore) TeamActivity(ctx context.Context, orgID string, teamIDs []string, since, until time.Time) (domain.TeamActivity, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return domain.TeamActivity{}, err
+	}
+	if len(teamIDs) == 0 {
+		return db.BuildTeamActivity(db.TeamActivityCuts{}), nil
 	}
 	sinceArg := since.UTC()
 	untilArg := until.UTC()

@@ -181,6 +181,26 @@ func RunTeamActivityConformance(t *testing.T, mk TeamActivityStoreFactory) {
 		}
 	})
 
+	t.Run("no_teams_answers_zeros", func(t *testing.T) {
+		s, orgID, _, seed := mk(t)
+		now := time.Now().UTC()
+		ent := seed.Entity(t, "unseen")
+		seed.Event(t, ent, domain.EventGitHubPROpened, "", now.Add(-time.Hour), time.Time{})
+
+		got, err := s.TeamActivity(ctx, orgID, nil, now.Add(-2*time.Hour), now)
+		if err != nil {
+			t.Fatalf("TeamActivity: %v", err)
+		}
+		if len(got.ByDay) != 0 || len(got.ByTracked) != 0 || len(got.ByEventType) != 0 {
+			t.Errorf("no teams = %+v, want no flow", got)
+		}
+		for _, src := range got.BySource {
+			if src.Events != nil && *src.Events != 0 || src.Tasks != 0 || src.Runs != 0 {
+				t.Errorf("no teams: by_source[%s] = %+v, want zeros", src.Source, src)
+			}
+		}
+	})
+
 	t.Run("by_tracked_is_the_tracked_set", func(t *testing.T) {
 		s, orgID, teamID, seed := mk(t)
 		// Millisecond precision, as in window_is_half_open, so a latest

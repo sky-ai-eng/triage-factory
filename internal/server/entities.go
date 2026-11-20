@@ -10,8 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
@@ -19,7 +17,7 @@ import (
 
 // --------------------------------------------------------------------
 // The entity and event reads: POST /api/entities/list, GET
-// /api/entities/{id}, and POST /api/events/list.
+// /api/entities/{id}, POST /api/events/list, and GET /api/events/{id}.
 //
 // An entity is listed to a viewer when one of their teams tracks its unit (a
 // repository, a Jira project, a Linear team, a Slack channel) — the standing
@@ -198,8 +196,10 @@ func (s *Server) handleEntityList(w http.ResponseWriter, r *http.Request) {
 		TeamIDs: httpx.CanonicalStrings(req.TeamIDs),
 	}
 	for _, id := range filter.TeamIDs {
-		if _, err := uuid.Parse(id); err != nil {
-			v.Invalid("team_ids", fmt.Sprintf("team id %q is not a valid team id", id))
+		// Canonical, not merely parseable: SQLite compares the text, and
+		// Postgres refuses some spellings uuid.Parse takes (urn:uuid:…).
+		if !httpx.IsCanonicalID(id) {
+			v.Invalid("team_ids", fmt.Sprintf("%q is not a team id in canonical form", id))
 		}
 	}
 	if len(filter.TeamIDs) > maxBatchTeamIDs {
@@ -306,6 +306,10 @@ type eventListRequest struct {
 	EntityIDs []string `json:"entity_ids"`
 	// Since (RFC3339) keeps the events recorded at or after it.
 	Since string `json:"since"`
+	// PerEntity keeps each entity's newest per_entity recorded events, 1 to
+	// httpx.MaxPageSize, so a read naming many entities gets a tail of each
+	// however busy one of them is. Absent is no cap.
+	PerEntity *int `json:"per_entity"`
 
 	httpx.PageRequest
 }
@@ -313,6 +317,7 @@ type eventListRequest struct {
 type eventListFilterKey struct {
 	EntityIDs []string `json:"entity_ids"`
 	Since     string   `json:"since"`
+	PerEntity int      `json:"per_entity"`
 }
 
 // handleEventList serves POST /api/events/list: the events of the entities
@@ -334,8 +339,14 @@ func (s *Server) handleEventList(w http.ResponseWriter, r *http.Request) {
 	filter := db.EventListFilter{EntityIDs: canonicalIDList(&v, "entity_ids", "an entity", req.EntityIDs)}
 	var sinceKey string
 	filter.Since, sinceKey = parseTaskWindow(&v, "since", req.Since)
+	if req.PerEntity != nil {
+		if *req.PerEntity < 1 || *req.PerEntity > httpx.MaxPageSize {
+			v.OutOfRange("per_entity", fmt.Sprintf("per_entity must be between 1 and %d; got %d", httpx.MaxPageSize, *req.PerEntity))
+		}
+		filter.PerEntity = *req.PerEntity
+	}
 	page := httpx.ResolveKeysetPage(&v, req.PageRequest, httpx.FilterFingerprint(eventListFilterKey{
-		EntityIDs: filter.EntityIDs, Since: sinceKey,
+		EntityIDs: filter.EntityIDs, Since: sinceKey, PerEntity: filter.PerEntity,
 	}), 0)
 	if v.Flush(w, http.StatusBadRequest) {
 		return
@@ -372,17 +383,51 @@ func (s *Server) handleEventList(w http.ResponseWriter, r *http.Request) {
 	}
 	items := make([]eventJSON, len(rows))
 	for i, row := range rows {
-		ev := row.Event
-		items[i] = eventJSON{ID: ev.ID, EventType: ev.EventType, DedupKey: ev.DedupKey, CreatedAt: ev.CreatedAt}
-		if ev.EntityID != nil {
-			items[i].EntityID = *ev.EntityID
-		}
-		if !ev.OccurredAt.IsZero() {
-			at := ev.OccurredAt
-			items[i].OccurredAt = &at
-		}
+		items[i] = toEventJSON(row.Event)
 	}
 	httpx.WriteListKeyset(w, page, items, total, nextKey)
+}
+
+func toEventJSON(ev domain.Event) eventJSON {
+	out := eventJSON{ID: ev.ID, EventType: ev.EventType, DedupKey: ev.DedupKey, CreatedAt: ev.CreatedAt}
+	if ev.EntityID != nil {
+		out.EntityID = *ev.EntityID
+	}
+	if !ev.OccurredAt.IsZero() {
+		at := ev.OccurredAt
+		out.OccurredAt = &at
+	}
+	return out
+}
+
+// handleEventGet serves GET /api/events/{id}. An event the viewer may not
+// read, including a system event, which has no entity, is 404 like one that
+// does not exist: it is in none of their lists.
+func (s *Server) handleEventGet(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := s.requireOrg(w, r)
+	if !ok {
+		return
+	}
+	userID := ClaimsFrom(r.Context()).Subject
+	id := r.PathValue("id")
+	if !httpx.IsCanonicalID(id) {
+		notFound(w, "event")
+		return
+	}
+	var rows []db.ListedEvent
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		rows, _, e = tx.Events.List(r.Context(), orgID, db.EventListFilter{IDs: []string{id}}, db.ListOpts{Limit: 1})
+		return e
+	}); err != nil {
+		internalError(w, "events", err)
+		return
+	}
+	if len(rows) == 0 {
+		notFound(w, "event")
+		return
+	}
+	writeJSON(w, http.StatusOK, toEventJSON(rows[0].Event))
 }
 
 func (s *Server) registerEntityRoutes() {
@@ -391,4 +436,5 @@ func (s *Server) registerEntityRoutes() {
 	s.apiMutating("POST /api/entities/list", s.handleEntityList)
 	s.api("GET /api/entities/{id}", s.handleEntityGet)
 	s.apiMutating("POST /api/events/list", s.handleEventList)
+	s.api("GET /api/events/{id}", s.handleEventGet)
 }

@@ -214,27 +214,6 @@ func TestTeamActivityStore_Postgres(t *testing.T) {
 
 	// No team is a team set with no flow: zeros, and the by-source rows the
 	// shape always carries, never an error.
-	t.Run("no_teams_answers_zeros", func(t *testing.T) {
-		h.Reset(t)
-		orgID, userID := seedPgFlowOrg(t, h)
-		promptID := seedPgFlowPrompt(t, h, orgID, userID)
-		seed := newPgFlowSeeder(h.AdminDB, orgID, userID, promptID)
-		now := time.Now().UTC()
-		ent := seed.Entity(t, "unseen")
-		seed.Event(t, ent, domain.EventGitHubPROpened, "", now.Add(-time.Hour), time.Time{})
-
-		got, err := stores.TeamActivity.TeamActivity(context.Background(), orgID, nil, now.Add(-2*time.Hour), now)
-		if err != nil {
-			t.Fatalf("TeamActivity: %v", err)
-		}
-		if len(got.ByDay) != 0 || len(got.ByTracked) != 0 || len(got.ByEventType) != 0 {
-			t.Errorf("no teams = %+v, want no flow", got)
-		}
-		if len(got.BySource) == 0 {
-			t.Error("no teams dropped the by_source rows the shape always carries")
-		}
-	})
-
 	// A team's Slack flow is the channels it watches, whoever is primary
 	// there: the subject team watches one channel another team is primary
 	// in, and that channel's events are the subject's. A channel only the

@@ -1,4 +1,4 @@
-import { apiJSON, apiList } from './apiClient'
+import { apiJSON, apiList, apiListAll } from './apiClient'
 import { ACTIVE_STATUSES } from './conversationStatus'
 import { TASK_LIST_PATH } from './taskList'
 import type {
@@ -15,10 +15,10 @@ import type {
 
 // The factory floor's reads. Nothing here is factory-shaped on the server:
 // the floor is one page of the entity list, the work on those entities from
-// the task and conversation lists, the recent events of the entities that
-// need them from the event list, and the station counters from the activity
-// node's by_event_type cut over the last REACHED_WINDOW_DAYS days. What the floor makes of them — stations, chips,
-// rides — is the scene's.
+// the task and conversation lists, each entity's recent events from the event
+// list, and the station counters from the activity node's by_event_type cut
+// over the last REACHED_WINDOW_DAYS days. What the floor makes of them —
+// stations, chips, rides — is the scene's.
 
 export const ENTITY_LIST_PATH = '/api/entities/list'
 export const EVENT_LIST_PATH = '/api/events/list'
@@ -32,20 +32,13 @@ export const FLOOR_PAGE_SIZE = 200
  *  the last bridge into its terminal station. */
 const CLOSED_GRACE_MS = 60_000
 
-/** How recently an entity's latest event must have landed for its chip to be
- *  possibly mid-ride. Longer than any chain of hops takes to play. */
-const RIDE_HORIZON_MS = 10 * 60_000
-
-/** How far back the floor reads an entity's history, to find the station it
- *  rode in from or the last station it stood at. */
-const HISTORY_LOOKBACK_MS = 7 * 24 * 60 * 60_000
-
-/** How many entities one history read names. A read is one page of events,
- *  newest first, so a smaller group leaves each entity more of the page. */
-const HISTORY_GROUP = 20
-
-/** How many events of an entity's history the chain animation keeps. */
+/** How many events of an entity's history the chain animation keeps, and how
+ *  many the event list returns for each entity. */
 const HISTORY_TAIL = 10
+
+/** How many entities one history read names: as many as fill one page with a
+ *  full tail each. */
+const HISTORY_GROUP = FLOOR_PAGE_SIZE / HISTORY_TAIL
 
 /** The task statuses of a task still open at its station. */
 const OPEN_TASK_STATUSES = ['queued', 'in_progress', 'snoozed']
@@ -53,10 +46,18 @@ const OPEN_TASK_STATUSES = ['queued', 'in_progress', 'snoozed']
 /** One entity's history as last read, with the latest event time it was read
  *  at. An entity's history changes only when a new event lands, which moves
  *  its latest event, so an entry whose time still matches is current. */
-export type FloorHistoryCache = Map<string, { latestEventAt: string; events: FactoryRecentEvent[] }>
+export type FloorHistoryCache = Map<
+  string,
+  { latestEventAt: string | null; events: FactoryRecentEvent[] }
+>
+
+/** A floor as the reads build it, without the station counters, which are
+ *  read on their own schedule (readReachedCounts). */
+export type FloorRead = Omit<FactoryFloor, 'reached'>
 
 type ConversationListEnvelope = {
   runs?: Record<string, Conversation[]>
+  next_page_token?: string
 }
 
 type ActivityNode = {
@@ -90,35 +91,23 @@ export async function readReachedCounts(now: number): Promise<Record<string, num
   return out
 }
 
-/** Whether the floor reads an entity's history: when its chip may be
- *  mid-ride, or when its latest event has no station, so the station it
- *  stands at is an earlier event's. */
-function needsHistory(e: EntityResource, stations: ReadonlySet<string>, now: number): boolean {
-  if (!e.latest_event_type || !e.latest_event_at) return false
-  if (!stations.has(e.latest_event_type)) return true
-  return now - Date.parse(e.latest_event_at) < RIDE_HORIZON_MS
-}
-
-/** Reads the histories the floor needs and the cache does not hold, and
- *  answers each needed entity's history. */
+/** Reads the histories the cache does not hold, and answers each entity's
+ *  history. */
 async function readHistories(
   entities: EntityResource[],
-  stations: ReadonlySet<string>,
   cache: FloorHistoryCache,
-  now: number,
 ): Promise<Map<string, FactoryRecentEvent[]>> {
-  const needed = entities.filter((e) => needsHistory(e, stations, now))
-  const stale = needed.filter((e) => cache.get(e.id)?.latestEventAt !== e.latest_event_at)
-  const since = new Date(now - HISTORY_LOOKBACK_MS).toISOString()
+  const stale = entities.filter(
+    (e) => e.latest_event_at && cache.get(e.id)?.latestEventAt !== e.latest_event_at,
+  )
   const groups: EntityResource[][] = []
   for (let i = 0; i < stale.length; i += HISTORY_GROUP)
     groups.push(stale.slice(i, i + HISTORY_GROUP))
   const pages = await Promise.all(
     groups.map((group) =>
-      apiList<EventResource>(EVENT_LIST_PATH, {
+      apiListAll<EventResource>(EVENT_LIST_PATH, {
         entity_ids: group.map((e) => e.id),
-        since,
-        page_size: FLOOR_PAGE_SIZE,
+        per_entity: HISTORY_TAIL,
       }),
     ),
   )
@@ -126,7 +115,7 @@ async function readHistories(
     const byEntity = new Map<string, FactoryRecentEvent[]>()
     // The page is newest recorded first; reversed, ties on a source time
     // keep the order the events were recorded in.
-    for (const ev of [...pages[i].items].reverse()) {
+    for (const ev of [...pages[i]].reverse()) {
       const list = byEntity.get(ev.entity_id) ?? []
       list.push({
         event_type: ev.event_type,
@@ -136,77 +125,94 @@ async function readHistories(
       byEntity.set(ev.entity_id, list)
     }
     for (const e of group) {
+      // The chain plays in source-time order, which the list does not sort
+      // by: it orders by recording, the one order a walk can resume in.
       const events = (byEntity.get(e.id) ?? [])
         .map((ev, order) => ({ ev, order }))
         .sort((a, b) => Date.parse(a.ev.at) - Date.parse(b.ev.at) || a.order - b.order)
         .map(({ ev }) => ev)
-        .slice(-HISTORY_TAIL)
-      cache.set(e.id, { latestEventAt: e.latest_event_at ?? '', events })
+      cache.set(e.id, { latestEventAt: e.latest_event_at, events })
     }
   })
   const keep = new Set(entities.map((e) => e.id))
   for (const id of cache.keys()) if (!keep.has(id)) cache.delete(id)
   const out = new Map<string, FactoryRecentEvent[]>()
-  for (const e of needed) out.set(e.id, cache.get(e.id)?.events ?? [])
+  for (const e of entities) out.set(e.id, cache.get(e.id)?.events ?? [])
   return out
 }
 
-/** The conversations in flight on the entities, with their tasks, and the
- *  open tasks on them. */
-async function readWork(entityIds: string[]): Promise<{ runs: FactoryRun[]; openTasks: Task[] }> {
-  const [convs, open] = await Promise.all([
-    apiJSON<ConversationListEnvelope>(CONVERSATION_LIST_PATH, {
+/** Every in-flight conversation on the entities, by task id, across every
+ *  page of the list. */
+async function readActiveRuns(entityIds: string[]): Promise<Record<string, Conversation[]>> {
+  const runs: Record<string, Conversation[]> = {}
+  let token = ''
+  do {
+    const page = await apiJSON<ConversationListEnvelope>(CONVERSATION_LIST_PATH, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         entity_ids: entityIds,
         statuses: ACTIVE_STATUSES,
         page_size: FLOOR_PAGE_SIZE,
+        ...(token ? { page_token: token } : {}),
       }),
-    }),
-    apiList<Task>(TASK_LIST_PATH, {
+    })
+    for (const [taskId, rows] of Object.entries(page.runs ?? {}))
+      (runs[taskId] ??= []).push(...rows)
+    token = page.next_page_token ?? ''
+  } while (token)
+  return runs
+}
+
+/** The conversations in flight on the entities, with their tasks, and the
+ *  open tasks on them in the filtered teams. Every page of each list is read:
+ *  an entity whose task sat on an unread page would show none. */
+async function readWork(
+  entityIds: string[],
+  teamIds: string[],
+): Promise<{ runs: FactoryRun[]; openTasks: Task[] }> {
+  const [convs, openTasks] = await Promise.all([
+    readActiveRuns(entityIds),
+    apiListAll<Task>(TASK_LIST_PATH, {
       entity_ids: entityIds,
+      team_ids: teamIds,
       statuses: OPEN_TASK_STATUSES,
       include_snoozed: true,
-      page_size: FLOOR_PAGE_SIZE,
     }),
   ])
-  const tasks = new Map(open.items.map((t) => [t.id, t]))
-  // A run goes on after its task closes, so a run's task may not be open.
-  const missing = Object.keys(convs.runs ?? {}).filter((id) => !tasks.has(id))
-  if (missing.length > 0) {
-    const closed = await apiList<Task>(TASK_LIST_PATH, {
-      ids: missing,
-      include_snoozed: true,
-      page_size: FLOOR_PAGE_SIZE,
-    })
-    for (const t of closed.items) tasks.set(t.id, t)
-  }
+  const tasks = new Map(openTasks.map((t) => [t.id, t]))
+  // A run goes on after its task closes, and a run on a shared entity may
+  // work another team's task, so a run's task may not be among those read.
+  const missing = Object.keys(convs).filter((id) => !tasks.has(id))
+  const chunks: string[][] = []
+  for (let i = 0; i < missing.length; i += FLOOR_PAGE_SIZE)
+    chunks.push(missing.slice(i, i + FLOOR_PAGE_SIZE))
+  const found = await Promise.all(
+    chunks.map((ids) => apiListAll<Task>(TASK_LIST_PATH, { ids, include_snoozed: true })),
+  )
+  for (const t of found.flat()) tasks.set(t.id, t)
   const runs: FactoryRun[] = []
-  for (const [taskId, rows] of Object.entries(convs.runs ?? {})) {
+  for (const [taskId, rows] of Object.entries(convs)) {
     const task = tasks.get(taskId)
     if (!task) continue
     for (const run of rows) runs.push({ run, task })
   }
-  return { runs, openTasks: open.items }
+  return { runs, openTasks }
 }
 
-/** Reads the floor for the team filter. `stations` is the set of event types
- *  the scene has a station for; `reached` is the station counters last read,
- *  which this read does not refresh. */
+/** Reads the floor for the team filter. `cache` holds the histories of the
+ *  last read, which this one reuses for every entity with no newer event. */
 export async function readFactoryFloor(opts: {
   teamIds: string[]
-  stations: ReadonlySet<string>
   cache: FloorHistoryCache
-  reached: Record<string, number>
   now: number
-}): Promise<FactoryFloor> {
+}): Promise<FloorRead> {
   const page = await readFloorEntities(opts.teamIds, opts.now)
   const ids = page.items.map((e) => e.id)
   // An empty entity_ids narrows nothing, so an empty floor reads no work.
   const [work, histories] = await Promise.all([
-    ids.length > 0 ? readWork(ids) : Promise.resolve({ runs: [], openTasks: [] }),
-    readHistories(page.items, opts.stations, opts.cache, opts.now),
+    ids.length > 0 ? readWork(ids, opts.teamIds) : Promise.resolve({ runs: [], openTasks: [] }),
+    readHistories(page.items, opts.cache),
   ])
 
   const pending = new Map<string, FactoryEntity['pending_tasks']>()
@@ -226,6 +232,5 @@ export async function readFactoryFloor(opts: {
     })),
     total: page.total_count ?? page.items.length,
     runs,
-    reached: opts.reached,
   }
 }

@@ -8,7 +8,6 @@ const EVENTS = '/api/events/list'
 const TASKS = '/api/tasks/list'
 const CONVERSATIONS = '/api/agent/conversations/list'
 
-const STATIONS = new Set(['github:pr:opened', 'github:pr:ci_check_passed', 'github:pr:merged'])
 const NOW = Date.parse('2026-11-20T12:00:00Z')
 
 function entity(id: string, latest: string | null, latestAt: string | null): EntityResource {
@@ -76,13 +75,7 @@ const list = (items: unknown[], total = items.length) => ({
 describe('readFactoryFloor', () => {
   it('asks for one page of GitHub pull requests, open or closed in the last minute, in the filtered teams', async () => {
     answers[ENTITIES] = () => list([], 0)
-    const floor = await readFactoryFloor({
-      teamIds: ['team-a'],
-      stations: STATIONS,
-      cache: new Map(),
-      reached: {},
-      now: NOW,
-    })
+    const floor = await readFactoryFloor({ teamIds: ['team-a'], cache: new Map(), now: NOW })
     expect(calls).toHaveLength(1)
     expect(calls[0].body).toEqual({
       sources: ['github'],
@@ -93,21 +86,25 @@ describe('readFactoryFloor', () => {
     })
     // An empty floor names no entities, and an empty entity_ids narrows
     // nothing, so nothing else is read.
-    expect(floor).toEqual({ entities: [], total: 0, runs: {}, reached: {} })
+    expect(floor).toEqual({ entities: [], total: 0, runs: {} })
   })
 
-  it('joins the work on the floor and reads history only where a chip may move or stands at an earlier event', async () => {
+  it('joins every page of the work on the floor and reads each entity a tail of its history', async () => {
     const parked = entity('parked', 'github:pr:ci_check_passed', '2026-11-19T00:00:00Z')
     const riding = entity('riding', 'github:pr:merged', '2026-11-20T11:59:50Z')
-    const commented = entity('commented', 'github:pr:commented', '2026-11-18T00:00:00Z')
-    answers[ENTITIES] = () => list([parked, riding, commented], 340)
-    answers[CONVERSATIONS] = () => ({
-      runs: {
-        'task-open': [{ id: 'run-1', status: 'running' }],
-        'task-closed': [{ id: 'run-2', status: 'running' }],
-      },
-      total_count: 2,
-    })
+    const quiet = entity('quiet', null, null)
+    answers[ENTITIES] = () => list([parked, riding, quiet], 340)
+    answers[CONVERSATIONS] = (body) =>
+      body.page_token
+        ? { runs: { 'task-open': [{ id: 'run-3', status: 'running' }] }, total_count: 3 }
+        : {
+            runs: {
+              'task-open': [{ id: 'run-1', status: 'running' }],
+              'task-closed': [{ id: 'run-2', status: 'running' }],
+            },
+            total_count: 3,
+            next_page_token: 'page-2',
+          }
     answers[TASKS] = (body) =>
       body.ids
         ? list([
@@ -135,7 +132,7 @@ describe('readFactoryFloor', () => {
     answers[EVENTS] = () =>
       list([
         event('e4', 'riding', 'github:pr:merged', '2026-11-20T11:59:50Z'),
-        event('e3', 'commented', 'github:pr:commented', '2026-11-18T00:00:00Z'),
+        event('e3', 'parked', 'github:pr:ci_check_passed', '2026-11-19T00:00:00Z'),
         event(
           'e2',
           'riding',
@@ -143,36 +140,41 @@ describe('readFactoryFloor', () => {
           '2026-11-19T00:00:00Z',
           '2026-11-18T23:00:00Z',
         ),
-        event('e1', 'commented', 'github:pr:opened', '2026-11-17T00:00:00Z'),
+        event('e1', 'parked', 'github:pr:opened', '2026-11-01T00:00:00Z'),
       ])
 
-    const floor = await readFactoryFloor({
-      teamIds: [],
-      stations: STATIONS,
-      cache: new Map(),
-      reached: { x: 1 },
-      now: NOW,
-    })
+    const floor = await readFactoryFloor({ teamIds: ['team-a'], cache: new Map(), now: NOW })
 
-    const conv = calls.find((c) => c.path === CONVERSATIONS)
-    expect(conv?.body.entity_ids).toEqual(['parked', 'riding', 'commented'])
-    expect(conv?.body.statuses).toContain('running')
+    const convs = calls.filter((c) => c.path === CONVERSATIONS)
+    expect(convs.map((c) => c.body.page_token)).toEqual([undefined, 'page-2'])
+    expect(convs[0].body.entity_ids).toEqual(['parked', 'riding', 'quiet'])
+    expect(convs[0].body.statuses).toContain('running')
+    const open = calls.find((c) => c.path === TASKS && !c.body.ids)
+    expect(open?.body.team_ids).toEqual(['team-a'])
     expect(calls.find((c) => c.path === TASKS && c.body.ids)?.body.ids).toEqual(['task-closed'])
+    // One read names every entity with an event, and asks for a tail of
+    // each rather than a window of time.
     const history = calls.filter((c) => c.path === EVENTS)
     expect(history).toHaveLength(1)
-    expect(history[0].body.entity_ids).toEqual(['riding', 'commented'])
+    expect(history[0].body).toEqual({
+      entity_ids: ['parked', 'riding'],
+      per_entity: 10,
+      page_size: 200,
+    })
 
     expect(floor.total).toBe(340)
-    expect(floor.reached).toEqual({ x: 1 })
-    expect(floor.runs['github:pr:ci_check_passed'].map((r) => r.run.id)).toEqual(['run-1'])
+    expect(floor.runs['github:pr:ci_check_passed'].map((r) => r.run.id)).toEqual(['run-1', 'run-3'])
     expect(floor.runs['github:pr:merged'].map((r) => r.task.id)).toEqual(['task-closed'])
 
     const byId = Object.fromEntries(floor.entities.map((e) => [e.id, e]))
-    expect(byId.parked.recent_events).toEqual([])
     expect(byId.parked.pending_tasks).toEqual({
       'github:pr:ci_check_passed': [{ task_id: 'task-open', dedup_key: '' }],
       'github:pr:label_added': [{ task_id: 'task-label', dedup_key: 'bug' }],
     })
+    expect(byId.parked.recent_events.map((e) => e.event_type)).toEqual([
+      'github:pr:opened',
+      'github:pr:ci_check_passed',
+    ])
     expect(byId.riding.recent_events).toEqual([
       {
         event_type: 'github:pr:ci_check_passed',
@@ -185,10 +187,7 @@ describe('readFactoryFloor', () => {
         detected_at: '2026-11-20T11:59:50Z',
       },
     ])
-    expect(byId.commented.recent_events.map((e) => e.event_type)).toEqual([
-      'github:pr:opened',
-      'github:pr:commented',
-    ])
+    expect(byId.quiet.recent_events).toEqual([])
   })
 
   it('reuses a history until the entity has a newer event', async () => {
@@ -200,24 +199,12 @@ describe('readFactoryFloor', () => {
       list([event('e1', 'riding', 'github:pr:merged', '2026-11-20T11:59:50Z')])
     const cache: FloorHistoryCache = new Map()
 
-    await readFactoryFloor({ teamIds: [], stations: STATIONS, cache, reached: {}, now: NOW })
-    await readFactoryFloor({
-      teamIds: [],
-      stations: STATIONS,
-      cache,
-      reached: {},
-      now: NOW + 1000,
-    })
+    await readFactoryFloor({ teamIds: [], cache, now: NOW })
+    await readFactoryFloor({ teamIds: [], cache, now: NOW + 1000 })
     expect(calls.filter((c) => c.path === EVENTS)).toHaveLength(1)
 
     answers[ENTITIES] = () => list([{ ...riding, latest_event_at: '2026-11-20T12:00:01Z' }])
-    await readFactoryFloor({
-      teamIds: [],
-      stations: STATIONS,
-      cache,
-      reached: {},
-      now: NOW + 2000,
-    })
+    await readFactoryFloor({ teamIds: [], cache, now: NOW + 2000 })
     expect(calls.filter((c) => c.path === EVENTS)).toHaveLength(2)
   })
 })

@@ -166,12 +166,15 @@ func TestEntityAndEventLists_RefuseBadBodies(t *testing.T) {
 		{"unknown state", "/api/entities/list", map[string]any{"states": []string{"merged"}}, "states"},
 		{"malformed closed_since", "/api/entities/list", map[string]any{"closed_since": "yesterday"}, "closed_since"},
 		{"malformed team", "/api/entities/list", map[string]any{"team_ids": []string{"junk"}}, "team_ids"},
+		{"urn team", "/api/entities/list", map[string]any{"team_ids": []string{"urn:uuid:6ba7b810-9dad-11d1-80b4-00c04fd430c8"}}, "team_ids"},
 		{"malformed id", "/api/entities/list", map[string]any{"ids": []string{"junk"}}, "ids[0]"},
 		{"page too large", "/api/entities/list", map[string]any{"page_size": 201}, "page_size"},
 		{"unknown event field", "/api/events/list", map[string]any{"event_types": []string{"x"}}, ""},
 		{"malformed entity id", "/api/events/list", map[string]any{"entity_ids": []string{"junk"}}, "entity_ids[0]"},
 		{"malformed since", "/api/events/list", map[string]any{"since": "2026-13-01"}, "since"},
 		{"foreign page token", "/api/events/list", map[string]any{"page_token": "garbage"}, "page_token"},
+		{"zero per_entity", "/api/events/list", map[string]any{"per_entity": 0}, "per_entity"},
+		{"per_entity too large", "/api/events/list", map[string]any{"per_entity": 201}, "per_entity"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			rec := doJSON(t, s, http.MethodPost, c.path, c.body)
@@ -241,6 +244,37 @@ func TestEventList_PagesByKeyset(t *testing.T) {
 	since := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
 	if p := read(map[string]any{"since": since}); p.TotalCount != 0 {
 		t.Errorf("since an hour from now = %d events, want none", p.TotalCount)
+	}
+
+	capped := read(map[string]any{"entity_ids": []string{pr.ID, other.ID}, "per_entity": 1})
+	if capped.TotalCount != 2 || len(capped.Items) != 2 {
+		t.Errorf("per_entity 1 over two entities = %+v, want one event of each", capped)
+	}
+}
+
+// An event is read by its id; one the viewer cannot read, or a malformed id,
+// is 404.
+func TestEventGet_ServesTheEventResource(t *testing.T) {
+	s := newTestServer(t)
+	pr := seedPRSnapshot(t, s, "acme", "api", 1, domain.PRSnapshot{Number: 1, Repo: "acme/api"})
+	id := recordTestEvent(t, s, pr.ID, domain.EventGitHubPROpened)
+
+	rec := doJSON(t, s, http.MethodGet, "/api/events/"+id, nil)
+	var got struct {
+		ID        string `json:"id"`
+		EntityID  string `json:"entity_id"`
+		EventType string `json:"event_type"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil || rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/events/%s = %d %s, want 200", id, rec.Code, rec.Body.String())
+	}
+	if got.ID != id || got.EntityID != pr.ID || got.EventType != domain.EventGitHubPROpened {
+		t.Errorf("event = %+v, want %s on %s", got, id, pr.ID)
+	}
+	for _, path := range []string{"/api/events/" + fixtureUUID("e_missing"), "/api/events/junk"} {
+		if rec := doJSON(t, s, http.MethodGet, path, nil); rec.Code != http.StatusNotFound {
+			t.Errorf("GET %s = %d, want 404", path, rec.Code)
+		}
 	}
 }
 

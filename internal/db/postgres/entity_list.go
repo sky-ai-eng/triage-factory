@@ -129,6 +129,14 @@ func (s *entityStore) List(ctx context.Context, orgID string, f db.EntityListFil
 func pgEventListWhere(orgID string, f db.EventListFilter) (string, []any, bool) {
 	args := []any{orgID}
 	clauses := []string{"ev.org_id = $1"}
+	if len(f.IDs) > 0 {
+		ids := filterValidUUIDs(f.IDs)
+		if len(ids) == 0 {
+			return "", nil, false
+		}
+		args = append(args, pgUUIDArray(ids))
+		clauses = append(clauses, fmt.Sprintf("ev.id = ANY($%d::uuid[])", len(args)))
+	}
 	if len(f.EntityIDs) > 0 {
 		ids := filterValidUUIDs(f.EntityIDs)
 		if len(ids) == 0 {
@@ -159,6 +167,16 @@ func (s *eventStore) List(ctx context.Context, orgID string, f db.EventListFilte
 		FROM events ev
 		JOIN entities e ON e.id = ev.entity_id AND e.org_id = ev.org_id
 		WHERE ` + where
+	if f.PerEntity > 0 {
+		// Ranked before the keyset cut below, so a row's rank is the same on
+		// every page of one walk.
+		args = append(args, f.PerEntity)
+		from = `
+		FROM (
+			SELECT ev.*, ROW_NUMBER() OVER (PARTITION BY ev.entity_id ORDER BY ev.seq DESC) AS entity_rank` + from + `
+		) ev
+		WHERE ev.entity_rank <= ` + fmt.Sprintf("$%d", len(args))
+	}
 	var total int
 	if err := s.q.QueryRowContext(ctx, `SELECT COUNT(*)`+from, args...).Scan(&total); err != nil {
 		return nil, 0, err

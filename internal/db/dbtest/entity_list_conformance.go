@@ -253,6 +253,61 @@ func RunEntityReadConformance(t *testing.T, mk EntityReadFactory) {
 		}
 	})
 
+	// A read naming several entities gets each one's newest events, however
+	// many more one of them has, and keeps the cap across a keyset walk.
+	t.Run("EventList_PerEntityKeepsEachEntitysNewest", func(t *testing.T) {
+		_, events, orgID, seed := mk(t)
+		now := time.Now().UTC().Truncate(time.Millisecond)
+		busy := seed.Entity(t, "busy")
+		quiet := seed.Entity(t, "quiet")
+		quietOld := seed.Event(t, quiet, domain.EventGitHubPROpened, "", now.Add(-time.Hour), time.Time{})
+		var busyIDs []string
+		for i := 0; i < 5; i++ {
+			busyIDs = append(busyIDs, seed.Event(t, busy, domain.EventGitHubPRCommented, "", now.Add(time.Duration(i-30)*time.Minute), time.Time{}))
+		}
+		quietNew := seed.Event(t, quiet, domain.EventGitHubPRNewCommits, "", now.Add(-time.Minute), time.Time{})
+
+		f := db.EventListFilter{EntityIDs: []string{busy, quiet}, PerEntity: 2}
+		rows, total, err := events.List(ctx, orgID, f, db.Unwindowed)
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		got := make([]string, len(rows))
+		for i, r := range rows {
+			got[i] = r.Event.ID
+		}
+		want := []string{quietNew, busyIDs[4], busyIDs[3], quietOld}
+		if !reflect.DeepEqual(got, want) || total != 4 {
+			t.Errorf("per_entity 2 = %v of %d, want %v of 4", got, total, want)
+		}
+
+		page1, _, err := events.List(ctx, orgID, f, db.ListOpts{Limit: 3})
+		if err != nil || len(page1) != 3 {
+			t.Fatalf("page 1 = %d rows, err %v; want 3", len(page1), err)
+		}
+		page2, _, err := events.List(ctx, orgID, f, db.ListOpts{Limit: 3, After: []string{strconv.FormatInt(page1[2].Position, 10)}})
+		if err != nil {
+			t.Fatalf("page 2: %v", err)
+		}
+		if len(page2) != 1 || page2[0].Event.ID != quietOld {
+			t.Errorf("page 2 = %d rows, want [%s]: the cap holds across the walk", len(page2), quietOld)
+		}
+	})
+
+	t.Run("EventList_FiltersByID", func(t *testing.T) {
+		_, events, orgID, seed := mk(t)
+		ent := seed.Entity(t, "by-id")
+		keep := seed.Event(t, ent, domain.EventGitHubPROpened, "", time.Now().UTC().Add(-time.Minute), time.Time{})
+		seed.Event(t, ent, domain.EventGitHubPRNewCommits, "", time.Now().UTC(), time.Time{})
+		rows, total, err := events.List(ctx, orgID, db.EventListFilter{IDs: []string{keep}}, db.Unwindowed)
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if total != 1 || len(rows) != 1 || rows[0].Event.ID != keep {
+			t.Errorf("ids [%s] = %d rows of %d, want that event alone", keep, len(rows), total)
+		}
+	})
+
 	t.Run("EventList_KeysetResumesWhileEventsArrive", func(t *testing.T) {
 		_, events, orgID, seed := mk(t)
 		now := time.Now().UTC()

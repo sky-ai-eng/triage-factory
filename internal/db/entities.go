@@ -321,9 +321,10 @@ type EntityStore interface {
 	// teams' tracked sets; a team the viewer is not on narrows to nothing.
 	// An entity no team tracks is listed to nobody.
 	//
-	// Local mode (SQLite, N=1) applies no tracked-set filter and ignores
-	// f.TeamIDs: the local tracker discovers only what involves the user, so
-	// every entity is theirs by construction.
+	// Local mode (SQLite, N=1) applies no tracked-set filter: the local
+	// tracker discovers only what involves the user, so every entity is
+	// theirs by construction. f.TeamIDs there keeps every entity when it
+	// names the org's team and none when it names no team that exists.
 	List(ctx context.Context, orgID string, f EntityListFilter, opts ListOpts) ([]domain.ListedEntity, int, error)
 
 	// --- Mutation ---
@@ -1071,6 +1072,6 @@ type EntityListFilter struct {
 	// not closed passes, so one read asks for the active set and whatever
 	// closed since a moment.
 	ClosedSince *time.Time
-	// TeamIDs narrows the tracked set to these teams' (Postgres only).
+	// TeamIDs narrows the tracked set to these teams'.
 	TeamIDs []string
 }

@@ -267,12 +267,22 @@ func TestEntityReads_SQLite_ListsUntrackedEntities(t *testing.T) {
 
 	stores := sqlitestore.New(conn)
 	items, _, err := stores.Entities.List(t.Context(), runmode.LocalDefaultOrgID,
-		db.EntityListFilter{TeamIDs: []string{uuid.New().String()}}, db.Unwindowed)
+		db.EntityListFilter{TeamIDs: []string{runmode.LocalDefaultTeamID}}, db.Unwindowed)
 	if err != nil {
 		t.Fatalf("Entities.List: %v", err)
 	}
 	if len(items) != 1 || items[0].Entity.ID != id || items[0].LatestEventType != "github:pr:opened" {
 		t.Errorf("entity list = %+v, want the untracked entity with its event — local mode applies no tracked-set filter", items)
+	}
+	// A team that does not exist is nobody's, so naming it narrows to
+	// nothing rather than widening to every entity.
+	none, total, err := stores.Entities.List(t.Context(), runmode.LocalDefaultOrgID,
+		db.EntityListFilter{TeamIDs: []string{uuid.New().String()}}, db.Unwindowed)
+	if err != nil {
+		t.Fatalf("Entities.List for an unknown team: %v", err)
+	}
+	if len(none) != 0 || total != 0 {
+		t.Errorf("unknown team = %d rows of %d, want none", len(none), total)
 	}
 	events, _, err := stores.Events.List(t.Context(), runmode.LocalDefaultOrgID, db.EventListFilter{}, db.Unwindowed)
 	if err != nil {
