@@ -300,32 +300,50 @@ func (r *Router) autoDelegatePreflight(ctx context.Context, orgID string, task *
 				routerLog.Warn("auto-trigger skipped: no agent bootstrapped", "task_id", task.ID)
 				return "", false, nil
 			}
-			// Read the bot-enabled flag for the FIRING team — the team
-			// whose trigger routed the bot here — not the task's owner
-			// team. One task is now visible to many teams; the gate must
-			// read the acting team's own team_agents row so a two-team org
-			// where team B disabled the bot doesn't auto-fire on team B by
-			// reading team A's flag. Fall back to the task's owner team,
-			// then the local sentinel, when the caller didn't supply one.
-			teamID := actingTeamID
-			if teamID == "" {
-				teamID = teamIDValue(task)
-			}
-			if teamID == "" {
-				teamID = runmode.LocalDefaultTeamID
-			}
-			ta, err := r.teamAgents.GetForTeamSystem(ctx, orgID, teamID, a.ID)
+			teamID := botTeam(task, actingTeamID)
+			enabled, err := r.botEnabledForTeam(ctx, orgID, teamID, a.ID)
 			if err != nil {
 				routerLog.Warn("auto-trigger deferred: team_agents lookup failed", "task_id", task.ID, "error", err)
 				return "", false, fmt.Errorf("team_agents lookup: %w", err)
 			}
-			if ta == nil || !ta.Enabled {
+			if !enabled {
 				routerLog.Info("auto-trigger skipped: bot disabled for team", "task_id", task.ID, "team", teamID)
 				return "", false, nil
 			}
 		}
 	}
 	return agentID, true, nil
+}
+
+// botTeam is the team whose team_agents row decides whether the bot may fire
+// for a trigger acting as actingTeamID: the acting team itself, not the
+// task's owner, since one task is visible to many teams and a two-team org
+// where team B disabled the bot must not fire on team B by reading team A's
+// flag. The task's owner team, then the local sentinel, stand in when the
+// caller has no acting team.
+func botTeam(task *domain.Task, actingTeamID string) string {
+	if actingTeamID != "" {
+		return actingTeamID
+	}
+	if teamID := teamIDValue(task); teamID != "" {
+		return teamID
+	}
+	return runmode.LocalDefaultTeamID
+}
+
+// botEnabledForTeam reports whether agentID is turned on for teamID in
+// team_agents.enabled; a team with no row for the agent has it off. Nil
+// r.teamAgents is older test wiring, and answers true. A non-nil error is a
+// read that reached no verdict.
+func (r *Router) botEnabledForTeam(ctx context.Context, orgID, teamID, agentID string) (bool, error) {
+	if r.teamAgents == nil {
+		return true, nil
+	}
+	ta, err := r.teamAgents.GetForTeamSystem(ctx, orgID, teamID, agentID)
+	if err != nil {
+		return false, err
+	}
+	return ta != nil && ta.Enabled, nil
 }
 
 // breakerGate reports whether trigger's breaker bars a run on entityID: its

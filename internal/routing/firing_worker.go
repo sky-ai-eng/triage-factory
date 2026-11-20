@@ -11,6 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/workkinds"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -191,6 +192,51 @@ func (r *Router) newestEventSince(ctx context.Context, f domain.PendingFiring) (
 	return newer, nil
 }
 
+// errFiringEventGone is firingEventMatches finding no row for the firing's
+// event, which the row's foreign key holds: retrying gets the same answer.
+var errFiringEventGone = errors.New("the firing's event row is gone")
+
+// firingEventMatches reports whether f's event matches trigger's scope
+// predicate as the trigger holds it now. The firing is the router's decision
+// on that event made late, so it is made on what the router would read now:
+// the event's current view (events.Current), in which an id the source has
+// since replaced resolves to its replacement, matched by matchPredicate. A
+// trigger with no predicate matches every event of its type, so it reads
+// nothing.
+//
+// The event is the row's own, not the task's newest. The run fires from the
+// row's event, and the (event, trigger) fence that makes a replay of the unit
+// a no-op is keyed on it, so it is the event the predicate has to match. A
+// later event that collapsed onto the row is not considered, so when the
+// row's event no longer matches, the later event starts no run either, even
+// one the predicate matches.
+//
+// A predicate the matcher cannot evaluate is no match, since reading it as a
+// match would widen the filter. A non-nil error is a read that reached no
+// verdict, errFiringEventGone among them.
+func (r *Router) firingEventMatches(ctx context.Context, f domain.PendingFiring, trigger domain.EventHandler) (bool, error) {
+	if trigger.ScopePredicateJSON == nil || *trigger.ScopePredicateJSON == "" {
+		return true, nil
+	}
+	ev, err := r.events.GetSystem(ctx, f.OrgID, f.TriggeringEventID)
+	if err != nil {
+		return false, fmt.Errorf("load event: %w", err)
+	}
+	if ev == nil {
+		return false, fmt.Errorf("event %s: %w", f.TriggeringEventID, errFiringEventGone)
+	}
+	metadataJSON, err := events.Current(ctx, f.OrgID, ev.EventType, ev.MetadataJSON)
+	if err != nil {
+		return false, fmt.Errorf("resolve event metadata: %w", err)
+	}
+	matched, err := matchPredicate(ev.EventType, *trigger.ScopePredicateJSON, metadataJSON)
+	if err != nil {
+		routerLog.ErrorContext(ctx, "firing-queue: event_handler predicate error", "firing_id", f.ID, "handler_id", trigger.ID, "error", err)
+		return false, nil
+	}
+	return matched, nil
+}
+
 // processFiring runs one claimed firing as one unit: renew the lease,
 // validate the firing against the world now, fire it, and write its terminal
 // under the receipt's fence. Done means done — the run committed and the row
@@ -277,6 +323,14 @@ func (r *Router) processFiring(ctx context.Context, cf dbpkg.ClaimedFiring) {
 			loser(termCtx, "requeue", err)
 		})
 	}
+	// failed requeues the row for a read that reached no verdict, and marks
+	// the span an error naming the read, so the unit is not taken for one
+	// that fired.
+	failed := func(op string, err error) {
+		span.SetStatus(codes.Error, "a read failed; the row is requeued")
+		span.SetAttributes(telemetry.Op(op))
+		requeue(workitem.OutcomeTransient, fmt.Errorf("%s: %w", op, err))
+	}
 	// skip reports whether the row completed as skipped, for a caller with
 	// something to do once it has.
 	skip := func(reason string) (completed bool) {
@@ -309,13 +363,13 @@ func (r *Router) processFiring(ctx context.Context, cf dbpkg.ClaimedFiring) {
 	reroute := func() {
 		rerouted, err := r.firings.TaskRerouted(unitCtx, f.OrgID, f.TaskID)
 		if err != nil {
-			requeue(workitem.OutcomeTransient, fmt.Errorf("rerouted sibling lookup: %w", err))
+			failed("rerouted sibling lookup", err)
 			return
 		}
 		if !rerouted {
 			ev, err := r.newestEventSince(unitCtx, f)
 			if err != nil {
-				requeue(workitem.OutcomeTransient, fmt.Errorf("load event: %w", err))
+				failed("load event", err)
 				return
 			}
 			if ev == nil {
@@ -356,7 +410,7 @@ func (r *Router) processFiring(ctx context.Context, cf dbpkg.ClaimedFiring) {
 	if f.HandedNoteID != "" {
 		read, err := r.firings.WithdrawHandedNote(unitCtx, f.OrgID, f.HandedNoteID)
 		if err != nil {
-			requeue(workitem.OutcomeTransient, fmt.Errorf("handed note lookup: %w", err))
+			failed("handed note lookup", err)
 			return
 		}
 		if read {
@@ -369,12 +423,14 @@ func (r *Router) processFiring(ctx context.Context, cf dbpkg.ClaimedFiring) {
 	}
 
 	// Validate against live tables, not the firing row, so the worker
-	// reflects the world now: a close, a takeover, a disabled trigger or a
-	// tripped breaker since the row was admitted is a definitive skip, and a
-	// read that failed is a transient requeue.
+	// reflects the world now: a close, a takeover, a disabled trigger, a team
+	// that turned its automation off, a predicate the event no longer
+	// matches, a threshold the task's score no longer meets, or a tripped
+	// breaker since the row was admitted is a definitive skip, and a read
+	// that failed is a transient requeue.
 	task, err := r.tasks.GetSystem(unitCtx, f.OrgID, f.TaskID)
 	if err != nil {
-		requeue(workitem.OutcomeTransient, fmt.Errorf("task lookup: %w", err))
+		failed("task lookup", err)
 		return
 	}
 	if task == nil {
@@ -397,7 +453,7 @@ func (r *Router) processFiring(ctx context.Context, cf dbpkg.ClaimedFiring) {
 	}
 	trigger, err := r.handlers.GetSystem(unitCtx, f.OrgID, f.TriggerID)
 	if err != nil {
-		requeue(workitem.OutcomeTransient, fmt.Errorf("trigger lookup: %w", err))
+		failed("trigger lookup", err)
 		return
 	}
 	if trigger == nil || !trigger.Automates() {
@@ -409,7 +465,7 @@ func (r *Router) processFiring(ctx context.Context, cf dbpkg.ClaimedFiring) {
 	if trigger.TeamID != "" {
 		team, err := r.teams.GetSystem(unitCtx, f.OrgID, trigger.TeamID)
 		if err != nil {
-			requeue(workitem.OutcomeTransient, fmt.Errorf("trigger team lookup: %w", err))
+			failed("trigger team lookup", err)
 			return
 		}
 		if team != nil && team.DeletedAt != nil {
@@ -417,9 +473,64 @@ func (r *Router) processFiring(ctx context.Context, cf dbpkg.ClaimedFiring) {
 			return
 		}
 	}
+	// Either switch the acting team holds stops its automation, and a
+	// firing it queued before the switch is part of that automation. The
+	// acting team is the trigger's, or the task's owner for a trigger with
+	// no team of its own.
+	acting := effectiveActingTeam(trigger.TeamID, teamIDValue(task))
+	enabled, err := r.autoDelegateEnabledForTeam(unitCtx, acting)
+	if err != nil {
+		failed("auto-delegate switch lookup", err)
+		return
+	}
+	if !enabled {
+		skip(domain.PendingFiringSkipAutoDelegateDisabled)
+		return
+	}
+	botOn, err := r.botEnabledForTeam(unitCtx, f.OrgID, botTeam(task, acting), task.ClaimedByAgentID)
+	if err != nil {
+		failed("team_agents lookup", err)
+		return
+	}
+	if !botOn {
+		skip(domain.PendingFiringSkipBotDisabled)
+		return
+	}
+	// The predicate and the threshold come before the breaker, whose read
+	// raises its notification: a firing either refuses would not start a run
+	// whatever the breaker says.
+	matches, err := r.firingEventMatches(unitCtx, f, *trigger)
+	switch {
+	case errors.Is(err, errFiringEventGone):
+		// Parked at once with the cause on the row: every retry would read
+		// the same missing row.
+		span.SetStatus(codes.Error, "load event")
+		requeue(workitem.OutcomePermanent, err)
+		return
+	case err != nil:
+		failed("match the trigger's predicate", err)
+		return
+	case !matches:
+		skip(domain.PendingFiringSkipPredicateUnmatched)
+		return
+	}
+	// A trigger that waits on the task's score fires on a score at or above
+	// its threshold as both stand now. One the walk would wait on, with no
+	// score yet, is not fired either: a missing score is never read as
+	// passing.
+	gate := deferralGate{r: r, orgID: f.OrgID, score: task.AutonomySuitability}
+	scored, err := gate.outcome(unitCtx, *trigger)
+	if err != nil {
+		failed("background-jobs model lookup", err)
+		return
+	}
+	if scored != triggerFireNow {
+		skip(domain.PendingFiringSkipBelowAutonomyThreshold)
+		return
+	}
 	tripped, err := r.breakerHolds(unitCtx, f.OrgID, *trigger, f.EntityID, task.EntitySourceID)
 	if err != nil {
-		requeue(workitem.OutcomeTransient, fmt.Errorf("breaker query: %w", err))
+		failed("breaker query", err)
 		return
 	}
 	if tripped {
@@ -469,7 +580,7 @@ func (r *Router) processFiring(ctx context.Context, cf dbpkg.ClaimedFiring) {
 		// closed task, decided on the task as it stands now.
 		closed, rerr := r.tasks.GetSystem(unitCtx, f.OrgID, f.TaskID)
 		if rerr != nil {
-			requeue(workitem.OutcomeTransient, fmt.Errorf("task lookup after refused fire: %w", rerr))
+			failed("task lookup after refused fire", rerr)
 			return
 		}
 		if closed != nil && closedByRunFinish(closed) {
