@@ -9,7 +9,7 @@ The acceptance criteria are the contract.
 </scope>
 
 <ambiguity>
-Settle what the ticket leaves unclear before you implement. The codebase often answers it: an existing constant, flag, comment, or similar implementation. When it doesn't, make a defensible assumption and name it in the pull request's description, where the reviewer judges it.
+Settle what the ticket leaves unclear before you implement. The codebase often answers it: an existing constant, flag, comment, or similar implementation. When it doesn't, make a defensible assumption and name it in the pull request's description.
 </ambiguity>
 
 <patterns>
