@@ -220,6 +220,24 @@ func (s *shippedDefaultsStore) backfillShippedDefaults(ctx context.Context, conn
 		if backfilledAt.Valid {
 			return nil // already backfilled
 		}
+		// The pass may stamp several blueprints, so it locks them all first,
+		// in one statement in id order, as a merge locks its two
+		// (BlueprintStore.GetAllForUpdate). Stamping them one at a time in
+		// slug order would hold one while waiting for another that a merge
+		// holds, and that merge could be waiting for the first.
+		slugs := make([]string, 0, len(shippedBlueprints))
+		for _, b := range shippedBlueprints {
+			if b.SystemSlug != "" {
+				slugs = append(slugs, b.SystemSlug)
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `
+			SELECT id FROM blueprints
+			WHERE org_id = $1 AND team_id = $2 AND system_slug = ANY($3) AND deleted_at IS NULL
+			ORDER BY id
+			FOR UPDATE`, orgID, teamID, slugs); err != nil {
+			return fmt.Errorf("lock shipped blueprints: %w", err)
+		}
 		now := time.Now().UTC()
 		for _, b := range shippedBlueprints {
 			if b.SystemSlug == "" {
@@ -313,9 +331,14 @@ func pgLoadTeamUnitState(ctx context.Context, q queryer, orgID, teamID string, b
 		bpMod  bool
 		bpDel  bool
 	)
+	// Locked before the steps are read, as every write that changes a
+	// blueprint's steps holds it (BlueprintStore.GetAllForUpdate): the plan
+	// may replace them, and a user's edit that held the row first has
+	// committed its user_modified stamp by the time this read returns.
 	switch err := q.QueryRowContext(ctx, `
 		SELECT id, name, user_modified, (deleted_at IS NOT NULL)
 		FROM blueprints WHERE org_id = $1 AND team_id = $2 AND system_slug = $3
+		FOR UPDATE
 	`, orgID, teamID, b.SystemSlug).Scan(&bpID, &bpName, &bpMod, &bpDel); {
 	case errors.Is(err, sql.ErrNoRows):
 		st.BlueprintExists = false

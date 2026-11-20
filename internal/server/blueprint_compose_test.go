@@ -101,8 +101,7 @@ func TestBlueprintMerge_TriggeredSourceRejected(t *testing.T) {
 	if len(hostSteps) != 1 {
 		t.Fatalf("host steps after rejected merge = %d, want 1 (untouched)", len(hostSteps))
 	}
-	// The merge retires the source before it finds the handler, so the
-	// refusal has to roll that back too.
+	// The source is left live with its steps.
 	assertLiveWithSteps(t, s, source, 1)
 }
 

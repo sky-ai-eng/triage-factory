@@ -155,19 +155,62 @@ func (s *blueprintStore) GetForUpdate(ctx context.Context, orgID string, id stri
 	return s.getLocked(ctx, orgID, id)
 }
 
+func (s *blueprintStore) GetAllForUpdate(ctx context.Context, orgID string, ids []string) (map[string]*domain.Blueprint, error) {
+	if err := s.requireWriteTx(ctx); err != nil {
+		return nil, err
+	}
+	held := make(map[string]*domain.Blueprint, len(ids))
+	for _, id := range ids {
+		b, err := s.Get(ctx, orgID, id)
+		if err != nil {
+			return nil, err
+		}
+		if b != nil {
+			held[id] = b
+		}
+	}
+	return held, nil
+}
+
 func (s *blueprintStore) getLocked(ctx context.Context, orgID, id string) (*domain.Blueprint, error) {
+	if err := s.requireWriteTx(ctx); err != nil {
+		return nil, err
+	}
+	return s.Get(ctx, orgID, id)
+}
+
+func (s *blueprintStore) requireWriteTx(ctx context.Context) error {
 	tx, ok := s.q.(*sql.Tx)
 	if !ok {
-		return nil, errors.New("sqlite: a locking blueprint read needs a transaction's stores, whose transaction serializes the caller")
+		return errors.New("sqlite: a locking blueprint read needs a transaction's stores, whose transaction serializes the caller")
 	}
 	var readOnly bool
 	if err := tx.QueryRowContext(ctx, `PRAGMA query_only`).Scan(&readOnly); err != nil {
-		return nil, fmt.Errorf("sqlite: read query_only: %w", err)
+		return fmt.Errorf("sqlite: read query_only: %w", err)
 	}
 	if readOnly {
-		return nil, errors.New("sqlite: a locking blueprint read needs a write transaction; a read transaction holds no lock")
+		return errors.New("sqlite: a locking blueprint read needs a write transaction; a read transaction holds no lock")
 	}
-	return s.Get(ctx, orgID, id)
+	return nil
+}
+
+// requireLiveBlueprints is the check a step writer makes before it touches a
+// step row, where Postgres takes its hold (BlueprintStore.GetAllForUpdate):
+// db.ErrNoSuchBlueprint unless every one of ids is live. The write
+// transaction it runs in already holds the database's write lock.
+func requireLiveBlueprints(ctx context.Context, q queryer, ids ...string) error {
+	for _, id := range ids {
+		var live bool
+		err := q.QueryRowContext(ctx,
+			`SELECT 1 FROM blueprints WHERE id = ? AND deleted_at IS NULL`, id).Scan(&live)
+		if errors.Is(err, sql.ErrNoRows) {
+			return db.ErrNoSuchBlueprint
+		}
+		if err != nil {
+			return fmt.Errorf("read blueprint %s: %w", id, err)
+		}
+	}
+	return nil
 }
 
 func (s *blueprintStore) GetSystem(ctx context.Context, orgID string, id string) (*domain.Blueprint, error) {
@@ -399,6 +442,9 @@ func (s *blueprintStore) ReplaceSteps(ctx context.Context, orgID, blueprintID st
 	}
 	var stamped domain.Blueprint
 	if err := inTx(ctx, s.q, func(q queryer) error {
+		if err := requireLiveBlueprints(ctx, q, blueprintID); err != nil {
+			return err
+		}
 		if _, err := q.ExecContext(ctx, `DELETE FROM blueprint_steps WHERE blueprint_id = ?`, blueprintID); err != nil {
 			return fmt.Errorf("clear existing steps: %w", err)
 		}
@@ -460,6 +506,9 @@ func (s *blueprintStore) MergeInto(ctx context.Context, orgID, hostID, sourceID 
 		return err
 	}
 	return inTx(ctx, s.q, func(q queryer) error {
+		if err := requireLiveBlueprints(ctx, q, hostID, sourceID); err != nil {
+			return err
+		}
 		var hostLen int
 		if err := q.QueryRowContext(ctx,
 			`SELECT COUNT(*) FROM blueprint_steps WHERE blueprint_id = ?`, hostID,
@@ -473,17 +522,9 @@ func (s *blueprintStore) MergeInto(ctx context.Context, orgID, hostID, sourceID 
 		now := time.Now().UTC()
 		// Soft-delete the now-empty source (mirrors Delete; inlined so it shares
 		// this tx whether s.q is a *sql.Tx or a fresh inTx-opened one).
-		res, err := q.ExecContext(ctx,
-			`UPDATE blueprints SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL`, now, sourceID)
-		if err != nil {
+		if _, err := q.ExecContext(ctx,
+			`UPDATE blueprints SET deleted_at = ? WHERE id = ?`, now, sourceID); err != nil {
 			return fmt.Errorf("soft-delete source: %w", err)
-		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if n == 0 {
-			return db.ErrNoSuchBlueprint
 		}
 		if _, err := q.ExecContext(ctx,
 			`UPDATE blueprints SET updated_at = ?, user_modified = 1 WHERE id = ?`, now, hostID); err != nil {
@@ -532,6 +573,9 @@ func (s *blueprintStore) SplitAt(ctx context.Context, orgID, id string, atIndex 
 		return "", err
 	}
 	err := inTx(ctx, s.q, func(q queryer) error {
+		if err := requireLiveBlueprints(ctx, q, id); err != nil {
+			return err
+		}
 		now := time.Now().UTC()
 		// Create the new trigger-less downstream blueprint.
 		if err := insertTriggerlessBlueprint(ctx, q, newBlueprintID, newName, now); err != nil {
@@ -588,6 +632,9 @@ func (s *blueprintStore) DeleteStep(ctx context.Context, orgID, blueprintID stri
 	}
 	var downstreamID string
 	err := inTx(ctx, s.q, func(q queryer) error {
+		if err := requireLiveBlueprints(ctx, q, blueprintID); err != nil {
+			return err
+		}
 		var n int
 		if err := q.QueryRowContext(ctx,
 			`SELECT COUNT(*) FROM blueprint_steps WHERE blueprint_id = ?`, blueprintID,

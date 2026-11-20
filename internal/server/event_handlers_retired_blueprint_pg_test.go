@@ -293,10 +293,10 @@ func (r absorbRig) absorb(route string) <-chan *httptest.ResponseRecorder {
 // TestEventHandlers_HandlerWritesRaceBlueprintAbsorb_Postgres runs a handler
 // write naming a blueprint against a merge or a reconnect that absorbs that
 // blueprint, in both orders the blueprint's row lock allows. The absorb
-// retires the blueprint and then checks that no handler names it, so the
-// property under test is that the write either commits before the retire,
-// and the absorb refuses and rolls back, or waits for the absorb and answers
-// 404: never a handler on a retired blueprint.
+// holds the blueprint and then checks that no handler names it, so the
+// property under test is that the write either commits before the hold, and
+// the absorb refuses, or waits for the absorb and answers 404: never a
+// handler on a retired blueprint.
 func TestEventHandlers_HandlerWritesRaceBlueprintAbsorb_Postgres(t *testing.T) {
 	// write prepares a handler write naming the absorbed blueprint, then
 	// returns what sends it. The preparing happens before any pause is armed.
@@ -328,8 +328,8 @@ func TestEventHandlers_HandlerWritesRaceBlueprintAbsorb_Postgres(t *testing.T) {
 				r := newAbsorbRig(t, nil)
 				write := prepare(t, r)
 
-				// The absorb, held after it retired the blueprint and found
-				// no handler on it.
+				// The absorb, held after it held the blueprint and found no
+				// handler on it.
 				r.afterList.armed.Store(true)
 				absorbed := r.absorb(route)
 				r.afterList.waitReached(t, "the "+route+"'s check")
@@ -370,7 +370,7 @@ func TestEventHandlers_HandlerWritesRaceBlueprintAbsorb_Postgres(t *testing.T) {
 				if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), httpx.ReasonConflict) {
 					t.Errorf("%s behind the %s = %d %s, want 422 %s", route, name, rec.Code, rec.Body.String(), httpx.ReasonConflict)
 				}
-				// The refused absorb rolled back everything it wrote.
+				// The refused absorb left both blueprints as they were.
 				if steps, live := r.stepsOf(t, r.absorbed); steps != 1 || !live {
 					t.Errorf("absorbed blueprint = (%d steps, live %v), want its 1 step, live", steps, live)
 				}
@@ -461,7 +461,8 @@ func TestEventHandlers_StalePatchRacesBlueprintMerge_Postgres(t *testing.T) {
 		}); e != nil {
 			return fmt.Errorf("detach the handler: %w", e)
 		}
-		// ...and a merge retires it, held after its check found no handler.
+		// ...and a merge holding it is held after its check found no
+		// handler.
 		r.afterList.armed.Store(true)
 		merged = r.absorb("merge")
 		select {
