@@ -50,8 +50,8 @@ func TestTaskCreate_404OnMissingEntity(t *testing.T) {
 	}
 }
 
-// TestTaskCreate_409OnClosedEntity: a factory snapshot shows an entity for a
-// while after it closes, but a drop in that window must not create a task on it.
+// TestTaskCreate_409OnClosedEntity: the factory shows an entity for a while
+// after it closes, but a drop in that window must not create a task on it.
 func TestTaskCreate_409OnClosedEntity(t *testing.T) {
 	s := newTestServer(t)
 	entity := seedStation(t, s, "owner/repo#409", domain.EventGitHubPRMerged)
@@ -181,67 +181,5 @@ func TestFactoryDropGesture_BotDisabledLeavesTaskUnclaimed(t *testing.T) {
 	}
 	if claimAgent.Valid && claimAgent.String != "" {
 		t.Errorf("bot claim landed despite the disabled flag: %q", claimAgent.String)
-	}
-}
-
-// TestFactorySnapshot_PendingTasksRoundtrip: an entity with an active task at a
-// station lists it under pending_tasks[event_type] with the dedup_key the
-// frontend forwards to POST /api/tasks.
-func TestFactorySnapshot_PendingTasksRoundtrip(t *testing.T) {
-	s := newTestServer(t)
-
-	entity, _, err := sqlitestore.New(s.db).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "https://github.com", "owner/repo#7", "", "pr", "test PR", "")
-	if err != nil {
-		t.Fatalf("seed entity: %v", err)
-	}
-	eid := entity.ID
-	evtID, err := s.events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
-		EntityID:  &eid,
-		EventType: domain.EventGitHubPRCICheckPassed,
-	})
-	if err != nil {
-		t.Fatalf("record event: %v", err)
-	}
-	task, _, err := s.tasks.FindOrCreate(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, entity.ID, domain.EventGitHubPRCICheckPassed, "", evtID, 0.5)
-	if err != nil {
-		t.Fatalf("create task: %v", err)
-	}
-
-	rec := doJSON(t, s, http.MethodGet, "/api/factory/snapshot", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("snapshot status = %d", rec.Code)
-	}
-	type pendingTaskRef struct {
-		TaskID   string `json:"task_id"`
-		DedupKey string `json:"dedup_key"`
-	}
-	type snapshotShape struct {
-		Entities []struct {
-			ID           string                      `json:"id"`
-			PendingTasks map[string][]pendingTaskRef `json:"pending_tasks"`
-		} `json:"entities"`
-	}
-	var snap snapshotShape
-	if err := json.NewDecoder(rec.Body).Decode(&snap); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-
-	var got *pendingTaskRef
-	for _, e := range snap.Entities {
-		if e.ID != entity.ID {
-			continue
-		}
-		if refs := e.PendingTasks[domain.EventGitHubPRCICheckPassed]; len(refs) > 0 {
-			got = &refs[0]
-		}
-	}
-	if got == nil {
-		t.Fatalf("expected pending_tasks[%s] for entity %s in snapshot", domain.EventGitHubPRCICheckPassed, entity.ID)
-	}
-	if got.TaskID != task.ID {
-		t.Errorf("task_id = %s, want %s", got.TaskID, task.ID)
-	}
-	if got.DedupKey != "" {
-		t.Errorf("dedup_key = %q, want empty", got.DedupKey)
 	}
 }

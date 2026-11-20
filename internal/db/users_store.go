@@ -41,7 +41,7 @@ type UsersStore interface {
 	// display a login, by GitHub's id when both sides have one: the
 	// deployment-App bind ceremony (the account that authorized must be the
 	// one linked to the TF user completing it), and the dashboard's and the
-	// factory's "mine".
+	// entity reads' "mine".
 	GetGitHubIdentity(ctx context.Context, userID, githubBaseURL string) (*domain.UserGitHubIdentity, error)
 
 	// UpsertGitHubIdentity writes (or refreshes) the user's GitHub login

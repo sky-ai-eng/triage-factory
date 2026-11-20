@@ -433,7 +433,7 @@ func (s *repoStore) listRepositories(ctx context.Context, orgID, host string, op
 
 // ListTeamScoped is the tracked set in local mode — N=1, so there is no other
 // team to scope away (matches the ListActiveJiraTeamScoped /
-// FactoryReadStore.Entities local-mode asymmetry, TFAC-559).
+// EntityStore.List local-mode asymmetry).
 func (s *repoStore) ListTeamScoped(ctx context.Context, orgID, host string, opts db.ListOpts) ([]domain.Repository, int, error) {
 	return s.ListTrackedSystem(ctx, orgID, host, opts)
 }

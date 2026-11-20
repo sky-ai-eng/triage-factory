@@ -9,8 +9,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// TeamActivityStore computes the team activity node's cuts — the windowed
-// synthetic read behind GET /api/teams/{team_id}/activity.
+// TeamActivityStore computes the activity node's cuts — the windowed
+// synthetic read behind GET /api/teams/{team_id}/activity, and behind GET
+// /api/me/activity over the union of the viewer's teams.
 //
 // Scoping follows the standing entity-read rule: on Postgres a team's events
 // are its tracked set's (a GitHub entity in one of the team's tracked repos,
@@ -23,10 +24,23 @@ import (
 // and RLS, so the Stores-level admin binding exists for wiring symmetry, not
 // for serving requests.
 type TeamActivityStore interface {
-	// TeamActivity computes the cuts for one team over [since, until).
-	// LastPollAt on the by-source cut is left nil — poll times live in
+	// TeamActivity computes the cuts for the union of teamIDs over [since,
+	// until): an event counts once however many of the teams track its
+	// entity, a task once however many of them it is visible to, and the
+	// tracked-set cut lists a unit once however many of them track it. No
+	// team is a team set with no flow, which answers zeros rather than an
+	// error. LastPollAt on the by-source cut is left nil — poll times live in
 	// poll_readiness on the admin pool, and the handler stitches them in.
-	TeamActivity(ctx context.Context, orgID, teamID string, since, until time.Time) (domain.TeamActivity, error)
+	TeamActivity(ctx context.Context, orgID string, teamIDs []string, since, until time.Time) (domain.TeamActivity, error)
+}
+
+// TeamActivityEventTypeCount is one event type's events cut a dialect hands to
+// BuildTeamActivity: the events of the type and the distinct entities that
+// sent them.
+type TeamActivityEventTypeCount struct {
+	EventType string
+	Events    int
+	Entities  int
 }
 
 // TeamActivityCount is one aggregation row a dialect hands to
@@ -89,6 +103,11 @@ type TeamActivityCuts struct {
 	UnitTasks  []TeamActivityUnitCount
 	UnitRuns   []TeamActivityUnitCount
 	LastEvent  map[TeamActivityUnit]time.Time
+
+	// EventTypeEvents counts events per event type under the Events cut's
+	// scoping, and EventTypeTasks tasks per event type under the Tasks cut's.
+	EventTypeEvents []TeamActivityEventTypeCount
+	EventTypeTasks  map[string]int
 
 	EventsDefinedFor []string
 }
@@ -242,7 +261,62 @@ func BuildTeamActivity(cuts TeamActivityCuts) domain.TeamActivity {
 		}
 		return a.UnitID < b.UnitID
 	})
+
+	// The event-type cut is every type either count mentions: a type that
+	// created tasks and sent no events in the window (an event before the
+	// window, a task inside it) is still a row.
+	byType := map[string]*domain.TeamActivityEventType{}
+	atType := func(et string) *domain.TeamActivityEventType {
+		if byType[et] == nil {
+			byType[et] = &domain.TeamActivityEventType{EventType: et}
+		}
+		return byType[et]
+	}
+	for _, r := range cuts.EventTypeEvents {
+		row := atType(r.EventType)
+		row.Events += r.Events
+		row.Entities += r.Entities
+	}
+	for et, n := range cuts.EventTypeTasks {
+		atType(et).Tasks += n
+	}
+	out.ByEventType = make([]domain.TeamActivityEventType, 0, len(byType))
+	for _, row := range byType {
+		out.ByEventType = append(out.ByEventType, *row)
+	}
+	sort.Slice(out.ByEventType, func(i, j int) bool {
+		return out.ByEventType[i].EventType < out.ByEventType[j].EventType
+	})
 	return out
+}
+
+// ScanTeamActivityEventTypeCounts drains rows of (event_type, events,
+// entities) into the event-type cut's events counts.
+func ScanTeamActivityEventTypeCounts(rows RowScanner) ([]TeamActivityEventTypeCount, error) {
+	var out []TeamActivityEventTypeCount
+	for rows.Next() {
+		var c TeamActivityEventTypeCount
+		if err := rows.Scan(&c.EventType, &c.Events, &c.Entities); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// ScanTeamActivityKeyCounts drains rows of (key, n) into a map — the shape of
+// the cuts counted per one text key.
+func ScanTeamActivityKeyCounts(rows RowScanner) (map[string]int, error) {
+	out := map[string]int{}
+	for rows.Next() {
+		var k string
+		var n int
+		if err := rows.Scan(&k, &n); err != nil {
+			return nil, err
+		}
+		out[k] += n
+	}
+	return out, rows.Err()
 }
 
 // scanTeamActivityCounts drains rows of (source, day, n) into counts —

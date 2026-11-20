@@ -455,6 +455,13 @@ func sqliteTaskListWhere(f db.TaskListFilter) (string, []any) {
 			args = append(args, id)
 		}
 	}
+	if len(f.EntityIDs) > 0 {
+		ph := strings.TrimRight(strings.Repeat("?, ", len(f.EntityIDs)), ", ")
+		clauses = append(clauses, fmt.Sprintf("t.entity_id IN (%s)", ph))
+		for _, id := range f.EntityIDs {
+			args = append(args, id)
+		}
+	}
 	if f.OnlyUnclaimed {
 		clauses = append(clauses, "t.claimed_by_agent_id IS NULL AND t.claimed_by_user_id IS NULL")
 	}
@@ -846,62 +853,6 @@ func (s *taskStore) FindActiveByEntity(ctx context.Context, orgID, entityID stri
 		JOIN entities e ON t.entity_id = e.id
 		WHERE t.entity_id = ? AND t.status NOT IN ('done', 'dismissed')
 	`, entityID)
-}
-
-// listActiveRefsChunkSize is the chunk applied to the IN clause when
-// fanning out across many entities, kept conservatively below SQLite's
-// historical bound-variable limit. Same shape RecentEventsByEntity
-// uses.
-const listActiveRefsChunkSize = 500
-
-func (s *taskStore) ListActiveRefsForEntities(ctx context.Context, orgID string, entityIDs []string, _ []string) ([]domain.PendingTaskRef, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
-	}
-	// teamIDs ignored: N=1 local mode has one team, so the factory's team
-	// filter has nothing to narrow here (the frontend never renders it
-	// below 2 teams). Mirrors the Queued/Entities asymmetry.
-	if len(entityIDs) == 0 {
-		return nil, nil
-	}
-	out := make([]domain.PendingTaskRef, 0, len(entityIDs))
-	for start := 0; start < len(entityIDs); start += listActiveRefsChunkSize {
-		end := start + listActiveRefsChunkSize
-		if end > len(entityIDs) {
-			end = len(entityIDs)
-		}
-		chunk := entityIDs[start:end]
-		placeholders := make([]string, len(chunk))
-		args := make([]any, 0, len(chunk))
-		for i, id := range chunk {
-			placeholders[i] = "?"
-			args = append(args, id)
-		}
-		rows, err := s.q.QueryContext(ctx, `
-			SELECT id, entity_id, event_type, dedup_key
-			FROM tasks
-			WHERE entity_id IN (`+strings.Join(placeholders, ",")+`)
-				AND status NOT IN ('done', 'dismissed')
-			ORDER BY entity_id, event_type, created_at DESC, rowid DESC
-		`, args...)
-		if err != nil {
-			return nil, err
-		}
-		for rows.Next() {
-			var ref domain.PendingTaskRef
-			if err := rows.Scan(&ref.ID, &ref.EntityID, &ref.EventType, &ref.DedupKey); err != nil {
-				rows.Close()
-				return nil, err
-			}
-			out = append(out, ref)
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		rows.Close()
-	}
-	return out, nil
 }
 
 func (s *taskStore) EntityIDsWithActiveTasks(ctx context.Context, orgID, source string) (map[string]struct{}, error) {

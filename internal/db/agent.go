@@ -151,13 +151,11 @@ func AwaitsPersonTypeSQL(alias string) string {
 //
 // Wired against the app pool in Postgres (RLS-active): every
 // consumer is request-equivalent or runs inside a delegate spawner
-// goroutine launched from a request handler. System-service reads
-// of conversation state are routed through the admin-pooled FactoryReadStore
-// instead — that's the snapshot path; this store is for the actor
-// lifecycle. Claim writes always run on the admin pool (claims is a
-// system-written table); on the app-pool lifecycle variants the
-// conversation flip and the claim release are therefore adjacent
-// statements rather than one transaction.
+// goroutine launched from a request handler. Claim writes always run
+// on the admin pool (claims is a system-written table); on the
+// app-pool lifecycle variants the conversation flip and the claim
+// release are therefore adjacent statements rather than one
+// transaction.
 //
 // The MemoryMissing field returned by Get and ListForTask is
 // derived from a LEFT JOIN to conversation_memory rather than read
@@ -250,6 +248,11 @@ type ConversationListFilter struct {
 	// Postgres the select policy already bounds which teams' conversations a
 	// viewer sees, so a foreign team id here matches nothing.
 	TeamIDs []string
+
+	// EntityIDs narrows to conversations whose task is on one of these
+	// entities. Empty is no entity narrowing, and a set that named only
+	// malformed ids matches nothing rather than widening, as TaskIDs does.
+	EntityIDs []string
 
 	// Statuses narrows to these DISPLAY statuses — the value the read
 	// projections produce, not the stored column, because the stored column
@@ -645,11 +648,6 @@ type ConversationStore interface {
 	// handler whose caller may not be a member of the team, so the team-visibility
 	// RLS would hide the rows on the app pool.
 	ActiveIDsForTeamSystem(ctx context.Context, orgID, teamID string) ([]string, error)
-
-	// EntitiesWithOpenConversations returns the subset of entityIDs that have at
-	// least one conversation currently in the `open` state without its step's
-	// verdict (a turn ended without a conclusion). Drives the factory snapshot's idle badge.
-	EntitiesWithOpenConversations(ctx context.Context, orgID string, entityIDs []string) (map[string]struct{}, error)
 
 	// --- Transcript / messages ---
 	//
@@ -1047,7 +1045,7 @@ type ConversationStore interface {
 	// Its own narrow read rather than columns on the conversation projection:
 	// the values are kilobytes of composed prompt text that exactly one code
 	// path wants, and the projection they would join is the one every list,
-	// dashboard and belt read goes through. ErrNoSuchConversation if
+	// dashboard and factory read goes through. ErrNoSuchConversation if
 	// conversationID names no row in the org; empty strings are stored values
 	// (see the write), and Parts is nil on a row that never recorded any.
 	SystemBlocksSystem(ctx context.Context, orgID, conversationID string) (domain.SystemBlocks, error)

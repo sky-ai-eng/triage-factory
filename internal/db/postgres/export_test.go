@@ -26,18 +26,11 @@ var (
 
 // TrackedEntityIDsForTest returns the ids of the org's entities the
 // tracked-set predicate admits, read through q (so under q's RLS, if any):
-// every viewer team's when teamIDs is empty, else those teams'. The belt
-// reads only db.FactoryBeltSource, so the predicate's other arms, which the
-// station counters and the team activity node read, are held to their rules
-// through this.
+// every viewer team's when teamIDs is empty, else those teams'. It holds the
+// predicate's arms to their rules without going through a list's other
+// filters.
 func TrackedEntityIDsForTest(ctx context.Context, q queryer, orgID string, teamIDs []string) (map[string]bool, error) {
-	membership := factoryEntityTrackedExists
-	args := []any{orgID}
-	if len(teamIDs) > 0 {
-		ph, ids := teamPlaceholders(2, teamIDs)
-		membership = factoryEntityTrackedForTeams(ph)
-		args = append(args, ids...)
-	}
+	membership, args := entityTracked(teamIDs, []any{orgID})
 	rows, err := q.QueryContext(ctx, `SELECT e.id FROM entities e WHERE e.org_id = $1 AND `+membership, args...)
 	if err != nil {
 		return nil, err

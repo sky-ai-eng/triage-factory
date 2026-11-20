@@ -120,7 +120,6 @@ func TestEntityDeckReads_StrictQueryParams(t *testing.T) {
 		name string
 		path string
 	}{
-		{"malformed team filter on factory", "/api/factory/snapshot?team_id=junk"},
 		{"malformed team filter on stock", "/api/jira/stock?team_id=junk"},
 		// Present-but-empty and repeated values on the single-team deck are
 		// rejected too: treating either as absent (or taking the first) would

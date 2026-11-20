@@ -1,4 +1,4 @@
-// Snapshot-driven chip mesh manager.
+// Floor-driven chip mesh manager.
 //
 // One chip mesh per entity in transit; reconcile() is called every
 // frame with the live set of transit placements, which pose the
@@ -8,9 +8,10 @@
 // Unlike ItemSimulator (which owns its own time-driven progress
 // state), this controller has no internal animation loop — chip
 // pose comes purely from the `progress` value in each placement.
-// That value is derived snapshot-side from `(now - last_event_at) /
-// duration`, so chip motion stays locked to backend authority and
-// can never disagree with station tray counts.
+// That value is derived from the floor read, as the time since the
+// chain's first detection over the ride's duration (place-entity.ts),
+// so chip motion stays locked to backend authority and can never
+// disagree with station tray counts.
 
 import {
   Color3,

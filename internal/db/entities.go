@@ -32,8 +32,8 @@ import (
 //   - AI scorer (internal/systemjob/scorer) — Descriptions to bulk-load the
 //     flattened body text for prompt context without pulling
 //     snapshot_json.
-//   - Server panels (factory snapshot, dashboard) — Get / GetBySource /
-//     ListActive for the entity views the UI renders.
+//   - Server reads (the entity list, the dashboard) — List / Get /
+//     GetBySource / ListActive for the entity views the UI renders.
 //
 // Wired against the app pool in Postgres (RLS-active): every
 // consumer is request-equivalent or runs inside a server-side
@@ -287,7 +287,7 @@ type EntityStore interface {
 	// RLS (jira_rules_select) is team-membership-scoped, so under the
 	// app pool (tf_app) the semi-join auto-scopes to the projects
 	// attached to the viewer's teams with no explicit team_id in the
-	// query — the same RLS-does-the-scoping trick as the factory belt.
+	// query — the same RLS-does-the-scoping trick as the entity list.
 	// An org-wide poller produces Jira entities across every team's
 	// projects; this keeps a user from swiping another team's
 	// untriaged backlog.
@@ -305,8 +305,27 @@ type EntityStore interface {
 	// one team, the Jira poller only discovers the configured
 	// projects, and gating here would just hide the deck's own
 	// contents — so the local impl applies no scoping, mirroring the
-	// FactoryReadStore.Entities asymmetry.
+	// List asymmetry.
 	ListActiveJiraTeamScoped(ctx context.Context, orgID, teamID string) ([]domain.Entity, error)
+
+	// List pages the entities a viewer may read under f, newest first
+	// (created_at DESC, id DESC), each with its latest event's type and
+	// detection time, and the filtered total computed under the same
+	// filters.
+	//
+	// Multi-mode (Postgres) scopes by the tracked set, the standing rule for
+	// an entity read that surfaces untasked entities: an entity is listed
+	// iff one of the viewer's teams tracks its unit (a repository, a Jira
+	// project, a Linear team, a Slack channel), which the tracking tables'
+	// RLS decides under the app pool. f.TeamIDs narrows that to the named
+	// teams' tracked sets; a team the viewer is not on narrows to nothing.
+	// An entity no team tracks is listed to nobody.
+	//
+	// Local mode (SQLite, N=1) applies no tracked-set filter: the local
+	// tracker discovers only what involves the user, so every entity is
+	// theirs by construction. f.TeamIDs there keeps every entity when it
+	// names the org's team and none when it names no team that exists.
+	List(ctx context.Context, orgID string, f EntityListFilter, opts ListOpts) ([]domain.ListedEntity, int, error)
 
 	// --- Mutation ---
 
@@ -738,8 +757,8 @@ type EntityStore interface {
 	// dashboard renders its merged PRs from.
 	//
 	// linear_team_id and jira_project_id are left alone: they are what keep a
-	// cleared row on its teams' belts and its unreachable event routable while
-	// the source is off.
+	// cleared row in its teams' tracked sets and its unreachable event
+	// routable while the source is off.
 	//
 	// The poll_seq bump is what makes this safe against a cycle already in
 	// flight: that cycle diffed against the snapshot being cleared, and its
@@ -1040,4 +1059,19 @@ func DuplicateEntityMergedKeys(survivor, loser domain.Entity) (kept, dropped dom
 		kept.ExternalID = dropped.ExternalID
 	}
 	return kept, dropped
+}
+
+// EntityListFilter narrows EntityStore.List. Every field is optional; an empty
+// one narrows nothing.
+type EntityListFilter struct {
+	IDs     []string
+	Sources []string
+	Kinds   []string
+	States  []string
+	// ClosedSince drops an entity that closed before it. An entity that has
+	// not closed passes, so one read asks for the active set and whatever
+	// closed since a moment.
+	ClosedSince *time.Time
+	// TeamIDs narrows the tracked set to these teams'.
+	TeamIDs []string
 }

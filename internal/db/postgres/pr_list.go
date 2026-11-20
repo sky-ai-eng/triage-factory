@@ -22,8 +22,8 @@ import (
 // become SQL.
 //
 // open reads the ENTITY's own state, not the snapshot's: it is the population
-// the factory belt renders, so the Overview's OPEN PRS figure and the belt
-// cannot disagree. merged and closed read the snapshot, where GitHub's two
+// the entity list's active state serves, so the Overview's OPEN PRS figure and
+// the factory floor cannot disagree. merged and closed read the snapshot, where GitHub's two
 // wire shapes for a merged pull request (MERGED, or CLOSED with merged=true)
 // both have to land as merged — which is also what PRSummaryFromSnapshot does
 // to the row's own state field, so a filtered page reads back the state it

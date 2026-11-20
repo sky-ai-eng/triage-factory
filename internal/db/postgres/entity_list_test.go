@@ -17,29 +17,23 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// TestFactoryReadStore_Postgres runs the shared conformance suite
-// against the Postgres FactoryReadStore impl. Each subtest gets a
-// fresh org + team + user + seed prompt, then seeds whatever
-// fixtures the subtest needs via raw INSERTs against the admin
-// pool. Skips cleanly when Docker isn't available — pgtest.Shared
-// handles that.
-func TestFactoryReadStore_Postgres(t *testing.T) {
+// TestEntityReads_Postgres runs the shared entity and event list conformance
+// suite against the Postgres impls. Each subtest gets a fresh org + team +
+// user + seed prompt, then seeds its fixtures via raw INSERTs against the
+// admin pool. Both pools are wired to AdminDB, so the tracked-set predicate
+// reduces to the org's tracking rows; the per-viewer narrowing RLS adds is
+// pinned by TestEntityReads_Postgres_CrossTeamIsolation_RLS. Skips cleanly
+// when Docker isn't available — pgtest.Shared handles that.
+func TestEntityReads_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
-	// Wire both pools against AdminDB so the factory store can read
-	// org-wide data without a JWT claims tx. The admin pool is the
-	// production wiring choice for this store anyway (system-level
-	// view, no per-user identity); using AdminDB for both halves
-	// matches that intent in tests. RLS bypass is fine for behavior
-	// conformance — the cross-org leakage test below exercises the
-	// org_id WHERE filter on its own.
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 
-	dbtest.RunFactoryReadStoreConformance(t, func(t *testing.T) (db.FactoryReadStore, string, dbtest.FactorySeeder) {
+	dbtest.RunEntityReadConformance(t, func(t *testing.T) (db.EntityStore, db.EventStore, string, dbtest.FlowSeeder) {
 		t.Helper()
 		h.Reset(t)
-		orgID, userID := seedPgFactoryOrg(t, h)
-		promptID := seedPgFactoryPrompt(t, h, orgID, userID)
-		seeder := newPgFactorySeeder(h.AdminDB, orgID, userID, promptID)
+		orgID, userID := seedPgFlowOrg(t, h)
+		promptID := seedPgFlowPrompt(t, h, orgID, userID)
+		seeder := newPgFlowSeeder(h.AdminDB, orgID, userID, promptID)
 		seeder.GroupedEntity = func(t *testing.T, source string) (string, string) {
 			t.Helper()
 			teamID := firstTeamForOrg(t, h, orgID)
@@ -64,31 +58,31 @@ func TestFactoryReadStore_Postgres(t *testing.T) {
 				id, orgID, time.Now().UTC())
 			return id, "lt-eng"
 		}
-		return stores.Factory, orgID, seeder
+		return stores.Entities, stores.Events, orgID, seeder
 	})
 }
 
-// seedPgFactoryOrg builds the auth.user + public.user + org +
-// org_membership + default team graph the factory's FK chain needs.
-// Mirrors seedPgOrgUserAgent from tasks_test.go but skips the agent
-// half — factory reads don't touch the agents table.
-func seedPgFactoryOrg(t *testing.T, h *pgtest.Harness) (orgID, userID string) {
+// seedPgFlowOrg builds the auth.user + public.user + org + org_membership +
+// default team graph the flow seeder's FK chain needs. Mirrors
+// seedPgOrgUserAgent from tasks_test.go but skips the agent half — the
+// entity reads and the activity node don't touch the agents table.
+func seedPgFlowOrg(t *testing.T, h *pgtest.Harness) (orgID, userID string) {
 	t.Helper()
 	orgID = uuid.New().String()
 	userID = uuid.New().String()
-	email := fmt.Sprintf("factory-%s@test.local", userID[:8])
+	email := fmt.Sprintf("flow-%s@test.local", userID[:8])
 
 	h.SeedAuthUser(t, userID, email)
 
 	if _, err := h.AdminDB.Exec(
 		`INSERT INTO users (id, display_name) VALUES ($1, $2)`,
-		userID, "Factory Conformance User",
+		userID, "Flow Conformance User",
 	); err != nil {
 		t.Fatalf("seed public.users: %v", err)
 	}
 	if _, err := h.AdminDB.Exec(
 		`INSERT INTO orgs (id, name, slug, owner_user_id) VALUES ($1, $2, $3, $4)`,
-		orgID, "Factory Org "+orgID[:8], "factory-"+orgID[:8], userID,
+		orgID, "Flow Org "+orgID[:8], "flow-"+orgID[:8], userID,
 	); err != nil {
 		t.Fatalf("seed org: %v", err)
 	}
@@ -106,30 +100,30 @@ func seedPgFactoryOrg(t *testing.T, h *pgtest.Harness) (orgID, userID string) {
 	return orgID, userID
 }
 
-// seedPgFactoryPrompt inserts a user-source prompt that conversations can
+// seedPgFlowPrompt inserts a user-source prompt that conversations can
 // FK into. team_id is read from the org's default team (created by
-// seedPgFactoryOrg via seedPgDefaultTeam). source='user' satisfies
+// seedPgFlowOrg via seedPgDefaultTeam). source='user' satisfies
 // prompts_system_has_no_creator (creator must be non-NULL).
-func seedPgFactoryPrompt(t *testing.T, h *pgtest.Harness, orgID, userID string) string {
+func seedPgFlowPrompt(t *testing.T, h *pgtest.Harness, orgID, userID string) string {
 	t.Helper()
-	promptID := "p_factory_" + uuid.New().String()
+	promptID := "p_flow_" + uuid.New().String()
 	teamID := firstTeamForOrg(t, h, orgID)
 	if _, err := h.AdminDB.Exec(`
 		INSERT INTO prompts (id, org_id, creator_user_id, team_id, name, body, source, allowed_tools, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, 'Factory Test', 'body', 'user', '', now(), now())
+		VALUES ($1, $2, $3, $4, 'Flow Test', 'body', 'user', '', now(), now())
 	`, promptID, orgID, userID, teamID); err != nil {
 		t.Fatalf("seed prompt: %v", err)
 	}
 	return promptID
 }
 
-// newPgFactorySeeder builds the FactorySeeder callbacks against the
+// newPgFlowSeeder builds the FlowSeeder callbacks against the
 // admin pool. Every INSERT carries org_id so RLS would pass even if
 // the store ran on the app pool — defense-in-depth without test-
 // side complication. The default team for the org backs every task
 // + run insertion's team_id requirement.
-func newPgFactorySeeder(conn *sql.DB, orgID, userID, promptID string) dbtest.FactorySeeder {
-	return dbtest.FactorySeeder{
+func newPgFlowSeeder(conn *sql.DB, orgID, userID, promptID string) dbtest.FlowSeeder {
+	return dbtest.FlowSeeder{
 		Entity: func(t *testing.T, suffix string) string {
 			t.Helper()
 			id := uuid.New().String()
@@ -247,7 +241,7 @@ func newPgFactorySeeder(conn *sql.DB, orgID, userID, promptID string) dbtest.Fac
 			if status == "running" {
 				if _, err := conn.Exec(`
 					INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, claimed_at, lease_expires_at)
-					VALUES ($1, $2, $3, 'factory-seed-executor', 1, now(), now() + interval '300 seconds')
+					VALUES ($1, $2, $3, 'flow-seed-executor', 1, now(), now() + interval '300 seconds')
 				`, uuid.New().String(), orgID, id); err != nil {
 					t.Fatalf("seed claim: %v", err)
 				}
@@ -285,10 +279,6 @@ func newPgFactorySeeder(conn *sql.DB, orgID, userID, promptID string) dbtest.Fac
 				t.Fatalf("close entity: %v", err)
 			}
 		},
-		SetEntityCreatedAt: func(t *testing.T, entityID string, at time.Time) {
-			t.Helper()
-			dbtest.MustUpdate(t, conn, `UPDATE entities SET created_at = $1 WHERE id = $2 AND org_id = $3`, at.UTC(), entityID, orgID)
-		},
 		SetEntityKind: func(t *testing.T, entityID, kind string) {
 			t.Helper()
 			if _, err := conn.Exec(
@@ -317,8 +307,8 @@ func newPgFactorySeeder(conn *sql.DB, orgID, userID, promptID string) dbtest.Fac
 }
 
 // trackPgRepo registers (owner, repo) as a tracked repo for teamID — the
-// multi-mode factory belt's GitHub visibility gate (TFAC-516). The registry
-// row comes first, because that is what the tracking row references.
+// multi-mode entity reads' GitHub visibility gate. The registry row comes
+// first, because that is what the tracking row references.
 func trackPgRepo(t *testing.T, h *pgtest.Harness, orgID, teamID, owner, repo string) {
 	t.Helper()
 	pgtest.SeedTrackedRepo(t, h, orgID, teamID, owner, repo)
@@ -326,9 +316,9 @@ func trackPgRepo(t *testing.T, h *pgtest.Harness, orgID, teamID, owner, repo str
 
 // seedPgGitHubEntityRaw / seedPgJiraEntityRaw insert an active entity with
 // an explicit "owner/repo#N" / "KEY-N" source_id and return its ID,
-// WITHOUT touching the tracked set — the factory tests below control
-// tracking themselves to exercise the tracked-set semi-join's include/
-// exclude boundary. (newPgFactorySeeder.Entity auto-tracks; these don't.)
+// WITHOUT touching the tracked set — the tests below control tracking
+// themselves to exercise the tracked-set semi-join's include/exclude
+// boundary. (newPgFlowSeeder.Entity auto-tracks; these don't.)
 func seedPgGitHubEntityRaw(t *testing.T, h *pgtest.Harness, orgID, owner, repo string, number int) string {
 	t.Helper()
 	return seedPgGitHubEntityOnHost(t, h, orgID, dbtest.TestGitHubHost, owner, repo, number)
@@ -364,9 +354,9 @@ func seedPgJiraEntityRaw(t *testing.T, h *pgtest.Harness, orgID, projectKey stri
 	return id
 }
 
-// seedPgFactoryEvent inserts an entity-attached event via the admin pool
-// for tests that need a station but not the full newPgFactorySeeder.
-func seedPgFactoryEvent(t *testing.T, h *pgtest.Harness, orgID, entityID, eventType string, createdAt time.Time) {
+// seedPgFlowEvent inserts an entity-attached event via the admin pool
+// for tests that need an event but not the full newPgFlowSeeder.
+func seedPgFlowEvent(t *testing.T, h *pgtest.Harness, orgID, entityID, eventType string, createdAt time.Time) {
 	t.Helper()
 	if _, err := h.AdminDB.Exec(`
 		INSERT INTO events (id, org_id, entity_id, event_type, dedup_key, metadata_json, created_at)
@@ -376,25 +366,22 @@ func seedPgFactoryEvent(t *testing.T, h *pgtest.Harness, orgID, entityID, eventT
 	}
 }
 
-// TestFactoryReadStore_Postgres_ExcludesUntrackedEntity pins the TFAC-516
-// tracked-set semi-join for GitHub: an entity whose repo is in the team's
-// tracked set rides the belt *with no task at all* (the whole point — belt
-// density is no longer a side effect of task creation), while an entity on
-// an untracked repo is excluded even when it has a station (event) and is
-// equally untasked. Matching is case-insensitive, mirroring
-// TracksRepoSystem. Runs under AdminDB, so the EXISTS reduces to the
-// org-scoped semi-join; the per-team RLS narrowing is exercised in
-// TestFactoryReadStore_Postgres_CrossTeamIsolation_RLS.
-func TestFactoryReadStore_Postgres_ExcludesUntrackedEntity(t *testing.T) {
+// TestEntityReads_Postgres_ExcludesUntrackedEntity pins the tracked-set
+// semi-join for GitHub: an entity whose repo is in the team's tracked set is
+// listed *with no task at all*, while an entity on an untracked repo is
+// excluded even when it has an event and is equally untasked. Matching is
+// case-insensitive, mirroring TracksRepoSystem. Runs under AdminDB, so the
+// EXISTS reduces to the org-scoped semi-join; the per-team RLS narrowing is
+// exercised in TestEntityReads_Postgres_CrossTeamIsolation_RLS.
+func TestEntityReads_Postgres_ExcludesUntrackedEntity(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
-	orgID, _ := seedPgFactoryOrg(t, h)
+	orgID, _ := seedPgFlowOrg(t, h)
 	teamID := firstTeamForOrg(t, h, orgID)
 
 	now := time.Now().UTC()
 
-	// onTracked: repo in the tracked set, NO task — under the old
-	// task-existence gate it would have been hidden; now it rides the belt.
+	// onTracked: repo in the tracked set, NO task.
 	trackPgRepo(t, h, orgID, teamID, "acme", "tracked")
 	onTracked := seedPgGitHubEntityRaw(t, h, orgID, "acme", "tracked", 1)
 
@@ -403,22 +390,15 @@ func TestFactoryReadStore_Postgres_ExcludesUntrackedEntity(t *testing.T) {
 	trackPgRepo(t, h, orgID, teamID, "acme", "casefold")
 	mixedCase := seedPgGitHubEntityRaw(t, h, orgID, "ACME", "CaseFold", 7)
 
-	// onUntracked: no team tracks its repo. It has a station and, like the
+	// onUntracked: no team tracks its repo. It has an event and, like the
 	// others, no task — so the tracked-set gate is the only thing on it.
 	onUntracked := seedPgGitHubEntityRaw(t, h, orgID, "acme", "untracked", 2)
-	seedPgFactoryEvent(t, h, orgID, onUntracked, "github:pr:opened", now)
+	seedPgFlowEvent(t, h, orgID, onUntracked, "github:pr:opened", now)
 
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
-	rows, err := stores.Factory.Entities(context.Background(), orgID, 100, nil)
-	if err != nil {
-		t.Fatalf("Entities: %v", err)
-	}
-	got := map[string]bool{}
-	for _, r := range rows {
-		got[r.Entity.ID] = true
-	}
+	got := pgListedEntityIDs(t, stores.Entities, orgID, nil)
 	if !got[onTracked] {
-		t.Errorf("entity on tracked repo %s missing — tracked-set semi-join must surface untasked entities", onTracked)
+		t.Errorf("entity on tracked repo %s missing — tracked-set semi-join must list untasked entities", onTracked)
 	}
 	if !got[mixedCase] {
 		t.Errorf("entity %s (mixed-case owner/repo) missing — tracked-repo match must be case-insensitive", mixedCase)
@@ -428,15 +408,15 @@ func TestFactoryReadStore_Postgres_ExcludesUntrackedEntity(t *testing.T) {
 	}
 }
 
-// TestFactoryReadStore_Postgres_GitHubMatchesTrackingOnItsOwnHost pins the
+// TestEntityReads_Postgres_GitHubMatchesTrackingOnItsOwnHost pins the
 // host half of the tracked-set semi-join: a pull request entity's scope is the
-// GitHub host it was polled from, and it rides the belt only when a team tracks
+// GitHub host it was polled from, and it is listed only when a team tracks
 // its owner/repo on that host. The same owner/repo tracked on another host is
 // a different repository and admits nothing.
-func TestFactoryReadStore_Postgres_GitHubMatchesTrackingOnItsOwnHost(t *testing.T) {
+func TestEntityReads_Postgres_GitHubMatchesTrackingOnItsOwnHost(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
-	orgID, _ := seedPgFactoryOrg(t, h)
+	orgID, _ := seedPgFlowOrg(t, h)
 	teamID := firstTeamForOrg(t, h, orgID)
 
 	pgtest.SeedTrackedRepoOnHost(t, h, orgID, teamID, dbtest.TestGitHubHost, "acme", "api")
@@ -448,14 +428,7 @@ func TestFactoryReadStore_Postgres_GitHubMatchesTrackingOnItsOwnHost(t *testing.
 	dotcomSameSlug := seedPgGitHubEntityOnHost(t, h, orgID, dbtest.TestGitHubHost, "acme", "ghe-only", 4)
 
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
-	rows, err := stores.Factory.Entities(context.Background(), orgID, 100, nil)
-	if err != nil {
-		t.Fatalf("Entities: %v", err)
-	}
-	got := map[string]bool{}
-	for _, r := range rows {
-		got[r.Entity.ID] = true
-	}
+	got := pgListedEntityIDs(t, stores.Entities, orgID, nil)
 	for _, c := range []struct {
 		name, id string
 		want     bool
@@ -466,21 +439,21 @@ func TestFactoryReadStore_Postgres_GitHubMatchesTrackingOnItsOwnHost(t *testing.
 		{"acme/ghe-only#4 on github.com, tracked only on ghe", dotcomSameSlug, false},
 	} {
 		if got[c.id] != c.want {
-			t.Errorf("%s: on belt = %v, want %v", c.name, got[c.id], c.want)
+			t.Errorf("%s: listed = %v, want %v", c.name, got[c.id], c.want)
 		}
 	}
 }
 
-// TestFactoryReadStore_Postgres_GitHubMatchesTrackingByRepositoryID pins that
-// the belt meets the tracked set on the entity's repository_id and reads
-// nothing out of its key. The tracked repository is renamed with no key
-// rewritten, and its pull request stays on the belt; another entity whose key
+// TestEntityReads_Postgres_GitHubMatchesTrackingByRepositoryID pins that
+// the entity list meets the tracked set on the entity's repository_id and
+// reads nothing out of its key. The tracked repository is renamed with no key
+// rewritten, and its pull request stays listed; another entity whose key
 // spells the tracked repository's new name but which references an untracked
-// row stays off it.
-func TestFactoryReadStore_Postgres_GitHubMatchesTrackingByRepositoryID(t *testing.T) {
+// row stays unlisted.
+func TestEntityReads_Postgres_GitHubMatchesTrackingByRepositoryID(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
-	orgID, _ := seedPgFactoryOrg(t, h)
+	orgID, _ := seedPgFlowOrg(t, h)
 	teamID := firstTeamForOrg(t, h, orgID)
 
 	trackPgRepo(t, h, orgID, teamID, "acme", "old")
@@ -501,35 +474,28 @@ func TestFactoryReadStore_Postgres_GitHubMatchesTrackingByRepositoryID(t *testin
 	}
 
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
-	// The unfiltered belt and the one narrowed to the team read the two
+	// The unfiltered list and the one narrowed to the team read the two
 	// variants of the predicate.
 	for _, teamIDs := range [][]string{nil, {teamID}} {
-		rows, err := stores.Factory.Entities(context.Background(), orgID, 100, teamIDs)
-		if err != nil {
-			t.Fatalf("Entities(%v): %v", teamIDs, err)
-		}
-		got := map[string]bool{}
-		for _, r := range rows {
-			got[r.Entity.ID] = true
-		}
+		got := pgListedEntityIDs(t, stores.Entities, orgID, teamIDs)
 		if !got[tracked] {
-			t.Errorf("teams %v: pull request in the renamed tracked repository is off the belt; its key still spells acme/old", teamIDs)
+			t.Errorf("teams %v: pull request in the renamed tracked repository is not listed; its key still spells acme/old", teamIDs)
 		}
 		if got[keyLies] {
-			t.Errorf("teams %v: entity keyed acme/new#2 in an untracked repository rides the belt; the key was read, not the id", teamIDs)
+			t.Errorf("teams %v: entity keyed acme/new#2 in an untracked repository is listed; the key was read, not the id", teamIDs)
 		}
 	}
 }
 
-// TestFactoryReadStore_Postgres_JiraScopedToTrackedProject is the Jira
+// TestEntityReads_Postgres_JiraScopedToTrackedProject is the Jira
 // mirror of the GitHub test: a Jira entity whose project key is attached
 // to one of the viewer's teams (a jira_project_status_rules row) is in the
 // tracked set; one whose project no team configured is not. Pins that the
 // tracked set's Jira arm scopes by tracked project, not task existence.
-func TestFactoryReadStore_Postgres_JiraScopedToTrackedProject(t *testing.T) {
+func TestEntityReads_Postgres_JiraScopedToTrackedProject(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
-	orgID, _ := seedPgFactoryOrg(t, h)
+	orgID, _ := seedPgFlowOrg(t, h)
 	teamID := firstTeamForOrg(t, h, orgID)
 
 	// teamID attaches project SKY; PROJ is attached by no team.
@@ -549,7 +515,7 @@ func TestFactoryReadStore_Postgres_JiraScopedToTrackedProject(t *testing.T) {
 	}
 }
 
-// TestFactoryReadStore_Postgres_JiraFollowsTheRegistryAfterAKeyRename: the
+// TestEntityReads_Postgres_JiraFollowsTheRegistryAfterAKeyRename: the
 // tracked set, and the team activity node that reads it, place a Jira issue
 // by the registry row it references, never by its key's prefix. After the
 // project's key is renamed the issue stays in its team's tracked set and its
@@ -557,11 +523,11 @@ func TestFactoryReadStore_Postgres_JiraScopedToTrackedProject(t *testing.T) {
 // holds the old key, and again once the registry is re-keyed. An issue in
 // another project whose key now carries the renamed project's key is in
 // neither.
-func TestFactoryReadStore_Postgres_JiraFollowsTheRegistryAfterAKeyRename(t *testing.T) {
+func TestEntityReads_Postgres_JiraFollowsTheRegistryAfterAKeyRename(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	ctx := context.Background()
-	orgID, _ := seedPgFactoryOrg(t, h)
+	orgID, _ := seedPgFlowOrg(t, h)
 	teamID := firstTeamForOrg(t, h, orgID)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 
@@ -592,7 +558,7 @@ func TestFactoryReadStore_Postgres_JiraFollowsTheRegistryAfterAKeyRename(t *test
 				t.Errorf("%s, teams %v: an untracked project's issue keyed NEW is in the tracked set; the key was read, not the row", stage, teamIDs)
 			}
 		}
-		activity, err := stores.TeamActivity.TeamActivity(ctx, orgID, teamID, now.Add(-time.Hour), now)
+		activity, err := stores.TeamActivity.TeamActivity(ctx, orgID, []string{teamID}, now.Add(-time.Hour), now)
 		if err != nil {
 			t.Fatalf("TeamActivity: %v", err)
 		}
@@ -613,14 +579,14 @@ func TestFactoryReadStore_Postgres_JiraFollowsTheRegistryAfterAKeyRename(t *test
 	check("registry re-keyed to NEW")
 }
 
-// TestFactoryReadStore_Postgres_LinearScopedToTrackedTeam is the Linear
+// TestEntityReads_Postgres_LinearScopedToTrackedTeam is the Linear
 // mirror: a Linear entity is in the tracked set when its Linear team is one
 // the org's teams track (a linear_team_rules row, watched or armed), and not
 // otherwise. The per-team narrowing reads the same arm.
-func TestFactoryReadStore_Postgres_LinearScopedToTrackedTeam(t *testing.T) {
+func TestEntityReads_Postgres_LinearScopedToTrackedTeam(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
-	orgID, _ := seedPgFactoryOrg(t, h)
+	orgID, _ := seedPgFlowOrg(t, h)
 	teamID := firstTeamForOrg(t, h, orgID)
 
 	bindWorkspace := func(workspaceID string) {
@@ -695,20 +661,18 @@ func TestFactoryReadStore_Postgres_LinearScopedToTrackedTeam(t *testing.T) {
 	}
 }
 
-// TestFactoryReadStore_Postgres_CrossTeamIsolation_RLS proves the per-team
-// narrowing the production app pool gets for free: driven through tf_app
-// with real JWT claims, a viewer only sees entities in their own teams'
-// tracked set, on the belt and in the tracked set the station counters and
-// the team activity node read. This is the one multi-tenant *leak* surface
-// in the cleanup (the net-new GitHub-by-repo query), held to the same
-// standard as the Jira deck. alice (teamA only) sees teamA's tracked GitHub,
-// Jira, and Slack entities but not teamB's; bob (teamB only) sees the mirror.
-func TestFactoryReadStore_Postgres_CrossTeamIsolation_RLS(t *testing.T) {
+// TestEntityReads_Postgres_CrossTeamIsolation_RLS proves the per-team
+// narrowing the production app pool gets for free: driven through tf_app with
+// real JWT claims, a viewer only sees entities in their own teams' tracked
+// set, in the entity list, in the event list, and in the tracked set the
+// activity node reads. alice (teamA only) sees teamA's tracked GitHub, Jira,
+// and Slack entities but not teamB's; bob (teamB only) sees the mirror.
+func TestEntityReads_Postgres_CrossTeamIsolation_RLS(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	ctx := context.Background()
 
-	orgID, alice := seedPgFactoryOrg(t, h)
+	orgID, alice := seedPgFlowOrg(t, h)
 	teamA := firstTeamForOrg(t, h, orgID)
 	bob := seedPgMember(t, h, orgID, "bob", "member")
 	teamB := seedPgDefaultTeam(t, h, orgID, bob)
@@ -732,17 +696,30 @@ func TestFactoryReadStore_Postgres_CrossTeamIsolation_RLS(t *testing.T) {
 	slackA := seedPgSlackThread(t, h, orgID, channelA, "C-A")
 	slackB := seedPgSlackThread(t, h, orgID, channelB, "C-B")
 
-	type view struct{ belt, tracked map[string]bool }
+	now := time.Now().UTC()
+	for _, id := range []string{ghA, ghB, jiraA, jiraB, slackA, slackB} {
+		seedPgFlowEvent(t, h, orgID, id, domain.EventGitHubPROpened, now)
+	}
+
+	type view struct{ listed, eventsOf, tracked map[string]bool }
 	viewFor := func(t *testing.T, userID string) view {
 		t.Helper()
-		v := view{belt: map[string]bool{}}
+		v := view{listed: map[string]bool{}, eventsOf: map[string]bool{}}
 		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
-			rows, e := pgstore.NewForTx(tx, pgtest.SecretKey).Factory.Entities(ctx, orgID, 100, nil)
+			stores := pgstore.NewForTx(tx, pgtest.SecretKey)
+			items, _, e := stores.Entities.List(ctx, orgID, db.EntityListFilter{}, db.Unwindowed)
 			if e != nil {
 				return e
 			}
-			for _, r := range rows {
-				v.belt[r.Entity.ID] = true
+			for _, it := range items {
+				v.listed[it.Entity.ID] = true
+			}
+			evs, _, e := stores.Events.List(ctx, orgID, db.EventListFilter{}, db.Unwindowed)
+			if e != nil {
+				return e
+			}
+			for _, ev := range evs {
+				v.eventsOf[*ev.Event.EntityID] = true
 			}
 			v.tracked, e = pgstore.TrackedEntityIDsForTest(ctx, tx, orgID, nil)
 			return e
@@ -755,18 +732,14 @@ func TestFactoryReadStore_Postgres_CrossTeamIsolation_RLS(t *testing.T) {
 
 	check := func(who string, v view, ours, theirs [3]string) {
 		t.Helper()
-		if !v.belt[ours[0]] {
-			t.Errorf("%s can't see their team's GitHub entity on the belt", who)
-		}
-		if v.belt[theirs[0]] {
-			t.Errorf("%s saw the other team's GitHub entity %s on the belt — tracked-repo scope leaked", who, theirs[0])
-		}
 		for i, source := range []string{"GitHub", "Jira", "Slack"} {
-			if !v.tracked[ours[i]] {
-				t.Errorf("%s can't see their team's tracked %s entity", who, source)
-			}
-			if v.tracked[theirs[i]] {
-				t.Errorf("%s saw the other team's %s entity %s — tracked-set scope leaked across the team boundary", who, source, theirs[i])
+			for name, seen := range map[string]map[string]bool{"entity list": v.listed, "event list": v.eventsOf, "tracked set": v.tracked} {
+				if !seen[ours[i]] {
+					t.Errorf("%s can't see their team's %s entity in the %s", who, source, name)
+				}
+				if seen[theirs[i]] {
+					t.Errorf("%s saw the other team's %s entity %s in the %s — tracked-set scope leaked across the team boundary", who, source, theirs[i], name)
+				}
 			}
 		}
 	}
@@ -774,143 +747,96 @@ func TestFactoryReadStore_Postgres_CrossTeamIsolation_RLS(t *testing.T) {
 	check("bob (teamB)", viewFor(t, bob), [3]string{ghB, jiraB, slackB}, [3]string{ghA, jiraA, slackA})
 }
 
-// TestFactoryReadStore_Postgres_CountersScopedToTrackedSet pins that the
-// station-throughput aggregates (EventCountsSince, TaskCountsSince,
-// LifetimeDistinctByEventType) carry the same tracked-set scope as the
-// belt. events RLS is org-wide, so without the semi-join an event on a PR
-// outside the tracked set would inflate the station header even though
-// that PR never appears on the belt; TaskCountsSince re-scopes the same
-// way so a task on an untracked entity (e.g. minted before the repo was
-// untracked) doesn't inflate "Triggered24h". Runs under AdminDB, so the
+// TestEntityReads_Postgres_EventListScopedToTrackedSet pins that the event
+// list carries the entity list's tracked-set scope. events RLS is org-wide, so
+// without the semi-join an event on a pull request outside the tracked set
+// would be listed though its entity is not. Runs under AdminDB, so the
 // semi-join reduces to the org-scoped tracked-set check.
-func TestFactoryReadStore_Postgres_CountersScopedToTrackedSet(t *testing.T) {
+func TestEntityReads_Postgres_EventListScopedToTrackedSet(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
-	orgID, userID := seedPgFactoryOrg(t, h)
-	promptID := seedPgFactoryPrompt(t, h, orgID, userID)
-	seed := newPgFactorySeeder(h.AdminDB, orgID, userID, promptID)
-
+	orgID, userID := seedPgFlowOrg(t, h)
+	promptID := seedPgFlowPrompt(t, h, orgID, userID)
+	seed := newPgFlowSeeder(h.AdminDB, orgID, userID, promptID)
 	now := time.Now().UTC()
 
-	// Tracked entity (seed.Entity auto-registers its repo): one opened
-	// event + a task, both in-window — both must count.
-	tracked := seed.Entity(t, "ctr-tracked")
-	evT := seed.Event(t, tracked, "github:pr:opened", "", now.Add(-10*time.Minute), time.Time{})
-	seed.Task(t, tracked, "github:pr:opened", "", evT, "queued", now.Add(-10*time.Minute))
-
-	// A vulnerable package in a tracked repository: GitHub's, tracked, and
-	// still no chip the floor can draw, so its event counts nowhere either.
-	pkg := seed.Entity(t, "ctr-package")
-	seed.SetEntityKind(t, pkg, domain.EntityKindVulnerablePackage)
-	seed.Event(t, pkg, "github:pr:opened", "", now.Add(-10*time.Minute), time.Time{})
-
-	// Untracked entity: its events AND its task must NOT contribute to any
-	// counter — it's off the belt.
+	tracked := seed.Entity(t, "ev-tracked")
+	ours := seed.Event(t, tracked, "github:pr:opened", "", now.Add(-10*time.Minute), time.Time{})
 	untracked := seedPgGitHubEntityRaw(t, h, orgID, "acme", "untracked", 9)
-	evU := seed.Event(t, untracked, "github:pr:opened", "", now.Add(-5*time.Minute), time.Time{})
 	seed.Event(t, untracked, "github:pr:merged", "", now.Add(-5*time.Minute), time.Time{})
-	seed.Task(t, untracked, "github:pr:merged", "", evU, "queued", now.Add(-5*time.Minute))
 
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
-	ctx := context.Background()
-
-	since, err := stores.Factory.EventCountsSince(ctx, orgID, now.Add(-1*time.Hour))
-	if err != nil {
-		t.Fatalf("EventCountsSince: %v", err)
-	}
-	if since["github:pr:opened"] != 1 {
-		t.Errorf("EventCountsSince[opened] = %d, want 1 (only the tracked entity counts)", since["github:pr:opened"])
-	}
-	if since["github:pr:merged"] != 0 {
-		t.Errorf("EventCountsSince[merged] = %d, want 0 (untracked entity's event must not count)", since["github:pr:merged"])
-	}
-
-	taskC, err := stores.Factory.TaskCountsSince(ctx, orgID, now.Add(-1*time.Hour))
-	if err != nil {
-		t.Fatalf("TaskCountsSince: %v", err)
-	}
-	if taskC["github:pr:opened"] != 1 {
-		t.Errorf("TaskCountsSince[opened] = %d, want 1 (tracked entity's task)", taskC["github:pr:opened"])
-	}
-	if taskC["github:pr:merged"] != 0 {
-		t.Errorf("TaskCountsSince[merged] = %d, want 0 (untracked entity's task must not count)", taskC["github:pr:merged"])
-	}
-
-	life, err := stores.Factory.LifetimeDistinctByEventType(ctx, orgID)
-	if err != nil {
-		t.Fatalf("LifetimeDistinctByEventType: %v", err)
-	}
-	if life["github:pr:opened"] != 1 {
-		t.Errorf("Lifetime[opened] = %d, want 1 (untracked entity excluded)", life["github:pr:opened"])
-	}
-	if life["github:pr:merged"] != 0 {
-		t.Errorf("Lifetime[merged] = %d, want 0 (untracked entity excluded)", life["github:pr:merged"])
+	for _, f := range []db.EventListFilter{{}, {EntityIDs: []string{tracked, untracked}}} {
+		rows, total, err := stores.Events.List(context.Background(), orgID, f, db.Unwindowed)
+		if err != nil {
+			t.Fatalf("Events.List(%+v): %v", f, err)
+		}
+		if total != 1 || len(rows) != 1 || rows[0].Event.ID != ours {
+			t.Errorf("Events.List(%+v) = %d rows of %d, want the tracked entity's one event", f, len(rows), total)
+		}
 	}
 }
 
-// TestFactoryReadStore_Postgres_CrossOrgLeakage pins the defense-in-
-// depth guarantee: even with the org bind as the only line of defense
-// (AdminDB bypasses RLS), org A's queries can't see org B's rows. In
-// production the RLS policies add a second layer; this test validates the
-// org-bind on its own (the tracked-set semi-join binds org via e.org_id /
-// the teams join) so a regression there can't silently rely on RLS to
-// compensate. Each entity is auto-tracked by its own org's seeder.
-func TestFactoryReadStore_Postgres_CrossOrgLeakage(t *testing.T) {
+// TestEntityReads_Postgres_CrossOrgLeakage pins the defense-in-depth
+// guarantee: even with the org bind as the only line of defense (AdminDB
+// bypasses RLS), org A's reads can't see org B's rows. In production the RLS
+// policies add a second layer; this test validates the org bind on its own
+// (the tracked-set semi-join binds org via e.org_id / the teams join) so a
+// regression there can't silently rely on RLS to compensate. Each entity is
+// auto-tracked by its own org's seeder.
+func TestEntityReads_Postgres_CrossOrgLeakage(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 
-	orgA, userA := seedPgFactoryOrg(t, h)
-	orgB, userB := seedPgFactoryOrg(t, h)
-	promptA := seedPgFactoryPrompt(t, h, orgA, userA)
-	promptB := seedPgFactoryPrompt(t, h, orgB, userB)
+	orgA, userA := seedPgFlowOrg(t, h)
+	orgB, userB := seedPgFlowOrg(t, h)
+	promptA := seedPgFlowPrompt(t, h, orgA, userA)
+	promptB := seedPgFlowPrompt(t, h, orgB, userB)
 
-	seedA := newPgFactorySeeder(h.AdminDB, orgA, userA, promptA)
-	seedB := newPgFactorySeeder(h.AdminDB, orgB, userB, promptB)
+	seedA := newPgFlowSeeder(h.AdminDB, orgA, userA, promptA)
+	seedB := newPgFlowSeeder(h.AdminDB, orgB, userB, promptB)
 
 	now := time.Now().UTC()
-	// seed.Entity registers each entity's repo for its own org's default
-	// team, so both clear the tracked-set semi-join in their own org — this
-	// test isolates the org bind, not the tracked-set membership.
 	entA := seedA.Entity(t, "cross-A")
 	entB := seedB.Entity(t, "cross-B")
-	seedA.Event(t, entA, "github:pr:opened", "", now, time.Time{})
-	seedB.Event(t, entB, "github:pr:merged", "", now, time.Time{})
+	evA := seedA.Event(t, entA, "github:pr:opened", "", now, time.Time{})
+	evB := seedB.Event(t, entB, "github:pr:merged", "", now, time.Time{})
 
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
-
-	// Org A's snapshot must NOT include org B's event.
-	countsA, err := stores.Factory.LifetimeDistinctByEventType(ctx, orgA)
-	if err != nil {
-		t.Fatalf("LifetimeDistinctByEventType orgA: %v", err)
-	}
-	if countsA["github:pr:merged"] != 0 {
-		t.Errorf("orgA saw orgB's merged event — org_id filter leaked")
-	}
-	if countsA["github:pr:opened"] != 1 {
-		t.Errorf("orgA counts[opened] = %d, want 1", countsA["github:pr:opened"])
-	}
-
-	// Symmetric.
-	countsB, err := stores.Factory.LifetimeDistinctByEventType(ctx, orgB)
-	if err != nil {
-		t.Fatalf("LifetimeDistinctByEventType orgB: %v", err)
-	}
-	if countsB["github:pr:opened"] != 0 {
-		t.Errorf("orgB saw orgA's opened event — org_id filter leaked")
-	}
-	if countsB["github:pr:merged"] != 1 {
-		t.Errorf("orgB counts[merged] = %d, want 1", countsB["github:pr:merged"])
-	}
-
-	// Entities is the other broad read — pin it too.
-	entsA, err := stores.Factory.Entities(ctx, orgA, 100, nil)
-	if err != nil {
-		t.Fatalf("Entities orgA: %v", err)
-	}
-	for _, e := range entsA {
-		if e.Entity.ID == entB {
-			t.Errorf("orgA Entities() returned orgB entity %s", entB)
+	for _, c := range []struct{ org, ent, ev, otherEnt, otherEv string }{
+		{orgA, entA, evA, entB, evB},
+		{orgB, entB, evB, entA, evA},
+	} {
+		got := pgListedEntityIDs(t, stores.Entities, c.org, nil)
+		if !got[c.ent] || got[c.otherEnt] {
+			t.Errorf("org %s entity list = %v, want its own entity %s and not %s", c.org, got, c.ent, c.otherEnt)
+		}
+		// Naming the other org's entity does not reach it either.
+		if crossed := pgListedEntityIDs(t, stores.Entities, c.org, nil); crossed[c.otherEnt] {
+			t.Errorf("org %s listed the other org's entity", c.org)
+		}
+		evs, _, err := stores.Events.List(ctx, c.org, db.EventListFilter{EntityIDs: []string{c.ent, c.otherEnt}}, db.Unwindowed)
+		if err != nil {
+			t.Fatalf("Events.List: %v", err)
+		}
+		if len(evs) != 1 || evs[0].Event.ID != c.ev {
+			t.Errorf("org %s event list = %d rows, want its own event %s alone", c.org, len(evs), c.ev)
 		}
 	}
+}
+
+// pgListedEntityIDs reads the whole entity list, narrowed to teamIDs when
+// given, and returns the ids it served.
+func pgListedEntityIDs(t *testing.T, entities db.EntityStore, orgID string, teamIDs []string) map[string]bool {
+	t.Helper()
+	items, _, err := entities.List(context.Background(), orgID, db.EntityListFilter{TeamIDs: teamIDs}, db.Unwindowed)
+	if err != nil {
+		t.Fatalf("Entities.List(teams %v): %v", teamIDs, err)
+	}
+	got := make(map[string]bool, len(items))
+	for _, it := range items {
+		got[it.Entity.ID] = true
+	}
+	return got
 }

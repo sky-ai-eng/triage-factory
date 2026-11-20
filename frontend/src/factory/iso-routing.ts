@@ -34,7 +34,7 @@ export interface RoutingTable {
   getItinerary(fromId: string, toId: string): PathSegment[] | null
   /** Animation duration in ms for a chip traveling from fromId to
    *  toId at the configured belt speed. Falls back to the supplied
-   *  default when no path exists — the snapshot reconciler still
+   *  default when no path exists — the floor reconciler still
    *  needs a number so unknown pairs eventually snap to parked. */
   getDuration(fromId: string, toId: string): number
 }

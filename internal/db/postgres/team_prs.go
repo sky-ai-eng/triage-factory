@@ -60,7 +60,7 @@ func (s *teamPRStore) TeamPRs(ctx context.Context, orgID, teamID, githubBaseURL 
 	// nobody attached to it, however familiar the author.
 	where := `
 		WHERE e.org_id = $1 AND e.source = 'github' AND e.snapshot_json IS NOT NULL
-		  AND ` + factoryGitHubRepoTrackedForTeams("$2") + `
+		  AND ` + githubRepoTrackedForTeams("$2") + `
 		  AND (e.owning_team_id = $2` + memberLeg + `)` + stateClause + pgPRDraftClause(f.Draft)
 
 	var total int

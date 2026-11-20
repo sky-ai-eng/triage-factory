@@ -291,42 +291,14 @@ func SingleParam(r *http.Request) string {
 	return v
 }
 
-// FilterParamStrict is FilterParam under the strict-params contract: a
-// malformed ?team_id= is rejected as a 400 INVALID_PARAM instead of silently
-// dropped — dropping a corrupt filter *widens* the result set, the exact
-// failure the contract forbids. On a malformed value the response is already
-// written and ok is false; callers return immediately. The lenient FilterParam
-// remains only for handlers not yet converted; converted handlers never go
-// back, and the lenient variants are deleted once the sweep finishes.
-func FilterParamStrict(w http.ResponseWriter, r *http.Request) (teams []string, ok bool) {
-	raw := r.URL.Query()["team_id"]
-	if len(raw) == 0 {
-		return nil, true
-	}
-	seen := make(map[string]struct{}, len(raw))
-	out := make([]string, 0, len(raw))
-	for _, v := range raw {
-		if _, err := uuid.Parse(v); err != nil {
-			writeBadTeamID(w, v)
-			return nil, false
-		}
-		if _, dup := seen[v]; dup {
-			continue
-		}
-		seen[v] = struct{}{}
-		out = append(out, v)
-	}
-	return out, true
-}
-
-// SingleParamStrict is SingleParam under the same strict-params contract as
-// FilterParamStrict: only a genuinely absent param means "no narrow" (""),
-// everything else must be one well-formed id. A present-but-empty
-// `?team_id=` and a repeated `?team_id=a&team_id=b` are both rejected —
-// treating either as absent (or taking the first value) would silently
-// retarget a single-team read to the caller's default team, the exact
-// fall-through this variant exists to close. Malformed ids are a 400 as in
-// FilterParamStrict.
+// SingleParamStrict is SingleParam under the strict-params contract: only a
+// genuinely absent param means "no narrow" (""), everything else must be one
+// well-formed id. A present-but-empty `?team_id=` and a repeated
+// `?team_id=a&team_id=b` are both rejected — treating either as absent (or
+// taking the first value) would silently retarget a single-team read to the
+// caller's default team, the exact fall-through this variant exists to close.
+// A malformed id is a 400 INVALID_PARAM rather than dropped, since dropping a
+// corrupt filter widens the result set.
 func SingleParamStrict(w http.ResponseWriter, r *http.Request) (team string, ok bool) {
 	raw, present := r.URL.Query()["team_id"]
 	if !present {

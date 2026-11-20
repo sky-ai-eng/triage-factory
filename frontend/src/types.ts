@@ -1313,6 +1313,61 @@ export interface ToastPayload {
   body: string
 }
 
+/** A pull request's fields from its last poll, as the entity resource carries
+ *  them. */
+export interface EntityPullRequest {
+  number: number
+  repo: string
+  author: string
+  draft: boolean
+  additions: number
+  deletions: number
+}
+
+/** The entity resource (POST /api/entities/list, GET /api/entities/{id}).
+ *  Every key is present on every source; a value the row does not have is
+ *  null. */
+export interface EntityResource {
+  id: string
+  source: string
+  source_id: string
+  kind: string
+  title: string
+  url: string
+  state: string
+  created_at: string
+  closed_at: string | null
+  /** A GitHub entity's repository registry row. Grouping by it rather than
+   *  by a name keeps a renamed repository's pull requests together. */
+  repository_id: string | null
+  /** The newest recorded event's type and detection time. */
+  latest_event_type: string | null
+  latest_event_at: string | null
+  /** Whether the viewer authored it; only a pull request can answer yes. */
+  mine: boolean
+  pull_request: EntityPullRequest | null
+}
+
+/** One row of POST /api/events/list. `occurred_at` is the source's own time
+ *  for the event and null when it reported none; `created_at` is when it was
+ *  recorded. */
+export interface EventResource {
+  id: string
+  entity_id: string
+  event_type: string
+  dedup_key: string
+  occurred_at: string | null
+  created_at: string
+}
+
+/** One row of the activity node's by_event_type cut. */
+export interface ActivityEventType {
+  event_type: string
+  events: number
+  tasks: number
+  entities: number
+}
+
 export interface FactoryRecentEvent {
   event_type: string
   /** Source-time when known (commit committed_at, check completed_at,
@@ -1327,66 +1382,41 @@ export interface FactoryRecentEvent {
   detected_at: string
 }
 
-export interface FactoryEntity {
-  id: string
-  source: string
-  source_id: string
-  kind: string
-  title: string
-  url: string
-  mine: boolean
-  current_event_type?: string
-  last_event_at?: string
-  /** Last ~10 events for this entity, oldest first. The factory reconciler
-   * walks this as an animation chain — a poll cycle that emitted two
-   * events in sequence (new_commits → ci_passed) shows both transitions
-   * rather than teleporting to the latest. */
-  recent_events?: FactoryRecentEvent[]
-  /** The pull request's repository registry row. The belt groups chips by
-   *  it rather than by a name, so a renamed repository keeps its chips'
-   *  hue. */
-  repository_id?: string
-  // GitHub PR fields.
-  number?: number
-  repo?: string
-  author?: string
-  additions?: number
-  deletions?: number
-  /** Active tasks for this entity, grouped by event_type. Drives the
-   *  station drawer's drag-to-delegate flow: dropping on the runs tray
-   *  reads the matching event_type's first dedup_key and forwards it
-   *  (along with entity_id + event_type) to POST /api/tasks, which
-   *  find-or-creates via the unique index on
-   *  (entity_id, event_type, dedup_key) and answers the task the second
-   *  call delegates. task_id is informational — not sent on the request —
-   *  and is kept available for future UI hints (e.g., "this queued chip
-   *  already has a task"). */
-  pending_tasks?: Record<string, Array<{ task_id: string; dedup_key: string }>>
-  /** True if any run on this entity is `open` (a turn ended without a
-   *  conclusion). Drives the idle badge on the runs-tray chip so a user
-   *  scanning the factory can spot open runs without opening each card. */
-  has_open_run?: boolean
+/** An entity as the factory floor draws it: the entity resource plus what
+ *  the floor reads beside it. */
+export interface FactoryEntity extends EntityResource {
+  /** The entity's last ~10 events, oldest first. The reconciler walks them
+   *  as an animation chain, so a poll cycle that emitted two events in
+   *  sequence (new_commits → ci_passed) shows both transitions rather than
+   *  teleporting to the latest. */
+  recent_events: FactoryRecentEvent[]
+  /** Open tasks on this entity, grouped by event_type. Drives the station
+   *  drawer's drag-to-delegate flow: dropping on the runs tray reads the
+   *  matching event_type's first dedup_key and forwards it (along with
+   *  entity_id + event_type) to POST /api/tasks, which find-or-creates via
+   *  the unique index on (entity_id, event_type, dedup_key) and answers the
+   *  task the second call delegates. */
+  pending_tasks: Record<string, Array<{ task_id: string; dedup_key: string }>>
 }
 
-export interface FactoryStation {
-  event_type: string
-  items_24h: number
-  triggered_24h: number
-  active_runs: number
-  /** From-catalog-start event count for this station's event_type.
-   *  This value may be populated for both terminal and non-terminal
-   *  stations, depending on the backend snapshot data. */
-  items_lifetime: number
-  runs: Array<{
-    run: Conversation
-    task: Task
-    mine: boolean
-  }>
+/** A conversation in flight at a station, with its task. */
+export interface FactoryRun {
+  run: Conversation
+  task: Task
 }
 
-export interface FactorySnapshot {
-  stations: Record<string, FactoryStation>
+/** Everything the factory scene draws, built from the generic reads. */
+export interface FactoryFloor {
   entities: FactoryEntity[]
+  /** How many entities the floor's read matched. More than `entities.length`
+   *  when the floor holds one page of a longer list. */
+  total: number
+  /** Conversations in flight on the floor's entities, by their task's event
+   *  type. */
+  runs: Record<string, FactoryRun[]>
+  /** Distinct entities that reached each event type in the last
+   *  REACHED_WINDOW_DAYS days (lib/factoryFloor). */
+  reached: Record<string, number>
 }
 
 export type WSEvent =

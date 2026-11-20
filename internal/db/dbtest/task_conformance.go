@@ -549,28 +549,37 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		}
 	})
 
-	t.Run("ListActiveRefsForEntities_filters_terminal", func(t *testing.T) {
+	t.Run("List_narrows_by_entity", func(t *testing.T) {
 		s, orgID, _, _, _, seed, _ := mk(t)
-		for _, none := range [][]string{nil, {}} {
-			if refs, err := s.ListActiveRefsForEntities(ctx, orgID, none, nil); err != nil || len(refs) != 0 {
-				t.Errorf("ListActiveRefsForEntities(%#v) = (%d refs, %v), want none", none, len(refs), err)
-			}
-		}
-		entityA, _, taskA := seed(t, "ref-a")
-		entityB, _, taskB := seed(t, "ref-b")
-		// Close B; only A should remain.
+		entityA, _, taskA := seed(t, "ent-a")
+		entityB, _, taskB := seed(t, "ent-b")
+		_, _, taskC := seed(t, "ent-c")
+		// Close B; an open-status narrowing then keeps only A of the two named.
 		if _, err := s.Close(ctx, orgID, taskB, "test", ""); err != nil {
 			t.Fatalf("Close: %v", err)
 		}
-		refs, err := s.ListActiveRefsForEntities(ctx, orgID, []string{entityA, entityB}, nil)
-		if err != nil {
-			t.Fatalf("ListActiveRefsForEntities: %v", err)
+		ids := func(f db.TaskListFilter) map[string]bool {
+			t.Helper()
+			tasks, total, err := s.List(ctx, orgID, f, db.Unwindowed)
+			if err != nil {
+				t.Fatalf("List(%+v): %v", f, err)
+			}
+			if total != len(tasks) {
+				t.Errorf("List(%+v): total = %d, want the %d rows it served", f, total, len(tasks))
+			}
+			out := map[string]bool{}
+			for _, task := range tasks {
+				out[task.ID] = true
+			}
+			return out
 		}
-		if len(refs) != 1 {
-			t.Fatalf("got %d refs, want 1 (only A active)", len(refs))
+		named := ids(db.TaskListFilter{EntityIDs: []string{entityA, entityB}})
+		if !named[taskA] || !named[taskB] || named[taskC] {
+			t.Errorf("entity_ids [A B] = %v, want A's and B's tasks and not C's", named)
 		}
-		if refs[0].ID != taskA {
-			t.Errorf("ref ID = %s, want %s", refs[0].ID, taskA)
+		open := ids(db.TaskListFilter{EntityIDs: []string{entityA, entityB}, Statuses: []string{"queued", "in_progress", "snoozed"}})
+		if !open[taskA] || open[taskB] || len(open) != 1 {
+			t.Errorf("entity_ids [A B] open = %v, want A's task alone", open)
 		}
 	})
 
