@@ -6326,12 +6326,12 @@ REVOKE ALL ON public.leases FROM anon, authenticated, service_role;
 -- poll_readiness: org-scoped state for the "config took effect" announce toast
 -- and the /api/jira/stock readiness gate. Under the control/standby split the
 -- pod running the poller is not the one serving the request, so this must be
--- readable by every control pod. One row per (org_id, source), source is
--- 'github' or 'jira'. Ready = last_poll_at IS NOT NULL: a restart stamps
--- restarted_at and nulls last_poll_at, and a completion is stored only when
--- its poll started at or after restarted_at, or its start time is unknown.
--- announce_pending is a one-shot flag consumed atomically so racing pods
--- can't double-fire the toast.
+-- readable by every control pod. One row per (org_id, source). Ready =
+-- last_poll_at IS NOT NULL: a restart stamps restarted_at and nulls
+-- last_poll_at, and a completion is stored only when its poll started at or
+-- after restarted_at, or its start time is unknown. announce_pending is a
+-- one-shot flag consumed atomically so racing pods can't double-fire the
+-- toast.
 -- Store methods take an explicit orgID and run on the admin pool; the handler
 -- has already resolved and authorized the org from session claims.
 --

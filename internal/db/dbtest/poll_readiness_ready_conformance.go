@@ -17,7 +17,8 @@ type PollReadinessReadyFactory func(t *testing.T) (store db.PollReadinessStore, 
 // a completion stamped with the same instant are what a coarse clock produces,
 // and neither dialect's clock can be made to produce them on demand.
 type PollReadinessSeeder struct {
-	// RestartedAt returns the pair's stored restart stamp. The row must exist.
+	// RestartedAt returns the pair's stored restart stamp. The pair must have
+	// been restarted.
 	RestartedAt func(t *testing.T, orgID, source string) time.Time
 	// SetLastPollAt overwrites the pair's stored completion stamp without
 	// passing MarkPollComplete's gate. The row must exist.
@@ -28,8 +29,8 @@ type PollReadinessSeeder struct {
 // impl must hold: not ready until a poll completes; a restart clears readiness
 // until a poll started at or after it completes; a completion whose poll
 // started before the restart is ignored; a completion with no start time is
-// accepted; a poll started, or a completion stamped, at the restart's own
-// instant is ready; and sources are independent.
+// accepted; a poll started at the restart's own instant is ready; any stored
+// completion is ready, whatever its stamp; and sources are independent.
 func RunPollReadinessReadyConformance(t *testing.T, mk PollReadinessReadyFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -94,13 +95,18 @@ func RunPollReadinessReadyConformance(t *testing.T, mk PollReadinessReadyFactory
 		}
 	})
 
-	t.Run("a_completion_stamped_at_the_restart_instant_is_ready", func(t *testing.T) {
+	t.Run("a_stored_completion_is_ready_whatever_its_stamp", func(t *testing.T) {
+		// The read compares no stamps. A coarse clock stamps a completion with
+		// the restart's own instant, and a completion whose stamp was taken
+		// just before the restart can still be stored after it.
 		store, orgID, seed := mk(t)
 		restart(t, store, orgID, "jira")
-		complete(t, store, orgID, "jira", seed.RestartedAt(t, orgID, "jira"))
-		seed.SetLastPollAt(t, orgID, "jira", seed.RestartedAt(t, orgID, "jira"))
-		if !ready(t, store, orgID, "jira") {
-			t.Fatal("Ready after a completion stamped with the restart's instant = false, want true")
+		restartedAt := seed.RestartedAt(t, orgID, "jira")
+		for _, at := range []time.Time{restartedAt, restartedAt.Add(-time.Millisecond)} {
+			seed.SetLastPollAt(t, orgID, "jira", at)
+			if !ready(t, store, orgID, "jira") {
+				t.Fatalf("Ready with a completion stamped %v against a restart at %v = false, want true", at, restartedAt)
+			}
 		}
 	})
 
