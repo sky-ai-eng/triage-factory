@@ -48,23 +48,14 @@ func (s *pollReadinessStore) MarkPollComplete(ctx context.Context, orgID, source
 }
 
 func (s *pollReadinessStore) Ready(ctx context.Context, orgID, source string) (bool, error) {
-	var restartedAt, lastPollAt sql.NullTime
+	var ready bool
 	err := s.q.QueryRowContext(ctx, `
-		SELECT restarted_at, last_poll_at FROM poll_readiness WHERE org_id = ? AND source = ?
-	`, orgID, source).Scan(&restartedAt, &lastPollAt)
-	if err == sql.ErrNoRows {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	if !lastPollAt.Valid {
-		return false, nil
-	}
-	if !restartedAt.Valid {
-		return true, nil
-	}
-	return lastPollAt.Time.After(restartedAt.Time), nil
+		SELECT EXISTS (
+			SELECT 1 FROM poll_readiness
+			WHERE org_id = ? AND source = ? AND last_poll_at IS NOT NULL
+		)
+	`, orgID, source).Scan(&ready)
+	return ready, err
 }
 
 func (s *pollReadinessStore) TakeAnnouncePending(ctx context.Context, orgID, source string) (bool, error) {

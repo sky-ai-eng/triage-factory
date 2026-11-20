@@ -58,13 +58,14 @@ const (
 // lifecycle adapter's dropped events, so every Slack counter comes from one
 // meter and one constructor.
 type ingestStats struct {
-	events              metric.Int64Counter
-	retries             metric.Int64Counter
-	rateLimited         metric.Int64Counter
-	signatureMismatches metric.Int64Counter
-	orgDeliveries       metric.Int64Counter
-	installs            metric.Int64Counter
-	lifecycleDropped    metric.Int64Counter
+	events               metric.Int64Counter
+	retries              metric.Int64Counter
+	rateLimited          metric.Int64Counter
+	signatureMismatches  metric.Int64Counter
+	deploymentDeliveries metric.Int64Counter
+	orgDeliveries        metric.Int64Counter
+	installs             metric.Int64Counter
+	lifecycleDropped     metric.Int64Counter
 }
 
 // newIngestStats builds the instrument set against mp — production passes
@@ -98,6 +99,12 @@ func newIngestStats(mp metric.MeterProvider) *ingestStats {
 		slackLog.Warn("signature mismatches counter setup failed", "error", err)
 	}
 
+	deploymentDeliveries, err := meter.Int64Counter("slack.webhook.deployment.deliveries",
+		metric.WithDescription("Deliveries to the deployment Slack app's Events API endpoint, by the signature check's verdict (verified, mismatch, stale, malformed). stale with nothing verified is this host's clock more than five minutes off, which refuses every delivery Slack sends; a replayed or forged request also counts."))
+	if err != nil {
+		slackLog.Warn("deployment deliveries counter setup failed", "error", err)
+	}
+
 	orgDeliveries, err := meter.Int64Counter("slack.webhook.org.deliveries",
 		metric.WithDescription("Deliveries to an org's Events API endpoint that name a workspace and app connected to that org, by app and by verdict: the signature check's (verified, mismatch, stale, malformed), or no_secret when the connection's signing secret could not be read. One app's refusals are its configuration; most apps' at once are the deployment's: its secret store, a proxy changing request bodies or headers, or a clock more than five minutes off."))
 	if err != nil {
@@ -116,13 +123,14 @@ func newIngestStats(mp metric.MeterProvider) *ingestStats {
 	}
 
 	return &ingestStats{
-		events:              events,
-		retries:             retries,
-		rateLimited:         rateLimited,
-		signatureMismatches: signatureMismatches,
-		orgDeliveries:       orgDeliveries,
-		installs:            installs,
-		lifecycleDropped:    lifecycleDropped,
+		events:               events,
+		retries:              retries,
+		rateLimited:          rateLimited,
+		signatureMismatches:  signatureMismatches,
+		deploymentDeliveries: deploymentDeliveries,
+		orgDeliveries:        orgDeliveries,
+		installs:             installs,
+		lifecycleDropped:     lifecycleDropped,
 	}
 }
 
@@ -169,6 +177,19 @@ func (s *ingestStats) recordSignatureMismatch(ctx context.Context, appID, namesA
 	s.signatureMismatches.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("app_id", appID),
 		attribute.String("names_app", namesApp),
+	))
+}
+
+// recordDeploymentDelivery counts one delivery to the deployment endpoint by
+// the signature check's verdict. appID is the deployment app's, whichever app
+// the unverified body names.
+func (s *ingestStats) recordDeploymentDelivery(ctx context.Context, appID string, check signatureCheck) {
+	if s == nil {
+		return
+	}
+	s.deploymentDeliveries.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("app_id", appID),
+		attribute.String("signature", check.label()),
 	))
 }
 

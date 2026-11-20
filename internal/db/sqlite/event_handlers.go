@@ -47,7 +47,7 @@ const sqliteEventHandlerColumns = `id, kind, event_type, scope_predicate_json, e
        name, default_priority, sort_order,
        blueprint_id, breaker_threshold, min_autonomy_suitability,
        user_modified, created_at, updated_at,
-       creator_user_id, notify_audience`
+       creator_user_id`
 
 func (s *eventHandlerStore) Seed(ctx context.Context, orgID, teamID string, blueprintIDsBySlug map[string]string) error {
 	if teamID == "" {
@@ -150,14 +150,6 @@ func (s *eventHandlerStore) List(ctx context.Context, orgID string, f db.EventHa
 	if f.Kind != "" {
 		where += ` AND kind = ?`
 		args = append(args, f.Kind)
-	}
-	if f.Audience != "" {
-		where += ` AND notify_audience = ?`
-		args = append(args, f.Audience)
-	}
-	if f.CreatorUserID != "" {
-		where += ` AND creator_user_id = ?`
-		args = append(args, f.CreatorUserID)
 	}
 	if len(f.GatedEventTypes) > 0 {
 		placeholders := make([]string, len(f.GatedEventTypes))
@@ -311,16 +303,16 @@ func (s *eventHandlerStore) Create(ctx context.Context, orgID, teamID string, h 
 			INSERT INTO event_handlers
 				(id, org_id, team_id, creator_user_id, kind, event_type,
 				 scope_predicate_json, enabled, source,
-				 name, notify_audience,
+				 name,
 				 created_at, updated_at)
 			VALUES (?, ?, ?, ?, 'notify', ?,
 			        ?, ?, 'user',
-			        ?, ?,
+			        ?,
 			        ?, ?)
 			RETURNING `+sqliteEventHandlerColumns,
 			h.ID, orgID, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID, h.EventType,
 			pred, h.Enabled,
-			h.Name, h.Audience,
+			h.Name,
 			now, now))
 	}
 	return domain.EventHandler{}, fmt.Errorf("sqlite event_handlers Create: unknown kind %q", h.Kind)
@@ -374,13 +366,13 @@ func (s *eventHandlerStore) Update(ctx context.Context, orgID string, h domain.E
 		return scanUpdatedEventHandlerSQLite(s.q.QueryRowContext(ctx, `
 			UPDATE event_handlers
 			SET scope_predicate_json = ?, enabled = ?,
-			    name = ?, notify_audience = ?,
+			    name = ?,
 			    user_modified = user_modified OR ?,
 			    updated_at = ?
 			WHERE org_id = ? AND id = ? AND kind = 'notify' AND deleted_at IS NULL
 			RETURNING `+sqliteEventHandlerColumns,
 			pred, h.Enabled,
-			h.Name, h.Audience,
+			h.Name,
 			contentChanged,
 			now, orgID, h.ID))
 	}
@@ -713,7 +705,6 @@ func scanEventHandlerFromAnySQLite(scanFn func(dst ...any) error) (domain.EventH
 		breakerNS     sql.NullInt64
 		minAutonomyNS sql.NullFloat64
 		creatorNS     sql.NullString
-		audienceNS    sql.NullString
 	)
 	if err := scanFn(
 		&h.ID, &h.Kind, &h.EventType, &pred, &h.Enabled, &h.Source,
@@ -721,12 +712,11 @@ func scanEventHandlerFromAnySQLite(scanFn func(dst ...any) error) (domain.EventH
 		&nameNS, &defPriority, &sortOrder,
 		&blueprintID, &breakerNS, &minAutonomyNS,
 		&h.UserModified, &h.CreatedAt, &h.UpdatedAt,
-		&creatorNS, &audienceNS,
+		&creatorNS,
 	); err != nil {
 		return h, err
 	}
 	h.CreatorUserID = creatorNS.String
-	h.Audience = audienceNS.String
 	if teamID.Valid {
 		h.TeamID = teamID.String
 	}

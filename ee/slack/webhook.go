@@ -229,16 +229,19 @@ func (h *webhookHandler) handleDeploymentWebhook(w http.ResponseWriter, r *http.
 	if !ok {
 		return
 	}
-	switch checkSlackSignature(h.deployment.SigningSecret, body, r.Header.Get("X-Slack-Request-Timestamp"), r.Header.Get("X-Slack-Signature")) {
+	// Every delivery is counted by its verdict, because a wrong signing
+	// secret and a clock more than five minutes off each refuse all of
+	// Slack's deliveries here, and Slack turns the app's events off within
+	// the hour.
+	check := checkSlackSignature(h.deployment.SigningSecret, body, r.Header.Get("X-Slack-Request-Timestamp"), r.Header.Get("X-Slack-Signature"))
+	h.stats.recordDeploymentDelivery(r.Context(), h.deployment.AppID, check)
+	switch check {
 	case signatureValid:
 	case signatureMismatch:
 		h.reportSignatureMismatch(r.Context(), body)
 		httpx.WriteUnauth(w)
 		return
 	default:
-		// TODO(TFAC-1491): a stale timestamp here is uncounted, so a clock
-		// more than five minutes off refuses every delivery to the deployment
-		// app with no metric or alert until Slack turns its events off.
 		httpx.WriteUnauth(w)
 		return
 	}
@@ -364,7 +367,8 @@ const (
 	signatureValid
 )
 
-// label is the check's verdict on slack.webhook.org.deliveries.
+// label is the check's verdict on slack.webhook.org.deliveries and
+// slack.webhook.deployment.deliveries.
 func (c signatureCheck) label() string {
 	switch c {
 	case signatureValid:
