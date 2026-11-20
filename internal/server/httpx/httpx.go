@@ -24,6 +24,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -50,7 +51,9 @@ func WriteJSON(w http.ResponseWriter, status int, v any) {
 // machine can read it; in multi mode the client sees a generic message and the
 // detail stays in the server log only — raw Go errors (driver messages, file
 // paths, internal IDs) must not leak to other tenants' browsers. scope is the
-// short subsystem tag (e.g. "tasks", "projects", "reviews").
+// short subsystem tag (e.g. "tasks", "projects", "reviews"). Two errors are
+// not server faults and get answers of their own: a canceled request context
+// (499) and a secret too large for the OS keychain (413 SECRET_TOO_LARGE).
 func InternalError(w http.ResponseWriter, scope string, err error) {
 	// A canceled request context means the caller went away (navigation,
 	// component remount, React StrictMode double-fire) before the handler
@@ -70,6 +73,16 @@ func InternalError(w http.ResponseWriter, scope string, err error) {
 	if IsClientGone(err) {
 		logging.Component(scope).Debug("request canceled by client", "error", err)
 		w.WriteHeader(StatusClientClosedRequest)
+		return
+	}
+	// A credential route's keychain write fails deep in its transaction, and
+	// the route answers whatever it does not recognize here, so every route
+	// that stores a secret gets this answer without checking for it. The
+	// request is fine and the fix is the operator's, a different secret
+	// backend, which the message names.
+	if errors.Is(err, auth.ErrSecretTooLarge) {
+		logging.Component(scope).Warn("secret refused by the OS keychain", "error", err)
+		WriteErrors(w, http.StatusRequestEntityTooLarge, ErrorItem{Reason: ReasonSecretTooLarge, Message: auth.ErrSecretTooLarge.Error()})
 		return
 	}
 	logging.Component(scope).Error("handler error", "error", err)

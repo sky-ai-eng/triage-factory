@@ -33,4 +33,26 @@ separate key for each install.
 | `keychain`       | The keychain; startup fails if there isn't one.                 |
 | `file`           | The encrypted file.                                             |
 
+## A credential too large for the keychain
+
+The macOS keychain refuses a single value larger than about 3,000 bytes. Most
+credentials are far smaller, but a GitHub App private key generated at 4096
+bits is about 3,200 bytes. Saving one fails with the reason `SECRET_TOO_LARGE`
+and this message:
+
+```
+this secret is too large for the OS keychain; to store it in the encrypted file backend instead, set TF_SECRETS_BACKEND=file and TF_SECRET_ENCRYPTION_KEY, restart Triage Factory, and enter your credentials again
+```
+
+The encrypted file has no size limit. To switch to it, set both variables and
+restart:
+
+```bash
+export TF_SECRET_ENCRYPTION_KEY=$(openssl rand -hex 32)
+export TF_SECRETS_BACKEND=file
+```
+
+The file starts empty, and nothing is copied from the keychain, so enter each
+credential again after the restart.
+
 For a host with no keychain, see [Running on a server](server.md).

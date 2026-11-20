@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -61,7 +62,18 @@ func GetSecret(key string) (string, error) {
 	return b.get(key)
 }
 
-// PutSecret writes value under key in the active backend.
+// ErrSecretTooLarge is what PutSecret returns when the OS keychain refuses a
+// value for its size: Windows Credential Manager holds at most 2,560 bytes,
+// and macOS refuses a value of about 3 KB, where the command line of the
+// `security` tool it is written through passes 4,096 characters. The encrypted
+// file backend has no limit, so the message names it as the fix. That backend
+// starts from its own file and reads nothing from the keychain, which is why
+// the message says to enter the credentials again.
+var ErrSecretTooLarge = errors.New("this secret is too large for the OS keychain; to store it in the encrypted file backend instead, set " +
+	envSecretsBackend + "=file and " + EnvSecretEncryptionKey + ", restart Triage Factory, and enter your credentials again")
+
+// PutSecret writes value under key in the active backend. A value the OS
+// keychain refuses for its size is ErrSecretTooLarge.
 func PutSecret(key, value string) error {
 	b, err := resolveBackend()
 	if err != nil {
@@ -207,7 +219,11 @@ func (keychainBackend) get(key string) (string, error) {
 }
 
 func (keychainBackend) put(key, value string) error {
-	return keyring.Set(service, key, value)
+	err := keyring.Set(service, key, value)
+	if errors.Is(err, keyring.ErrSetDataTooBig) {
+		return fmt.Errorf("keychain set %s (%d bytes): %w", key, len(value), ErrSecretTooLarge)
+	}
+	return err
 }
 
 func (keychainBackend) delete(key string) error {
