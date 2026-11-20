@@ -372,7 +372,10 @@ type BlueprintStore interface {
 	// takes GetForUpdate before it reads or detaches what references it, so
 	// the two run one after the other and the second sees what the first
 	// committed: a reference written first is there for the retire to detach,
-	// and a blueprint retired first reads as absent.
+	// and a blueprint retired first reads as absent. A write whose retire is
+	// itself a write to the row, as MergeInto's is, can retire first and read
+	// what references the blueprint after: the retire's write holds the row
+	// as GetForUpdate would.
 	//
 	// Postgres locks the row FOR SHARE or FOR UPDATE, so two writes that only
 	// reference the blueprint do not wait for one another. A lock that waited
@@ -488,9 +491,18 @@ type BlueprintStore interface {
 	// unchanged since both blueprints share them (validated same-team by the
 	// caller). The host's updated_at is bumped.
 	//
-	// The caller must reject a triggered source for a clean 422. MergeInto
-	// itself does not touch event_handlers — the source carrying no trigger is
-	// a precondition, not something this method enforces or repairs.
+	// The caller must reject a triggered source for a clean 422. It checks
+	// after MergeInto, in the same transaction, and rolls back when a handler
+	// names the source: the check then runs while the retire's write holds the
+	// source's row, so a handler written under GetForShare either committed
+	// before the retire, and the check sees it, or waits for the merge and
+	// reads the source as absent. MergeInto itself does not touch
+	// event_handlers — the source carrying no trigger is a precondition, not
+	// something this method enforces or repairs.
+	//
+	// Returns ErrNoSuchBlueprint when the source is not live by the time its
+	// retire runs. The source's steps have been moved by then, so the caller
+	// rolls back.
 	//
 	// Stamps user_modified true on the host (see the stamping contract
 	// above); the source is retired, not stamped.

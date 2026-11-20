@@ -473,11 +473,17 @@ func (s *blueprintStore) MergeInto(ctx context.Context, orgID, hostID, sourceID 
 			return err
 		}
 		if n == 0 {
-			return fmt.Errorf("blueprint %s not found or already deleted", sourceID)
+			return db.ErrNoSuchBlueprint
 		}
 		// Bump host.updated_at (the set_updated_at trigger also stamps it, but
 		// the row must be touched for the trigger to fire) and stamp
 		// user_modified true (the source is retired, not stamped).
+		//
+		// TODO(TFAC-1518): nothing holds the host, and this stamp does not
+		// check that it is still live, so a concurrent merge that absorbs the
+		// host leaves the source's steps on a retired blueprint. Holding it
+		// needs every writer of a blueprint's steps to lock blueprint rows
+		// before step rows, or the hold deadlocks against a steps PUT.
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE blueprints SET updated_at = now(), user_modified = TRUE WHERE org_id = $1 AND id = $2`, orgID, hostID); err != nil {
 			return fmt.Errorf("bump host updated_at: %w", err)

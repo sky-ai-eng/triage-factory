@@ -3,6 +3,7 @@ package dbtest
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -31,9 +32,12 @@ var blueprintLocks = []struct {
 // GetForUpdate by what their callers rely on: each reads the live blueprint as
 // Get does; a write that holds a blueprint to reference it waits for a retire
 // that held it first, and then reads it as absent; outside a write
-// transaction, where nothing would hold the row, both are refused; and
+// transaction, where nothing would hold the row, both are refused;
 // EventHandlers.Update, which holds a blueprint it attaches the same way,
-// refuses an attach that waited on a retire.
+// refuses an attach that waited on a retire; MergeInto's retire of its source
+// orders it against GetForShare in both directions, so a check the merge
+// makes after it sees a reference that came first; and MergeInto answers a
+// source that is no longer live with ErrNoSuchBlueprint.
 func RunBlueprintLockConformance(t *testing.T, mk BlueprintLockFactory) {
 	for _, lock := range blueprintLocks {
 		t.Run(lock.name+"_reads_the_live_blueprint", func(t *testing.T) {
@@ -242,6 +246,169 @@ func RunBlueprintLockConformance(t *testing.T, mk BlueprintLockFactory) {
 			t.Errorf("handler blueprint after the refused attach = %q; want none", stored.BlueprintID)
 		}
 	})
+
+	// A merge retires its source with a write of its own and checks the
+	// source's handlers after, under that write's hold of the row, so the
+	// write has to order the merge against GetForShare in both directions.
+	t.Run("a_share_waits_for_a_merges_retire_and_reads_it_absent", func(t *testing.T) {
+		stores, orgID, userID, teamID := mk(t)
+		ctx := t.Context()
+		host := seedLockBlueprint(t, stores, orgID, userID, teamID, "host")
+		source := seedLockBlueprint(t, stores, orgID, userID, teamID, "absorbed")
+
+		held, release := make(chan struct{}), make(chan struct{})
+		free := releaseOnCleanup(t, release)
+		merge := make(chan error, 1)
+		go func() {
+			merge <- stores.Tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+				if err := tx.Blueprints.MergeInto(ctx, orgID, host, source); err != nil {
+					return err
+				}
+				close(held)
+				<-release
+				return nil
+			})
+		}()
+		select {
+		case <-held:
+		case err := <-merge:
+			t.Fatalf("the merge ended before holding its retire: %v", err)
+		}
+
+		type read struct {
+			blueprint *domain.Blueprint
+			err       error
+		}
+		reference := make(chan read, 1)
+		go func() {
+			var r read
+			r.err = stores.Tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+				var err error
+				r.blueprint, err = tx.Blueprints.GetForShare(ctx, orgID, source)
+				return err
+			})
+			reference <- r
+		}()
+		select {
+		case r := <-reference:
+			t.Fatalf("GetForShare answered while the merge held its retire: %+v", r)
+		case <-time.After(200 * time.Millisecond):
+		}
+		free()
+		if err := <-merge; err != nil {
+			t.Fatalf("merge: %v", err)
+		}
+		select {
+		case r := <-reference:
+			if r.err != nil {
+				t.Fatalf("GetForShare after the merge committed: %v", r.err)
+			}
+			if r.blueprint != nil {
+				t.Errorf("GetForShare after the merge committed = %+v; want the source absent", r.blueprint)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("GetForShare never answered after the merge committed")
+		}
+	})
+
+	t.Run("a_merges_retire_waits_for_a_share_and_its_check_sees_the_reference", func(t *testing.T) {
+		stores, orgID, userID, teamID := mk(t)
+		ctx := t.Context()
+		host := seedLockBlueprint(t, stores, orgID, userID, teamID, "host")
+		source := seedLockBlueprint(t, stores, orgID, userID, teamID, "referenced")
+
+		held, release := make(chan struct{}), make(chan struct{})
+		free := releaseOnCleanup(t, release)
+		reference := make(chan error, 1)
+		go func() {
+			reference <- stores.Tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+				b, err := tx.Blueprints.GetForShare(ctx, orgID, source)
+				if err != nil {
+					return err
+				}
+				if b == nil {
+					t.Error("GetForShare read the live blueprint as absent")
+				}
+				if _, err := tx.EventHandlers.Create(ctx, orgID, teamID, newHandler(domain.EventHandlerModeWatch, domain.EventGitHubPROpened, "on the source", source)); err != nil {
+					return err
+				}
+				close(held)
+				<-release
+				return nil
+			})
+		}()
+		select {
+		case <-held:
+		case err := <-reference:
+			t.Fatalf("the reference ended before holding the blueprint: %v", err)
+		}
+
+		type seen struct {
+			handlers int
+			err      error
+		}
+		merge := make(chan seen, 1)
+		go func() {
+			var s seen
+			s.err = stores.Tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+				if err := tx.Blueprints.MergeInto(ctx, orgID, host, source); err != nil {
+					return err
+				}
+				handlers, err := tx.EventHandlers.ListForBlueprint(ctx, orgID, source)
+				s.handlers = len(handlers)
+				return err
+			})
+			merge <- s
+		}()
+		select {
+		case s := <-merge:
+			t.Fatalf("the merge retired the source while a reference held it: %+v", s)
+		case <-time.After(200 * time.Millisecond):
+		}
+		free()
+		if err := <-reference; err != nil {
+			t.Fatalf("reference: %v", err)
+		}
+		select {
+		case s := <-merge:
+			if s.err != nil {
+				t.Fatalf("merge: %v", s.err)
+			}
+			if s.handlers != 1 {
+				t.Errorf("the merge's check after its retire read %d handlers; want the reference's", s.handlers)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("the merge never retired the source after the reference committed")
+		}
+	})
+
+	t.Run("a_merge_of_a_source_that_is_not_live_is_ErrNoSuchBlueprint", func(t *testing.T) {
+		stores, orgID, userID, teamID := mk(t)
+		ctx := t.Context()
+		host := seedLockBlueprint(t, stores, orgID, userID, teamID, "host")
+		source := seedLockBlueprint(t, stores, orgID, userID, teamID, "absorbed")
+		merge := func() error {
+			return stores.Tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+				return tx.Blueprints.MergeInto(ctx, orgID, host, source)
+			})
+		}
+		if err := merge(); err != nil {
+			t.Fatalf("first merge: %v", err)
+		}
+		if err := merge(); !errors.Is(err, db.ErrNoSuchBlueprint) {
+			t.Errorf("merge of a retired source = %v; want db.ErrNoSuchBlueprint", err)
+		}
+	})
+}
+
+// releaseOnCleanup returns what closes release, once, and closes it when the
+// test ends too: a failed check must still end the transaction held on it,
+// or its locks outlive the subtest.
+func releaseOnCleanup(t *testing.T, release chan struct{}) func() {
+	var once sync.Once
+	free := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(free)
+	return free
 }
 
 // seedLockBlueprint creates a blueprint on teamID under userID's claims and

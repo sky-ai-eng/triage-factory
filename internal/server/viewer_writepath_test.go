@@ -37,12 +37,23 @@ type viewerRig struct {
 
 func newViewerRig(t *testing.T) *viewerRig {
 	t.Helper()
+	return newViewerRigWithTx(t, nil)
+}
+
+// newViewerRigWithTx is newViewerRig with its TxRunner passed through wrap
+// before the server is built, as newTestServerWithTx does for SQLite. A nil
+// wrap is newViewerRig.
+func newViewerRigWithTx(t *testing.T, wrap func(db.TxRunner) db.TxRunner) *viewerRig {
+	t.Helper()
 	runmode.SetForTest(t, runmode.ModeMulti)
 
 	h := pgtest.Shared(t)
 	h.Reset(t)
 
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	if wrap != nil {
+		stores.Tx = wrap(stores.Tx)
+	}
 	s := New(h.AdminDB, stores)
 
 	orgID, founder, teamID := pgtest.SeedOrgWithUser(t, h, "founder")
