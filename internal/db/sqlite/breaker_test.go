@@ -54,15 +54,15 @@ func newSQLiteBreakerSeeder(conn *sql.DB) dbtest.BreakerSeeder {
 	}
 	// seedRun stages a finished or running blueprint run with one step
 	// conversation; triggerID and creator are each nil or a value, as the
-	// run's trigger_type requires.
-	seedRun := func(t *testing.T, taskID string, triggerID any, blueprintID, triggerType string, creator any, status string, startedAt time.Time) string {
+	// run's trigger_type requires, and predicate is what the run recorded.
+	seedRun := func(t *testing.T, taskID string, triggerID any, blueprintID, triggerType string, creator any, predicate, status string, startedAt time.Time) string {
 		t.Helper()
 		runID := uuid.New().String()
 		exec(t, "seed blueprint run", `
 			INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, trigger_id, creator_user_id,
-			                            status, worktree_path, step_plan, started_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, '[]', ?)
-		`, runID, blueprintID, taskID, triggerType, triggerID, creator, status, "/tmp/wt-"+runID, startedAt)
+			                            scope_predicate_json, status, worktree_path, step_plan, started_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', ?)
+		`, runID, blueprintID, taskID, triggerType, triggerID, creator, predicate, status, "/tmp/wt-"+runID, startedAt)
 		conversationID := uuid.New().String()
 		step := 0
 		insertConversationForTest(t, conn, domain.Conversation{
@@ -103,15 +103,27 @@ func newSQLiteBreakerSeeder(conn *sql.DB) dbtest.BreakerSeeder {
 		},
 		EventRun: func(t *testing.T, taskID, triggerID, blueprintID, status string, startedAt time.Time) string {
 			t.Helper()
-			return seedRun(t, taskID, triggerID, blueprintID, "event", nil, status, startedAt)
+			var predicate string
+			if err := conn.QueryRow(`SELECT COALESCE(scope_predicate_json, '') FROM event_handlers WHERE id = ?`, triggerID).Scan(&predicate); err != nil {
+				t.Fatalf("read the trigger's predicate: %v", err)
+			}
+			return seedRun(t, taskID, triggerID, blueprintID, "event", nil, predicate, status, startedAt)
+		},
+		EventRunUnder: func(t *testing.T, taskID, triggerID, blueprintID, predicate, status string, startedAt time.Time) string {
+			t.Helper()
+			return seedRun(t, taskID, triggerID, blueprintID, "event", nil, predicate, status, startedAt)
 		},
 		ManualRun: func(t *testing.T, taskID, blueprintID, status string, startedAt time.Time) string {
 			t.Helper()
-			return seedRun(t, taskID, nil, blueprintID, "manual", runmode.LocalDefaultUserID, status, startedAt)
+			return seedRun(t, taskID, nil, blueprintID, "manual", runmode.LocalDefaultUserID, "", status, startedAt)
 		},
 		SetTrigger: func(t *testing.T, triggerID, mode string, threshold int) {
 			t.Helper()
 			exec(t, "set trigger", `UPDATE event_handlers SET mode = ?, breaker_threshold = ? WHERE id = ?`, mode, threshold, triggerID)
+		},
+		SetPredicate: func(t *testing.T, triggerID, predicate string) {
+			t.Helper()
+			exec(t, "set predicate", `UPDATE event_handlers SET scope_predicate_json = NULLIF(?, '') WHERE id = ?`, predicate, triggerID)
 		},
 		DeleteTrigger: func(t *testing.T, triggerID string) {
 			t.Helper()

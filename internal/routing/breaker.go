@@ -61,8 +61,9 @@ func (r *Router) breakerOccurrence(ctx context.Context, orgID string, trigger do
 // cancelled, in every org where it is open. The gate opens it; this resolves
 // it, because a breaker stops holding through more doors than the gate sees: a
 // run a person started completing, the entity closing, and the trigger turned
-// off, deleted or given a higher threshold, none of which fires the trigger
-// again. It runs once, on the brain.
+// off, deleted, given a higher threshold, given another predicate or pointed
+// at another blueprint, none of which fires the trigger again. It runs once,
+// on the brain.
 func (r *Router) RunBreakerSync(ctx context.Context, interval time.Duration) {
 	t := time.NewTicker(interval)
 	defer t.Stop()

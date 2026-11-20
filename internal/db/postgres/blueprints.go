@@ -1074,8 +1074,13 @@ func lockFiringTeam(ctx context.Context, q queryer, orgID, teamID string) (archi
 // insertFiringRun writes the blueprint_runs row for a firing on the given
 // transaction, fenced on the event arm and plain on the manual one, and
 // reports through inserted whether a row landed. Split out so the two arms'
-// only difference — the fence and the creator column the schema CHECK pairs
-// with trigger_type — reads as the two statements it is.
+// differences — the fence, the creator column the schema CHECK pairs with
+// trigger_type, and the trigger's predicate, which only the event arm
+// records — read as the two statements they are.
+//
+// The predicate is stored as jsonb's text of it, the form the trigger's own
+// jsonb column reads back as, so the breaker compares the two as text
+// whatever spacing or key order the caller's copy had.
 func insertFiringRun(ctx context.Context, q queryer, orgID string, br domain.BlueprintRun, teamID, stepPlan string, event bool, creatorUserID string, inserted *bool) error {
 	var res sql.Result
 	var err error
@@ -1083,15 +1088,15 @@ func insertFiringRun(ctx context.Context, q queryer, orgID string, br domain.Blu
 		res, err = q.ExecContext(ctx, `
 			INSERT INTO blueprint_runs
 				(id, org_id, team_id, creator_user_id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id,
-				 actor_agent_id, status, worktree_path, started_at, step_plan)
+				 scope_predicate_json, actor_agent_id, status, worktree_path, started_at, step_plan)
 			VALUES (
 				$1, $2, $3::uuid, NULL,
 				$4, $5, 'event', $6, $7,
-				$8, $9, $10, now(), $11
+				COALESCE(NULLIF($12, '')::jsonb::text, ''), $8, $9, $10, now(), $11
 			)
 			ON CONFLICT (triggering_event_id, trigger_id) WHERE triggering_event_id IS NOT NULL DO NOTHING
 		`, br.ID, orgID, nullIfEmpty(teamID), br.BlueprintID, br.TaskID, br.TriggerID, br.TriggeringEventID,
-			nullIfEmpty(br.ActorAgentID), br.Status, br.WorktreePath, stepPlan)
+			nullIfEmpty(br.ActorAgentID), br.Status, br.WorktreePath, stepPlan, br.ScopePredicateJSON)
 	} else {
 		// A manual run is attributed to the person who asked for it, and the
 		// creator has to arrive on the row — see db.ErrManualCreatorRequired.

@@ -287,17 +287,19 @@ type ShippedEventHandler struct {
 // (blueprint_id, org_id) → blueprints (id, org_id) is satisfied at seed time
 // in Postgres.
 //
-// Handlers about "my PR" carry `author_id_in: []` and handlers about "my
-// issue" carry `assignee_in: []`. An empty list matches everyone, and both
-// dialects' Seed insert the predicate as written. Owner routing scopes these
-// at event time instead: it resolves the PR author's (or the issue
-// assignee's) team through the owning-team ladder. Users can fill either list
-// to narrow a handler to particular people.
+// Every shipped handler matches all events of its type, and owner routing
+// scopes the ones about "my PR" or "my issue" at event time: it resolves the
+// PR author's (or the issue assignee's) team through the owning-team ladder.
+// Users can set author_id_in or assignee_in to narrow a handler to particular
+// people. A Predicate is written in the canonical form the API stores
+// (events.ValidatePredicateJSON), because a trigger's breaker compares
+// predicates as text: a shipped form the first API save rewrote would start
+// the breaker over.
 var ShippedEventHandlers = []ShippedEventHandler{
 	{
 		ID:               "system-handler-ci-check-failed",
 		EventType:        domain.EventGitHubPRCICheckFailed,
-		Predicate:        `{"author_id_in":[]}`,
+		Predicate:        "",
 		Name:             "CI check failed on my PR",
 		DefaultPriority:  0.75,
 		SortOrder:        0,
@@ -308,7 +310,7 @@ var ShippedEventHandlers = []ShippedEventHandler{
 	{
 		ID:               "system-handler-review-changes-requested",
 		EventType:        domain.EventGitHubPRReviewChangesRequested,
-		Predicate:        `{"author_id_in":[]}`,
+		Predicate:        "",
 		Name:             "Changes requested on my PR",
 		DefaultPriority:  0.85,
 		SortOrder:        1,
@@ -319,7 +321,7 @@ var ShippedEventHandlers = []ShippedEventHandler{
 	{
 		ID:               "system-handler-review-commented",
 		EventType:        domain.EventGitHubPRReviewCommented,
-		Predicate:        `{"author_id_in":[]}`,
+		Predicate:        "",
 		Name:             "Reviewer commented on my PR",
 		DefaultPriority:  0.65,
 		SortOrder:        2,
@@ -343,7 +345,7 @@ var ShippedEventHandlers = []ShippedEventHandler{
 	{
 		ID:               "system-handler-jira-assigned",
 		EventType:        domain.EventJiraIssueAssigned,
-		Predicate:        `{"assignee_in":[]}`,
+		Predicate:        "",
 		Name:             "Jira issue assigned to me",
 		DefaultPriority:  0.60,
 		SortOrder:        4,
@@ -357,7 +359,7 @@ var ShippedEventHandlers = []ShippedEventHandler{
 		// emits became_atomic when the last subtask closes.
 		ID:               "system-handler-jira-became-atomic",
 		EventType:        domain.EventJiraIssueBecameAtomic,
-		Predicate:        `{"assignee_in":[]}`,
+		Predicate:        "",
 		Name:             "Jira issue decomposition resolved (now actionable)",
 		DefaultPriority:  0.60,
 		SortOrder:        5,
@@ -367,7 +369,7 @@ var ShippedEventHandlers = []ShippedEventHandler{
 	{
 		ID:               "system-handler-linear-assigned",
 		EventType:        domain.EventLinearIssueAssigned,
-		Predicate:        `{"assignee_in":[]}`,
+		Predicate:        "",
 		Name:             "Linear issue assigned to me",
 		DefaultPriority:  0.60,
 		SortOrder:        6,
@@ -381,7 +383,7 @@ var ShippedEventHandlers = []ShippedEventHandler{
 		// became_atomic when the last one closes.
 		ID:               "system-handler-linear-became-atomic",
 		EventType:        domain.EventLinearIssueBecameAtomic,
-		Predicate:        `{"assignee_in":[]}`,
+		Predicate:        "",
 		Name:             "Linear issue decomposition resolved (now actionable)",
 		DefaultPriority:  0.60,
 		SortOrder:        7,
@@ -406,7 +408,7 @@ var ShippedEventHandlers = []ShippedEventHandler{
 	{
 		ID:               "system-handler-pr-conflicts",
 		EventType:        domain.EventGitHubPRConflicts,
-		Predicate:        `{"author_id_in":[]}`,
+		Predicate:        "",
 		Name:             "Merge conflicts on my PR",
 		DefaultPriority:  0.70,
 		SortOrder:        9,

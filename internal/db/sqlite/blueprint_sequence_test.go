@@ -201,6 +201,23 @@ func sqliteSequenceScaffold(t *testing.T) (db.BlueprintStore, dbtest.BlueprintSe
 			}
 			return idx
 		},
+		SetTriggerPredicate: func(t *testing.T, triggerID, predicate string) string {
+			t.Helper()
+			var stored string
+			if err := conn.QueryRow(`UPDATE event_handlers SET scope_predicate_json = NULLIF(?, '') WHERE id = ?
+				RETURNING COALESCE(scope_predicate_json, '')`, predicate, triggerID).Scan(&stored); err != nil {
+				t.Fatalf("set the trigger's predicate: %v", err)
+			}
+			return stored
+		},
+		RunPredicate: func(t *testing.T, blueprintRunID string) string {
+			t.Helper()
+			var got string
+			if err := conn.QueryRow(`SELECT scope_predicate_json FROM blueprint_runs WHERE id = ?`, blueprintRunID).Scan(&got); err != nil {
+				t.Fatalf("read scope_predicate_json: %v", err)
+			}
+			return got
+		},
 		BackdateRunStartedAt: func(t *testing.T, blueprintRunID string, age time.Duration) {
 			t.Helper()
 			if _, err := conn.Exec(`UPDATE blueprint_runs SET started_at = datetime('now', ?) WHERE id = ?`,
