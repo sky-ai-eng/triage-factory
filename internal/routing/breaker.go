@@ -14,7 +14,8 @@ const DefaultBreakerSyncInterval = 30 * time.Second
 
 // breakerHolds reports whether trigger's breaker holds on entityID, the gate
 // both the event-time path and the firing worker read before a run is fired:
-// the trigger's runs there have failed breaker_threshold times in a row
+// its blueprint's event-fired runs there, by this trigger or another on the
+// same blueprint, have failed breaker_threshold times in a row
 // (TaskStore.BreakerStreakSystem). A breaker that holds opens or bumps
 // kinds.BreakerTripped, on every refusal rather than only the first, so a
 // failed write corrects itself on the next one. subject is the entity's key

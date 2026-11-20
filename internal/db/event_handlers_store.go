@@ -205,9 +205,7 @@ type EventHandlerStore interface {
 	// deleted_at IS NULL, so a soft-deleted row is indistinguishable from a
 	// hard-deleted one to every caller except the sync and the rows that
 	// reference it. A deleted trigger never fires again (the firing worker
-	// skips a queued firing whose trigger it cannot read), and the
-	// one-trigger-per-blueprint index excludes it, so its blueprint can take a
-	// new trigger.
+	// skips a queued firing whose trigger it cannot read).
 	//
 	// Exempt from the returned-row rule: it is a delete. The soft arm leaves a
 	// row, but one every read path filters out — precisely the row a caller
@@ -241,17 +239,15 @@ type EventHandlerStore interface {
 	// UPDATE, preserving the handler row — and its id, which runs /
 	// blueprint_runs / pending_firings FK-reference — so run history and the
 	// event-trigger fence survive the move (a delete+recreate would orphan that
-	// history and trip the FK). Trigger-only: the WHERE pins kind='trigger', so a
-	// rule id is a no-op. The caller validates that the new blueprint exists, is
-	// same-team, and is not already triggered; the one-trigger-per-blueprint
-	// partial-unique index is the hard backstop. Always stamps
+	// history and trip the FK). Trigger-only: the WHERE pins kind='trigger'.
+	// The caller validates that the new blueprint exists and is same-team; the
+	// blueprint may already have other triggers. Always stamps
 	// user_modified=true — a user-initiated retarget must never be silently
 	// reverted by a later sync pass (which re-resolves an unmodified trigger's
 	// blueprint binding from the shipped slug on every boot).
 	//
-	// Returns the retargeted row, or ErrNoSuchEventHandler — which is now what
-	// a rule id gets, rather than the silent no-op the kind filter used to
-	// produce.
+	// Returns the retargeted row, or ErrNoSuchEventHandler when no live trigger
+	// carries the id.
 	RetargetBlueprint(ctx context.Context, orgID string, id string, newBlueprintID string) (domain.EventHandler, error)
 
 	// Sync brings teamID's unmodified copies of shippedHandlers up to current
@@ -478,13 +474,7 @@ var ShippedEventHandlers = []ShippedEventHandler{
 		BreakerThreshold:       2,
 		MinAutonomySuitability: 0.0,
 	},
-	// No became_atomic trigger ships for either tracker: a blueprint is fired
-	// by exactly one event (the partial-unique
-	// event_handlers_one_trigger_per_blueprint index), and each implementation
-	// blueprint is already claimed by its tracker's assigned trigger. A
-	// decomposition-resolved issue still surfaces as a task via its
-	// became-atomic rule; auto-delegating it is a user-authored trigger on its
-	// own blueprint (or a blueprint copy).
+	// No became_atomic trigger ships for either tracker.
 	{
 		// review_requested only fires when the session user is added
 		// to the PR's review-request list, so the event is already

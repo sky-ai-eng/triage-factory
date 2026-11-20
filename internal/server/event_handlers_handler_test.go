@@ -401,12 +401,6 @@ func TestHandleEventHandlerDelete_TriggerThatHasRun(t *testing.T) {
 	if c, br := runTriggerIDs(t, s, run); c != trigger || br != trigger {
 		t.Errorf("run trigger_id after delete = (conversation %q, blueprint run %q), want %q", c, br, trigger)
 	}
-
-	// The one-trigger-per-blueprint index excludes the deleted row, so the
-	// blueprint takes a new trigger.
-	if again := attachTrigger(t, s, bp, "github:pr:ci_check_failed"); again == trigger {
-		t.Errorf("new trigger reused the deleted trigger's id %s", trigger)
-	}
 }
 
 // --- POST /api/event-handlers/{id}/promote -------------------------------

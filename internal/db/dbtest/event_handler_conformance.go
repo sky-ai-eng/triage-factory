@@ -3,6 +3,7 @@ package dbtest
 import (
 	"context"
 	"errors"
+	"maps"
 	"slices"
 	"strconv"
 	"testing"
@@ -1100,45 +1101,33 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		}
 	})
 
-	t.Run("Delete_SoftDeletedSystemTrigger_FreesBlueprintSlotForANewTrigger", func(t *testing.T) {
-		store, orgID, teamID, seedBlueprints, handlerID := factory(t)
+	t.Run("TwoLiveTriggers_ReferenceOneBlueprint", func(t *testing.T) {
+		store, orgID, teamID, seedBlueprints, _ := factory(t)
 		ctx := context.Background()
-		ids := seedBlueprints(t,
-			"system-pr-review", "system-conflict-resolution", "system-ci-fix",
-			"system-jira-implement", "system-linear-implement", "system-fix-review-feedback",
-			"system-vulnerability-remediate",
-		)
-		if err := store.Seed(ctx, orgID, teamID, ids); err != nil {
-			t.Fatalf("Seed: %v", err)
+		blueprintID := seedBlueprints(t, "p-shared-blueprint")["p-shared-blueprint"]
+		breaker, minAutonomy := 3, 0.0
+		want := map[string]bool{}
+		for _, eventType := range []string{domain.EventGitHubPRCICheckFailed, domain.EventGitHubPRReviewChangesRequested} {
+			created, err := store.Create(ctx, orgID, teamID, domain.EventHandler{
+				ID: uuid.New().String(), Kind: domain.EventHandlerKindTrigger,
+				BlueprintID: blueprintID, EventType: eventType, Enabled: true,
+				BreakerThreshold: &breaker, MinAutonomySuitability: &minAutonomy,
+			})
+			if err != nil {
+				t.Fatalf("Create trigger on %s for the shared blueprint: %v", eventType, err)
+			}
+			want[created.ID] = true
 		}
-		blueprintID := ids["system-ci-fix"]
-		shipped := handlerCopyBySlug(t, store, handlerID, orgID, teamID, "system-trigger-ci-fix")
-		if shipped == nil {
-			t.Fatal("shipped handler system-trigger-ci-fix missing before delete")
-		}
-
-		// Deleting the shipped (system_slug) trigger soft-deletes it — verify
-		// the dedup index doesn't keep the blueprint permanently claimed by the
-		// now-invisible row.
-		if err := store.Delete(ctx, orgID, shipped.ID); err != nil {
-			t.Fatalf("Delete shipped trigger: %v", err)
-		}
-		existing, err := store.ListForBlueprint(ctx, orgID, blueprintID)
+		bound, err := store.ListForBlueprint(ctx, orgID, blueprintID)
 		if err != nil {
 			t.Fatalf("ListForBlueprint: %v", err)
 		}
-		if len(existing) != 0 {
-			t.Fatalf("ListForBlueprint after soft-delete = %d rows; want 0 (a spurious \"already triggered\" 409 otherwise)", len(existing))
+		got := map[string]bool{}
+		for _, h := range bound {
+			got[h.ID] = true
 		}
-		breaker := 3
-		minAutonomy := 0.0
-		replacement := domain.EventHandler{
-			ID: uuid.New().String(), Kind: domain.EventHandlerKindTrigger,
-			BlueprintID: blueprintID, EventType: domain.EventGitHubPRCICheckFailed,
-			BreakerThreshold: &breaker, MinAutonomySuitability: &minAutonomy,
-		}
-		if _, err := store.Create(ctx, orgID, teamID, replacement); err != nil {
-			t.Fatalf("Create replacement trigger on the freed blueprint: %v", err)
+		if len(bound) != len(want) || !maps.Equal(got, want) {
+			t.Errorf("ListForBlueprint = %v, want both live triggers %v", got, want)
 		}
 	})
 }

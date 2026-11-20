@@ -83,8 +83,9 @@ func (eh *eventHandlersHandler) gateHandlerWrite(w http.ResponseWriter, r *http.
 //	PUT    /api/event-handlers/reorder                — rules-only sort_order
 //
 // promote and retarget stay verbs because each writes a field PATCH declares
-// immutable (kind, blueprint_id) under a fence PATCH cannot express — which is
-// what makes them transitions rather than field writes.
+// immutable: promote changes kind, which decides the fields the row carries,
+// and retarget moves the row, with the id its runs reference, to another
+// blueprint.
 
 // eventHandlerListRequest is the body of POST /api/event-handlers/list. Each
 // field is a narrowing, validated strictly: a corrupt filter is a 400 naming
@@ -526,13 +527,6 @@ func (eh *eventHandlersHandler) insertEventHandler(w http.ResponseWriter, r *htt
 		if writeUnprocessableError(w, err) {
 			return
 		}
-		// A unique-constraint failure leaks schema/index names; translate to a
-		// generic 409 and log the raw error for operators.
-		if isUniqueViolation(err) {
-			eventHandlersLog.Warn("create conflict", "kind", h.Kind, "event_type", h.EventType, "error", err)
-			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonDuplicateName, Message: "an event handler with this configuration already exists"})
-			return
-		}
 		eventHandlersLog.Error("create failed", "error", err)
 		internalError(w, "event_handlers", err)
 		return
@@ -690,9 +684,8 @@ func (eh *eventHandlersHandler) handleEventHandlerCreateTrigger(w http.ResponseW
 	// acting team is recorded as the caller's last-written one by the write
 	// itself (insertEventHandler), which a refused request never commits.
 	var (
-		blueprint           *domain.Blueprint
-		crossTeamBlueprint  bool
-		blueprintHasTrigger bool
+		blueprint          *domain.Blueprint
+		crossTeamBlueprint bool
 	)
 	if err := eh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -707,13 +700,6 @@ func (eh *eventHandlersHandler) handleEventHandlerCreateTrigger(w http.ResponseW
 		if blueprint.TeamID != "" && blueprint.TeamID != actingTeam {
 			crossTeamBlueprint = true
 		}
-		// A blueprint is fired by exactly one event: pre-check for a clean
-		// 409 instead of letting the partial-unique index surface a raw 500.
-		existing, e := tx.EventHandlers.ListForBlueprint(r.Context(), orgID, req.BlueprintID)
-		if e != nil {
-			return e
-		}
-		blueprintHasTrigger = len(existing) > 0
 		return nil
 	}); err != nil {
 		if teamscope.WriteIfSelectionError(w, err) {
@@ -727,13 +713,8 @@ func (eh *eventHandlersHandler) handleEventHandlerCreateTrigger(w http.ResponseW
 		return
 	}
 	// Another team's blueprint is a 422 the body's others are answered with.
-	// Whether it already has a trigger is no concern of a caller who cannot
-	// use it, so the 409 is only for the team's own.
 	if crossTeamBlueprint {
 		unproc.Add(crossTeamBlueprintFault)
-	} else if blueprintHasTrigger {
-		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this blueprint already has a trigger — a blueprint is fired by exactly one event"})
-		return
 	}
 
 	h := domain.EventHandler{
@@ -1077,7 +1058,6 @@ func (eh *eventHandlersHandler) handleEventHandlerPromote(w http.ResponseWriter,
 
 	var existing *domain.EventHandler
 	var blueprint *domain.Blueprint
-	var blueprintHasTrigger bool
 	if err := eh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		existing, e = tx.EventHandlers.Get(r.Context(), orgID, id)
@@ -1091,17 +1071,7 @@ func (eh *eventHandlersHandler) handleEventHandlerPromote(w http.ResponseWriter,
 			return nil
 		}
 		blueprint, e = tx.Blueprints.Get(r.Context(), orgID, req.BlueprintID)
-		if e != nil {
-			return e
-		}
-		triggers, e := tx.EventHandlers.ListForBlueprint(r.Context(), orgID, req.BlueprintID)
-		if e != nil {
-			return e
-		}
-		if len(triggers) > 0 {
-			blueprintHasTrigger = true
-		}
-		return nil
+		return e
 	}); err != nil {
 		internalError(w, "event_handlers", err)
 		return
@@ -1119,14 +1089,9 @@ func (eh *eventHandlersHandler) handleEventHandlerPromote(w http.ResponseWriter,
 		return
 	}
 	// Same-team guard: a promoted trigger may only fire a blueprint the rule's
-	// own team owns (crossTeamBlueprintFault). A blueprint is fired by exactly
-	// one event, so promoting a second trigger onto one of the team's own
-	// that already has one is a clean 409.
+	// own team owns (crossTeamBlueprintFault).
 	if existing.TeamID != "" && blueprint.TeamID != "" && blueprint.TeamID != existing.TeamID {
 		unproc.Add(crossTeamBlueprintFault)
-	} else if blueprintHasTrigger {
-		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this blueprint already has a trigger — a blueprint is fired by exactly one event"})
-		return
 	}
 
 	// The predicate is validated against the rule's event type, which promote
@@ -1164,15 +1129,6 @@ func (eh *eventHandlersHandler) handleEventHandlerPromote(w http.ResponseWriter,
 		if writeUnprocessableError(w, err) {
 			return
 		}
-		// The blueprintHasTrigger pre-check and this Promote run in separate
-		// transactions, so a concurrent promote onto the same blueprint can pass
-		// the check window and hit the partial-unique index here — surface a
-		// clean 409, not a raw 500.
-		if isUniqueViolation(err) {
-			eventHandlersLog.Warn("promote conflict, blueprint already triggered", "error", err)
-			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this blueprint already has a trigger — a blueprint is fired by exactly one event"})
-			return
-		}
 		// The rule was read in the check above, so a miss here means it was
 		// deleted or promoted by someone else in the window between them.
 		if errors.Is(err, db.ErrNoSuchEventHandler) {
@@ -1192,8 +1148,7 @@ func (eh *eventHandlersHandler) handleEventHandlerPromote(w http.ResponseWriter,
 // a trigger arrow's head off one blueprint's entry and onto another's. A single
 // UPDATE of blueprint_id (RetargetBlueprint) preserves the handler row and its
 // id, so run history and the event-trigger fence survive the move. blueprint_id
-// in the body is the new target; it must exist, be same-team, and be
-// trigger-less (a blueprint is fired by exactly one event).
+// in the body is the new target; it must exist and belong to the trigger's team.
 type retargetEventHandlerRequest struct {
 	BlueprintID string `json:"blueprint_id"`
 }
@@ -1229,11 +1184,8 @@ func (eh *eventHandlersHandler) handleEventHandlerRetarget(w http.ResponseWriter
 		fresh      *domain.EventHandler
 		notTrigger bool
 		crossTeam  bool
-		hasTrigger bool
 		noChange   bool
 	)
-	// Validation + the UPDATE share one tx, so the "blueprint already triggered"
-	// check and the write see the same snapshot — no promote-style race window.
 	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		existing, e = tx.EventHandlers.Get(r.Context(), orgID, id)
@@ -1256,14 +1208,6 @@ func (eh *eventHandlersHandler) handleEventHandlerRetarget(w http.ResponseWriter
 			crossTeam = true
 			return nil
 		}
-		triggers, e := tx.EventHandlers.ListForBlueprint(r.Context(), orgID, req.BlueprintID)
-		if e != nil {
-			return e
-		}
-		if len(triggers) > 0 {
-			hasTrigger = true
-			return nil
-		}
 		moved, e := tx.EventHandlers.RetargetBlueprint(r.Context(), orgID, id, req.BlueprintID)
 		if e != nil {
 			return e
@@ -1271,11 +1215,6 @@ func (eh *eventHandlersHandler) handleEventHandlerRetarget(w http.ResponseWriter
 		fresh = &moved
 		return nil
 	}); err != nil {
-		if isUniqueViolation(err) {
-			eventHandlersLog.Warn("retarget conflict, blueprint already triggered", "error", err)
-			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this blueprint already has a trigger — a blueprint is fired by exactly one event"})
-			return
-		}
 		if errors.Is(err, db.ErrNoSuchEventHandler) {
 			notFound(w, "event handler")
 			return
@@ -1301,10 +1240,6 @@ func (eh *eventHandlersHandler) handleEventHandlerRetarget(w http.ResponseWriter
 	}
 	if crossTeam {
 		httpx.WriteErrors(w, http.StatusUnprocessableEntity, crossTeamBlueprintFault)
-		return
-	}
-	if hasTrigger {
-		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this blueprint already has a trigger — a blueprint is fired by exactly one event"})
 		return
 	}
 	writeJSON(w, http.StatusOK, fresh)

@@ -1109,9 +1109,11 @@ type TaskStore interface {
 	// --- Breaker ---
 	//
 	// A trigger's breaker is keyed on its blueprint: every run a trigger
-	// fires is a blueprint run, and event_handlers_one_trigger_per_blueprint
-	// gives each blueprint one live trigger. It counts blueprint runs, so a
-	// run of several steps counts once.
+	// fires is a blueprint run, and the streak counts the blueprint's
+	// event-fired runs on the entity whichever trigger fired them, so every
+	// trigger on one blueprint reads the same streak against its own
+	// threshold. It counts blueprint runs, so a run of several steps counts
+	// once.
 
 	// BreakerStreakSystem counts the failed and aborted blueprint runs of
 	// blueprintID that an event fired on entityID's tasks and that no

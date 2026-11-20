@@ -11,8 +11,8 @@ import (
 
 // Composition mutations: merge absorbs a trigger-less source onto a host's
 // tail, split partitions a blueprint at an index into the trigger-retaining
-// upstream and a new trigger-less downstream, and a second trigger on one
-// blueprint is a clean 409.
+// upstream and a new trigger-less downstream, and a blueprint takes a trigger
+// whatever triggers it already has.
 
 // maxBlueprintSteps is the step cap the blueprints API enforces on the steps
 // PUT, merge and reconnect. TestBlueprintMerge_ExceedsStepCapRejected fails if
@@ -218,31 +218,32 @@ func TestBlueprintSplit_AtEndsRejected(t *testing.T) {
 	}
 }
 
-// --- A: ≤1 event per blueprint surfaces as a clean 409 -------------------
+// --- A: many events per blueprint ------------------------------------------
 
-func TestEventHandlerCreate_SecondTriggerConflicts(t *testing.T) {
+func TestEventHandlerCreate_SecondTriggerOnBlueprint(t *testing.T) {
 	s := newTestServer(t)
 	configureEventSources(t, s)
-	seedBlueprintForTrigger(t, s, "bp-one-trigger")
-	attachTrigger(t, s, "bp-one-trigger", "github:pr:ci_check_failed")
-	// A second trigger on the same blueprint (even on a different event) is a
-	// clean 409, not a raw 500 from the partial-unique index.
+	seedBlueprintForTrigger(t, s, "bp-two-triggers")
+	first := attachTrigger(t, s, "bp-two-triggers", "github:pr:ci_check_failed")
 	second := doJSON(t, s, http.MethodPost, "/api/event-handlers/triggers", map[string]any{
 		"event_type":               "github:pr:review_changes_requested",
-		"blueprint_id":             "bp-one-trigger",
+		"blueprint_id":             "bp-two-triggers",
 		"breaker_threshold":        3,
 		"min_autonomy_suitability": 0.0,
 	})
-	if second.Code != http.StatusConflict {
-		t.Fatalf("second trigger: expected 409, got %d: %s", second.Code, second.Body.String())
+	if second.Code != http.StatusCreated {
+		t.Fatalf("second trigger: expected 201, got %d: %s", second.Code, second.Body.String())
+	}
+	if got := triggerIDsForBlueprint(t, s, "bp-two-triggers"); len(got) != 2 || !got[first] {
+		t.Errorf("triggers on the blueprint = %v, want the first and the second", got)
 	}
 }
 
-func TestEventHandlerPromote_OntoTriggeredBlueprintConflicts(t *testing.T) {
+func TestEventHandlerPromote_OntoTriggeredBlueprint(t *testing.T) {
 	s := newTestServer(t)
 	configureEventSources(t, s)
-	seedBlueprintForTrigger(t, s, "bp-promote-conflict")
-	attachTrigger(t, s, "bp-promote-conflict", "github:pr:ci_check_failed")
+	seedBlueprintForTrigger(t, s, "bp-promote-onto")
+	attachTrigger(t, s, "bp-promote-onto", "github:pr:ci_check_failed")
 	rule := doJSON(t, s, http.MethodPost, "/api/event-handlers/rules", map[string]any{
 		"event_type":       "github:pr:review_changes_requested",
 		"name":             "to-promote",
@@ -258,12 +259,15 @@ func TestEventHandlerPromote_OntoTriggeredBlueprintConflicts(t *testing.T) {
 	_ = json.Unmarshal(rule.Body.Bytes(), &r)
 
 	prom := doJSON(t, s, http.MethodPost, "/api/event-handlers/"+r.ID+"/promote", map[string]any{
-		"blueprint_id":             "bp-promote-conflict",
+		"blueprint_id":             "bp-promote-onto",
 		"breaker_threshold":        3,
 		"min_autonomy_suitability": 0.0,
 	})
-	if prom.Code != http.StatusConflict {
-		t.Fatalf("promote onto triggered blueprint: expected 409, got %d: %s", prom.Code, prom.Body.String())
+	if prom.Code != http.StatusOK {
+		t.Fatalf("promote onto triggered blueprint: expected 200, got %d: %s", prom.Code, prom.Body.String())
+	}
+	if got := triggerIDsForBlueprint(t, s, "bp-promote-onto"); len(got) != 2 || !got[r.ID] {
+		t.Errorf("triggers on the blueprint = %v, want the existing one and the promoted %s", got, r.ID)
 	}
 }
 

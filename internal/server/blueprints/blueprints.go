@@ -343,11 +343,11 @@ func (h *Handler) handleBlueprintUpdate(w http.ResponseWriter, r *http.Request) 
 //     their blueprint), so leaving them behind orphans rows with no canvas
 //     presence. We resolve the steps and soft-delete each via the shared
 //     source-dispatch — the other half of the prompt-delete sole-owner pairing.
-//   - The bound trigger is detached: every handler ListForBlueprint resolves is
+//   - Its triggers are detached: every handler ListForBlueprint resolves is
 //     deleted via EventHandlers.Delete, matching DELETE /api/event-handlers/{id}
 //     and the prompt head-delete path. A trigger is kept as a deleted row, so
 //     the runs that reference it keep their trigger_id. The blueprint header
-//     stays present (soft-deleted, not gone), so the trigger's
+//     stays present (soft-deleted, not gone), so each trigger's
 //     (blueprint_id, org_id) / (blueprint_id, team_id) FKs are always
 //     satisfied regardless of order.
 //
@@ -802,10 +802,10 @@ func (h *Handler) handleBlueprintMerge(w http.ResponseWriter, r *http.Request) {
 				"host and source blueprints belong to different teams", "source_blueprint_id")
 			return nil
 		}
-		// Source must be trigger-less. Unreachable from the canvas (you can only
-		// connect a tail into a trigger-less entry), but the endpoint is
-		// third-party-callable so it asserts rather than corrupting state. The
-		// ≤1-trigger-per-blueprint partial-unique is the hard backstop.
+		// Source must be trigger-less: the merge retires it, and a trigger on it
+		// would be left referencing a retired blueprint. Unreachable from the
+		// canvas (you can only connect a tail into a trigger-less entry), but
+		// the endpoint is third-party-callable, so it refuses here.
 		triggers, e := tx.EventHandlers.ListForBlueprint(r.Context(), orgID, req.SourceBlueprintID)
 		if e != nil {
 			return e
@@ -1074,8 +1074,9 @@ func (h *Handler) handleBlueprintReconnect(w http.ResponseWriter, r *http.Reques
 				"at_step_index must split the blueprint into two non-empty halves", "at_step_index")
 			return nil
 		}
-		// Target must be trigger-less to be absorbed (mirrors merge). The
-		// one-trigger-per-blueprint partial-unique index is the hard backstop.
+		// Target must be trigger-less to be absorbed, as a merge's source must:
+		// the absorb retires it, and a trigger on it would be left referencing a
+		// retired blueprint.
 		triggers, e := tx.EventHandlers.ListForBlueprint(r.Context(), orgID, req.TargetBlueprintID)
 		if e != nil {
 			return e
