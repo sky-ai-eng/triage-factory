@@ -35,11 +35,19 @@ func pgSigner(orgID, userID string) domain.OrgCommitSigner {
 // against the Postgres impl. Both pools bind the admin (BYPASSRLS) connection,
 // the convention for a store suite; the RLS split is covered below.
 func TestOrgCommitSignerStore_Postgres_Conformance(t *testing.T) {
-	dbtest.RunOrgCommitSignerStoreConformance(t, func(t *testing.T) (db.OrgCommitSignerStore, string, string) {
+	dbtest.RunOrgCommitSignerStoreConformance(t, func(t *testing.T) (db.OrgCommitSignerStore, string, string, func(*testing.T, time.Duration)) {
 		h := pgtest.Shared(t)
 		h.Reset(t)
 		orgID, userID, _ := pgtest.SeedOrgWithUser(t, h, "signers")
-		return pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey).OrgCommitSigners, orgID, userID
+		age := func(t *testing.T, d time.Duration) {
+			t.Helper()
+			dbtest.MustUpdate(t, h.AdminDB, `
+				UPDATE org_commit_signers SET
+					status_since = status_since - $2 * interval '1 microsecond',
+					checked_at   = checked_at   - $2 * interval '1 microsecond'
+				WHERE org_id = $1`, orgID, d.Microseconds())
+		}
+		return pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey).OrgCommitSigners, orgID, userID, age
 	})
 }
 
@@ -225,6 +233,11 @@ func pgCommitSignatureSeeder(t *testing.T, h *pgtest.Harness, orgID, userID stri
 			t.Helper()
 			return pgtest.SeedRepository(t, h, orgID, "acme", "app-"+uuid.New().String()[:8])
 		},
+		AgePush: func(t *testing.T, signatureID string, d time.Duration) {
+			t.Helper()
+			dbtest.MustUpdate(t, h.AdminDB, `UPDATE commit_signatures SET pushed_at = pushed_at - $3 * interval '1 microsecond' WHERE org_id = $1 AND id = $2`,
+				orgID, signatureID, d.Microseconds())
+		},
 	}
 }
 
@@ -266,6 +279,11 @@ func TestCommitSignatureQueue_Postgres_Conformance(t *testing.T) {
 				t.Helper()
 				conversationID := seedPgSnapshotConversation(t, h.AdminDB, orgID, userID, seedPgTask(t, h, orgID, userID))
 				return conversationID, seedPgSnapshotClaim(t, h.AdminDB, orgID, conversationID, claimedAt, released)
+			},
+			AgeRequest: func(t *testing.T, signatureID string, d time.Duration) {
+				t.Helper()
+				dbtest.MustUpdate(t, h.AdminDB, `UPDATE commit_signatures SET created_at = created_at - $3 * interval '1 microsecond' WHERE org_id = $1 AND id = $2`,
+					orgID, signatureID, d.Microseconds())
 			},
 		}
 	})
