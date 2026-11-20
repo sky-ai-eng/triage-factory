@@ -1036,6 +1036,13 @@ func TestTaskStore_Postgres_MemoryPendingConformance(t *testing.T) {
 					`UPDATE conversations SET ended_at = now() - make_interval(secs => $2) WHERE id = $1`,
 					conversationID, age.Seconds())
 			},
+			AgeAttempt: func(t *testing.T, attemptID string, age time.Duration) {
+				t.Helper()
+				dbtest.MustUpdate(t, h.AdminDB, `
+					UPDATE conversation_memory_attempts
+					SET started_at = $2, completed_at = CASE WHEN completed_at IS NULL THEN NULL ELSE $2::timestamptz END
+					WHERE id = $1`, attemptID, time.Now().UTC().Add(-age))
+			},
 			Conversation: func(t *testing.T, taskID, suffix string) string {
 				t.Helper()
 				stepIdx := 0

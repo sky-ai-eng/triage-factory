@@ -3,6 +3,7 @@ package sqlite_test
 import (
 	"database/sql"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -16,9 +17,13 @@ import (
 // TestEntityKey_SQLite runs the key half of the entity identity model against
 // the SQLite EntityStore, a fresh database per subtest.
 func TestEntityKey_SQLite(t *testing.T) {
-	dbtest.RunEntityKeyConformance(t, func(t *testing.T) (db.EntityStore, string) {
+	dbtest.RunEntityKeyConformance(t, func(t *testing.T) (db.EntityStore, string, func(*testing.T, string, time.Time)) {
 		t.Helper()
-		return sqlitestore.New(newSQLiteForEntityTest(t)).Entities, runmode.LocalDefaultOrgID
+		conn := newSQLiteForEntityTest(t)
+		return sqlitestore.New(conn).Entities, runmode.LocalDefaultOrgID, func(t *testing.T, entityID string, at time.Time) {
+			t.Helper()
+			dbtest.MustUpdate(t, conn, `UPDATE entities SET created_at = ? WHERE id = ?`, at.UTC(), entityID)
+		}
 	})
 }
 
@@ -65,6 +70,10 @@ func TestEntityIdentity_SQLite(t *testing.T) {
 			ForgetExternalID: func(t *testing.T, entityID string) {
 				t.Helper()
 				dbseed.ForgetIssueID(t, conn, entityID)
+			},
+			SetCreatedAt: func(t *testing.T, entityID string, at time.Time) {
+				t.Helper()
+				dbtest.MustUpdate(t, conn, `UPDATE entities SET created_at = ? WHERE id = ?`, at.UTC(), entityID)
 			},
 			Conversation: func(t *testing.T, suffix string) string {
 				t.Helper()
