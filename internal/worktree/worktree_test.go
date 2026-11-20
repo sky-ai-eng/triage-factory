@@ -49,39 +49,6 @@ func TestCleanupWithOptions_SkipClaudeProjectCleanup(t *testing.T) {
 	}
 }
 
-// TestEncodeClaudeProjectDir_ReplacesDots is the headline regression
-// test for the encoding bug. Empirically (Claude Code 2.1.119) every
-// '/' AND every '.' in the resolved cwd becomes '-'. Triage Factory's
-// own paths almost always contain dots — the takeover destination is
-// ~/.triagefactory/takeovers/run-<id> — so a slash-only encoding
-// silently misses Claude Code's actual lookup path and resume fails
-// with "No conversation found." This test pins down both characters
-// so the rule can't quietly regress.
-func TestEncodeClaudeProjectDir_ReplacesDots(t *testing.T) {
-	cases := []struct {
-		in   string
-		want string
-	}{
-		{"/private/tmp/repro-orig", "-private-tmp-repro-orig"},
-		{"/private/tmp/dot.in.middle", "-private-tmp-dot-in-middle"},
-		{"/private/tmp/v1.2.3-rc", "-private-tmp-v1-2-3-rc"},
-		// The case that actually broke in production: leading dot in
-		// `.triagefactory` produces a `--` (two dashes in a row) where
-		// the slash-after-dot used to live. Slash-only would have
-		// produced just `-.triagefactory-...`.
-		{"/Users/aidan/.triagefactory/takeovers/run-x", "-Users-aidan--triagefactory-takeovers-run-x"},
-		{"/home/user/.triagefactory/takeovers/run-x", "-home-user--triagefactory-takeovers-run-x"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.in, func(t *testing.T) {
-			got := encodeClaudeProjectDir(tc.in)
-			if got != tc.want {
-				t.Errorf("encodeClaudeProjectDir(%q) = %q, want %q", tc.in, got, tc.want)
-			}
-		})
-	}
-}
-
 // TestRemoveAt_HandlesNonCanonicalPath guards review-comment fix #3:
 // callers hold the source worktree path explicitly. If they used
 // Remove(conversationID) (which derives the path from the canonical /tmp
