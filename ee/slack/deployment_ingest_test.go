@@ -472,13 +472,21 @@ func TestDeploymentWebhook_SignatureVerdictsCounted(t *testing.T) {
 		t.Errorf("deployment deliveries by app = %v; want {%s: 6}", got, deployTestAppID)
 	}
 
-	unconfigured := newDeploymentIngestRig(t)
-	unconfigured.webhook.deployment = socketDeploymentApp()
-	if rec := postDeploymentWebhook(t, unconfigured.webhook, body, fresh, sign(deployTestSecret, fresh, body)); rec.Code != http.StatusNotFound {
-		t.Errorf("Socket Mode deployment app: status = %d, want 404", rec.Code)
-	}
-	if got := sumByAttr(t, unconfigured.metrics, "slack.webhook.deployment.deliveries", "signature"); len(got) != 0 {
-		t.Errorf("deployment deliveries with the endpoint off = %v; want none", got)
+	for _, tc := range []struct {
+		name string
+		app  deploymentApp
+	}{
+		{"no deployment app", deploymentApp{}},
+		{"Socket Mode deployment app", socketDeploymentApp()},
+	} {
+		off := newDeploymentIngestRig(t)
+		off.webhook.deployment = tc.app
+		if rec := postDeploymentWebhook(t, off.webhook, body, fresh, sign(deployTestSecret, fresh, body)); rec.Code != http.StatusNotFound {
+			t.Errorf("%s: status = %d, want 404", tc.name, rec.Code)
+		}
+		if got := sumByAttr(t, off.metrics, "slack.webhook.deployment.deliveries", "signature"); len(got) != 0 {
+			t.Errorf("%s: deployment deliveries = %v; want none", tc.name, got)
+		}
 	}
 }
 

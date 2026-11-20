@@ -396,8 +396,10 @@ Web API failing is `UpstreamFailingFleetWide`. `SlackDeliveriesRetried` and
 dropping its events. The rest are about what you own: the
 [deployment Slack app](deployment-integrations/deployment-slack-app.md) and
 TF's own handling of Slack events. `SlackSigningSecretMismatch` and
-`SlackDeploymentDeliveriesStale` count requests anyone can send, so in a window
-with no deliveries from Slack a forged request can fire either.
+`SlackDeploymentDeliveriesStale` count requests anyone can send, so a forged
+request can fire `SlackSigningSecretMismatch` in a window with no deliveries
+from Slack, and `SlackDeploymentDeliveriesStale` in a window with none to the
+control pod it reaches.
 
 `JiraDeploymentAppQuotaLow` is the only alert on rate-limit readings. On
 Atlassian's default tier, every org that connects Jira through the deployment's

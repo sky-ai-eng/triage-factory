@@ -35,7 +35,8 @@ the admin's browser, not by Slack.
 With the Events API, the control host's clock must be within five minutes of
 the real time. Triage Factory refuses a delivery whose timestamp is further
 from its own clock, and logs no line for it. With the bundled Prometheus,
-[`SlackDeploymentDeliveriesStale`](../monitoring.md#alerts) fires when it does.
+[`SlackDeploymentDeliveriesStale`](../monitoring.md#alerts) fires when a
+control pod refuses deliveries this way and verifies none.
 
 ## 1. Create the app
 
