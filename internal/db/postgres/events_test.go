@@ -37,6 +37,16 @@ func TestEventStore_Postgres(t *testing.T) {
 				t.Helper()
 				return seedPgEntityForEvents(t, h, orgID, suffix)
 			},
+			SetCreatedAt: func(t *testing.T, eventID string, at time.Time) {
+				t.Helper()
+				res, err := h.AdminDB.Exec(`UPDATE events SET created_at = $1 WHERE org_id = $2 AND id = $3`, at.UTC(), orgID, eventID)
+				if err != nil {
+					t.Fatalf("set created_at: %v", err)
+				}
+				if n, _ := res.RowsAffected(); n != 1 {
+					t.Fatalf("set created_at: %d rows for event %s, want 1", n, eventID)
+				}
+			},
 		}
 		return stores.Events, orgID, seed
 	})

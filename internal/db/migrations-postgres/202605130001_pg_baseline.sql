@@ -780,7 +780,7 @@ CREATE TABLE public.events (
     occurred_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     -- Insertion order, which breaks a created_at tie: two events can share a
-    -- timestamp, and id is a random UUID. SQLite's rowid plays the same part.
+    -- timestamp, and id is a random UUID.
     seq bigint GENERATED ALWAYS AS IDENTITY
 );
 

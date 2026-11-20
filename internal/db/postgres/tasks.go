@@ -1447,8 +1447,6 @@ func (s *taskStore) LatestEventIDSystem(ctx context.Context, orgID, taskID strin
 	return eventID, nil
 }
 
-// LatestEventAfterSystem orders by (created_at, seq), seq being insertion
-// order, so on a created_at tie the later insert is the newer event.
 func (s *taskStore) LatestEventAfterSystem(ctx context.Context, orgID, taskID, eventID string) (string, error) {
 	var latestID string
 	err := s.admin.QueryRowContext(ctx, `

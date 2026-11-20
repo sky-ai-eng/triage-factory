@@ -1094,8 +1094,10 @@ type TaskStore interface {
 
 	// LatestEventAfterSystem returns the id of the newest of those events
 	// that is newer than eventID, in LatestEventIDSystem's order, or "" when
-	// none is. eventID need not be on the task's timeline. Admin pool, org_id
-	// bound by argument.
+	// none is. eventID need not be on the task's timeline, but it must name an
+	// event: "" also answers an id with no event row, so a caller that needs
+	// to tell the two apart reads the event first. Admin pool, org_id bound by
+	// argument.
 	LatestEventAfterSystem(ctx context.Context, orgID, taskID, eventID string) (string, error)
 
 	// MarkEventInjectedSystem flips the (task_id, event_id) timeline row's

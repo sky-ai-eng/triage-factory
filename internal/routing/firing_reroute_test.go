@@ -242,8 +242,12 @@ func TestFiringWorker_Reroute_RoutesTheTasksNewestEvent(t *testing.T) {
 // stampEvent rewrites an event's created_at.
 func stampEvent(t *testing.T, database *sql.DB, eventID string, at time.Time) {
 	t.Helper()
-	if _, err := database.Exec(`UPDATE events SET created_at = ? WHERE id = ?`, at, eventID); err != nil {
+	res, err := database.Exec(`UPDATE events SET created_at = ? WHERE id = ?`, at, eventID)
+	if err != nil {
 		t.Fatalf("stamp event %s: %v", eventID, err)
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		t.Fatalf("stamp event %s: %d rows, want 1", eventID, n)
 	}
 }
 

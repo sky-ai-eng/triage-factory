@@ -733,9 +733,8 @@ func (s *taskStore) LatestEventIDSystem(ctx context.Context, orgID, taskID strin
 	return eventID, nil
 }
 
-// LatestEventAfterSystem orders by (created_at, rowid). A new row's rowid is
-// above every row present, so on a created_at tie, which a coarse clock makes
-// common, the later insert is the newer event.
+// rowid is insertion order: SQLite gives a new row a rowid above every row
+// present.
 func (s *taskStore) LatestEventAfterSystem(ctx context.Context, orgID, taskID, eventID string) (string, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return "", err
