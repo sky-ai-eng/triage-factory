@@ -1229,7 +1229,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 		if stepIdx+1 < len(plan) {
 			nextStepName = plan[stepIdx+1].PromptName
 		}
-		mission = buildBlueprintStepWrapperPrompt(*task, step, stepPrompt, slug, agentproc.AgentVisibleRoot(cfg.runRoot), len(plan), nextStepName)
+		mission = buildBlueprintStepWrapperPrompt(missionTaskTitle(plan[stepIdx], *task), step, stepPrompt, slug, agentproc.AgentVisibleRoot(cfg.runRoot), len(plan), nextStepName)
 
 		toast.FireUser(s.wsHub, orgID, conv.CreatorUserID, toast.LevelInfo, "", fmt.Sprintf("Blueprint step %d/%d: %s (%s)",
 			stepIdx+1, len(plan), truncateToastMsg(stepPrompt.Name, 60), shortConversationID(conv.ID)))
@@ -1615,6 +1615,14 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 		return
 	}
 
+	// The system blocks this turn is resumed with, and what changed in them
+	// since the session last heard them. Composed ahead of the flush below, so
+	// the knowledge it stages does not stand between the person's messages
+	// being taken off the queue and the session receiving them.
+	final, finalRead := s.resumedStepIsFinal(stepCtx, orgID, conv)
+	finalStep := blueprintRunID != "" && final
+	system := s.resumeClaimSystem(stepCtx, conv, *task, resumeCwd, finalStep, finalRead)
+
 	// Past every hand-back: this claim now owns the conversation's outcome, so
 	// the queued rows become this turn's message, and the turn starts.
 	s.startTurn(stepCtx, conv.ID, conv.ClaimID)
@@ -1641,7 +1649,30 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 	// picked up (the flush is destructive, so composing it early would
 	// risk losing anything staged in the gap).
 	prepends, prependsUnsent := s.stagedInjectionsForEngagement(stepCtx, orgID, conv.ID)
-	message := joinTurnText(note, prepends, agentMessage)
+
+	// What changed in the system blocks goes after the message that starts
+	// this turn. The append stays the one the session was started with; a
+	// fence refusal leaves the update out with its row, as it does the
+	// workspace note, and an opening that never reaches the session takes the
+	// row back with the notes it carried.
+	//
+	// The verbs in it name the binary the resumed process runs, as the
+	// append's do. A path this process cannot resolve leaves them as written,
+	// and the resume refuses to start for the same reason.
+	updateBin := "triagefactory"
+	if self, err := os.Executable(); err == nil {
+		updateBin = agentproc.AgentVisibleBinary(self)
+	}
+	updateText := ""
+	if update := sdkSystemUpdate(system, updateBin); update != nil {
+		update.ConversationID = conv.ID
+		update.UserID = userID
+		if !s.insertClaimNote(stepCtx, orgID, conv.ClaimID, update) {
+			updateText = update.Content
+			prependsUnsent = allOf(prependsUnsent, s.withdrawUnsentUpdate(orgID, update))
+		}
+	}
+	message := joinTurnText(note, prepends, agentMessage, updateText)
 
 	// The resume path's agent-live: every hand-back is behind us and the
 	// runtime is about to come up. It clears the phase rather than only ending
@@ -1650,12 +1681,11 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 	// resume's first claim-fenced write meets the same fence.
 	s.updatePhase(stepCtx, orgID, conv.ID, conv.ClaimID, "")
 
-	finalStep := blueprintRunID != "" && s.resumedStepIsFinal(stepCtx, orgID, conv)
 	nudge := turnEndNudge(s.turnEndNudges(orgID, conv.ID, *task, finalStep, conv.Type == domain.ConversationTypeInteractive))
 	outcome, rerr := s.ResumeWithMessage(stepCtx, orgID, conv.ID, conv.SessionID, resumeCwd, message, ResumeOptions{
 		Model:             conv.Model,
 		Effort:            s.claimEffort(stepCtx, orgID, conv.ID, conv.Model),
-		SystemBlock:       s.launchedSystemBlock(stepCtx, orgID, conv.ID),
+		SystemBlocks:      system.sent,
 		GitHubOwner:       owner,
 		ExtraAllowedTools: extraTools,
 		Namespace:         namespace,

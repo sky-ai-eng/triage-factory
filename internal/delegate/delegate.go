@@ -529,6 +529,7 @@ func (s *Spawner) PlanDelegation(task domain.Task, teamID string, opts DelegateO
 			AllowedTools: p.AllowedTools,
 			Model:        p.Model,
 			Brief:        st.Brief,
+			TaskTitle:    task.Title,
 		}
 	}
 	// Refuse a firing whose models this org cannot authenticate — a provider it
@@ -734,10 +735,11 @@ type sourceDocs struct {
 	notes string
 }
 
-// tools renders the <tools> section for the runtime that reads it, which
-// decides how the verbs are spelled and whether GitHub's are repeated there.
-func (d sourceDocs) tools(runtime agentprompt.Runtime) string {
-	return agentprompt.ToolsReferenceForSources(runtime, d.kinds)
+// toolParts are the <tools> section one source at a time, for the runtime
+// that reads it, which decides how the verbs are spelled and whether GitHub's
+// are repeated there. A re-claim compares them one by one.
+func (d sourceDocs) toolParts(runtime agentprompt.Runtime) []agentprompt.ToolsPart {
+	return agentprompt.ToolsReferenceParts(runtime, d.kinds)
 }
 
 // sourceDocsFor composes a run's sourceDocs from its source manifest: the

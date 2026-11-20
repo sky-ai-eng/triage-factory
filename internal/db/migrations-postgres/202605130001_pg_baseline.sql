@@ -1354,15 +1354,16 @@ CREATE TABLE public.messages (
     -- The executor engagement that produced this row, for per-engagement token
     -- accounting. NULL outside any claim. Never read by assembly.
     claim_id uuid,
-    -- role is app-validated, no CHECK: 'assistant' | 'tool' | 'user'. Only rows
-    -- deviating from normal role behavior carry a subtype, so blank is a
-    -- person's own message. The vocabulary is owned in Go (see
+    -- role is app-validated, no CHECK: 'assistant' | 'tool' | 'user' |
+    -- 'system' (a re-claim's system update, always subtype 'system-update').
+    -- Only rows deviating from normal role behavior carry a subtype, so blank
+    -- is a person's own message. The vocabulary is owned in Go (see
     -- db.ConversationStore's transcript section and domain's MessageSubtype*
     -- constants): 'injection:steer', 'injection:executor-changed',
     -- 'injection:nudge', 'injection:output-limit',
     -- 'injection:compaction-request', 'injection:compaction-result',
     -- 'injection:memory', 'injection:task-context', 'injection:system-note',
-    -- 'system_note', 'stop-note'.
+    -- 'system_note', 'stop-note', 'system-update'.
     role text NOT NULL,
     content text,
     subtype text DEFAULT ''::text,
@@ -1476,17 +1477,22 @@ CREATE TABLE public.conversations (
     -- Nothing here writes it above zero, since a multi delegation mints
     -- runtime='native'; it keeps the row the shape SQLite's is.
     sdk_session_cost_usd double precision DEFAULT 0 NOT NULL,
-    -- This conversation's own system block (the run's facts, its verb
-    -- reference, its mission and its step addendum) as the launch composed it —
-    -- a fourth SDK resume coordinate beside sdk_session_id, worktree_path and
-    -- model. The SDK harness takes its append once and replays only the session
-    -- transcript afterwards, so a resumed turn is handed this string again
-    -- rather than a recomposition off today's prompt row. Block 1 is not stored:
-    -- agentprompt.Build is byte-identical for a fixed spec, so the resume
-    -- rebuilds it. Empty is a legal value (every section is optional), and every
-    -- row here is empty in practice — a multi delegation mints runtime='native',
-    -- whose loop re-sends its block on every request.
+    -- The system prompt this conversation's claims send, as its first claim
+    -- sent it: system_prompt is the shared framework prompt (block 1),
+    -- system_block the conversation's own block (block 2: the run's facts, its
+    -- verb reference, its mission and its step addendum), and system_parts the
+    -- parts both were composed from (domain.SystemParts). Every later claim
+    -- sends the two blocks back unchanged, because the provider binds each
+    -- thinking block to the system prompt it was produced under; a change to
+    -- either reaches the conversation as a system-update row, and a later
+    -- claim compares its own composition with system_parts or with that row's.
+    -- A native compaction drops every row a thinking block rides on, so it
+    -- saves the blocks the engagement composed in their place. Empty strings
+    -- are legal values (every section of block 2 is optional); system_parts is
+    -- NULL on a row that never recorded any.
+    system_prompt text DEFAULT ''::text NOT NULL,
     system_block text DEFAULT ''::text NOT NULL,
+    system_parts jsonb,
     worktree_path text,
     result_summary text,
     outcome text,

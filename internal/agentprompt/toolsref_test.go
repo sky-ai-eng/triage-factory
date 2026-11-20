@@ -1,6 +1,7 @@
 package agentprompt
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -123,6 +124,45 @@ func TestTrackerReferences_MatchTheComposition(t *testing.T) {
 	} {
 		if want := ToolsReferenceForSources(RuntimeSDK, []string{tc.source}) + "\n"; tc.got != want {
 			t.Errorf("the %s accessor and ToolsReferenceForSources(%q) disagree", tc.source, tc.source)
+		}
+	}
+}
+
+// TestToolsReferenceParts_JoinToTheSection: a caller compares two <tools>
+// sections source by source, so the parts must be the whole section, keyed by
+// the source each documents.
+func TestToolsReferenceParts_JoinToTheSection(t *testing.T) {
+	ResetToolsReferences()
+	t.Cleanup(ResetToolsReferences)
+	RegisterToolsReference("slack", "Slack: triagefactory exec slack post")
+
+	for _, runtime := range []Runtime{RuntimeSDK, RuntimeNative} {
+		for _, kinds := range [][]string{
+			{"github"},
+			{"github", "jira"},
+			{"linear", "github", "jira", "slack"},
+			{"slack"},
+			nil,
+		} {
+			parts := ToolsReferenceParts(runtime, kinds)
+			texts := make([]string, 0, len(parts))
+			var keys []string
+			for _, p := range parts {
+				texts = append(texts, p.Text)
+				keys = append(keys, p.Key)
+			}
+			if got, want := strings.Join(texts, "\n\n"), ToolsReferenceForSources(runtime, kinds); got != want {
+				t.Errorf("%s %v: the parts do not join to the section;\ngot:\n%s\n\nwant:\n%s", runtime, kinds, got, want)
+			}
+			for _, p := range parts {
+				if runtime == RuntimeNative && strings.Contains(p.Text, "triagefactory exec") {
+					t.Errorf("%s %v: part %s is spelled for the SDK", runtime, kinds, p.Key)
+				}
+			}
+			hasTracker := slices.Contains(kinds, "jira") || slices.Contains(kinds, "linear")
+			if slices.Contains(keys, ToolsWorkspaceKey) != hasTracker {
+				t.Errorf("%s %v: keys %v, want the workspace part exactly when a tracker is in the set", runtime, kinds, keys)
+			}
 		}
 	}
 }

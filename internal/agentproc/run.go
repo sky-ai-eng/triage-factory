@@ -127,9 +127,10 @@ type RunOptions struct {
 	// delegated agent rides here: the framework blocks and the conversation's
 	// own block — its mission, its run context, its verb reference and its
 	// step addendum — composed by the caller
-	// (internal/delegate.sdkSystemPrompt). A resume re-sends the same bytes,
-	// because the harness replays the session's history but not the prompt
-	// that was appended to it.
+	// (internal/delegate.sdkSystemPrompt). A resume re-sends the bytes the
+	// session was started with, because the harness replays the session's
+	// history but not the prompt that was appended to it, and the provider
+	// binds the session's thinking to that prompt.
 	SystemPrompt string
 
 	// MaxTurns sets --max-turns. Zero omits the flag.

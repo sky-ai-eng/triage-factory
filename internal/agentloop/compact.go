@@ -109,10 +109,10 @@ func warmCacheLive(rows []domain.Message) bool {
 // and the warmth check, whatever the model or the cache. Claim start is the
 // only place the state can be met: every error out of compactWarm ends the
 // engagement, so only a new engagement finds it.
-func (e *Engine) compactOnResume(ctx context.Context, params Params, spent *spend) error {
+func (e *Engine) compactOnResume(ctx context.Context, params Params, spent *spend) (compacted bool, err error) {
 	rows, err := e.Transcript.ListForAssembly(ctx, params.OrgID, params.ConversationID)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if summary, ok := uncommittedWarmSummary(rows); ok {
 		// The reply is already a row, priced and counted by the engagement
@@ -120,23 +120,58 @@ func (e *Engine) compactOnResume(ctx context.Context, params Params, spent *spen
 		// passed as nil: the span flips it inactive with everything else.
 		e.info("committing a compaction summary an earlier engagement persisted",
 			"conversation", params.ConversationID)
-		return e.compaction(ctx, compactResume, func(ctx context.Context) error {
+		err := e.compaction(ctx, compactResume, func(ctx context.Context) error {
 			if err := e.commitCompaction(ctx, params, nil, summary, compactionSpan(rows)); err != nil {
 				return err
 			}
 			markCompacted(ctx, compactedRecovered)
 			return nil
 		})
+		return err == nil, err
 	}
 	if !e.compactionDue(params, rows) {
-		return nil
+		return false, nil
 	}
 	if warmCacheLive(rows) {
-		return nil
+		return false, nil
 	}
-	return e.compaction(ctx, compactResume, func(ctx context.Context) error {
+	err = e.compaction(ctx, compactResume, func(ctx context.Context) error {
 		return e.compactCold(ctx, params, spent)
 	})
+	return err == nil, err
+}
+
+// adoptCurrentSystem moves the engagement onto the system blocks its claim
+// composed (Params.Current) once a compaction has committed, and returns the
+// params every later call is built from.
+//
+// The blocks a conversation is sent stay the ones its earlier turns were sent,
+// because the provider binds each thinking block to them. A compaction flips
+// every delivered row a thinking block rides on, so from here nothing binds
+// them, and the claim's system update would otherwise survive only inside a
+// summary. So the newest blocks become the conversation's (SaveSystemBlocks),
+// and the update, now in them, is not written. A save that fails keeps the
+// engagement on the blocks it was sending: the next claim reads those back,
+// and they must be what this engagement's calls carried.
+func (e *Engine) adoptCurrentSystem(ctx context.Context, params Params) Params {
+	if params.Current == nil {
+		return params
+	}
+	// TODO(TFAC-1512): the save is a second write after the compaction's
+	// transaction, so a failure or a crash between the two leaves the change
+	// only in the summary for this engagement and has the next claim deliver
+	// the update again. It belongs in the commit's own transaction.
+	if e.Hooks.SaveSystemBlocks != nil {
+		if err := e.Hooks.SaveSystemBlocks(ctx, *params.Current); err != nil {
+			e.warn("saving the conversation's system blocks after a compaction failed; the engagement keeps the blocks it was sending",
+				"conversation", params.ConversationID, "error", err)
+			return params
+		}
+	}
+	params.SystemPrompt, params.SystemAddendum = params.Current.Prompt, params.Current.Addendum
+	params.Current = nil
+	params.SystemUpdate = nil
+	return params
 }
 
 // compactWindowFull is the reactive arm's dispatcher: warm semantics while

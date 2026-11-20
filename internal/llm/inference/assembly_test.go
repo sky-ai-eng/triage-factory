@@ -95,6 +95,9 @@ func bijectionCorpus() map[string]domain.Message {
 				ImageURL: &domain.ContentImageURL{URL: "data:image/png;base64,iVBORw0KGgo="},
 			}},
 		},
+		"system update": {
+			Role: "system", Content: "The branch naming convention changed.",
+		},
 		"tool result image only": {
 			Role: "tool", ToolCallID: "toolu_05",
 			ContentBlocks: []domain.ContentBlock{{
@@ -374,5 +377,36 @@ func TestRowsToMessages_MovingCacheBreakpoint(t *testing.T) {
 	plain, _ := RowsToMessages(rows, AssemblyOptions{NoCacheBreakpoint: true})
 	if plain[len(plain)-1].Content.ContentStr == nil {
 		t.Fatal("NoCacheBreakpoint must leave string content unpromoted")
+	}
+}
+
+// TestRowsToMessages_ASystemUpdateIsASystemMessageInPlace: a re-claim's system
+// update rides the conversation as a role:"system" message where its row sits,
+// after the input that started the claim, and nothing around it moves. The
+// user rows on either side of it stay separate messages, because merging
+// across it would put the person's earlier text after the update.
+func TestRowsToMessages_ASystemUpdateIsASystemMessageInPlace(t *testing.T) {
+	rows := []domain.Message{
+		{ID: 1, Role: "user", Content: "go"},
+		{ID: 2, Role: "assistant", Content: "done"},
+		{ID: 3, Role: "user", Subtype: domain.MessageSubtypeInjectionNewSandbox, Content: "new sandbox"},
+		{ID: 4, Role: "user", Content: "one more thing"},
+		{ID: 5, Role: "system", Subtype: domain.MessageSubtypeSystemUpdate, Content: "the branch convention changed"},
+	}
+	msgs, err := RowsToMessages(rows, AssemblyOptions{NoCacheBreakpoint: true})
+	if err != nil {
+		t.Fatalf("RowsToMessages: %v", err)
+	}
+	var roles []schemas.ChatMessageRole
+	for _, m := range msgs {
+		roles = append(roles, m.Role)
+	}
+	want := []schemas.ChatMessageRole{schemas.ChatMessageRoleUser, schemas.ChatMessageRoleAssistant, schemas.ChatMessageRoleUser, schemas.ChatMessageRoleSystem}
+	if !reflect.DeepEqual(roles, want) {
+		t.Fatalf("roles = %v, want %v", roles, want)
+	}
+	last := msgs[len(msgs)-1]
+	if last.Content == nil || last.Content.ContentStr == nil || *last.Content.ContentStr != "the branch convention changed" {
+		t.Errorf("the system message carries %+v, want the update's text", last.Content)
 	}
 }

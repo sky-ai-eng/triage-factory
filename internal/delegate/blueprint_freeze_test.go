@@ -155,3 +155,52 @@ func TestBlueprintRun_StepPlanFrozenAgainstMidFlightEdit(t *testing.T) {
 		t.Errorf("step 1 SKILL.md leaked the mid-flight prompt-body edit; got:\n%s", skillMD)
 	}
 }
+
+// TestBlueprintRun_MissionKeepsTheTitleFromItsStart: the plan a delegation
+// freezes carries the task's title, so a step's mission names the task as it
+// was when the run started however the pull request is renamed meanwhile, and
+// every claim of the step composes the same mission. A plan frozen before
+// titles were names the task's current title.
+func TestBlueprintRun_MissionKeepsTheTitleFromItsStart(t *testing.T) {
+	database := newCostCapTestDB(t)
+	task, bpID := delegatableFixture(t, database, "title")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
+	if _, err := s.Delegate(task, DelegateOpts{
+		OrgID:               runmode.LocalDefaultOrgID,
+		ExplicitBlueprintID: bpID,
+		TriggerType:         "manual",
+		CreatorUserID:       runmode.LocalDefaultUserID,
+	}); err != nil {
+		t.Fatalf("Delegate: %v", err)
+	}
+	var brID string
+	if err := database.QueryRow(`SELECT id FROM blueprint_runs WHERE task_id = ?`, task.ID).Scan(&brID); err != nil {
+		t.Fatalf("read the run: %v", err)
+	}
+	br, err := s.blueprints.GetRunSystem(context.Background(), runmode.LocalDefaultOrgID, brID)
+	if err != nil || br == nil || len(br.StepPlan) == 0 {
+		t.Fatalf("GetRunSystem = (%+v, %v)", br, err)
+	}
+	for _, step := range br.StepPlan {
+		if step.TaskTitle != task.Title {
+			t.Errorf("step %d froze title %q, want the task's %q", step.StepIndex, step.TaskTitle, task.Title)
+		}
+	}
+
+	renamed := task
+	renamed.Title = "a title the pull request was given later"
+	mission := func(planStep domain.BlueprintPlanStep) string {
+		return buildBlueprintStepWrapperPrompt(missionTaskTitle(planStep, renamed), planStep.Step(br.BlueprintID),
+			planStep.Prompt(), "step-0", "/work", len(br.StepPlan), "")
+	}
+	got := mission(br.StepPlan[0])
+	if !strings.Contains(got, "Task: "+task.Title+"\n") || strings.Contains(got, renamed.Title) {
+		t.Errorf("the mission after a rename does not carry the run's title;\n%s", got)
+	}
+
+	legacy := br.StepPlan[0]
+	legacy.TaskTitle = ""
+	if got := mission(legacy); !strings.Contains(got, "Task: "+renamed.Title+"\n") {
+		t.Errorf("a plan frozen without a title does not name the task's current one;\n%s", got)
+	}
+}

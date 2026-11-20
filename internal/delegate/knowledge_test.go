@@ -9,7 +9,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -426,4 +428,112 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// TestKnowledgeForClaim_AHandedOffTreeListsTheFilesOnDisk: a later claim
+// cannot write into a tree the sandbox owns, so it stages nothing, and its
+// listing names the files the tree holds — the same listing their staging
+// rendered, so a re-claim on an unchanged tree has nothing to update.
+func TestKnowledgeForClaim_AHandedOffTreeListsTheFilesOnDisk(t *testing.T) {
+	kb := kbstore.NewLocalAt(t.TempDir())
+	writeKB(t, kb, kbTeam, kbstore.RootPrivate, "architecture.md", "# How it fits together\n\nmore")
+	writeKB(t, kb, kbTeam, kbstore.RootShared, "notes/conventions.md", "Naming and review conventions")
+	writeKB(t, kb, "team-platform", kbstore.RootShared, "slo/latency.md", "What we promise")
+	// A first line long enough that the summary's read cuts a character.
+	writeKB(t, kb, kbTeam, kbstore.RootPrivate, "long.md", "x"+strings.Repeat("é", 4000))
+	s := stagingSpawner(t, kb, fakeTeams{teams: []domain.Team{
+		{ID: kbTeam, Slug: "alpha", Name: "Alpha"},
+		{ID: "team-platform", Slug: "platform", Name: "Platform"},
+	}})
+	cwd := t.TempDir()
+	staged := s.knowledgeForClaim(context.Background(), kbOrg, kbTeam, cwd, false)
+	if staged == "" {
+		t.Fatal("staging rendered no listing; this test would pass vacuously")
+	}
+
+	// The knowledge base moves on; the tree, owned by the sandbox now, does not.
+	writeKB(t, kb, kbTeam, kbstore.RootShared, "new.md", "Filed after the tree was handed off")
+	if got := s.knowledgeForClaim(context.Background(), kbOrg, kbTeam, cwd, true); got != staged {
+		t.Errorf("the handed-off tree's listing is not its staging's;\ngot:\n%s\n\nwant:\n%s", got, staged)
+	}
+	if got := stagedTree(t, cwd); slicesContain(got, "team/shared/new.md") {
+		t.Error("a claim on a handed-off tree staged into it")
+	}
+
+	// What the agent can read is what the listing names, whoever put it there.
+	extra := filepath.Join(cwd, scratchDirName, knowledgeDirName, "team", "shared", "runbook.md")
+	if err := os.WriteFile(extra, []byte("How to roll back\n"), 0o644); err != nil {
+		t.Fatalf("write a file into the tree: %v", err)
+	}
+	got := s.knowledgeForClaim(context.Background(), kbOrg, kbTeam, cwd, true)
+	if !strings.Contains(got, "shared/runbook.md — How to roll back") {
+		t.Errorf("the listing does not name a file the tree holds;\n%s", got)
+	}
+	if strings.Contains(got, "new.md") {
+		t.Errorf("the listing names a document the tree does not hold;\n%s", got)
+	}
+}
+
+// TestKnowledgeForClaim_AHandedOffTreeListsOnlyItsOwnFiles: the agent can put
+// anything into a tree it owns, and what the listing reads goes into the
+// prompt. A link out of the tree, a link to a directory and a pipe are none of
+// them knowledge: each is left out, nothing behind them is read, and the pipe
+// does not hold the claim.
+func TestKnowledgeForClaim_AHandedOffTreeListsOnlyItsOwnFiles(t *testing.T) {
+	kb := kbstore.NewLocalAt(t.TempDir())
+	writeKB(t, kb, kbTeam, kbstore.RootShared, "runbook.md", "How to roll back")
+	s := stagingSpawner(t, kb, fakeTeams{})
+	cwd := t.TempDir()
+	if staged := s.knowledgeForClaim(context.Background(), kbOrg, kbTeam, cwd, false); staged == "" {
+		t.Fatal("staging rendered no listing; this test would pass vacuously")
+	}
+
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(secret, []byte("EXECUTOR-SECRET\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	shared := filepath.Join(cwd, scratchDirName, knowledgeDirName, "team", "shared")
+	for name, target := range map[string]string{"env.md": secret, "escape": outside} {
+		if err := os.Symlink(target, filepath.Join(shared, name)); err != nil {
+			t.Fatalf("plant %s: %v", name, err)
+		}
+	}
+	if err := syscall.Mkfifo(filepath.Join(shared, "pipe.md"), 0o644); err != nil {
+		t.Fatalf("plant a pipe: %v", err)
+	}
+
+	done := make(chan string, 1)
+	go func() { done <- s.knowledgeForClaim(context.Background(), kbOrg, kbTeam, cwd, true) }()
+	var got string
+	select {
+	case got = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("listing the tree blocked on what the agent planted in it")
+	}
+	if !strings.Contains(got, "runbook.md") {
+		t.Errorf("the listing lost the tree's own file;\n%s", got)
+	}
+	for _, planted := range []string{"EXECUTOR-SECRET", "env.md", "escape", "secret.txt", "pipe.md"} {
+		if strings.Contains(got, planted) {
+			t.Errorf("the listing carries %q from what the agent planted;\n%s", planted, got)
+		}
+	}
+}
+
+// TestKnowledgeForClaim_AHandedOffTreeWithNoKnowledgeListsNothing.
+func TestKnowledgeForClaim_AHandedOffTreeWithNoKnowledgeListsNothing(t *testing.T) {
+	s := stagingSpawner(t, kbstore.NewLocalAt(t.TempDir()), fakeTeams{})
+	if got := s.knowledgeForClaim(context.Background(), kbOrg, kbTeam, t.TempDir(), true); got != "" {
+		t.Errorf("listing = %q, want none", got)
+	}
+}
+
+func slicesContain(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
 }

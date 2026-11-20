@@ -9,7 +9,8 @@ import type { Message } from '../types'
 // machine-composed row that replaces a compacted span. The subtype is what
 // tells them apart, and the human set is closed: blank (the normal spelling —
 // a mission prompt, an API follow-up) and the mid-work steer stamp. Every
-// other subtype on a user row is the system.
+// other subtype on a user row is the system. So is every role=system row: the
+// update a re-claim writes when the agent's instructions changed.
 //
 // Blank is the whole of "normal" — the vocabulary reserves a subtype for rows
 // that deviate from ordinary role behavior, and the conversations refactor
@@ -22,7 +23,8 @@ import type { Message } from '../types'
 
 const HUMAN_SUBTYPES = new Set(['', 'injection:steer'])
 
-/** True when a role=user row records something the system did, not something a person said. */
+/** True when a row records something the system did, not something a person said. */
 export function isSystemNotice(msg: Message): boolean {
+  if (msg.role === 'system') return true
   return msg.role === 'user' && !HUMAN_SUBTYPES.has(msg.subtype ?? '')
 }

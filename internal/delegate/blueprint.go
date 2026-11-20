@@ -376,6 +376,16 @@ func nonterminalStepSysPrompt(i, total int) string {
 	return ""
 }
 
+// missionTaskTitle is the task title a step's mission names: the one its
+// plan froze when the run was minted, or the task's current title for a plan
+// frozen before titles were.
+func missionTaskTitle(planStep domain.BlueprintPlanStep, task domain.Task) string {
+	if planStep.TaskTitle != "" {
+		return planStep.TaskTitle
+	}
+	return task.Title
+}
+
 // buildBlueprintStepWrapperPrompt produces the per-step user prompt carrying
 // step-specific data. The base completion contract (the composed framework
 // prompt) plus the non-terminal addendum (agentprompt.NonTerminalCompletion,
@@ -386,7 +396,10 @@ func nonterminalStepSysPrompt(i, total int) string {
 // The skill's path is spelled from it in full because the agent works from
 // inside a checkout, where a path relative to the run root resolves into the
 // repository instead.
-func buildBlueprintStepWrapperPrompt(task domain.Task, step domain.BlueprintStep, stepPrompt *domain.Prompt, slug, agentRunRoot string, total int, nextStepName string) string {
+//
+// taskTitle is the title the plan froze (missionTaskTitle), so every claim of
+// a step composes the same mission however the task is renamed meanwhile.
+func buildBlueprintStepWrapperPrompt(taskTitle string, step domain.BlueprintStep, stepPrompt *domain.Prompt, slug, agentRunRoot string, total int, nextStepName string) string {
 	mission := strings.TrimSpace(step.Brief)
 	if mission == "" {
 		mission = stepPrompt.Name
@@ -394,7 +407,7 @@ func buildBlueprintStepWrapperPrompt(task domain.Task, step domain.BlueprintStep
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "You are step %d of %d in a blueprint firing on this task.\n\n", step.StepIndex+1, total)
-	fmt.Fprintf(&b, "Task: %s\n", strings.TrimSpace(task.Title))
+	fmt.Fprintf(&b, "Task: %s\n", strings.TrimSpace(taskTitle))
 	fmt.Fprintf(&b, "Mission for this step: %s\n\n", mission)
 	fmt.Fprintf(&b, "Skill slug: %q (materialized at %s)\n", slug, filepath.Join(agentRunRoot, ".claude", "skills", slug, "SKILL.md"))
 	isFinal := step.StepIndex+1 == total
@@ -507,16 +520,17 @@ func finalBlueprintStepOf(cfg runConfig) bool {
 // resumedStepIsFinal is finalBlueprintStep for a conversation a resume is
 // about to drive, read from its blueprint run: the resume path holds no plan
 // of its own. True when there is no blueprint run to read, or the read fails,
-// for the reason finalBlueprintStep gives.
-func (s *Spawner) resumedStepIsFinal(ctx context.Context, orgID string, conv *domain.Conversation) bool {
+// for the reason finalBlueprintStep gives; read is false when the read failed,
+// so a caller that must not act on that default can tell.
+func (s *Spawner) resumedStepIsFinal(ctx context.Context, orgID string, conv *domain.Conversation) (final, read bool) {
 	if s.blueprints == nil || conv.BlueprintRunID == "" {
-		return true
+		return true, true
 	}
 	br, err := s.blueprints.GetRunSystem(ctx, orgID, conv.BlueprintRunID)
 	if err != nil || br == nil {
-		return true
+		return true, false
 	}
-	return finalBlueprintStep(br, conv.BlueprintStepIndex)
+	return finalBlueprintStep(br, conv.BlueprintStepIndex), true
 }
 
 // taskHasUnresolvedDeliverables reports whether any conversation on the task holds

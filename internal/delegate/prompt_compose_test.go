@@ -18,12 +18,14 @@ func reviewTask() domain.Task {
 	}
 }
 
-// launchAppend is the append a launch sends: the two calls runAgent makes, in
-// its order. The production seam takes block 2 already composed, because a
-// resume reads that block off the row rather than rebuilding it — so these
-// tests compose it the way the launch does and hand it over the same door.
+// launchAppend is the append a launch sends: block 1 for the SDK machinist and
+// block 2 composed the way the launch composes it, through the door a resume
+// hands its saved blocks to.
 func launchAppend(mission, runCtxBlock, toolsRef, nonTerminal, binaryPath string) string {
-	return sdkSystemPrompt(agentprompt.SurfaceMachinist, composeConversationSystemBlock(mission, runCtxBlock, toolsRef, nonTerminal), binaryPath)
+	return sdkSystemPrompt(domain.SystemBlocks{
+		Prompt: agentprompt.Build(sdkSpec(agentprompt.SurfaceMachinist)),
+		Block:  composeConversationSystemBlock(mission, runCtxBlock, toolsRef, nonTerminal),
+	}, binaryPath)
 }
 
 // TestSDKSystemPrompt_IsTheTwoBlocks is the parity this runtime is held to: the

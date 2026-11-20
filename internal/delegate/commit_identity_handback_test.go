@@ -46,8 +46,8 @@ func TestRunAgent_FailedCommitIdentityReadHandsBack(t *testing.T) {
 				t.Errorf("disposition = %+v, want neither fenced nor handed back", disp)
 			}
 			// Nothing about the launch was written, so no agent was started on it.
-			if block := f.s.launchedSystemBlock(context.Background(), org, conv.ID); block != "" {
-				t.Errorf("the launch's system block was stored (%d bytes); the run must stop before it", len(block))
+			if blocks, err := f.s.conversations.SystemBlocksSystem(context.Background(), org, conv.ID); err != nil || blocks.Prompt != "" || blocks.Block != "" {
+				t.Errorf("the launch's system blocks were stored (%d and %d bytes, %v); the run must stop before it", len(blocks.Prompt), len(blocks.Block), err)
 			}
 			if rows := f.transcript(t); len(rows) != 0 {
 				t.Errorf("transcript = %+v, want nothing — no agent ran", rows)

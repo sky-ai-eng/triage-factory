@@ -185,7 +185,8 @@ func surfaceFor(convType string) agentprompt.Surface {
 }
 
 // sdkSystemPrompt is the whole of what the SDK harness is appended: the
-// framework blocks, then this conversation's own block.
+// shared framework prompt (block 1), then this conversation's own block
+// (block 2).
 //
 // The SDK takes one appended string where the native engine takes two system
 // blocks, so the parity between the runtimes is the bytes rather than the
@@ -196,68 +197,49 @@ func surfaceFor(convType string) agentprompt.Surface {
 // inside Claude Code's third system block, which is a divergence in framing
 // and not in content.
 //
-// It takes block 2 already composed rather than composing it, because two
-// launches of one conversation call this: the first, which composes the block
-// from the run's live inputs and stores it, and every resume after that, which
-// reads that stored block back. Both then reach the same bytes through the same
-// function, which is what makes a woken conversation's append the one it opened
-// with rather than a second composition that agrees with the first by care.
+// It takes both blocks already composed rather than composing them, because
+// every launch of one conversation calls this: the first, which composes the
+// blocks from the run's live inputs and saves them, and every resume after
+// that, which reads them back. Both then reach the same bytes through the same
+// function, which is what makes a woken conversation's append the one it
+// opened with rather than a second composition that agrees with the first by
+// care.
 //
 // resolveCLIPath runs here, over the composed string and nothing else, and at
 // each launch rather than once — the run's binary is where THIS process can
-// execute it, which a stored block cannot know. Every `triagefactory exec` in
+// execute it, which a saved block cannot know. Every `triagefactory exec` in
 // it was written by TF, by the org in its own prompt row, or by a team in its
 // own knowledge base; the two things the rewrite must never touch — the task
 // context and the injected memories, the only externally-authored text a run
 // reads — are transcript rows and never part of this string.
-func sdkSystemPrompt(surface agentprompt.Surface, conversationBlock, binaryPath string) string {
-	return resolveCLIPath(joinSections(
-		agentprompt.Build(sdkSpec(surface)),
-		conversationBlock,
-	), binaryPath)
+func sdkSystemPrompt(blocks domain.SystemBlocks, binaryPath string) string {
+	return resolveCLIPath(joinSections(blocks.Prompt, blocks.Block), binaryPath)
 }
 
-// persistSystemBlock records the block the SDK harness is about to be launched
-// with, so a resume of this conversation can be handed the same one. Reports
+// persistSystemBlocks records the system blocks this conversation's first
+// claim sends, so every later claim of it can be handed the same ones. Reports
 // whether the claim fence refused it, on which the caller parks — the same
 // disposition the phase write's refusal takes, and for the same reason: a
-// refusal means a successor owns the conversation, and this engagement's append
-// is not the one its next turn should replay.
+// refusal means a successor owns the conversation, and this engagement's
+// blocks are not the ones its next turn should replay.
 //
-// Any other failure is a warning and the launch proceeds. The agent in front of
-// us has the append in hand and runs correctly without the row; what a lost
-// write costs is a later wake, which composes the framework blocks alone.
-func (s *Spawner) persistSystemBlock(ctx context.Context, orgID, conversationID, claimID, block string) (fenced bool) {
+// Any other failure is a warning and the launch proceeds. The agent in front
+// of us has the blocks in hand and runs correctly without the row; what a lost
+// write costs is a later claim, which reads an empty row and sends what it
+// composes.
+func (s *Spawner) persistSystemBlocks(ctx context.Context, orgID, conversationID, claimID string, blocks domain.SystemBlocks) (fenced bool) {
 	// Detached from cancellation for the reason updatePhase is: a shutdown
 	// landing mid-launch must not drop a coordinate the row already owes.
 	ctx = context.WithoutCancel(ctx)
-	if _, err := s.conversations.SetSystemBlockForClaimSystem(ctx, orgID, conversationID, claimID, block); errors.Is(err, db.ErrClaimReleased) {
+	if _, err := s.conversations.SetSystemBlocksForClaimSystem(ctx, orgID, conversationID, claimID, blocks); errors.Is(err, db.ErrClaimReleased) {
 		delegateLog.Error("claim fence refused the system-block write — this executor no longer owns the conversation",
 			"conversation", conversationID, "claim_id", claimID, "org_id", orgID, "error", err)
 		return true
 	} else if err != nil {
-		delegateLog.Warn("record the launch's system block failed; a resume of this conversation will wake without its mission",
+		delegateLog.Warn("record the conversation's system blocks failed; its next claim sends the blocks it composes",
 			"conversation", conversationID, "org_id", orgID, "error", err)
 	}
 	return false
-}
-
-// launchedSystemBlock reads that block back for a resume.
-//
-// A read failure degrades to the empty block rather than refusing the turn, and
-// the asymmetry is deliberate. Resuming on the framework blocks alone costs one
-// turn its mission and nothing more — the agent keeps its session history.
-// Handing the claim back instead would spend an attempt against
-// TF_MAX_CLAIM_ATTEMPTS on a read that is transient, and running out of those
-// ends the conversation outright.
-func (s *Spawner) launchedSystemBlock(ctx context.Context, orgID, conversationID string) string {
-	block, err := s.conversations.SystemBlockSystem(ctx, orgID, conversationID)
-	if err != nil {
-		delegateLog.Warn("read the launch's system block failed; this turn resumes on the framework blocks alone",
-			"conversation", conversationID, "org_id", orgID, "error", err)
-		return ""
-	}
-	return block
 }
 
 // composeConversationSystemBlock assembles the conversation's own system block —
@@ -298,8 +280,9 @@ func resolveCLIPath(text, binaryPath string) string {
 	return strings.ReplaceAll(text, "triagefactory exec", binaryPath+" exec")
 }
 
-// runContext renders what the framework prompt refers to but cannot contain:
-// the facts of this particular run. agentprompt.Build is byte-identical for a
+// runContextLines are what the framework prompt refers to but cannot contain:
+// the facts of this particular run, one part per fact present, keyed by which
+// fact it is, in the order <run_context> renders them (renderRunContext). agentprompt.Build is byte-identical for a
 // fixed Spec so the fleet shares one cached prefix, which leaves anything that
 // differs between two runs — what this one is pointed at, where its tree and
 // the checkout its setup built are, what the team calls its branches — to
@@ -309,19 +292,21 @@ func resolveCLIPath(text, binaryPath string) string {
 // An absent fact renders no line: a deployment with no public URL says nothing
 // about a URL rather than offering a blank one.
 //
-// The task's state arrives here only when the task is already closed at the
-// launch (domain.TaskClosedRunContext): the completion blocks tell a run what
-// a closed task means for it, and whether this one is closed is a fact about
+// The task's state arrives here only when the task is closed at the claim
+// (domain.TaskClosedRunContext): the completion blocks tell a run what a
+// closed task means for it, and whether this one is closed is a fact about
 // one run. It is not the task context's status, which is the source's own
 // word about its object, inside the region marked untrusted.
 //
 // The overlapping work arrives here for the same reason
 // (domain.SiblingWorkRunContext): which other tasks bear on this run's pull
 // request or issue, who holds each, and whether work is going on it are facts
-// about one launch. The block names tasks by id and entities by key, and no
-// person, so nothing in it is text a source or a person authored. It is read
-// once, at the launch; who takes a task on afterwards reaches the run as a
-// note.
+// about one claim. The block names tasks by id and entities by key, and no
+// person, so nothing in it is text a source or a person authored.
+//
+// Every claim composes these lines; a conversation that already holds them is
+// told of a change as a system update (systemUpdateText), and who takes a
+// task on while a claim runs reaches the run as a note.
 //
 // The source notes arrive here for the same reason: which sources this run's
 // sandbox holds a credential for, and why each other one is unavailable, is a
@@ -333,50 +318,58 @@ func resolveCLIPath(text, binaryPath string) string {
 // this org happens to hold today is a fact about one run, and the framework
 // blocks that tell the agent knowledge exists have to stay byte-identical
 // across runs to remain a cacheable prefix. It renders last and as its own
-// block, because it is a listing rather than a line — and only when something
-// was actually staged, so a run with no knowledge behind it says nothing about
-// knowledge at all.
-func runContext(scope, taskState, siblingWork, runRoot, prCheckout, baseCheckout, branchTemplate, runURL, sourceNotes, knowledge string) string {
-	var lines []string
-	if s := strings.TrimSpace(scope); s != "" {
-		lines = append(lines, s)
+// block, because it is a listing rather than a line — and only when the run
+// tree holds something, so a run with no knowledge behind it says nothing
+// about knowledge at all.
+//
+// A re-claim compares the lines one by one (systemUpdateText), so each line
+// it reports changed is the line and nothing around it.
+func runContextLines(scope, taskState, siblingWork, runRoot, prCheckout, baseCheckout, branchTemplate, runURL, sourceNotes, knowledge string) []domain.SystemPart {
+	var lines []domain.SystemPart
+	add := func(key, text string) {
+		if text = strings.TrimSpace(text); text != "" {
+			lines = append(lines, domain.SystemPart{Key: key, Text: text})
+		}
 	}
-	if taskState != "" {
-		lines = append(lines, taskState)
-	}
-	if w := strings.TrimSpace(siblingWork); w != "" {
-		lines = append(lines, w)
-	}
+	add(partScope, scope)
+	add(partTaskState, taskState)
+	add(partSiblingWork, siblingWork)
 	if runRoot != "" {
-		lines = append(lines, "Run root: "+runRoot+
+		add(partRunRoot, "Run root: "+runRoot+
 			" — every `_tfac/...` path in your instructions sits directly under this directory."+
 			" Reach it by the absolute path, so it resolves from whatever directory you have cd'd into.")
 	}
 	if prCheckout != "" {
-		lines = append(lines, "PR checkout: "+prCheckout+
+		add(partPRCheckout, "PR checkout: "+prCheckout+
 			" — the pull request's checkout, already on its branch. `cd` into it before reading or changing the code.")
 	}
 	if baseCheckout != "" {
-		lines = append(lines, "Base-branch checkout: "+baseCheckout+
+		add(partBaseCheckout, "Base-branch checkout: "+baseCheckout+
 			" — the repository's checkout of its base branch, detached, as `workspace add` makes one."+
 			" `cd` into it before reading or changing the code, and create your own branch before committing.")
 	}
 	if branchTemplate != "" {
-		lines = append(lines, "Branch naming convention for this team: "+branchTemplate)
+		add(partBranchConvention, "Branch naming convention for this team: "+branchTemplate)
 	}
 	if runURL != "" {
-		lines = append(lines, "Run URL: "+runURL)
+		add(partRunURL, "Run URL: "+runURL)
 	}
-	if n := strings.TrimSpace(sourceNotes); n != "" {
-		lines = append(lines, n)
-	}
-	if k := strings.TrimSpace(knowledge); k != "" {
-		lines = append(lines, k)
-	}
+	add(partSourceNotes, sourceNotes)
+	add(partKnowledge, knowledge)
+	return lines
+}
+
+// renderRunContext joins run-context lines into the <run_context> section, ""
+// for none.
+func renderRunContext(lines []domain.SystemPart) string {
 	if len(lines) == 0 {
 		return ""
 	}
-	return "<run_context>\n" + strings.Join(lines, "\n") + "\n</run_context>"
+	texts := make([]string, 0, len(lines))
+	for _, l := range lines {
+		texts = append(texts, l.Text)
+	}
+	return "<run_context>\n" + strings.Join(texts, "\n") + "\n</run_context>"
 }
 
 // joinSections drops the empty sections and separates the rest by a blank line.

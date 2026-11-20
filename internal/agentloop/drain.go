@@ -211,6 +211,21 @@ func aboveWaitingInput(rows []domain.Message) *float64 {
 	return nil
 }
 
+// insertSystemUpdate writes the claim's system update (Params.SystemUpdate) as
+// a delivered role:"system" row at the end of the window. Delivered, because it
+// is not input waiting for the model to be ready for it: it is the change to
+// the instructions the next call is made under.
+func (e *Engine) insertSystemUpdate(ctx context.Context, params Params) error {
+	_, err := e.Transcript.Insert(ctx, params.OrgID, &domain.Message{
+		ConversationID: params.ConversationID,
+		Role:           "system",
+		Subtype:        domain.MessageSubtypeSystemUpdate,
+		Content:        params.SystemUpdate.Content,
+		Metadata:       params.SystemUpdate.Metadata,
+	})
+	return err
+}
+
 // insertDelivered writes a system-authored user row straight into the window,
 // skipping the pending queue. Used where the row is both a statement about
 // the turn that just happened AND the thing the next call must read — the

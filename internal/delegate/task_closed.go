@@ -80,9 +80,9 @@ func (s *Spawner) tellTaskResolved(ctx context.Context, orgID, conversationID, t
 	}
 }
 
-// closedTaskContext is the <run_context> line of a launch on a task that is
-// already closed, "" for an open one. Read at the launch rather than taken
-// from the claim's task, which a bring-up can outlast.
+// closedTaskContext is the <run_context> line of a claim on a task that is
+// closed, "" for an open one. Read when the claim composes its system blocks
+// rather than taken from the claim's task, which a bring-up can outlast.
 func (s *Spawner) closedTaskContext(ctx context.Context, orgID, taskID string) string {
 	closed, ok := s.closedTask(ctx, orgID, taskID)
 	if !ok {
