@@ -890,13 +890,10 @@ export interface TriggerHandler extends EventHandlerBase {
   min_autonomy_suitability: number
 }
 
-// NotifyAudience: who a notify rule tells — its creator, or its team's members.
-export type NotifyAudience = 'creator' | 'team'
-
+// NotifyHandler: a notify rule, which tells its team's members.
 export interface NotifyHandler extends EventHandlerBase {
   kind: 'notify'
   name: string
-  audience: NotifyAudience
 }
 
 export type EventHandler = RuleHandler | TriggerHandler | NotifyHandler

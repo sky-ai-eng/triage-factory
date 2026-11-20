@@ -78,7 +78,7 @@ func TestBuildNotify_InstallsTheVerbs(t *testing.T) {
 		t.Fatalf("create entity: %v", err)
 	}
 	kinds.Event.Raise(ctx, org, notify.EventRaise{EventType: domain.EventGitHubPRCICheckFailed, Source: "github", Entity: *entity, Condition: true,
-		Rules: []notify.EventRule{{HandlerID: "h1", TeamID: runmode.LocalDefaultTeamID, Name: "Mine", Audience: domain.NotifyAudienceCreator, CreatorUserID: user}}})
+		Rules: []notify.EventRule{{HandlerID: "h1", TeamID: runmode.LocalDefaultTeamID, Name: "Mine"}}})
 	targets, err := notify.OpenEventConditions(ctx, org, entity.ID, []string{domain.EventGitHubPRCICheckFailed})
 	if err != nil || len(targets) != 1 {
 		t.Fatalf("OpenEventConditions = %+v, %v; want the CI condition", targets, err)
@@ -95,7 +95,7 @@ func TestBuildNotify_InstallsTheVerbs(t *testing.T) {
 	// An event of the row's own type closing it (a reassignment, in the
 	// catalog's close relations) is told apart from the one that raised it.
 	kinds.Event.Raise(ctx, org, notify.EventRaise{EventType: domain.EventGitHubPRCICheckFailed, Source: "github", Entity: *entity, Condition: true,
-		Rules: []notify.EventRule{{HandlerID: "h1", TeamID: runmode.LocalDefaultTeamID, Name: "Mine", Audience: domain.NotifyAudienceCreator, CreatorUserID: user}}})
+		Rules: []notify.EventRule{{HandlerID: "h1", TeamID: runmode.LocalDefaultTeamID, Name: "Mine"}}})
 	targets, err = notify.OpenEventConditions(ctx, org, entity.ID, []string{domain.EventGitHubPRCICheckFailed})
 	if err != nil || len(targets) != 1 {
 		t.Fatalf("OpenEventConditions = %+v, %v; want the second CI condition", targets, err)

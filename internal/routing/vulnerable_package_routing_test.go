@@ -115,10 +115,10 @@ func seedVulnHandler(t *testing.T, database *sql.DB, kind, teamID, predicate str
 		_, err = database.Exec(`
 			INSERT INTO event_handlers
 				(id, org_id, team_id, creator_user_id, kind, event_type,
-				 scope_predicate_json, enabled, source, name, notify_audience, created_at, updated_at)
-			VALUES (?, ?, ?, ?, 'notify', ?, ?, 1, 'user', ?, ?, ?, ?)
+				 scope_predicate_json, enabled, source, name, created_at, updated_at)
+			VALUES (?, ?, ?, ?, 'notify', ?, ?, 1, 'user', ?, ?, ?)
 		`, id, runmode.LocalDefaultOrgID, teamID, runmode.LocalDefaultUserID, domain.EventGitHubVulnerabilityAlertOpened,
-			pred, "vuln notify "+id[:8], domain.NotifyAudienceTeam, now, now)
+			pred, "vuln notify "+id[:8], now, now)
 	default:
 		t.Fatalf("seedVulnHandler: unknown kind %q", kind)
 	}

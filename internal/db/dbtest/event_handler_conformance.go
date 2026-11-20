@@ -625,9 +625,9 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		}
 	})
 
-	// A notify rule round-trips its name and audience, names its creator,
-	// refuses rule- and trigger-only fields, and reads after every rule and
-	// trigger on its event type.
+	// A notify rule round-trips its name, names its creator, refuses rule- and
+	// trigger-only fields, and reads after every rule and trigger on its event
+	// type.
 	t.Run("Notify_RoundTripUpdateAndOrdering", func(t *testing.T) {
 		store, orgID, teamID, seedBlueprints, _ := factory(t)
 		ctx := context.Background()
@@ -640,13 +640,13 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		notifyID := uuid.New().String()
 		created, err := store.Create(ctx, orgID, teamID, domain.EventHandler{
 			ID: notifyID, Kind: domain.EventHandlerKindNotify, EventType: eventType, Enabled: true,
-			Name: "CI failed on my PR", Audience: domain.NotifyAudienceCreator,
+			Name: "CI failed on my PR",
 		})
 		if err != nil {
 			t.Fatalf("Create (notify): %v", err)
 		}
 		AssertWriteReturnedStoredRow(t, "Create (notify)", created, read(notifyID))
-		if created.Kind != domain.EventHandlerKindNotify || created.Audience != domain.NotifyAudienceCreator ||
+		if created.Kind != domain.EventHandlerKindNotify ||
 			created.Name != "CI failed on my PR" || created.CreatorUserID == "" || created.Source != domain.EventHandlerSourceUser ||
 			created.DefaultPriority != nil || created.SortOrder != nil || created.BlueprintID != "" {
 			t.Errorf("Create (notify) returned %+v; want a user notify rule naming its creator, with no rule or trigger fields", created)
@@ -654,38 +654,28 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 
 		next := created
 		next.Name = "CI failed on the team's PRs"
-		next.Audience = domain.NotifyAudienceTeam
 		next.Enabled = false
 		updated, err := store.Update(ctx, orgID, next)
 		if err != nil {
 			t.Fatalf("Update (notify): %v", err)
 		}
 		AssertWriteReturnedStoredRow(t, "Update (notify)", updated, read(notifyID))
-		if updated.Audience != domain.NotifyAudienceTeam || updated.Name != next.Name || updated.Enabled {
-			t.Errorf("Update (notify) returned %+v; want the new name, the team audience, disabled", updated)
+		if updated.Name != next.Name || updated.Enabled {
+			t.Errorf("Update (notify) returned %+v; want the new name, disabled", updated)
 		}
 
 		priority, sortOrder, breaker, minAutonomy := 0.5, 0, 4, 0.0
 		for name, bad := range map[string]domain.EventHandler{
-			"no audience":    {Name: "x"},
-			"other audience": {Name: "x", Audience: "org"},
-			"no name":        {Audience: domain.NotifyAudienceCreator},
-			"rule fields":    {Name: "x", Audience: domain.NotifyAudienceCreator, DefaultPriority: &priority, SortOrder: &sortOrder},
-			"trigger fields": {Name: "x", Audience: domain.NotifyAudienceCreator, BlueprintID: bp, BreakerThreshold: &breaker, MinAutonomySuitability: &minAutonomy},
-			"unowned watch":  {Name: "x", Audience: domain.NotifyAudienceCreator, AppliesToUnowned: true},
+			"no name":        {},
+			"rule fields":    {Name: "x", DefaultPriority: &priority, SortOrder: &sortOrder},
+			"trigger fields": {Name: "x", BlueprintID: bp, BreakerThreshold: &breaker, MinAutonomySuitability: &minAutonomy},
+			"unowned watch":  {Name: "x", AppliesToUnowned: true},
 		} {
 			bad.ID, bad.Kind, bad.EventType = uuid.New().String(), domain.EventHandlerKindNotify, eventType
 			if _, err := store.Create(ctx, orgID, teamID, bad); err == nil {
 				t.Errorf("Create (notify, %s) succeeded; want it refused", name)
 			}
 		}
-		if _, err := store.Create(ctx, orgID, teamID, domain.EventHandler{
-			ID: uuid.New().String(), Kind: domain.EventHandlerKindRule, EventType: eventType,
-			Name: "r", DefaultPriority: &priority, SortOrder: &sortOrder, Audience: domain.NotifyAudienceTeam,
-		}); err == nil {
-			t.Error("Create (rule with an audience) succeeded; want it refused")
-		}
-
 		next.Enabled = true
 		if _, err := store.Update(ctx, orgID, next); err != nil {
 			t.Fatalf("re-enable the notify rule: %v", err)
@@ -718,77 +708,6 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		listed, total, err := store.List(ctx, orgID, db.EventHandlerListFilter{Kind: domain.EventHandlerKindNotify}, db.ListOpts{Limit: 50})
 		if err != nil || total != 1 || len(listed) != 1 || listed[0].ID != notifyID {
 			t.Errorf("List(kind=notify) = %+v (total %d), %v; want only the notify rule", listed, total, err)
-		}
-	})
-
-	t.Run("List_AudienceAndCreatorFilters", func(t *testing.T) {
-		store, orgID, teamID, seedBlueprints, _ := factory(t)
-		ctx := context.Background()
-		eventType := domain.EventGitHubPRCICheckFailed
-		notify := func(name, audience string) domain.EventHandler {
-			t.Helper()
-			h, err := store.Create(ctx, orgID, teamID, domain.EventHandler{
-				ID: uuid.New().String(), Kind: domain.EventHandlerKindNotify, EventType: eventType, Enabled: true,
-				Name: name, Audience: audience,
-			})
-			if err != nil {
-				t.Fatalf("Create (notify %s): %v", name, err)
-			}
-			return h
-		}
-		personal := notify("mine", domain.NotifyAudienceCreator)
-		team := notify("team", domain.NotifyAudienceTeam)
-		priority, sortOrder := 0.5, 0
-		rule, err := store.Create(ctx, orgID, teamID, domain.EventHandler{
-			ID: uuid.New().String(), Kind: domain.EventHandlerKindRule, EventType: eventType,
-			Name: "r", DefaultPriority: &priority, SortOrder: &sortOrder, Enabled: true,
-		})
-		if err != nil {
-			t.Fatalf("Create (rule): %v", err)
-		}
-		// Shipped rows have no creator; the creator filter leaves them out.
-		bps := seedBlueprints(t, "system-pr-review", "system-conflict-resolution", "system-ci-fix",
-			"system-jira-implement", "system-linear-implement", "system-fix-review-feedback",
-			"system-vulnerability-remediate")
-		if err := store.Seed(ctx, orgID, teamID, bps); err != nil {
-			t.Fatalf("Seed: %v", err)
-		}
-
-		ids := func(t *testing.T, f db.EventHandlerListFilter) []string {
-			t.Helper()
-			rows, total, err := store.List(ctx, orgID, f, db.ListOpts{Limit: 200})
-			if err != nil {
-				t.Fatalf("List(%+v): %v", f, err)
-			}
-			if _, count, err := store.List(ctx, orgID, f, db.ListOpts{CountOnly: true}); err != nil || count != total {
-				t.Errorf("List(%+v) count-only = %d, %v; want the paged total %d", f, count, err, total)
-			}
-			out := make([]string, len(rows))
-			for i, h := range rows {
-				out[i] = h.ID
-			}
-			slices.Sort(out)
-			return out
-		}
-		sorted := func(in ...string) []string { slices.Sort(in); return in }
-		for name, tc := range map[string]struct {
-			f    db.EventHandlerListFilter
-			want []string
-		}{
-			"creator audience": {db.EventHandlerListFilter{Audience: domain.NotifyAudienceCreator}, []string{personal.ID}},
-			"team audience":    {db.EventHandlerListFilter{Audience: domain.NotifyAudienceTeam}, []string{team.ID}},
-			// Every handler the creator authored, of any kind, and none shipped.
-			"creator": {db.EventHandlerListFilter{CreatorUserID: personal.CreatorUserID}, sorted(personal.ID, team.ID, rule.ID)},
-			"creator's personal notify rules": {
-				db.EventHandlerListFilter{Kind: domain.EventHandlerKindNotify, Audience: domain.NotifyAudienceCreator, CreatorUserID: personal.CreatorUserID},
-				[]string{personal.ID},
-			},
-			"another creator":      {db.EventHandlerListFilter{CreatorUserID: uuid.New().String()}, []string{}},
-			"an audience on rules": {db.EventHandlerListFilter{Kind: domain.EventHandlerKindRule, Audience: domain.NotifyAudienceTeam}, []string{}},
-		} {
-			if got := ids(t, tc.f); !slices.Equal(got, tc.want) {
-				t.Errorf("%s: List = %v, want %v", name, got, tc.want)
-			}
 		}
 	})
 

@@ -23,9 +23,6 @@ import (
 // rules tell, renders and writes the rows, and resolves them when the close
 // phase says so.
 
-// exampleUserID stands in for the creator a personal rule's Example tells.
-const exampleUserID = "00000000-0000-0000-0000-000000000001"
-
 // eventLabel is what an event row's failures are counted under: one label
 // for every event type, which is in the log line rather than the metric.
 const eventLabel = "event"
@@ -35,9 +32,6 @@ type EventRule struct {
 	HandlerID string
 	TeamID    string
 	Name      string
-	// Audience is domain.NotifyAudienceCreator or domain.NotifyAudienceTeam.
-	Audience      string
-	CreatorUserID string
 }
 
 // EventRaise is one event's notification: what happened, the entity it
@@ -64,9 +58,7 @@ type EventParams struct {
 	DedupKey  string `json:"dedup_key"`
 	// HandlerID is the rule the row names: the first the event matched for
 	// the row's audience.
-	HandlerID string `json:"handler_id"`
-	// TeamRule is whether that rule tells its team rather than its creator.
-	TeamRule     bool   `json:"team_rule"`
+	HandlerID    string `json:"handler_id"`
 	RuleName     string `json:"rule_name"`
 	EntitySource string `json:"entity_source"`
 	EntityKey    string `json:"entity_key"`
@@ -111,10 +103,8 @@ func Event(s EventSpec) *EventKind {
 	return &EventKind{render: s.Render, resolved: s.Resolved, example: s.Example, exampleClosedBy: s.ExampleClosedBy}
 }
 
-// Raise writes the event's rows: one for each matched team rule's team, and
-// one for each matched personal rule's creator who is still a member of the
-// rule's team and is not a member of a team whose rule matched. A failure is
-// logged and counted, and writes nothing.
+// Raise writes the event's rows: one for each team a matched rule is on. A
+// failure is logged and counted, and writes nothing.
 func (k *EventKind) Raise(ctx context.Context, orgID string, r EventRaise) {
 	if len(r.Rules) == 0 {
 		return
@@ -124,8 +114,8 @@ func (k *EventKind) Raise(ctx context.Context, orgID string, r EventRaise) {
 	}
 }
 
-// Examples renders the Example for a team row, a personal row, and local
-// mode's one user, under the conformance checks Examples applies to a kind.
+// Examples renders the Example for a team row and for local mode's one user,
+// under the conformance checks Examples applies to a kind.
 func (k *EventKind) Examples() []Example {
 	var out []Example
 	render := func(p EventParams, to Recipient, local bool) {
@@ -146,11 +136,8 @@ func (k *EventKind) Examples() []Example {
 			ex.Resolutions = append(ex.Resolutions, renderResolution(r, func(r Resolution) string { return k.resolved(p, r) }))
 		}
 	}
-	team, personal := k.example, k.example
-	team.TeamRule, personal.TeamRule = true, false
-	render(team, Recipient{Scope: domain.NotificationScopeTeam, Role: Members, TeamID: exampleTeamID}, false)
-	render(personal, Recipient{Scope: domain.NotificationScopeUser, UserID: exampleUserID}, false)
-	render(personal, Recipient{Scope: domain.NotificationScopeUser, UserID: runmode.LocalDefaultUserID}, true)
+	render(k.example, Recipient{Scope: domain.NotificationScopeTeam, Role: Members, TeamID: exampleTeamID}, false)
+	render(k.example, Recipient{Scope: domain.NotificationScopeUser, UserID: runmode.LocalDefaultUserID}, true)
 	return out
 }
 
@@ -300,7 +287,7 @@ func (e *engine) RaiseEvent(ctx context.Context, sk any, orgID string, raw any) 
 	for _, row := range rows {
 		p := EventParams{
 			EventID: r.EventID, EventType: r.EventType, EntityID: r.Entity.ID, DedupKey: r.DedupKey,
-			HandlerID: row.rule.HandlerID, TeamRule: row.rule.Audience == domain.NotifyAudienceTeam, RuleName: row.rule.Name,
+			HandlerID: row.rule.HandlerID, RuleName: row.rule.Name,
 			EntitySource: r.Entity.Source, EntityKey: r.Entity.SourceID, EntityTitle: r.Entity.Title, EntityURL: r.Entity.URL,
 		}
 		c := k.render(p, row.to)
@@ -373,67 +360,26 @@ func (e *engine) eventActions(ctx context.Context, lc domain.NotificationLifecyc
 	return renderActions(lc, to, kept, orgID, e.b.Local, check)
 }
 
-// eventRows is who the matched rules tell. A team rule tells its team's
-// members; a personal rule tells its creator while they are a member of the
-// rule's team, unless a matched team rule's team already reaches them. A
-// team's members are the inbox's own "is sent" answer, so an archived team
+// eventRows is who the matched rules tell: each rule's team's members, one
+// row per team, named by the first rule on it. A team's members are the
+// inbox's own "is sent" answer, so an archived team, or one with no members,
 // reaches nobody. Any failed read fails the whole answer: a partial one would
 // tell a person what the read could not show they may hear.
 func (e *engine) eventRows(ctx context.Context, orgID string, rules []EventRule) ([]eventRow, error) {
-	members := map[string][]string{}
-	membersOf := func(teamID string) ([]string, error) {
-		if got, ok := members[teamID]; ok {
-			return got, nil
-		}
-		got, err := e.b.Notifications.RecipientsSystem(ctx, orgID, Recipient{Scope: domain.NotificationScopeTeam, Role: Members, TeamID: teamID})
-		if err != nil {
-			return nil, err
-		}
-		members[teamID] = got
-		return got, nil
-	}
 	var rows []eventRow
-	has := func(to Recipient) bool {
-		return slices.ContainsFunc(rows, func(r eventRow) bool { return r.to == to })
-	}
-	var told []string // teams a team row reaches
 	for _, rule := range rules {
-		if rule.Audience != domain.NotifyAudienceTeam || rule.TeamID == "" {
+		if rule.TeamID == "" {
 			continue
-		}
-		ms, err := membersOf(rule.TeamID)
-		if err != nil {
-			return nil, err
 		}
 		to := Recipient{Scope: domain.NotificationScopeTeam, Role: Members, TeamID: rule.TeamID}
-		if len(ms) == 0 || has(to) {
+		if slices.ContainsFunc(rows, func(r eventRow) bool { return r.to == to }) {
 			continue
 		}
-		rows = append(rows, eventRow{to: to, rule: rule})
-		told = append(told, rule.TeamID)
-	}
-	for _, rule := range rules {
-		if rule.Audience != domain.NotifyAudienceCreator || rule.CreatorUserID == "" || rule.TeamID == "" {
-			continue
-		}
-		ms, err := membersOf(rule.TeamID)
+		ms, err := e.b.Notifications.RecipientsSystem(ctx, orgID, to)
 		if err != nil {
 			return nil, err
 		}
-		if !slices.Contains(ms, rule.CreatorUserID) {
-			continue
-		}
-		covered := false
-		for _, team := range told {
-			if ms, err := membersOf(team); err != nil {
-				return nil, err
-			} else if slices.Contains(ms, rule.CreatorUserID) {
-				covered = true
-				break
-			}
-		}
-		to := Recipient{Scope: domain.NotificationScopeUser, UserID: rule.CreatorUserID}
-		if covered || has(to) {
+		if len(ms) == 0 {
 			continue
 		}
 		rows = append(rows, eventRow{to: to, rule: rule})

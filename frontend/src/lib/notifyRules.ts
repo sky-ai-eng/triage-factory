@@ -3,7 +3,7 @@
 // callers render failures through httpErrorMessage, so an HttpError passes
 // through unchanged.
 
-import type { EventHandler, NotifyAudience } from '../types'
+import type { EventHandler } from '../types'
 import { apiFetch, apiJSON } from './apiClient'
 import type { ListRequest } from './apiClient'
 import { handlersBase, notifyCreatePath } from './scope'
@@ -11,7 +11,6 @@ import { handlersBase, notifyCreatePath } from './scope'
 export interface NotifyRuleCreate {
   event_type: string
   name: string
-  audience: NotifyAudience
   // team_id is the acting team; '' lets the server resolve the sole team.
   team_id: string
   scope_predicate?: Record<string, unknown>
@@ -21,7 +20,6 @@ export interface NotifyRuleCreate {
 // clears the filter.
 export interface NotifyRulePatch {
   name?: string
-  audience?: NotifyAudience
   enabled?: boolean
   scope_predicate?: Record<string, unknown> | null
 }
@@ -35,17 +33,9 @@ export function notifyRulesListPath(): string {
   return `${handlersBase()}/list`
 }
 
-/** The list body for a person's own personal rules: the notify rules telling
- *  their creator, authored by userId. */
-export function personalNotifyRulesFilter(userId: string): ListRequest {
-  return { kind: 'notify', audience: 'creator', creator_user_id: userId }
-}
-
-/** The list body for the team rules of the caller's teams. Another member's
- *  personal rule is readable too, but it tells only its creator, so neither
- *  read lists it. */
-export function teamNotifyRulesFilter(): ListRequest {
-  return { kind: 'notify', audience: 'team' }
+/** The list body for the notify rules of the caller's teams. */
+export function notifyRulesFilter(): ListRequest {
+  return { kind: 'notify' }
 }
 
 /** getNotifyRule reads one handler by id, for a link to a rule that need not

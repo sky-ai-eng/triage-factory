@@ -25,7 +25,7 @@ So nothing answers: _this team's configuration has been broken for three weeks �
 
 Making notifications a third `event_handlers` kind (beside rules and triggers) was considered and rejected for V1. It would put every condition into the events catalog — the GitHub App becoming unusable, a Linear team becoming unreadable, a Jira mirror failing — although none of them is something an automation should run on, the set cannot be predicted ahead of time, and the catalog would change every time a new consumer appears. It also meets constraints in the router: entity-less events are dropped (`routableEntity` → `DispositionTasklessUnroutable`), `system:*` types never reach the durable queue, handlers are team-only (`event_handlers.team_id NOT NULL`), handlers are forward-only, and each producer would have to detect its own transitions to avoid writing an event per poll cycle.
 
-Event-driven notifications remain the plan for user-configured rules on events that already exist for automation ("notify me when CI fails on my PR"). They write into the same tables with `origin = 'event'`; see **Event notifications**.
+Event-driven notifications remain the plan for user-configured rules on events that already exist for automation ("tell the team when CI fails on a pull request"). They write into the same tables with `origin = 'event'`; see **Event notifications**.
 
 ## Vocabulary
 
@@ -416,7 +416,7 @@ Jira configuration names values Jira can take away. Detection is `internal/jira/
 
 ## Event notifications
 
-People configure notifications on events that already exist for automation: "notify me when CI fails on my PR", "tell the team when a review requests changes". A **notify rule** is a third kind of `event_handlers`, beside rules and triggers, and it writes into the same `notifications` tables with `origin = 'event'`. Nothing is added to the events catalog for it, and TF's own health conditions stay the code-defined kinds above.
+People configure notifications on events that already exist for automation: "tell the team when CI fails on a pull request", "tell the team when a review requests changes". A **notify rule** is a third kind of `event_handlers`, beside rules and triggers, and it writes into the same `notifications` tables with `origin = 'event'`. Nothing is added to the events catalog for it, and TF's own health conditions stay the code-defined kinds above.
 
 ### The rule
 
@@ -426,30 +426,18 @@ People configure notifications on events that already exist for automation: "not
 | `name`            | Required. Named in the notification's body, so a person can tell which rule told them.                        |
 | `event_type`      | A GitHub, Jira or Linear event. Another source is refused (422 `INVALID_FIELD`); see **Matching**.            |
 | `scope_predicate` | The same predicate schema, editor and checks as a task rule's.                                                |
-| `audience`        | `creator` (a personal rule, the default) or `team`. Stored as `event_handlers.notify_audience`.               |
 | `enabled`         | Defaults to true.                                                                                             |
 | `team_id`         | The owning team, as for every handler.                                                                        |
 
-A notify rule has no priority, sort order, blueprint or `applies_to_unowned`, and TF ships none: a shipped notify rule would badge every member of every team on install. Creation is `POST /api/event-handlers/notify`; reads, `PATCH` and `DELETE` are the existing handler routes, with a notify body schema (`name`, `enabled`, `scope_predicate`, `audience`). `scope_predicate: null` clears the filter; the other three always hold a value, so a `null` for one is a 400 naming it.
+A notify rule has no priority, sort order, blueprint or `applies_to_unowned`, and TF ships none: a shipped notify rule would badge every member of every team on install. Creation is `POST /api/event-handlers/notify`; reads, `PATCH` and `DELETE` are the existing handler routes, with a notify body schema (`name`, `enabled`, `scope_predicate`). `scope_predicate: null` clears the filter; the other two always hold a value, so a `null` for either is a 400 naming it. `creator_user_id` is kept on the row as attribution and decides nothing.
 
 ### Audience
 
-- **`creator`** is one user-scope row for the rule's creator, written only while they are a member of the rule's team. A personal rule is a team handler, so the team's tracked set already limits what it can match, and a person who leaves the team stops being told.
-- **`team`** is one team-scope row for the team's members.
-- **One person, one row.** When one event matches a team rule and a personal rule, the personal row is not written if its creator is a member of the team whose rule matched: the team row already reaches them. Two rules for the same audience are one row (see **Coalescing**), so a person in two personal rules and a team rule on one event sees one notification.
-- **Local mode** writes one row for the one user, whichever rules matched.
-
-The membership read uses the inbox's own "is sent" predicate (`RecipientsSystem`), so an archived team's rules reach nobody. A failed read writes nothing for the event.
+A rule tells its team's members: every matched rule yields one team-scope row for its team, and two matched rules of one team are one row (see **Coalescing**). Local mode writes one row for the one user, whichever rules matched. The membership read uses the inbox's own "is sent" predicate (`RecipientsSystem`), so an archived team's rules reach nobody, and a failed read writes nothing for the event.
 
 ### Who may write
 
-| Write                                                          | Gate                               |
-| -------------------------------------------------------------- | ---------------------------------- |
-| Create a personal rule                                         | Team write, as a task rule         |
-| Edit or delete a personal rule                                 | Its creator, or a team admin       |
-| Create, edit or delete a team rule, or move a rule to or from `team` | Team admin                   |
-
-A rule whose audience is the whole team badges every member, so it is a team admin's decision. Team members can read each other's personal rules through the API, as they can every handler of their team; the editor lists only the caller's own and the team's, as two reads of `POST /api/event-handlers/list` narrowed by its `audience` (`creator` or `team`) and `creator_user_id` filters.
+Creating, changing and deleting a notify rule each need team write on the rule's team, as every handler write does, and nothing more. The event_handlers RLS policies hold Postgres to the same rule.
 
 ### Matching
 
@@ -464,7 +452,7 @@ A notification never fails routing. The event's routing obligation is its tasks.
 - **Kind** is the event type and **key** is `<entity_id>/<dedup_key>`: one open occurrence per (event type, entity, dedup key) per audience, the same triple a task dedups on. The rule is not part of the key, because two rules that match one event describe one thing to be told. The first matching rule for the audience is named in the copy.
 - **Lifecycle.** An event type that a typed close relation closes (`closeRelations` in `internal/routing`, the non-terminating entries) opens a **condition**: CI check failed, review requested, changes requested, and Jira and Linear assigned and available. Every other type posts a **notice**, which expires `DefaultNoticeTTL` after its last event.
 - **A recurrence** while a condition is open bumps it quietly: the condition is still true. A recurrence of a notice bumps it and **resurfaces** it (`escalated_at` moves, so it is unread and undismissed again, and the ping is sent): a second comment on a pull request is news the person asked for.
-- **Priority** is `high` and every row is dismissible. `urgent` means work has stopped for the audience, which no catalog event says; a rule someone wrote in order to be told is what the badge is for.
+- **Priority** is `high` and every row is dismissible. `urgent` means work has stopped for the audience, which no catalog event says; a rule someone wrote so the team is told is what the badge is for.
 - **A raise never resolves an audience.** Unlike `Set`, an event names only the rules its own metadata matched, so a second event on the same key that a team rule's predicate excludes does not resolve that team's row.
 
 ### Columns
@@ -484,9 +472,9 @@ A notification never fails routing. The event's routing obligation is its tasks.
 One rendering for every event type (`kinds.Event`):
 
 - **Title:** the catalog label and the entity's key, e.g. `CI Check Failed: acme/widgets#18`.
-- **Body:** the entity's title, then `From your rule "…"` or `From the team rule "…"`.
+- **Body:** the entity's title, then `From the team rule "…"`.
 - **Resolution:** the event whose routing resolved the row, e.g. `CI Check Passed on acme/widgets#18.`, or `Issue Assigned again on SKY-123.` when an event of the row's own type closed it (a reassignment); `acme/widgets#18 is no longer open.` when the closed-entity sweep or the poll's close obligation resolved it; and the source turned off for `ClearSource`. The close phase passes `ResolveEvents` the event type it is routing for this, and none for the close obligation, which stands in for a close that was lost.
-- **Actions:** a link to the entity on its source (an external link, so the host check applies), and a link to the rule: "Edit your rule" on a personal row, which is how a person stops being told until per-person preferences exist, and "Open the team rule" on a team row. The entity's link is data rather than code, so an event row whose link is refused (no stored URL, a host the org no longer configures) is written with its other actions instead of failing the raise. An unreadable org setting is not a refused link: the host check could not run, and the raise fails as any unreadable read does.
+- **Actions:** a link to the entity on its source (an external link, so the host check applies), and "Open the team rule", a link to the rule. The entity's link is data rather than code, so an event row whose link is refused (no stored URL, a host the org no longer configures) is written with its other actions instead of failing the raise. An unreadable org setting is not a refused link: the host check could not run, and the raise fails as any unreadable read does.
 
 No type gets copy of its own in this phase. Where two open rows on one entity share a title (one per requested reviewer, one per label), the entity is where the reader acts on either, and a type that needs more than the label gets a renderer of its own when someone asks for it.
 
@@ -496,11 +484,11 @@ A rule says nothing about an event that already happened. Creating, enabling or 
 
 ### The editor
 
-Notify rules live on the triage page beside task rules: a **Notify rules** panel lists the caller's personal rules and the team's rules, each with an enabled switch, and opens an editor with the event picker and predicate editor task rules use, plus the audience (offered as "Just me" or "Everyone on the team"; the second only to a team admin). `Routes.NotifyRule(id)` is `/triage?notify_rule=<id>`, which opens that rule.
+Notify rules live on the triage page beside task rules: a **Notify rules** panel lists the notify rules of the caller's teams, one paged read of `POST /api/event-handlers/list` with `kind: "notify"`, each with an enabled switch, and opens an editor with the event picker and predicate editor task rules use. Anyone who can see the panel's team can write its rules, as on the task rules panel; a write the server refuses is shown through the shared error path. `Routes.NotifyRule(id)` is `/triage?notify_rule=<id>`, which opens that rule.
 
 ### Not in scope
 
-Org-scoped handlers; out-of-app delivery, which is a later channel on the same handler; a per-type renderer; muting a rule per person.
+Org-scoped handlers; out-of-app delivery, which is a later channel on the same handler; a per-type renderer; muting a rule per person; a rule that tells one person, which a team per person is expected to cover.
 
 ## Later
 
