@@ -366,6 +366,29 @@ type BlueprintStore interface {
 	// request-facing paths).
 	Get(ctx context.Context, orgID string, id string) (*domain.Blueprint, error)
 
+	// GetForShare and GetForUpdate are Get inside a write transaction, holding
+	// the blueprint until the transaction ends. A write that makes something
+	// reference the blueprint takes GetForShare, and a write that retires it
+	// takes GetForUpdate before it reads or detaches what references it, so
+	// the two run one after the other and the second sees what the first
+	// committed: a reference written first is there for the retire to detach,
+	// and a blueprint retired first reads as absent.
+	//
+	// Postgres locks the row FOR SHARE or FOR UPDATE, so two writes that only
+	// reference the blueprint do not wait for one another. A lock that waited
+	// on a retire reads the row as it committed, so a retired blueprint answers
+	// (nil, nil). Row-level security applies the blueprints UPDATE policy to a
+	// locking read as well as the SELECT one, so a blueprint of a team the
+	// caller may only read also answers (nil, nil). SQLite takes nothing: its
+	// write transaction begins IMMEDIATE and already holds the database's
+	// write lock.
+	//
+	// Both are refused outside a write transaction: outside any transaction
+	// nothing would hold the blueprint past the read, and a read transaction
+	// holds nothing a writer waits for.
+	GetForShare(ctx context.Context, orgID string, id string) (*domain.Blueprint, error)
+	GetForUpdate(ctx context.Context, orgID string, id string) (*domain.Blueprint, error)
+
 	// Create inserts a new blueprint (user or imported source) owned by
 	// teamID. Caller-provided ID. The Postgres impl binds teamID directly
 	// (it satisfies the team-membership RLS); the SQLite impl ignores it.

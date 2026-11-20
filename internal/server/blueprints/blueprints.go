@@ -348,8 +348,8 @@ func (h *Handler) handleBlueprintUpdate(w http.ResponseWriter, r *http.Request) 
 //     watch and keeps making tasks. The prompt head-delete path detaches the
 //     same way.
 //
-// 404 by re-read (Get filters soft-deleted) when the blueprint is missing or
-// already deleted.
+// 404 by re-read (GetForUpdate filters soft-deleted) when the blueprint is
+// missing or already deleted.
 func (h *Handler) handleBlueprintDelete(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
@@ -368,7 +368,11 @@ func (h *Handler) handleBlueprintDelete(w http.ResponseWriter, r *http.Request) 
 
 	var found bool
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		existing, e := tx.Blueprints.Get(r.Context(), orgID, id)
+		// Held until commit, before the detach below reads which handlers
+		// reference the blueprint: a handler write that attaches it holds it
+		// too (Blueprints.GetForShare), so a handler written before this
+		// delete is detached by it, and one written after answers 404.
+		existing, e := tx.Blueprints.GetForUpdate(r.Context(), orgID, id)
 		if e != nil || existing == nil {
 			return e
 		}
@@ -796,9 +800,9 @@ func (h *Handler) handleBlueprintMerge(w http.ResponseWriter, r *http.Request) {
 		// blueprint. Unreachable from the canvas (you can only connect a tail
 		// into an entry no handler references), but the endpoint is
 		// third-party-callable, so it refuses here.
-		// TODO(TFAC-1511): neither this check nor the handler writes lock the
-		// source, so a handler write that overlaps the merge can leave a handler
-		// on the retired source.
+		// TODO(TFAC-1511): this check does not lock the source, so in Postgres
+		// a handler write that holds the source after the check and before
+		// MergeInto retires it leaves a handler on the retired source.
 		triggers, e := tx.EventHandlers.ListForBlueprint(r.Context(), orgID, req.SourceBlueprintID)
 		if e != nil {
 			return e
@@ -1070,9 +1074,9 @@ func (h *Handler) handleBlueprintReconnect(w http.ResponseWriter, r *http.Reques
 		// No event handler may reference the target, as for a merge's source:
 		// the absorb retires it, and a handler on it would be left referencing a
 		// retired blueprint.
-		// TODO(TFAC-1511): neither this check nor the handler writes lock the
-		// target, so a handler write that overlaps the reconnect can leave a
-		// handler on the retired target.
+		// TODO(TFAC-1511): this check does not lock the target, so in Postgres
+		// a handler write that holds the target after the check and before
+		// MergeInto retires it leaves a handler on the retired target.
 		triggers, e := tx.EventHandlers.ListForBlueprint(r.Context(), orgID, req.TargetBlueprintID)
 		if e != nil {
 			return e

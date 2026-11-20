@@ -373,6 +373,20 @@ func (h *Handler) handlePromptDelete(w http.ResponseWriter, r *http.Request) {
 			return e
 		}
 		if owned {
+			// Held until commit, before its steps and handlers are read: a
+			// handler write that attaches the owner holds it too
+			// (Blueprints.GetForShare), so a handler written before a delete
+			// that retires the owner is detached by it, and one written after
+			// answers 404. An owner retired while this waited for it means
+			// another write moved or deleted the prompt's chain, so the delete
+			// answers 409 rather than act on a chain it did not read.
+			owner, e := tx.Blueprints.GetForUpdate(r.Context(), orgID, ownerID)
+			if e != nil {
+				return e
+			}
+			if owner == nil {
+				return errOwnerChanged
+			}
 			steps, e := tx.Blueprints.ListSteps(r.Context(), orgID, ownerID)
 			if e != nil {
 				return e
@@ -431,6 +445,13 @@ func (h *Handler) handlePromptDelete(w http.ResponseWriter, r *http.Request) {
 		status, de = SoftDeleteBySource(r.Context(), tx, orgID, prompt)
 		return de
 	}); err != nil {
+		if errors.Is(err, errOwnerChanged) {
+			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+				Reason:  httpx.ReasonConflict,
+				Message: "the blueprint this prompt belongs to was deleted or merged while this delete was made: read the prompt again and retry",
+			})
+			return
+		}
 		httpx.InternalError(w, "prompts", err)
 		return
 	}
@@ -440,6 +461,10 @@ func (h *Handler) handlePromptDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"status": status, "orphaned_blueprint": orphaned})
 }
+
+// errOwnerChanged is a prompt delete whose owning blueprint was retired by
+// another write while the delete waited to hold it.
+var errOwnerChanged = errors.New("the prompt's blueprint was retired during the delete")
 
 // indexOfStep returns the position of the step whose prompt is promptID, or -1.
 func indexOfStep(steps []domain.BlueprintStep, promptID string) int {

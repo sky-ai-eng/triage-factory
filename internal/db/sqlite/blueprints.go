@@ -135,6 +135,35 @@ func (s *blueprintStore) Get(ctx context.Context, orgID string, id string) (*dom
 	return &b, nil
 }
 
+// GetForShare and GetForUpdate are Get once the caller is known to hold the
+// database's write lock, which a write transaction takes when it begins
+// (BEGIN IMMEDIATE): that lock already orders the caller against every other
+// writer. A read transaction holds no such lock, and neither does a statement
+// outside a transaction, so both are refused, as the Postgres impl refuses
+// them.
+func (s *blueprintStore) GetForShare(ctx context.Context, orgID string, id string) (*domain.Blueprint, error) {
+	return s.getLocked(ctx, orgID, id)
+}
+
+func (s *blueprintStore) GetForUpdate(ctx context.Context, orgID string, id string) (*domain.Blueprint, error) {
+	return s.getLocked(ctx, orgID, id)
+}
+
+func (s *blueprintStore) getLocked(ctx context.Context, orgID, id string) (*domain.Blueprint, error) {
+	tx, ok := s.q.(*sql.Tx)
+	if !ok {
+		return nil, errors.New("sqlite: a locking blueprint read needs a transaction's stores, whose transaction serializes the caller")
+	}
+	var readOnly bool
+	if err := tx.QueryRowContext(ctx, `PRAGMA query_only`).Scan(&readOnly); err != nil {
+		return nil, fmt.Errorf("sqlite: read query_only: %w", err)
+	}
+	if readOnly {
+		return nil, errors.New("sqlite: a locking blueprint read needs a write transaction; a read transaction holds no lock")
+	}
+	return s.Get(ctx, orgID, id)
+}
+
 func (s *blueprintStore) GetSystem(ctx context.Context, orgID string, id string) (*domain.Blueprint, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err

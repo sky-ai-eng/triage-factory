@@ -229,11 +229,9 @@ func (s *eventHandlerStore) Update(ctx context.Context, orgID string, h domain.E
 	// different one only while it is live. The guard on blueprint_id is what
 	// holds under READ COMMITTED: an UPDATE that waited on a concurrent
 	// detach re-checks its WHERE against the detached row, while the EXISTS
-	// still reads the snapshot the statement began with.
-	//
-	// TODO(TFAC-1517): that snapshot is also why the EXISTS passes for a
-	// blueprint whose delete is still in flight, so attaching it can leave the
-	// handler on a deleted blueprint once the delete commits.
+	// still reads the snapshot the statement began with, where a blueprint
+	// whose delete has not committed is live. That is why a caller attaching
+	// a blueprint holds it first (see the interface).
 	attaches := h.BlueprintID != "" && h.BlueprintID != cur.BlueprintID
 	updated, err := scanUpdatedEventHandlerPG(s.app.QueryRowContext(ctx, `
 		UPDATE event_handlers
