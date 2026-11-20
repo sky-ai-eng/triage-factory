@@ -123,16 +123,28 @@ groups:
       # fire it: refusals have to keep arriving, at least one every five
       # minutes for 15 minutes, which a burst does not and Slack's deliveries
       # do while it is delivering. Slack delivering less often than that is
-      # not caught until its deliveries come closer together. Grouped by app
-      # and not by pod, because what is in front of control is usually in
-      # front of every pod, and the sum gives the rule all of Slack's
-      # deliveries to judge. A warning: the cause is outside TF.
+      # not caught until its deliveries come closer together. Once firing, it
+      # keeps firing for 15 minutes after the refusals stop, so a pause in
+      # Slack's deliveries during an outage does not resolve it. Grouped by
+      # app and not by pod, because what is in front of control is usually in
+      # front of every pod, and the sum counts every pod's deliveries. The
+      # verified side has the first-sample branch: a pod's first verified
+      # delivery since it started is the series' first sample, which has no
+      # rate. A warning: the cause is outside TF.
       - alert: SlackDeploymentDeliveriesMalformed
         expr: |
           sum by (app_id) (rate(tf_slack_webhook_deployment_deliveries_total{signature="malformed"}[5m])) > 0
           unless on (app_id)
-          sum by (app_id) (rate(tf_slack_webhook_deployment_deliveries_total{signature="verified"}[5m])) > 0
+          (
+            sum by (app_id) (rate(tf_slack_webhook_deployment_deliveries_total{signature="verified"}[5m])) > 0
+            or
+            sum by (app_id) (
+              tf_slack_webhook_deployment_deliveries_total{signature="verified"}
+              unless last_over_time(tf_slack_webhook_deployment_deliveries_total{signature="verified"}[5m] offset 5m)
+            ) > 0
+          )
         for: 15m
+        keep_firing_for: 15m
         labels:
           severity: warning
         annotations:
@@ -146,8 +158,10 @@ groups:
             header. That refuses every delivery, and once more than 95% of the
             app's deliveries fail within an hour, Slack turns the app's event
             subscriptions off. Make it pass both headers to control unchanged.
-            Requests that are not from Slack, such as a scanner's, also count,
-            and one delivery from Slack that verifies clears the alert.
+            Requests that are not from Slack, such as a scanner's, also count;
+            deliveries under signature="verified" mean the headers get through.
+            The alert keeps firing for 15 minutes after the refusals stop, and
+            a pause in Slack's deliveries does not clear it.
 
       # Slack sent app_rate_limited: the app went past the Events API's
       # 30,000 events per workspace per hour, and Slack drops the deliveries
