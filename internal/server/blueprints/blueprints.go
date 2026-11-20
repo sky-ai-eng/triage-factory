@@ -806,6 +806,9 @@ func (h *Handler) handleBlueprintMerge(w http.ResponseWriter, r *http.Request) {
 		// would be left referencing a retired blueprint. Unreachable from the
 		// canvas (you can only connect a tail into a trigger-less entry), but
 		// the endpoint is third-party-callable, so it refuses here.
+		// TODO(TFAC-1511): neither this check nor the trigger writes lock the
+		// source, so a trigger write that overlaps the merge can leave a trigger
+		// on the retired source.
 		triggers, e := tx.EventHandlers.ListForBlueprint(r.Context(), orgID, req.SourceBlueprintID)
 		if e != nil {
 			return e
@@ -1077,6 +1080,9 @@ func (h *Handler) handleBlueprintReconnect(w http.ResponseWriter, r *http.Reques
 		// Target must be trigger-less to be absorbed, as a merge's source must:
 		// the absorb retires it, and a trigger on it would be left referencing a
 		// retired blueprint.
+		// TODO(TFAC-1511): neither this check nor the trigger writes lock the
+		// target, so a trigger write that overlaps the reconnect can leave a
+		// trigger on the retired target.
 		triggers, e := tx.EventHandlers.ListForBlueprint(r.Context(), orgID, req.TargetBlueprintID)
 		if e != nil {
 			return e
