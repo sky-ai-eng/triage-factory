@@ -158,7 +158,7 @@ func RemoveClaudeProjectDir(cwd string) {
 	if err != nil {
 		return
 	}
-	if !strings.HasPrefix(resolved, tmpResolved) {
+	if !pathUnder(resolved, tmpResolved) {
 		worktreeLog.Warn("refusing to clean project dir for non-tmp cwd", "cwd", resolved)
 		return
 	}
@@ -171,4 +171,12 @@ func RemoveClaudeProjectDir(cwd string) {
 	if err := os.RemoveAll(projectDir); err != nil {
 		worktreeLog.Warn("remove ghost project dir", "dir", projectDir, "error", err)
 	}
+}
+
+// pathUnder reports whether the clean absolute path p is strictly inside dir.
+// A string prefix test is not enough: it admits a sibling such as /tmpwork
+// for dir /tmp.
+func pathUnder(p, dir string) bool {
+	rel, err := filepath.Rel(dir, p)
+	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
