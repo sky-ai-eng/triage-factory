@@ -357,36 +357,40 @@ go_group() {
   # scripts, prompt blocks, seeds and SQL break under CRLF. .gitattributes
   # checks text out as LF, but it can't fix a file already committed with
   # CRLF, or a working tree checked out before it took effect. So every
-  # tracked file, embedded or not, is checked in the index and in the working
-  # tree. Git reads a file holding a lone CR as binary (-text), so one is not
-  # caught.
+  # tracked file, embedded or not, is searched for a CR in the index and in
+  # the working tree. It is a search because `git ls-files --eol` reads a file
+  # holding any lone CR as binary and reports no line endings for it, and a
+  # CRLF file converted twice ends its lines CR CR LF. -I skips a file that
+  # .gitattributes marks binary, or that holds a NUL in its first 8000 bytes.
+  # git grep exits 1 when nothing matches.
   blue "line-ending guard"
-  local eol_info eol_offenders
-  if ! eol_info=$(git ls-files --eol); then
-    red "line-ending guard: 'git ls-files --eol' failed — line endings NOT verified"
-    rc=1
-  elif [[ -z "$eol_info" ]]; then
-    red "line-ending guard: 'git ls-files --eol' listed no files — line endings NOT verified"
+  local cr_index cr_worktree eol_rc=0
+  cr_index=$(git grep --cached -I -F -l -e $'\r')
+  status=$?
+  if (( status > 1 )); then
+    red "line-ending guard: 'git grep --cached' exited $status — the index is NOT verified (see the error above)"
+    eol_rc=1
+  elif [[ -n "$cr_index" ]]; then
+    red "line-ending guard: carriage returns in the index:"
+    echo "$cr_index"
+    red "Run 'git add --renormalize -- <file>' and commit, which converts CRLF to LF. Remove a CR that no LF follows by hand, and mark a binary file binary in .gitattributes."
+    eol_rc=1
+  fi
+  cr_worktree=$(git grep -I -F -l -e $'\r')
+  status=$?
+  if (( status > 1 )); then
+    red "line-ending guard: 'git grep' exited $status — the working tree is NOT verified (see the error above)"
+    eol_rc=1
+  elif [[ -n "$cr_worktree" ]]; then
+    red "line-ending guard: carriage returns in the working tree:"
+    echo "$cr_worktree"
+    red "A plain checkout leaves these as they are. Commit or stash your changes, delete each file, and run 'git checkout -- <file>'. For every tracked file at once: git ls-files -z | xargs -0 rm -f && git checkout -- ."
+    eol_rc=1
+  fi
+  if (( eol_rc )); then
     rc=1
   else
-    # Each line is "i/<eol> w/<eol> attr/<attrs>\t<path>"; attrs can hold
-    # spaces, and a path holding a tab is quoted, so split on the tab first.
-    eol_offenders=$(printf '%s\n' "$eol_info" | awk -F '\t' '
-      { split($1, info, " ") }
-      info[1] ~ /^i\/(crlf|mixed)$/ || info[2] ~ /^w\/(crlf|mixed)$/ {
-        print info[1] " " info[2] "\t" $2 }')
-    status=$?
-    if (( status != 0 )); then
-      red "line-ending guard: scan exited $status — line endings NOT verified (see the error above)"
-      rc=1
-    elif [[ -n "$eol_offenders" ]]; then
-      red "line-ending guard: tracked files with CRLF line endings, in the index (i/) or the working tree (w/):"
-      echo "$eol_offenders"
-      red "Fix i/ with 'git add --renormalize .' and commit. Fix w/ by deleting the file and running 'git checkout -- <file>'; a plain checkout leaves it as it is."
-      rc=1
-    else
-      green "line-ending guard OK"
-    fi
+    green "line-ending guard OK"
   fi
 
   return $rc
