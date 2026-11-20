@@ -7,8 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/google/uuid"
-
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -16,8 +14,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// A notify rule is created with its defaults (a personal, enabled rule), is
-// listed under kind=notify, and PATCHes its own fields.
+// A notify rule is created enabled, is listed under kind=notify, and PATCHes
+// its own fields.
 func TestHandleEventHandlerCreateNotify_HappyPathAndPatch(t *testing.T) {
 	s := newTestServer(t)
 	configureEventSources(t, s)
@@ -32,16 +30,16 @@ func TestHandleEventHandlerCreateNotify_HappyPathAndPatch(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if got.Kind != domain.EventHandlerKindNotify || got.Audience != domain.NotifyAudienceCreator || !got.Enabled ||
+	if got.Kind != domain.EventHandlerKindNotify || !got.Enabled ||
 		got.Name != "CI failed on my PR" || got.CreatorUserID != runmode.LocalDefaultUserID || got.DefaultPriority != nil {
-		t.Fatalf("created %+v; want an enabled personal notify rule named by its trimmed name, naming its creator", got)
+		t.Fatalf("created %+v; want an enabled notify rule named by its trimmed name, naming its creator", got)
 	}
 	if items := listEventHandlers(t, s, domain.EventHandlerKindNotify); len(items) != 1 || items[0]["id"] != got.ID {
 		t.Errorf("list kind=notify = %v; want the one rule", items)
 	}
 
 	rec = doJSON(t, s, http.MethodPatch, "/api/event-handlers/"+got.ID, map[string]any{
-		"name": "CI failed on the team's PRs", "audience": "team", "enabled": false,
+		"name": "CI failed on the team's PRs", "enabled": false,
 		"scope_predicate": map[string]any{"check_name": "build"},
 	})
 	if rec.Code != http.StatusOK {
@@ -49,9 +47,9 @@ func TestHandleEventHandlerCreateNotify_HappyPathAndPatch(t *testing.T) {
 	}
 	var patched domain.EventHandler
 	_ = json.Unmarshal(rec.Body.Bytes(), &patched)
-	if patched.Audience != domain.NotifyAudienceTeam || patched.Enabled || patched.Name != "CI failed on the team's PRs" ||
+	if patched.Enabled || patched.Name != "CI failed on the team's PRs" ||
 		patched.ScopePredicateJSON == nil || !strings.Contains(*patched.ScopePredicateJSON, "build") {
-		t.Errorf("patched %+v; want the new name, audience, filter and enabled flag", patched)
+		t.Errorf("patched %+v; want the new name, filter and enabled flag", patched)
 	}
 
 	// Another kind's fields are unknown on a notify rule's PATCH, and a field
@@ -61,13 +59,13 @@ func TestHandleEventHandlerCreateNotify_HappyPathAndPatch(t *testing.T) {
 			t.Errorf("patch %v: %d; want 400", body, rec.Code)
 		}
 	}
-	for _, field := range []string{"name", "audience", "enabled"} {
+	for _, field := range []string{"name", "enabled"} {
 		rec := doJSON(t, s, http.MethodPatch, "/api/event-handlers/"+got.ID, map[string]any{field: nil})
 		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), `"field":"`+field+`"`) {
 			t.Errorf("patch %s: null: %d %s; want 400 naming %s", field, rec.Code, rec.Body.String(), field)
 		}
 	}
-	if rec := doJSON(t, s, http.MethodGet, "/api/event-handlers/"+got.ID, nil); !strings.Contains(rec.Body.String(), `"audience":"team"`) {
+	if rec := doJSON(t, s, http.MethodGet, "/api/event-handlers/"+got.ID, nil); !strings.Contains(rec.Body.String(), `"name":"CI failed on the team's PRs"`) {
 		t.Errorf("after the refused nulls: %s; want the rule unchanged", rec.Body.String())
 	}
 	// A notify rule carries no sort order and cannot be promoted.
@@ -77,9 +75,9 @@ func TestHandleEventHandlerCreateNotify_HappyPathAndPatch(t *testing.T) {
 	}
 }
 
-// Bad create bodies fail, each with the field named: a missing name, an
-// audience outside the two, another kind's fields, and an event type whose
-// source has no strict tracked-set gate.
+// Bad create bodies fail, each with the field named: a missing name, another
+// kind's fields, and an event type whose source has no strict tracked-set
+// gate.
 func TestHandleEventHandlerCreateNotify_Refusals(t *testing.T) {
 	s := newTestServer(t)
 	configureEventSources(t, s)
@@ -99,7 +97,6 @@ func TestHandleEventHandlerCreateNotify_Refusals(t *testing.T) {
 		field  string
 	}{
 		{"no name", map[string]any{"event_type": domain.EventGitHubPRCICheckFailed}, http.StatusBadRequest, "name"},
-		{"bad audience", map[string]any{"event_type": domain.EventGitHubPRCICheckFailed, "name": "x", "audience": "org"}, http.StatusBadRequest, "audience"},
 		{"rule field", map[string]any{"event_type": domain.EventGitHubPRCICheckFailed, "name": "x", "default_priority": 0.5}, http.StatusBadRequest, "default_priority"},
 		{"watch flag", map[string]any{"event_type": domain.EventGitHubPRCICheckFailed, "name": "x", "applies_to_unowned": true}, http.StatusBadRequest, "applies_to_unowned"},
 		{"slack event", map[string]any{"event_type": domain.EventSlackMessage, "name": "x"}, http.StatusUnprocessableEntity, "event_type"},
@@ -112,38 +109,62 @@ func TestHandleEventHandlerCreateNotify_Refusals(t *testing.T) {
 	}
 }
 
-// TestNotifyRules_WriteGate_Postgres: a personal rule is a team writer's to
-// create and its creator's or a team admin's to change, a team-wide rule is a
-// team admin's, and RLS holds the store to the same rule without the server's gate.
-func TestNotifyRules_WriteGate_Postgres(t *testing.T) {
+// A notify rule tells its team and has no audience to name, so audience in a
+// create or a PATCH body is an unknown field: a 400 naming it.
+func TestNotifyRules_RefuseAudience(t *testing.T) {
+	s := newTestServer(t)
+	configureEventSources(t, s)
+	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/notify", map[string]any{
+		"event_type": domain.EventGitHubPRCICheckFailed, "name": "x", "audience": "team",
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("create with audience: %d %s; want 400", rec.Code, rec.Body.String())
+	}
+	assertFieldError(t, rec, "audience")
+
+	rec = doJSON(t, s, http.MethodPost, "/api/event-handlers/notify", map[string]any{
+		"event_type": domain.EventGitHubPRCICheckFailed, "name": "x",
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	var created domain.EventHandler
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	rec = doJSON(t, s, http.MethodPatch, "/api/event-handlers/"+created.ID, map[string]any{"audience": "creator"})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("patch with audience: %d %s; want 400", rec.Code, rec.Body.String())
+	}
+	assertFieldError(t, rec, "audience")
+}
+
+// TestNotifyRules_TeamWriteGate_Postgres: a notify rule is gated by team write
+// alone. A member who is not a team admin creates one, another such member
+// changes and deletes it, and a viewer can do none of the three. The routes
+// run under the callers' claims on the RLS pool, so the policies are held to
+// the same rule.
+func TestNotifyRules_TeamWriteGate_Postgres(t *testing.T) {
 	r := newViewerRig(t)
 	r.bindGitHubPAT(t)
 	other := pgtest.SeedUser(t, r.h, "other")
 	pgtest.AddOrgMember(t, r.h, other, r.orgID, r.teamID, "member", "member")
 
-	create := func(caller string, body map[string]any) *httptest.ResponseRecorder {
+	create := func(caller string) *httptest.ResponseRecorder {
 		t.Helper()
-		body["event_type"] = domain.EventGitHubPRCICheckFailed
-		body["name"] = "rule"
 		rec := httptest.NewRecorder()
-		r.eh.handleEventHandlerCreateNotify(rec, r.req(http.MethodPost, "/api/event-handlers/notify", caller, body))
+		r.eh.handleEventHandlerCreateNotify(rec, r.req(http.MethodPost, "/api/event-handlers/notify", caller, map[string]any{
+			"event_type": domain.EventGitHubPRCICheckFailed, "name": "rule",
+		}))
 		return rec
 	}
-	idOf := func(rec *httptest.ResponseRecorder) string {
-		t.Helper()
-		var h domain.EventHandler
-		if err := json.Unmarshal(rec.Body.Bytes(), &h); err != nil || h.ID == "" {
-			t.Fatalf("decode created rule: %v %s", err, rec.Body.String())
-		}
-		return h.ID
-	}
-	patch := func(caller, id string, body map[string]any) int {
+	patch := func(caller, id string, body map[string]any) *httptest.ResponseRecorder {
 		t.Helper()
 		rec := httptest.NewRecorder()
 		req := r.req(http.MethodPatch, "/api/event-handlers/"+id, caller, body)
 		req.SetPathValue("id", id)
 		r.eh.handleEventHandlerUpdate(rec, req)
-		return rec.Code
+		return rec
 	}
 	del := func(caller, id string) int {
 		t.Helper()
@@ -154,60 +175,45 @@ func TestNotifyRules_WriteGate_Postgres(t *testing.T) {
 		return rec.Code
 	}
 
-	if rec := create(r.viewer, map[string]any{}); rec.Code != http.StatusForbidden {
-		t.Errorf("viewer creates a personal rule: %d; want 403", rec.Code)
+	if rec := create(r.viewer); rec.Code != http.StatusForbidden {
+		t.Errorf("viewer creates a notify rule: %d %s; want 403", rec.Code, rec.Body.String())
 	}
-	if rec := create(r.member, map[string]any{"audience": "team"}); rec.Code != http.StatusForbidden {
-		t.Errorf("member creates a team rule: %d %s; want 403", rec.Code, rec.Body.String())
+	rec := create(r.member)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("member creates a notify rule: %d %s; want 201", rec.Code, rec.Body.String())
 	}
-	personal := create(r.member, map[string]any{})
-	if personal.Code != http.StatusCreated {
-		t.Fatalf("member creates a personal rule: %d %s", personal.Code, personal.Body.String())
+	var created domain.EventHandler
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil || created.ID == "" {
+		t.Fatalf("decode created rule: %v %s", err, rec.Body.String())
 	}
-	mine := idOf(personal)
-	team := create(r.admin, map[string]any{"audience": "team"})
-	if team.Code != http.StatusCreated {
-		t.Fatalf("admin creates a team rule: %d %s", team.Code, team.Body.String())
-	}
-	teamRule := idOf(team)
-
-	if code := patch(other, mine, map[string]any{"name": "taken over"}); code != http.StatusForbidden {
-		t.Errorf("another member edits a personal rule: %d; want 403", code)
-	}
-	if code := patch(r.member, mine, map[string]any{"name": "renamed"}); code != http.StatusOK {
-		t.Errorf("creator edits their personal rule: %d; want 200", code)
-	}
-	if code := patch(r.member, mine, map[string]any{"audience": "team"}); code != http.StatusForbidden {
-		t.Errorf("creator moves their rule to the team: %d; want 403", code)
-	}
-	if code := patch(r.admin, mine, map[string]any{"enabled": false}); code != http.StatusOK {
-		t.Errorf("team admin edits a personal rule: %d; want 200", code)
-	}
-	if code := patch(r.member, teamRule, map[string]any{"enabled": false}); code != http.StatusForbidden {
-		t.Errorf("member edits the team rule: %d; want 403", code)
-	}
-	if code := del(r.member, teamRule); code != http.StatusForbidden {
-		t.Errorf("member deletes the team rule: %d; want 403", code)
-	}
-	if code := del(other, mine); code != http.StatusForbidden {
-		t.Errorf("another member deletes a personal rule: %d; want 403", code)
-	}
-	if code := del(r.admin, teamRule); code != http.StatusOK {
-		t.Errorf("admin deletes the team rule: %d; want 200", code)
-	}
-	if code := del(r.member, mine); code != http.StatusOK {
-		t.Errorf("creator deletes their personal rule: %d; want 200", code)
+	if created.CreatorUserID != r.member || created.TeamID != r.teamID {
+		t.Errorf("created %+v; want it on the team, naming the member who wrote it", created)
 	}
 
-	// Past the server: RLS refuses a member's team rule outright.
-	err := r.s.tx.WithTx(t.Context(), r.orgID, r.member, func(tx db.TxStores) error {
-		_, e := tx.EventHandlers.Create(t.Context(), r.orgID, r.teamID, domain.EventHandler{
-			ID: uuid.New().String(), Kind: domain.EventHandlerKindNotify, EventType: domain.EventGitHubPRCICheckFailed,
-			Name: "around the gate", Audience: domain.NotifyAudienceTeam, Enabled: true,
-		})
+	if rec := patch(r.viewer, created.ID, map[string]any{"enabled": false}); rec.Code != http.StatusForbidden {
+		t.Errorf("viewer changes the rule: %d %s; want 403", rec.Code, rec.Body.String())
+	}
+	rec = patch(other, created.ID, map[string]any{"name": "renamed", "enabled": false})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("another member changes the rule: %d %s; want 200", rec.Code, rec.Body.String())
+	}
+	var patched domain.EventHandler
+	if err := json.Unmarshal(rec.Body.Bytes(), &patched); err != nil || patched.Name != "renamed" || patched.Enabled {
+		t.Errorf("patched %+v, %v; want the new name, disabled", patched, err)
+	}
+
+	if code := del(r.viewer, created.ID); code != http.StatusForbidden {
+		t.Errorf("viewer deletes the rule: %d; want 403", code)
+	}
+	if code := del(other, created.ID); code != http.StatusOK {
+		t.Errorf("another member deletes the rule: %d; want 200", code)
+	}
+	var gone *domain.EventHandler
+	if err := r.s.tx.WithReadTx(t.Context(), r.orgID, r.member, func(tx db.TxStores) error {
+		var e error
+		gone, e = tx.EventHandlers.Get(t.Context(), r.orgID, created.ID)
 		return e
-	})
-	if err == nil {
-		t.Error("a member's team notify rule passed RLS; want it refused")
+	}); err != nil || gone != nil {
+		t.Errorf("after the delete: %+v, %v; want no rule", gone, err)
 	}
 }

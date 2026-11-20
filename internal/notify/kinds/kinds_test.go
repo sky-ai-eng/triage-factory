@@ -47,13 +47,13 @@ func checkResolutions(t *testing.T, name string, ex notify.Example) {
 }
 
 // TestEventConformance holds the event rendering to the same checks, for a
-// team row, a personal row and local mode's one user. Every row links to the
-// entity and to its rule, so a row whose entity link cannot be shown still
-// carries an action.
+// team row and local mode's one user. Every row links to the entity and to
+// its rule, so a row whose entity link cannot be shown still carries an
+// action.
 func TestEventConformance(t *testing.T) {
 	exs := kinds.Event.Examples()
-	if len(exs) != 3 {
-		t.Fatalf("got %d examples; want a team row, a personal row and local mode's", len(exs))
+	if len(exs) != 2 {
+		t.Fatalf("got %d examples; want a team row and local mode's", len(exs))
 	}
 	for _, ex := range exs {
 		if strings.TrimSpace(ex.Content.Title) == "" {

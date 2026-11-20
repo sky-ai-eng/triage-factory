@@ -8,17 +8,14 @@ import type { NotifyHandler } from '../types'
 import { toast } from './Toast/toastStore'
 import {
   getNotifyRule,
+  notifyRulesFilter,
   notifyRulesListPath,
-  personalNotifyRulesFilter,
-  teamNotifyRulesFilter,
   updateNotifyRule,
 } from '../lib/notifyRules'
-import { useMe } from '../hooks/useDeploymentConfig'
-import { useTeams } from '../hooks/useTeams'
 import { usePagedList } from '../hooks/usePagedList'
 import type { PagedList } from '../hooks/usePagedList'
 
-// How many rules one page of a section carries; "Show more" reads the next.
+// How many rules one page carries; "Show more" reads the next.
 const PAGE_SIZE = 50
 
 const LOAD_ERROR = 'Could not load the notify rules.'
@@ -32,43 +29,28 @@ interface NotifyRulesPanelProps {
   openRuleId?: string | null
 }
 
-// NotifyRulesPanel lists the notify rules the viewer has a stake in, as two
-// reads of the handler list: their own personal rules, and their teams' team
-// rules. Another member's personal rule is readable through the API, as every
-// handler of the team is, but it tells only its creator, so neither read asks
-// for it.
+// NotifyRulesPanel lists the notify rules of the viewer's teams, one paged
+// read of the handler list. Each rule tells its team's members, and anyone who
+// can write a team's rules can write these; the server refuses the rest.
 export default function NotifyRulesPanel({ open, onClose, openRuleId }: NotifyRulesPanelProps) {
-  const { me } = useMe()
-  const { teams } = useTeams()
-  const mineList = usePagedList<NotifyHandler>(notifyRulesListPath(), LOAD_ERROR)
-  const teamList = usePagedList<NotifyHandler>(notifyRulesListPath(), LOAD_ERROR)
+  const list = usePagedList<NotifyHandler>(notifyRulesListPath(), LOAD_ERROR)
   const [editing, setEditing] = useState<NotifyHandler | null>(null)
   const [creating, setCreating] = useState(false)
   const [refreshKey, setRefreshKey] = useState(0)
   const openedLink = useRef<string | null>(null)
 
-  const { load: loadMine, setItems: setMine } = mineList
-  const { load: loadTeam, setItems: setTeam } = teamList
-  const myId = me?.id
+  const { load, setItems: setRules } = list
   useEffect(() => {
     if (!open) return
-    void loadTeam({ ...teamNotifyRulesFilter(), page_size: PAGE_SIZE }, { keepDepth: true })
-    // The personal read names its creator, so it waits for the caller's id.
-    if (myId) {
-      void loadMine(
-        { ...personalNotifyRulesFilter(myId), page_size: PAGE_SIZE },
-        { keepDepth: true },
-      )
-    }
-  }, [open, refreshKey, myId, loadMine, loadTeam])
+    void load({ ...notifyRulesFilter(), page_size: PAGE_SIZE }, { keepDepth: true })
+  }, [open, refreshKey, load])
 
-  const loadError = mineList.error || teamList.error
   useEffect(() => {
-    if (loadError) toast.error(loadError)
-  }, [loadError])
+    if (list.error) toast.error(list.error)
+  }, [list.error])
 
   // A link opens its rule once, read by id: the rule need not be on a page
-  // either section has read.
+  // the panel has read.
   useEffect(() => {
     if (!openRuleId) {
       openedLink.current = null
@@ -89,20 +71,8 @@ export default function NotifyRulesPanel({ open, onClose, openRuleId }: NotifyRu
 
   const refresh = useCallback(() => setRefreshKey((k) => k + 1), [])
 
-  // The server's gate, mirrored for presentation: a team rule is a team
-  // admin's, a personal rule its creator's or a team admin's.
-  const canWrite = useCallback(
-    (rule: NotifyHandler) => {
-      const admin = teams.find((t) => t.id === rule.team_id)?.role === 'admin'
-      return admin || (rule.audience === 'creator' && rule.creator_user_id === me?.id)
-    },
-    [teams, me],
-  )
-
   const toggleEnabled = useCallback(
     async (rule: NotifyHandler) => {
-      // The section the rule was listed in holds it.
-      const setRules = rule.audience === 'team' ? setTeam : setMine
       const prev = rule.enabled
       setRules((rs) => rs.map((r) => (r.id === rule.id ? { ...r, enabled: !prev } : r)))
       try {
@@ -112,12 +82,11 @@ export default function NotifyRulesPanel({ open, onClose, openRuleId }: NotifyRu
         toast.failed(err, 'Could not toggle the notify rule.')
       }
     },
-    [setMine, setTeam],
+    [setRules],
   )
 
-  const mine = mineList.items
-  const team = teamList.items
-  const loading = mineList.loading || teamList.loading
+  const rules = list.items
+  const loading = list.loading
   const editorOpen = creating || editing !== null
 
   return (
@@ -155,52 +124,36 @@ export default function NotifyRulesPanel({ open, onClose, openRuleId }: NotifyRu
             </div>
 
             <div className="flex-1 overflow-y-auto p-3 space-y-4">
-              {loading && mine.length === 0 && team.length === 0 && (
+              {loading && rules.length === 0 && (
                 <div className="space-y-2 p-2">
                   {[1, 2].map((i) => (
                     <div key={i} className="h-14 rounded-xl bg-tint-2 animate-pulse" />
                   ))}
                 </div>
               )}
-              {!loading && mine.length === 0 && team.length === 0 && (
+              {!loading && rules.length === 0 && (
                 <p className="text-body text-ink-3 text-center py-12 px-4">
-                  No notify rules yet. Create one to be told when an event happens, such as CI
-                  failing on your pull request.
+                  No notify rules yet. Create one to tell the team when an event happens, such as CI
+                  failing on a pull request.
                 </p>
               )}
-              {[
-                { title: 'Yours', list: mineList },
-                { title: 'Team', list: teamList },
-              ].map(
-                ({ title, list }) =>
-                  list.items.length > 0 && (
-                    <section key={title}>
-                      <h3 className="px-3 pb-1 text-label font-medium text-ink-3 uppercase tracking-wide">
-                        {title}
-                      </h3>
-                      {list.items.map((rule) => (
-                        <NotifyRuleRow
-                          key={rule.id}
-                          rule={rule}
-                          writable={canWrite(rule)}
-                          onEdit={() => setEditing(rule)}
-                          onToggle={() => toggleEnabled(rule)}
-                        />
-                      ))}
-                      <ShowMore
-                        list={list}
-                        label={title === 'Yours' ? 'your rules' : 'team rules'}
-                      />
-                    </section>
-                  ),
-              )}
+              <div>
+                {rules.map((rule) => (
+                  <NotifyRuleRow
+                    key={rule.id}
+                    rule={rule}
+                    onEdit={() => setEditing(rule)}
+                    onToggle={() => toggleEnabled(rule)}
+                  />
+                ))}
+                <ShowMore list={list} />
+              </div>
             </div>
           </motion.div>
 
           <NotifyRuleEditor
             open={editorOpen}
             rule={editing}
-            writable={editing ? canWrite(editing) : true}
             onClose={() => {
               setEditing(null)
               setCreating(false)
@@ -218,15 +171,15 @@ export default function NotifyRulesPanel({ open, onClose, openRuleId }: NotifyRu
   )
 }
 
-/** ShowMore reads a section's next page, and renders nothing once the section
- *  holds its last one. */
-function ShowMore({ list, label }: { list: PagedList<NotifyHandler>; label: string }) {
+/** ShowMore reads the next page, and renders nothing once the panel holds the
+ *  last one. */
+function ShowMore({ list }: { list: PagedList<NotifyHandler> }) {
   if (!list.hasMore) return null
   return (
     <button
       onClick={() => void list.loadMore()}
       disabled={list.loading}
-      aria-label={`Show more ${label}`}
+      aria-label="Show more notify rules"
       className="w-full px-3 py-2 text-left text-ui text-warm hover:text-warm/70 transition-colors disabled:opacity-50"
     >
       Show more
@@ -236,12 +189,10 @@ function ShowMore({ list, label }: { list: PagedList<NotifyHandler>; label: stri
 
 function NotifyRuleRow({
   rule,
-  writable,
   onEdit,
   onToggle,
 }: {
   rule: NotifyHandler
-  writable: boolean
   onEdit: () => void
   onToggle: () => void
 }) {
@@ -268,7 +219,7 @@ function NotifyRuleRow({
           <Switch.Root
             checked={rule.enabled}
             onCheckedChange={onToggle}
-            disabled={!writable || unavailable}
+            disabled={unavailable}
             aria-label={`Enable ${rule.name}`}
             className="relative w-8 h-[18px] rounded-full transition-colors data-[state=checked]:bg-warm data-[state=unchecked]:bg-line-2 cursor-pointer disabled:cursor-not-allowed disabled:opacity-40"
           >

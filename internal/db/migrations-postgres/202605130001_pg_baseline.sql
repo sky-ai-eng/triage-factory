@@ -387,9 +387,9 @@ $$;
 -- +goose StatementEnd
 
 
--- Whether target_team exists and is not archived. A select policy whose
--- creator arm grants a row without membership ANDs this in, so an archived
--- team's rows are hidden from the person who wrote them too.
+-- Whether target_team exists and is not archived. A select policy with an arm
+-- that grants a row without membership ANDs this in, so an archived team's
+-- rows stay hidden through that arm too.
 
 -- +goose StatementBegin
 CREATE FUNCTION tf.team_active(target_team uuid) RETURNS boolean
@@ -751,9 +751,6 @@ CREATE TABLE public.event_handlers (
     blueprint_id text,
     breaker_threshold integer,
     min_autonomy_suitability double precision,
-    -- Notify-only: who a notify rule tells, its creator ('creator') or its
-    -- team's members ('team'). NULL for rules and triggers.
-    notify_audience text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     -- As on prompts and blueprints: user_modified is the shipped-content sync's
@@ -762,10 +759,9 @@ CREATE TABLE public.event_handlers (
     user_modified boolean DEFAULT false NOT NULL,
     deleted_at timestamp with time zone,
     CONSTRAINT event_handlers_kind_check CHECK ((kind = ANY (ARRAY['rule'::text, 'trigger'::text, 'notify'::text]))),
-    -- A notify rule is a person's or a team's, never shipped content, and tells
-    -- its audience about an event without touching tasks.
-    CONSTRAINT event_handlers_notify_shape CHECK (((kind <> 'notify'::text) OR ((blueprint_id IS NULL) AND (breaker_threshold IS NULL) AND (min_autonomy_suitability IS NULL) AND (default_priority IS NULL) AND (sort_order IS NULL) AND (name IS NOT NULL) AND (notify_audience = ANY (ARRAY['creator'::text, 'team'::text])) AND (source <> 'system'::text) AND (NOT applies_to_unowned)))),
-    CONSTRAINT event_handlers_notify_audience_kind CHECK (((kind = 'notify'::text) = (notify_audience IS NOT NULL))),
+    -- A notify rule is user-authored, never shipped content, and tells its
+    -- team's members about an event without touching tasks.
+    CONSTRAINT event_handlers_notify_shape CHECK (((kind <> 'notify'::text) OR ((blueprint_id IS NULL) AND (breaker_threshold IS NULL) AND (min_autonomy_suitability IS NULL) AND (default_priority IS NULL) AND (sort_order IS NULL) AND (name IS NOT NULL) AND (source <> 'system'::text) AND (NOT applies_to_unowned)))),
     CONSTRAINT event_handlers_rule_shape CHECK (((kind <> 'rule'::text) OR ((blueprint_id IS NULL) AND (breaker_threshold IS NULL) AND (min_autonomy_suitability IS NULL) AND (name IS NOT NULL) AND (default_priority IS NOT NULL) AND (sort_order IS NOT NULL)))),
     -- source is app-validated, not CHECK-constrained, so new provenance values are
     -- addable without DDL. The creator pairing below tolerates any non-system source.
@@ -2966,19 +2962,16 @@ CREATE POLICY entity_links_all ON public.entity_links USING (((org_id = tf.curre
 ALTER TABLE public.event_handlers ENABLE ROW LEVEL SECURITY;
 
 
--- A notify rule whose audience is the team is a team admin's to write; a
--- personal one is its creator's, or a team admin's. The server checks the same
--- before it writes.
-CREATE POLICY event_handlers_delete ON public.event_handlers FOR DELETE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id) AND ((kind <> 'notify'::text) OR tf.user_is_team_admin(team_id) OR ((notify_audience = 'creator'::text) AND (creator_user_id = tf.current_user_id())))));
+CREATE POLICY event_handlers_delete ON public.event_handlers FOR DELETE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id)));
 
 
-CREATE POLICY event_handlers_insert ON public.event_handlers FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id()) AND tf.user_can_write_team(team_id) AND ((kind <> 'notify'::text) OR tf.user_is_team_admin(team_id) OR ((notify_audience = 'creator'::text) AND (creator_user_id = tf.current_user_id())))));
+CREATE POLICY event_handlers_insert ON public.event_handlers FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id()) AND tf.user_can_write_team(team_id)));
 
 
-CREATE POLICY event_handlers_select ON public.event_handlers FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.team_active(team_id) AND ((creator_user_id = tf.current_user_id()) OR tf.user_in_team(team_id))));
+CREATE POLICY event_handlers_select ON public.event_handlers FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_in_team(team_id)));
 
 
-CREATE POLICY event_handlers_update ON public.event_handlers FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id) AND ((kind <> 'notify'::text) OR tf.user_is_team_admin(team_id) OR ((notify_audience = 'creator'::text) AND (creator_user_id = tf.current_user_id()))))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id) AND ((kind <> 'notify'::text) OR tf.user_is_team_admin(team_id) OR ((notify_audience = 'creator'::text) AND (creator_user_id = tf.current_user_id())))));
+CREATE POLICY event_handlers_update ON public.event_handlers FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id)));
 
 
 ALTER TABLE public.events ENABLE ROW LEVEL SECURITY;
@@ -3131,7 +3124,7 @@ CREATE POLICY prompts_delete ON public.prompts FOR DELETE USING (((org_id = tf.c
 CREATE POLICY prompts_insert ON public.prompts FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id()) AND tf.user_can_write_team(team_id)));
 
 
-CREATE POLICY prompts_select ON public.prompts FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.team_active(team_id) AND ((creator_user_id = tf.current_user_id()) OR tf.user_in_team(team_id))));
+CREATE POLICY prompts_select ON public.prompts FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_in_team(team_id)));
 
 
 CREATE POLICY prompts_update ON public.prompts FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id)));
@@ -3886,8 +3879,7 @@ ALTER TABLE public.blueprints ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY blueprints_select ON public.blueprints FOR SELECT
   USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)
-          AND tf.team_active(team_id)
-          AND ((creator_user_id = tf.current_user_id()) OR tf.user_in_team(team_id))));
+          AND tf.user_in_team(team_id)));
 CREATE POLICY blueprints_insert ON public.blueprints FOR INSERT
   WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id()) AND tf.user_can_write_team(team_id)));
 CREATE POLICY blueprints_update ON public.blueprints FOR UPDATE

@@ -124,13 +124,11 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// AES-256-GCM-encrypted app-side with secretKey (TFAC-402).
 		Secrets: secrets,
 		// EventHandlers needs both pools: Seed writes shipped rows
-		// without JWT claims, but event_handlers_insert /
-		// event_handlers_update RLS policies gate on either
-		// creator_user_id = tf.current_user_id() or
-		// tf.user_is_org_admin() on org-visible writes. The impl
-		// routes Seed to admin (BYPASSRLS) and every CRUD method to
-		// app — same pool-split pattern PromptStore + the predecessor
-		// stores used.
+		// without JWT claims, but the event_handlers_insert RLS policy
+		// gates on creator_user_id = tf.current_user_id() and on team
+		// write. The impl routes Seed to admin (BYPASSRLS) and every
+		// CRUD method to app — same pool-split pattern PromptStore +
+		// the predecessor stores used.
 		EventHandlers: eventHandlers,
 		// Blueprints wires both pools: the request-facing reads on app
 		// under RLS, every write and every `...System` read (ListSteps,

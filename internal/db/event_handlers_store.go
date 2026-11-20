@@ -29,8 +29,8 @@ var ErrNoSuchEventHandler = errors.New("no live event handler with that id")
 //	kind="trigger" — auto-delegation; creates a task and fires a blueprint.
 //	                 Carries blueprint_id, breaker_threshold,
 //	                 min_autonomy_suitability.
-//	kind="notify"  — tells its audience about a matching event; creates no
-//	                 task. Carries name and notify_audience.
+//	kind="notify"  — tells its team's members about a matching event;
+//	                 creates no task. Carries name.
 //
 // Per-kind CHECK constraints on the event_handlers table enforce that each
 // row populates exactly its kind's required fields and leaves the other
@@ -73,15 +73,6 @@ type EventHandlerListFilter struct {
 	// (team_id NOT NULL, no org-visible tier), so this is a plain team
 	// filter. The SQLite impl ignores it — local mode is single-team.
 	TeamID string
-	// Audience keeps the notify rules with this audience
-	// (domain.NotifyAudienceCreator or NotifyAudienceTeam). Rules and
-	// triggers carry no audience, so a set Audience leaves only notify rules.
-	// "" is no filter.
-	Audience string
-	// CreatorUserID keeps the handlers this user authored, compared as
-	// stored (the canonical id). Shipped handlers have no creator, so a set
-	// CreatorUserID leaves only user-authored ones. "" is no filter.
-	CreatorUserID string
 	// GatedEventTypes are event types this org is not entitled to; handlers
 	// bound to one are hidden. Rows persist regardless of entitlement state —
 	// this is visibility only.

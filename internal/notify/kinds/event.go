@@ -8,19 +8,14 @@ import (
 // Event renders what a notify rule raises, one rendering for every event type
 // in the catalog: the type's label and the entity's key as the title, the
 // entity's title and the rule as the body, a link to the entity on its
-// source, and a link to the rule: the person's own, which is how they stop
-// being told, or the team's. The rule link is also what a row keeps when the
-// entity's link cannot be shown. No type has copy of its own yet; the entity
-// is where the reader acts on any of them.
+// source, and a link to the rule. The rule link is also what a row keeps when
+// the entity's link cannot be shown. No type has copy of its own yet; the
+// entity is where the reader acts on any of them.
 var Event = notify.Event(notify.EventSpec{
-	Render: func(p notify.EventParams, to notify.Recipient) notify.Content {
+	Render: func(p notify.EventParams, _ notify.Recipient) notify.Content {
 		subject := eventSubject(p)
 		rule := `From the team rule "` + p.RuleName + `".`
 		ruleLink := notify.Link("Open the team rule", notify.Routes.NotifyRule(p.HandlerID))
-		if !p.TeamRule && to.Scope == domain.NotificationScopeUser {
-			rule = `From your rule "` + p.RuleName + `".`
-			ruleLink = notify.Link("Edit your rule", notify.Routes.NotifyRule(p.HandlerID))
-		}
 		body := rule
 		if p.EntityTitle != "" {
 			body = p.EntityTitle + "\n" + rule
