@@ -79,8 +79,8 @@ func TestPersonClaim_Postgres_MintsUnderTheClaimantsClaims(t *testing.T) {
 					INSERT INTO blueprint_steps (org_id, team_id, blueprint_id, step_index, step_prompt_id)
 					VALUES ($1, $2, $3, 0, $4)`, r.orgID, r.teamID, blueprintID, promptID)
 				pgtest.MustExec(t, admin, `
-					INSERT INTO event_handlers (id, org_id, creator_user_id, team_id, kind, event_type, source, blueprint_id, breaker_threshold, min_autonomy_suitability, enabled, created_at, updated_at)
-					VALUES ($1, $2, $3, $4, 'trigger', 'github:pr:opened', 'user', $5, 4, 0, true, now(), now())`,
+					INSERT INTO event_handlers (id, org_id, creator_user_id, team_id, mode, name, event_type, source, blueprint_id, breaker_threshold, min_autonomy_suitability, created_at, updated_at)
+					VALUES ($1, $2, $3, $4, 'automate', 'Claim handler', 'github:pr:opened', 'user', $5, 4, 0, now(), now())`,
 					triggerID, r.orgID, r.admin, r.teamID, blueprintID)
 				inserted, _, err := pgstore.New(admin, r.h.AppDB, pgtest.SecretKey).PendingFirings.Enqueue(
 					t.Context(), r.orgID, entityID, taskID, triggerID, eventID, db.AgentClaimStamp{})

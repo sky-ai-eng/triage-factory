@@ -424,8 +424,8 @@ func findVisibleImportedPromptByContent(ctx context.Context, database *sql.DB, n
 }
 
 func hideDuplicateImportedPrompts(ctx context.Context, database *sql.DB, prompts db.PromptStore) (int, error) {
-	// A trigger references a BLUEPRINT, not a prompt directly, so "is this
-	// prompt referenced by a trigger" routes event_handlers.blueprint_id →
+	// A handler references a BLUEPRINT, not a prompt directly, so "is this
+	// prompt referenced by a handler" routes event_handlers.blueprint_id →
 	// blueprint_steps.step_prompt_id = p.id. Only the event_handlers join
 	// matches org_id (so a same-id prompt in another org isn't counted as a
 	// cross-org reference); blueprint_steps has no org_id column of its own —
@@ -446,7 +446,6 @@ func hideDuplicateImportedPrompts(ctx context.Context, database *sql.DB, prompts
 		LEFT JOIN event_handlers t
 		       ON t.blueprint_id = bs.blueprint_id
 		      AND t.org_id       = p.org_id
-		      AND t.kind         = 'trigger'
 		      AND t.deleted_at   IS NULL
 		WHERE p.source = 'imported' AND p.hidden = 0
 		  AND p.org_id = ?

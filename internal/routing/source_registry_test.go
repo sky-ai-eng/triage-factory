@@ -58,10 +58,10 @@ func seedFakeRule(t *testing.T, database *sql.DB, teamID string) {
 	t.Helper()
 	if _, err := database.Exec(`
 		INSERT INTO event_handlers
-			(id, org_id, team_id, creator_user_id, kind, event_type,
-			 scope_predicate_json, enabled, source, name, default_priority, sort_order,
+			(id, org_id, team_id, creator_user_id, mode, event_type,
+			 scope_predicate_json, source, name, default_priority, sort_order,
 			 created_at, updated_at)
-		VALUES (?, ?, ?, ?, 'rule', ?, NULL, 1, 'user', ?, 0.6, 100, ?, ?)
+		VALUES (?, ?, ?, ?, 'watch', ?, NULL, 'user', ?, 0.6, 100, ?, ?)
 	`, "fake-rule-"+teamID[:8], runmode.LocalDefaultOrgID, teamID, runmode.LocalDefaultUserID,
 		fakeEventType, "fake rule "+teamID[:8], time.Now(), time.Now()); err != nil {
 		t.Fatalf("seed fake rule for team %s: %v", teamID, err)

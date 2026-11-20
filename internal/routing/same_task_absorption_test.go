@@ -153,15 +153,15 @@ func setupAbsorbScenario(t *testing.T, database *sql.DB) (entityID string, task 
 
 	trig := domain.EventHandler{
 		ID:                     "trigger-absorb",
-		Kind:                   domain.EventHandlerKindTrigger,
+		Name:                   "trigger-absorb",
+		DefaultPriority:        0.5,
+		Mode:                   domain.EventHandlerModeAutomate,
 		BlueprintID:            "p-absorb",
-		TriggerType:            domain.TriggerTypeEvent,
 		EventType:              absorbTestEventType,
-		BreakerThreshold:       intPtr(4),
-		MinAutonomySuitability: floatPtr(0),
-		Enabled:                true,
+		BreakerThreshold:       4,
+		MinAutonomySuitability: 0,
 	}
-	createTriggerForTestRouting(t, database, trig)
+	createHandlerForTestRouting(t, database, trig)
 	if err := database.QueryRow(`SELECT blueprint_id FROM event_handlers WHERE id = ?`, trig.ID).Scan(&trig.BlueprintID); err != nil {
 		t.Fatalf("resolve trigger blueprint id: %v", err)
 	}
@@ -567,15 +567,15 @@ func TestTryAutoDelegate_SiblingTask_FiresConcurrently(t *testing.T) {
 
 	trigB := domain.EventHandler{
 		ID:                     "trigger-cross",
-		Kind:                   domain.EventHandlerKindTrigger,
+		Name:                   "trigger-cross",
+		DefaultPriority:        0.5,
+		Mode:                   domain.EventHandlerModeAutomate,
 		BlueprintID:            "p-cross",
-		TriggerType:            domain.TriggerTypeEvent,
 		EventType:              absorbOtherEventType,
-		BreakerThreshold:       intPtr(4),
-		MinAutonomySuitability: floatPtr(0),
-		Enabled:                true,
+		BreakerThreshold:       4,
+		MinAutonomySuitability: 0,
 	}
-	createTriggerForTestRouting(t, database, trigB)
+	createHandlerForTestRouting(t, database, trigB)
 	if err := database.QueryRow(`SELECT blueprint_id FROM event_handlers WHERE id = ?`, trigB.ID).Scan(&trigB.BlueprintID); err != nil {
 		t.Fatalf("resolve cross trigger blueprint id: %v", err)
 	}
@@ -803,12 +803,16 @@ func TestTryAutoDelegate_FrozenTask_BlocksOnlyItself(t *testing.T) {
 		t.Fatalf("create sibling task: %v", err)
 	}
 	trigB := domain.EventHandler{
-		ID: "trigger-sibling", Kind: domain.EventHandlerKindTrigger,
-		BlueprintID: "p-sibling", TriggerType: domain.TriggerTypeEvent,
-		EventType: absorbOtherEventType, BreakerThreshold: intPtr(4),
-		MinAutonomySuitability: floatPtr(0), Enabled: true,
+		ID:                     "trigger-sibling",
+		Name:                   "trigger-sibling",
+		DefaultPriority:        0.5,
+		Mode:                   domain.EventHandlerModeAutomate,
+		BlueprintID:            "p-sibling",
+		EventType:              absorbOtherEventType,
+		BreakerThreshold:       4,
+		MinAutonomySuitability: 0,
 	}
-	createTriggerForTestRouting(t, database, trigB)
+	createHandlerForTestRouting(t, database, trigB)
 	if err := database.QueryRow(`SELECT blueprint_id FROM event_handlers WHERE id = ?`, trigB.ID).Scan(&trigB.BlueprintID); err != nil {
 		t.Fatalf("resolve sibling blueprint id: %v", err)
 	}
@@ -893,15 +897,15 @@ func setupManualAbsorbScenario(t *testing.T, database *sql.DB) (entityID string,
 
 	trig := domain.EventHandler{
 		ID:                     "trigger-manual-absorb",
-		Kind:                   domain.EventHandlerKindTrigger,
+		Name:                   "trigger-manual-absorb",
+		DefaultPriority:        0.5,
+		Mode:                   domain.EventHandlerModeAutomate,
 		BlueprintID:            "p-manual-absorb",
-		TriggerType:            domain.TriggerTypeEvent,
 		EventType:              absorbTestEventType,
-		BreakerThreshold:       intPtr(4),
-		MinAutonomySuitability: floatPtr(0),
-		Enabled:                true,
+		BreakerThreshold:       4,
+		MinAutonomySuitability: 0,
 	}
-	createTriggerForTestRouting(t, database, trig)
+	createHandlerForTestRouting(t, database, trig)
 	if err := database.QueryRow(`SELECT blueprint_id FROM event_handlers WHERE id = ?`, trig.ID).Scan(&trig.BlueprintID); err != nil {
 		t.Fatalf("resolve trigger blueprint id: %v", err)
 	}

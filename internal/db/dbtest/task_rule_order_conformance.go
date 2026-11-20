@@ -13,8 +13,8 @@ import (
 // the task, handler and team stores, the org and team they write into, a door
 // that seeds a queued task of a named event type (the TaskSeeder mints one
 // type only), the backend's shipped-handler lookup by slug, and raw doors for
-// a second team and a rule on it (SQLite's Create pins every row to the local
-// team).
+// a second team and a handler on it (SQLite's Create pins every row to the
+// local team).
 type TaskRuleOrderFixture struct {
 	Tasks         db.TaskStore
 	Handlers      db.EventHandlerStore
@@ -27,7 +27,7 @@ type TaskRuleOrderFixture struct {
 	HandlerID ShippedHandlerIDBySlug
 	// SeedTeam inserts another team in OrgID and returns its id.
 	SeedTeam func(t *testing.T) string
-	// SeedRule inserts an enabled user rule on teamID for eventType at
+	// SeedRule inserts a user handler in watch on teamID for eventType at
 	// sortOrder and returns its id.
 	SeedRule func(t *testing.T, teamID, eventType string, sortOrder int) string
 }
@@ -36,15 +36,16 @@ type TaskRuleOrderFixture struct {
 type TaskRuleOrderFactory func(t *testing.T) TaskRuleOrderFixture
 
 // RunTaskRuleOrderConformance pins that the task list's default order ranks a
-// task by the rules that would match its event type: a deleted shipped rule,
-// which stays behind as a row with deleted_at set and enabled untouched, and
-// a rule on an archived team leave the order, and a restored team's rule
-// comes back.
+// task by the handlers that would make a task for its event type: a deleted
+// shipped handler, which stays behind as a row with deleted_at set and its
+// mode untouched, and a handler on an archived team leave the order, and a
+// restored team's handler comes back. A handler that does not make a task
+// never ranks one.
 func RunTaskRuleOrderConformance(t *testing.T, factory TaskRuleOrderFactory) {
 	t.Helper()
 	ctx := context.Background()
-	// The sort order a task takes when no rule that would match covers its
-	// event type.
+	// The sort order a task takes when no handler that would make it covers
+	// its event type.
 	const unranked = 999
 
 	// order reads the queue in the default order and returns the ids and
@@ -79,10 +80,10 @@ func RunTaskRuleOrderConformance(t *testing.T, factory TaskRuleOrderFactory) {
 	t.Run("List_default_order_drops_a_deleted_shipped_rule", func(t *testing.T) {
 		fx := factory(t)
 		if err := fx.Handlers.Sync(ctx, fx.OrgID, fx.TeamID, []db.ShippedEventHandler{
-			syncRule("order-ci", domain.EventGitHubPRCICheckFailed, "", "CI failed", 0.5, 0),
-			syncRule("order-review", domain.EventGitHubPRReviewRequested, "", "Review requested", 0.5, 1),
+			syncHandler("order-ci", domain.EventHandlerModeWatch, domain.EventGitHubPRCICheckFailed, "", "CI failed", 0.5, 0, ""),
+			syncHandler("order-review", domain.EventHandlerModeWatch, domain.EventGitHubPRReviewRequested, "", "Review requested", 0.5, 1, ""),
 		}, nil); err != nil {
-			t.Fatalf("Sync shipped rules: %v", err)
+			t.Fatalf("Sync shipped handlers: %v", err)
 		}
 		ciTask := fx.SeedTask(t, domain.EventGitHubPRCICheckFailed)
 		reviewTask := fx.SeedTask(t, domain.EventGitHubPRReviewRequested)
@@ -90,12 +91,25 @@ func RunTaskRuleOrderConformance(t *testing.T, factory TaskRuleOrderFactory) {
 
 		ruleID := fx.HandlerID(t, fx.TeamID, "order-ci")
 		if ruleID == "" {
-			t.Fatal("shipped rule order-ci has no live copy after Sync")
+			t.Fatal("shipped handler order-ci has no live copy after Sync")
 		}
 		if err := fx.Handlers.Delete(ctx, fx.OrgID, ruleID); err != nil {
-			t.Fatalf("Delete shipped rule: %v", err)
+			t.Fatalf("Delete shipped handler: %v", err)
 		}
 		expect(t, fx, "after delete", reviewTask, 1, ciTask, unranked)
+	})
+
+	t.Run("List_default_order_ignores_a_handler_that_makes_no_task", func(t *testing.T) {
+		fx := factory(t)
+		if err := fx.Handlers.Sync(ctx, fx.OrgID, fx.TeamID, []db.ShippedEventHandler{
+			syncHandler("order-notify", domain.EventHandlerModeNotify, domain.EventGitHubPRCICheckFailed, "", "CI failed", 0.5, 0, ""),
+			syncHandler("order-review", domain.EventHandlerModeWatch, domain.EventGitHubPRReviewRequested, "", "Review requested", 0.5, 1, ""),
+		}, nil); err != nil {
+			t.Fatalf("Sync shipped handlers: %v", err)
+		}
+		ciTask := fx.SeedTask(t, domain.EventGitHubPRCICheckFailed)
+		reviewTask := fx.SeedTask(t, domain.EventGitHubPRReviewRequested)
+		expect(t, fx, "with the ci handler in notify", reviewTask, 1, ciTask, unranked)
 	})
 
 	t.Run("List_default_order_drops_an_archived_teams_rule", func(t *testing.T) {

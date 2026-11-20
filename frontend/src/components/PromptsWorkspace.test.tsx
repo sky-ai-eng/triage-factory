@@ -4,8 +4,8 @@ import PromptsWorkspace from './PromptsWorkspace'
 import { jsonBody } from '../test/apiResponse'
 import { reportFailedThroughError } from '../test/toastDouble'
 
-// What's under test is opening a linked trigger: the canvas and drawers are
-// stand-ins, and the config panel shows which trigger it was opened on and
+// What's under test is opening a linked event handler: the canvas and drawers
+// are stand-ins, and the config panel shows which handler it was opened on and
 // whether it is read-only.
 vi.mock('./BindingGraph', () => ({ default: () => null }))
 vi.mock('./PromptDrawer', () => ({ default: () => null }))
@@ -36,13 +36,13 @@ function stubTrigger(body: unknown, ok = true, status = 200) {
   return fetchMock
 }
 
-describe('PromptsWorkspace linked trigger', () => {
+describe('PromptsWorkspace linked event handler', () => {
   beforeEach(() => {
     toastMock.error.mockReset()
   })
 
-  it('opens the trigger the link names and reports its team', async () => {
-    const fetchMock = stubTrigger({ id: 'trig-1', kind: 'trigger', team_id: 'team-a' })
+  it('opens the handler the link names and reports its team', async () => {
+    const fetchMock = stubTrigger({ id: 'trig-1', blueprint_id: 'bp-1', team_id: 'team-a' })
     const opened = vi.fn()
     render(
       <PromptsWorkspace teamId="team-a" ready openTriggerId="trig-1" onTriggerOpened={opened} />,
@@ -53,8 +53,8 @@ describe('PromptsWorkspace linked trigger', () => {
     expect(opened).toHaveBeenCalledExactlyOnceWith('team-a')
   })
 
-  it("opens a trigger of a team the viewer isn't on read-only", async () => {
-    stubTrigger({ id: 'trig-x', kind: 'trigger', team_id: 'team-x' })
+  it("opens a handler of a team the viewer isn't on read-only", async () => {
+    stubTrigger({ id: 'trig-x', blueprint_id: 'bp-x', team_id: 'team-x' })
     const opened = vi.fn()
     render(
       <PromptsWorkspace teamId="team-a" ready openTriggerId="trig-x" onTriggerOpened={opened} />,
@@ -64,8 +64,8 @@ describe('PromptsWorkspace linked trigger', () => {
     expect(opened).toHaveBeenCalledExactlyOnceWith('team-x')
   })
 
-  it('opens no panel for a rule, and still tells the caller', async () => {
-    stubTrigger({ id: 'rule-1', kind: 'rule', team_id: 'team-a' })
+  it('opens no panel for a handler with no blueprint, and still tells the caller', async () => {
+    stubTrigger({ id: 'rule-1', blueprint_id: null, team_id: 'team-a' })
     const opened = vi.fn()
     render(
       <PromptsWorkspace teamId="team-a" ready openTriggerId="rule-1" onTriggerOpened={opened} />,
@@ -76,7 +76,7 @@ describe('PromptsWorkspace linked trigger', () => {
     expect(toastMock.error).toHaveBeenCalledTimes(1)
   })
 
-  it('reports a trigger that is gone', async () => {
+  it('reports a handler that is gone', async () => {
     stubTrigger(
       { errors: [{ reason: 'NOT_FOUND', message: 'event handler not found' }] },
       false,

@@ -15,10 +15,10 @@ import (
 // BreakerSeeder stages the graph a trigger's breaker reads: triggers and the
 // blueprints they fire, entities and their tasks, and finished blueprint runs.
 type BreakerSeeder struct {
-	// Trigger stages a one-step blueprint and an enabled trigger on its team
-	// firing it with threshold as breaker_threshold.
+	// Trigger stages a one-step blueprint and a handler in automate on its
+	// team running it with threshold as breaker_threshold.
 	Trigger func(t *testing.T, threshold int) (triggerID, blueprintID string)
-	// TriggerOn stages another enabled trigger firing blueprintID.
+	// TriggerOn stages another handler in automate running blueprintID.
 	TriggerOn func(t *testing.T, blueprintID string, threshold int) (triggerID string)
 	// Task stages a fresh active entity and a queued task on it.
 	Task func(t *testing.T) (entityID, taskID string)
@@ -30,8 +30,8 @@ type BreakerSeeder struct {
 	// ManualRun stages a blueprint run of blueprintID on taskID that a person
 	// started, with one step conversation. Returns the conversation's id.
 	ManualRun func(t *testing.T, taskID, blueprintID, status string, startedAt time.Time) (conversationID string)
-	// SetTrigger writes the trigger's enabled flag and breaker_threshold.
-	SetTrigger func(t *testing.T, triggerID string, enabled bool, threshold int)
+	// SetTrigger writes the handler's mode and breaker_threshold.
+	SetTrigger func(t *testing.T, triggerID, mode string, threshold int)
 	// DeleteTrigger soft-deletes the trigger, as the delete route does.
 	DeleteTrigger func(t *testing.T, triggerID string)
 	// CloseEntity sets the entity's state to closed.
@@ -261,10 +261,10 @@ func RunBreakerConformance(t *testing.T, mk BreakerFactory) {
 			change func(t *testing.T, seed BreakerSeeder, triggerID, blueprintID, entityID, taskID string)
 		}{
 			{"threshold_raised_past_the_count", func(t *testing.T, seed BreakerSeeder, triggerID, _, _, _ string) {
-				seed.SetTrigger(t, triggerID, true, 3)
+				seed.SetTrigger(t, triggerID, domain.EventHandlerModeAutomate, 3)
 			}},
-			{"trigger_disabled", func(t *testing.T, seed BreakerSeeder, triggerID, _, _, _ string) {
-				seed.SetTrigger(t, triggerID, false, 2)
+			{"handler_moved_to_watch", func(t *testing.T, seed BreakerSeeder, triggerID, _, _, _ string) {
+				seed.SetTrigger(t, triggerID, domain.EventHandlerModeWatch, 2)
 			}},
 			{"trigger_deleted", func(t *testing.T, seed BreakerSeeder, triggerID, _, _, _ string) {
 				seed.DeleteTrigger(t, triggerID)

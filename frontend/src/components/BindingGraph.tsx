@@ -16,7 +16,7 @@ import {
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { Copy, FileText, Layers, MoreVertical, Trash2 } from 'lucide-react'
-import type { Blueprint, BlueprintStep, Prompt, TriggerHandler } from '../types'
+import type { Blueprint, BlueprintStep, EventHandler, Prompt } from '../types'
 import { toast } from './Toast/toastStore'
 import { apiFetch, apiJSON, apiListAll } from '../lib/apiClient'
 import { useFocusTrap } from '../hooks/useFocusTrap'
@@ -27,15 +27,11 @@ import {
   DETACH_BEFORE_MERGE,
   EVENT_ALREADY_RUNS_BLUEPRINT,
   eventRunsBlueprint,
+  handlerForConnection,
   planConnection,
 } from './bindingGraphConnection'
-import {
-  type BindingScope,
-  blueprintsBase,
-  promptsBase,
-  handlersBase,
-  triggersCreatePath,
-} from '../lib/scope'
+import { type BindingScope, blueprintsBase, promptsBase, handlersBase } from '../lib/scope'
+import { createEventHandler, detachPatch, updateEventHandler } from '../lib/eventHandlers'
 
 interface EventType {
   id: string
@@ -46,14 +42,14 @@ interface EventType {
 }
 
 interface GraphProps {
-  // The editor scope: a single team's prompts+triggers. teamId '' means
+  // The editor scope: a single team's prompts and event handlers. teamId '' means
   // solo/local (the server resolves the sole team).
   scope: BindingScope
   // False until the scope resolves — a multi-team user can't post team_id:''
   // in the cold-load window (→ 400). The connect gesture no-ops while false.
   scopeReady: boolean
   onPromptClick?: (promptId: string) => void
-  onTriggerClick?: (trigger: TriggerHandler) => void
+  onTriggerClick?: (trigger: EventHandler) => void
   onTriggerDeleted?: (eventType: string, predicate?: string | null) => void
 }
 
@@ -440,7 +436,9 @@ function BindingGraphInner({
   const teamId = scope.teamId
   const [eventTypes, setEventTypes] = useState<EventType[]>([])
   const [prompts, setPrompts] = useState<Prompt[]>([])
-  const [triggers, setTriggers] = useState<TriggerHandler[]>([])
+  // triggers is the team's event handlers that reference a blueprint — the
+  // edges of the canvas, one per handler.
+  const [triggers, setTriggers] = useState<EventHandler[]>([])
   const [blueprints, setBlueprints] = useState<Blueprint[]>([])
   // blueprintFirstPrompt maps a blueprint id → its step-0 prompt id so an event
   // edge targets the entry of the blueprint it fires; blueprintSteps holds each
@@ -454,7 +452,7 @@ function BindingGraphInner({
   // Edge context menu (shift-click an edge). For a trigger edge it offers edit
   // (→ the trigger config panel) + remove; for a sequence edge, split-here.
   const [edgeMenu, setEdgeMenu] = useState<
-    | { x: number; y: number; kind: 'trigger'; trigger: TriggerHandler }
+    | { x: number; y: number; kind: 'trigger'; trigger: EventHandler }
     | { x: number; y: number; kind: 'sequence'; blueprintId: string; atStepIndex: number }
     | null
   >(null)
@@ -503,7 +501,7 @@ function BindingGraphInner({
   }, [blueprintSteps])
   const triggerEvents = useMemo(() => {
     const m: Record<string, string[]> = {}
-    for (const t of triggers) (m[t.blueprint_id] ??= []).push(t.event_type)
+    for (const t of triggers) if (t.blueprint_id) (m[t.blueprint_id] ??= []).push(t.event_type)
     return m
   }, [triggers])
 
@@ -593,8 +591,8 @@ function BindingGraphInner({
         apiJSON<EventType[]>('/api/event-types'),
         apiListAll<Blueprint>(`${blueprintsBase()}/list`, teamFilter),
         apiListAll<Prompt>(`${promptsBase()}/list`, teamFilter),
-        apiListAll<TriggerHandler>(`${handlersBase()}/list`, {
-          kind: 'trigger',
+        apiListAll<EventHandler>(`${handlersBase()}/list`, {
+          has_blueprint: true,
           ...teamFilter,
         }),
         apiListAll<BlueprintStep>('/api/blueprint-steps/list', teamFilter),
@@ -641,7 +639,7 @@ function BindingGraphInner({
       setBlueprintSteps(stepsByBlueprint)
 
       const saved = layoutRef.current
-      const boundIds = new Set((tRes as TriggerHandler[]).map((t) => t.event_type))
+      const boundIds = new Set(tRes.map((t) => t.event_type))
       const active = new Set<string>()
       for (const id of Object.keys(saved.eventPositions)) active.add(id)
       for (const id of boundIds) active.add(id)
@@ -669,18 +667,16 @@ function BindingGraphInner({
     setDeleteConfirm(null)
   }, [teamId])
 
-  // Remove event from canvas
+  // Remove an event from the canvas: each of its handlers is detached from its
+  // blueprint, not deleted — the handler goes on making tasks, or whatever its
+  // mode says, without one.
   const removeEvent = useCallback(
     async (eventTypeId: string) => {
-      const toDelete = triggersRef.current.filter((t) => t.event_type === eventTypeId)
+      const toDetach = triggersRef.current.filter((t) => t.event_type === eventTypeId)
       try {
-        await Promise.all(
-          toDelete.map((t) =>
-            apiFetch(`${handlersBase()}/${encodeURIComponent(t.id)}`, { method: 'DELETE' }),
-          ),
-        )
+        await Promise.all(toDetach.map((t) => updateEventHandler(t.id, detachPatch(t))))
         // Drop the node + its saved position only once the backend confirms the
-        // triggers are gone — otherwise the canvas would diverge from the server.
+        // edges are gone — otherwise the canvas would diverge from the server.
         setActiveEventIds((prev) => {
           const next = new Set(prev)
           next.delete(eventTypeId)
@@ -804,7 +800,7 @@ function BindingGraphInner({
             }
           }
           if (orphaned) {
-            toast.info('Steps after a deleted prompt are now an untriggered blueprint.')
+            toast.info('Steps after a deleted prompt are now a separate blueprint.')
           }
         } finally {
           setDeleteConfirm(null)
@@ -983,46 +979,51 @@ function BindingGraphInner({
     // Reconnection (rule 4) is enabled on the head (target) end only.
     const reconnectable: Edge['reconnectable'] = 'target'
     const triggerEdges: Edge[] = triggers
-      // Drop triggers whose blueprint has no resolvable entry prompt so we never
+      // Drop handlers whose blueprint has no resolvable entry prompt so we never
       // emit an edge pointing at a node that isn't on the canvas.
-      .filter(
-        (t) =>
-          activeEventIds.has(t.event_type) &&
-          blueprintFirstPrompt[t.blueprint_id] &&
-          presentPrompts.has(blueprintFirstPrompt[t.blueprint_id]),
-      )
-      .map((t) => ({
-        id: t.id,
-        source: `et:${t.event_type}`,
-        target: `p:${blueprintFirstPrompt[t.blueprint_id]}`,
-        type: 'default',
-        animated: t.enabled,
-        data: { kind: 'trigger' },
-        deletable: false,
-        reconnectable,
-        style: {
-          stroke: t.enabled ? 'var(--color-warm)' : 'var(--color-ink-3)',
-          strokeWidth: t.enabled ? 2 : 1,
-          strokeDasharray: t.enabled ? undefined : '5 5',
-          opacity: t.enabled ? 1 : 0.5,
-        },
-        markerEnd: {
-          type: MarkerType.ArrowClosed,
-          color: t.enabled ? 'var(--color-warm)' : 'var(--color-ink-3)',
-        },
-        label: t.enabled ? 'auto' : 'disabled',
-        labelStyle: {
-          fontSize: 9,
-          fill: t.enabled ? 'var(--color-warm)' : 'var(--color-ink-3)',
-          fontWeight: 600,
-        },
-        // The "auto"/"disabled" label text is already theme-aware (accent /
-        // text-tertiary), but the pill behind it must be too — a hardcoded
-        // white pill glares as a bright rectangle on the dark canvas, swamping
-        // the state it's meant to read out (TFAC-400). surface-raised is white
-        // in light mode (unchanged) and the dark raised surface in dark mode.
-        labelBgStyle: { fill: 'var(--color-raised)', fillOpacity: 0.8 },
-      }))
+      .flatMap((t) => {
+        const entry = t.blueprint_id ? blueprintFirstPrompt[t.blueprint_id] : undefined
+        return entry && activeEventIds.has(t.event_type) && presentPrompts.has(entry)
+          ? [{ t, entry }]
+          : []
+      })
+      .map(({ t, entry }) => {
+        // An edge runs when its handler automates; in any other mode the
+        // blueprint is attached and idle.
+        const runs = t.mode === 'automate'
+        return {
+          id: t.id,
+          source: `et:${t.event_type}`,
+          target: `p:${entry}`,
+          type: 'default',
+          animated: runs,
+          data: { kind: 'trigger' },
+          deletable: false,
+          reconnectable,
+          style: {
+            stroke: runs ? 'var(--color-warm)' : 'var(--color-ink-3)',
+            strokeWidth: runs ? 2 : 1,
+            strokeDasharray: runs ? undefined : '5 5',
+            opacity: runs ? 1 : 0.5,
+          },
+          markerEnd: {
+            type: MarkerType.ArrowClosed,
+            color: runs ? 'var(--color-warm)' : 'var(--color-ink-3)',
+          },
+          label: t.mode,
+          labelStyle: {
+            fontSize: 9,
+            fill: runs ? 'var(--color-warm)' : 'var(--color-ink-3)',
+            fontWeight: 600,
+          },
+          // The mode label text is already theme-aware (accent /
+          // text-tertiary), but the pill behind it must be too — a hardcoded
+          // white pill glares as a bright rectangle on the dark canvas,
+          // swamping the state it's meant to read out. surface-raised is white
+          // in light mode and the dark raised surface in dark mode.
+          labelBgStyle: { fill: 'var(--color-raised)', fillOpacity: 0.8 },
+        }
+      })
 
     const sequenceEdges: Edge[] = []
     for (const [bpId, ids] of Object.entries(blueprintSteps)) {
@@ -1155,20 +1156,11 @@ function BindingGraphInner({
       }
 
       if (plan.kind === 'trigger') {
-        const body: Record<string, unknown> = {
-          blueprint_id: plan.blueprintId,
-          event_type: plan.eventType,
-          team_id: teamId,
-        }
         try {
-          await apiFetch(triggersCreatePath(), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
-          })
+          await createEventHandler(handlerForConnection(plan, teamId))
           fetchAll()
         } catch (err) {
-          toast.failed(err, 'Could not create the trigger.')
+          toast.failed(err, 'Could not create the event handler.')
         }
         return
       }
@@ -1353,22 +1345,20 @@ function BindingGraphInner({
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [duplicateSelection, copySelection, pasteClipboard])
 
-  const doDeleteTrigger = useCallback(
-    async (triggerId: string) => {
+  // Remove a handler edge: the handler is detached from its blueprint, not
+  // deleted.
+  const doDetachTrigger = useCallback(
+    async (handlerId: string) => {
       await removeTriggerGuard.run(async () => {
-        // Capture trigger info before deletion for the forgiving banner callback.
-        const deleted = triggersRef.current.find((t) => t.id === triggerId)
+        const detached = triggersRef.current.find((t) => t.id === handlerId)
+        if (!detached) return
         try {
-          await apiFetch(`${handlersBase()}/${encodeURIComponent(triggerId)}`, {
-            method: 'DELETE',
-          })
+          await updateEventHandler(handlerId, detachPatch(detached))
           await fetchAll()
           // Notify parent so it can check coverage and show the forgiving banner.
-          if (deleted) {
-            onTriggerDeletedRef.current?.(deleted.event_type)
-          }
+          onTriggerDeletedRef.current?.(detached.event_type)
         } catch (err) {
-          toast.failed(err, 'Could not remove the trigger.')
+          toast.failed(err, 'Could not detach the event handler.')
         }
       })
     },
@@ -1397,18 +1387,14 @@ function BindingGraphInner({
   // --- Edge reconnection (rule 4: drag an arrow's head onto a new target) ---
   // Re-target lands on a chain entry; drop-on-empty detaches.
 
-  // Re-point a trigger edge onto a different blueprint's entry: an in-place
-  // blueprint_id move that preserves the trigger row + its run history.
+  // Re-point a handler edge onto a different blueprint's entry: an in-place
+  // blueprint_id write that preserves the handler row + its run history.
   const doRetargetTrigger = useCallback(
-    async (triggerId: string, targetBlueprintId: string) => {
+    async (handlerId: string, targetBlueprintId: string) => {
       try {
-        await apiFetch(`${handlersBase()}/${encodeURIComponent(triggerId)}/retarget`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ blueprint_id: targetBlueprintId }),
-        })
+        await updateEventHandler(handlerId, { blueprint_id: targetBlueprintId })
       } catch (err) {
-        toast.failed(err, 'Could not move the trigger.')
+        toast.failed(err, 'Could not move the event handler.')
       } finally {
         fetchAll()
       }
@@ -1479,7 +1465,7 @@ function BindingGraphInner({
       }
       const kind = (oldEdge.data as { kind?: string } | undefined)?.kind
       if (kind === 'trigger') {
-        // The trigger keeps its event (the edge's source is `et:<event type>`).
+        // The handler keeps its event (the edge's source is `et:<event type>`).
         if (eventRunsBlueprint(triggerEventsRef.current, oldEdge.source.slice(3), targetBp)) {
           toast.error(EVENT_ALREADY_RUNS_BLUEPRINT)
           return
@@ -1504,25 +1490,26 @@ function BindingGraphInner({
   )
 
   // A reconnect drag ended. If it didn't land on a handle (success still false),
-  // the user dropped the head on empty space → detach: a trigger edge removes
-  // the trigger, a sequence edge splits the blueprint at that point.
+  // the user dropped the head on empty space → detach: a handler edge detaches
+  // the handler from its blueprint, a sequence edge splits the blueprint at
+  // that point.
   const onReconnectEnd = useCallback(
     (_event: MouseEvent | TouchEvent, edge: Edge) => {
       if (edgeReconnectSuccessful.current) return
       const kind = (edge.data as { kind?: string } | undefined)?.kind
       if (kind === 'trigger') {
-        doDeleteTrigger(edge.id)
+        doDetachTrigger(edge.id)
       } else if (kind === 'sequence') {
         const data = edge.data as { blueprintId: string; atStepIndex: number }
         doSplit(data.blueprintId, data.atStepIndex)
       }
       edgeReconnectSuccessful.current = true
     },
-    [doDeleteTrigger, doSplit],
+    [doDetachTrigger, doSplit],
   )
 
-  // Click an edge: plain click on a trigger edge opens its config; shift-click
-  // any edge opens a contextual menu (trigger: edit/remove; sequence: split).
+  // Click an edge: plain click on a handler edge opens its config; shift-click
+  // any edge opens a contextual menu (handler: edit/detach; sequence: split).
   const onEdgeClick: EdgeMouseHandler = useCallback((event, edge) => {
     const mouseEvent = event as unknown as MouseEvent
     const kind = (edge.data as { kind?: string } | undefined)?.kind
@@ -1539,7 +1526,7 @@ function BindingGraphInner({
       }
       return
     }
-    // Trigger edge — resolve the backing trigger by edge id.
+    // Handler edge — resolve the backing handler by edge id.
     const trigger = triggersRef.current.find((t) => t.id === edge.id)
     if (!trigger) return
     if (event.shiftKey) {
@@ -1744,17 +1731,17 @@ function BindingGraphInner({
                   }}
                   className="w-full text-left text-ui text-ink-2 hover:text-ink-1 hover:bg-tint-3 font-medium px-2.5 py-1.5 rounded-lg transition-colors"
                 >
-                  Edit trigger config
+                  Edit event handler
                 </button>
                 <button
                   onClick={async () => {
-                    await doDeleteTrigger(edgeMenu.trigger.id)
+                    await doDetachTrigger(edgeMenu.trigger.id)
                     setEdgeMenu(null)
                   }}
                   disabled={removeTriggerGuard.pending}
                   className="w-full text-left text-ui text-alarm hover:bg-alarm disabled:opacity-40 disabled:cursor-not-allowed font-medium px-2.5 py-1.5 rounded-lg transition-colors"
                 >
-                  {removeTriggerGuard.pending ? 'Removing…' : 'Remove trigger'}
+                  {removeTriggerGuard.pending ? 'Detaching…' : 'Detach from blueprint'}
                 </button>
               </>
             ) : (
@@ -1853,7 +1840,7 @@ function BindingGraphInner({
                     }}
                     className="w-full text-left text-ui text-ink-2 hover:text-ink-1 hover:bg-tint-3 font-medium px-2.5 py-1.5 rounded-lg border border-line-1 transition-colors"
                   >
-                    Edit trigger config
+                    Edit event handler
                     <span className="block text-reported font-normal text-ink-3 truncate">
                       {eventTypes.find((et) => et.id === trigger.event_type)?.label ??
                         trigger.event_type}
@@ -1977,7 +1964,7 @@ function BindingGraphInner({
             </ul>
             <p className="text-reported text-ink-3 leading-snug mb-3">
               {deleteMightOrphan &&
-                'Deleting a prompt mid-blueprint splits the steps after it into a new untriggered blueprint. '}
+                'Deleting a prompt mid-blueprint splits the steps after it into a new, separate blueprint. '}
               This can’t be undone.
             </p>
             <div className="flex items-center justify-end gap-1.5">

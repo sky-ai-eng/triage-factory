@@ -43,9 +43,9 @@ func newPgBreakerSeeder(conn *sql.DB, orgID, userID string) dbtest.BreakerSeeder
 		t.Helper()
 		triggerID := uuid.New().String()
 		exec(t, "seed trigger", `
-			INSERT INTO event_handlers (id, org_id, creator_user_id, team_id, kind, event_type, source,
+			INSERT INTO event_handlers (id, org_id, creator_user_id, team_id, mode, event_type, source, name,
 			                            blueprint_id, breaker_threshold, min_autonomy_suitability)
-			VALUES ($1, $2, $3, `+team+`, 'trigger', $4, 'user', $5, $6, 0)
+			VALUES ($1, $2, $3, `+team+`, 'automate', $4, 'user', 'Breaker', $5, $6, 0)
 		`, triggerID, orgID, userID, domain.EventGitHubPRCICheckFailed, blueprintID, threshold)
 		return triggerID
 	}
@@ -113,9 +113,9 @@ func newPgBreakerSeeder(conn *sql.DB, orgID, userID string) dbtest.BreakerSeeder
 			t.Helper()
 			return seedRun(t, taskID, nil, blueprintID, "manual", userID, status, startedAt)
 		},
-		SetTrigger: func(t *testing.T, triggerID string, enabled bool, threshold int) {
+		SetTrigger: func(t *testing.T, triggerID, mode string, threshold int) {
 			t.Helper()
-			exec(t, "set trigger", `UPDATE event_handlers SET enabled = $1, breaker_threshold = $2 WHERE id = $3`, enabled, threshold, triggerID)
+			exec(t, "set trigger", `UPDATE event_handlers SET mode = $1, breaker_threshold = $2 WHERE id = $3`, mode, threshold, triggerID)
 		},
 		DeleteTrigger: func(t *testing.T, triggerID string) {
 			t.Helper()

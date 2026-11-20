@@ -54,11 +54,11 @@ type outageHandlerStore struct {
 	o *outage
 }
 
-func (s outageHandlerStore) GetEnabledForEventSystem(ctx context.Context, orgID, eventType string) ([]domain.EventHandler, error) {
+func (s outageHandlerStore) GetActiveForEventSystem(ctx context.Context, orgID, eventType string) ([]domain.EventHandler, error) {
 	if s.o.down() {
 		return nil, errOutage
 	}
-	return s.EventHandlerStore.GetEnabledForEventSystem(ctx, orgID, eventType)
+	return s.EventHandlerStore.GetActiveForEventSystem(ctx, orgID, eventType)
 }
 
 type outageTaskStore struct {

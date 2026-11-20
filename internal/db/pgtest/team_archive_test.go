@@ -194,8 +194,8 @@ func seedTeamRows(t *testing.T, h *Harness, orgID, userID, teamID, suffix string
 		t.Fatalf("seed prompt %s: %v", suffix, err)
 	}
 	if err := h.AdminDB.QueryRow(`
-		INSERT INTO event_handlers (org_id, creator_user_id, team_id, kind, event_type, name, default_priority, sort_order)
-		VALUES ($1, $2, $3, 'rule', 'github:pr:opened', $4, 0.5, 0) RETURNING id
+		INSERT INTO event_handlers (org_id, creator_user_id, team_id, mode, event_type, name, default_priority, sort_order)
+		VALUES ($1, $2, $3, 'watch', 'github:pr:opened', $4, 0.5, 0) RETURNING id
 	`, orgID, userID, teamID, "rule-"+suffix).Scan(&r.handler); err != nil {
 		t.Fatalf("seed rule %s: %v", suffix, err)
 	}

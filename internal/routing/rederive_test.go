@@ -223,15 +223,15 @@ func setupReDeriveScenario(t *testing.T, database *sql.DB, minAutonomy float64) 
 	// Create trigger with autonomy threshold
 	trigger := domain.EventHandler{
 		ID:                     "test-trigger",
-		Kind:                   domain.EventHandlerKindTrigger,
+		Name:                   "test-trigger",
+		DefaultPriority:        0.5,
+		Mode:                   domain.EventHandlerModeAutomate,
 		BlueprintID:            "test-prompt",
-		TriggerType:            domain.TriggerTypeEvent,
 		EventType:              domain.EventGitHubPRCICheckFailed,
-		BreakerThreshold:       intPtr(4),
-		MinAutonomySuitability: floatPtr(minAutonomy),
-		Enabled:                true,
+		BreakerThreshold:       4,
+		MinAutonomySuitability: minAutonomy,
 	}
-	createTriggerForTestRouting(t, database, trigger)
+	createHandlerForTestRouting(t, database, trigger)
 
 	return task.ID, trigger.ID
 }
@@ -381,12 +381,12 @@ func TestReDeriveWorker_CrossTeamTrigger_AdmitsOnlyTheVisibleTeams(t *testing.T)
 	bpTeamB := insertBlueprintForTeam(t, database, "bp-teamB", "p-teamB", teamB)
 	if _, err := database.Exec(`
 		INSERT INTO event_handlers
-			(id, org_id, team_id, creator_user_id, kind, event_type,
-			 scope_predicate_json, enabled, source,
+			(id, org_id, team_id, creator_user_id, mode, event_type,
+			 scope_predicate_json, source, name,
 			 blueprint_id, breaker_threshold, min_autonomy_suitability,
 			 created_at, updated_at)
-		VALUES (?, ?, ?, ?, 'trigger', ?,
-		        NULL, 1, 'user',
+		VALUES (?, ?, ?, ?, 'automate', ?,
+		        NULL, 'user', 'team B trigger',
 		        ?, 4, 0.6,
 		        datetime('now'), datetime('now'))
 	`, "trigger-teamB", runmode.LocalDefaultOrgID, teamB, runmode.LocalDefaultUserID,
@@ -453,12 +453,12 @@ func TestReDeriveWorker_TeamNotInVisibilitySet_AdmitsNothing(t *testing.T) {
 	bpNovis := insertBlueprintForTeam(t, database, "bp-novis", "p-novis", teamB)
 	if _, err := database.Exec(`
 		INSERT INTO event_handlers
-			(id, org_id, team_id, creator_user_id, kind, event_type,
-			 scope_predicate_json, enabled, source,
+			(id, org_id, team_id, creator_user_id, mode, event_type,
+			 scope_predicate_json, source, name,
 			 blueprint_id, breaker_threshold, min_autonomy_suitability,
 			 created_at, updated_at)
-		VALUES (?, ?, ?, ?, 'trigger', ?,
-		        NULL, 1, 'user',
+		VALUES (?, ?, ?, ?, 'automate', ?,
+		        NULL, 'user', 'team B trigger',
 		        ?, 4, 0.6,
 		        datetime('now'), datetime('now'))
 	`, "trigger-novis", runmode.LocalDefaultOrgID, teamB, runmode.LocalDefaultUserID,
@@ -519,12 +519,16 @@ func TestReDeriveWorker_PredicateMismatch_AdmitsNothing(t *testing.T) {
 	createTestPrompt(t, database, domain.Prompt{ID: "p3", Name: "Test3", Body: "Do", Source: "user"})
 
 	pred := `{"author_id_in":["583231"]}`
-	createTriggerForTestRouting(t, database, domain.EventHandler{
-		ID: "t-pred", Kind: domain.EventHandlerKindTrigger,
-		BlueprintID: "p3", TriggerType: domain.TriggerTypeEvent,
-		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: intPtr(4),
-		MinAutonomySuitability: floatPtr(0.5), Enabled: true,
-		ScopePredicateJSON: &pred,
+	createHandlerForTestRouting(t, database, domain.EventHandler{
+		ID:                     "t-pred",
+		Name:                   "t-pred",
+		DefaultPriority:        0.5,
+		Mode:                   domain.EventHandlerModeAutomate,
+		BlueprintID:            "p3",
+		EventType:              domain.EventGitHubPRCICheckFailed,
+		BreakerThreshold:       4,
+		MinAutonomySuitability: 0.5,
+		ScopePredicateJSON:     &pred,
 	})
 
 	scoreTask(t, database, task.ID, 0.9)
@@ -560,12 +564,16 @@ func TestReDeriveWorker_MatchesThroughTheCurrentView(t *testing.T) {
 
 	createTestPrompt(t, database, domain.Prompt{ID: "p4", Name: "Test4", Body: "Do", Source: "user"})
 	pred := `{"author_id_in":["583231"]}`
-	createTriggerForTestRouting(t, database, domain.EventHandler{
-		ID: "t-view", Kind: domain.EventHandlerKindTrigger,
-		BlueprintID: "p4", TriggerType: domain.TriggerTypeEvent,
-		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: intPtr(4),
-		MinAutonomySuitability: floatPtr(0.5), Enabled: true,
-		ScopePredicateJSON: &pred,
+	createHandlerForTestRouting(t, database, domain.EventHandler{
+		ID:                     "t-view",
+		Name:                   "t-view",
+		DefaultPriority:        0.5,
+		Mode:                   domain.EventHandlerModeAutomate,
+		BlueprintID:            "p4",
+		EventType:              domain.EventGitHubPRCICheckFailed,
+		BreakerThreshold:       4,
+		MinAutonomySuitability: 0.5,
+		ScopePredicateJSON:     &pred,
 	})
 
 	scoreTask(t, database, task.ID, 0.9)

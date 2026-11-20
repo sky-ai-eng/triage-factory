@@ -22,8 +22,8 @@ func testPromptStore(database *sql.DB) db.PromptStore {
 }
 
 // testEventHandlerStore returns a SQLite-backed EventHandlerStore for
-// routing tests. The router takes one store covering both
-// rules and triggers; tests construct it the same way as production.
+// routing tests. The router takes one store covering every handler mode;
+// tests construct it the same way as production.
 func testEventHandlerStore(database *sql.DB) db.EventHandlerStore {
 	if database == nil {
 		return nil
@@ -51,10 +51,10 @@ func testBlueprintStore(database *sql.DB) db.BlueprintStore {
 }
 
 // blueprintWrappingPrompt creates a single-step user blueprint owned by
-// teamID wrapping promptID and returns the blueprint id. A trigger now FKs a
-// same-team blueprint (not a prompt), so trigger fixtures wrap their prompt
+// teamID wrapping promptID and returns the blueprint id. A handler FKs a
+// same-team blueprint (not a prompt), so handler fixtures wrap their prompt
 // here. blueprintID is derived from promptID so repeat calls for the same
-// (prompt, team) are stable; the caller points the trigger's BlueprintID at
+// (prompt, team) are stable; the caller points the handler's BlueprintID at
 // the returned id.
 func blueprintWrappingPrompt(t *testing.T, database *sql.DB, promptID, teamID string) string {
 	t.Helper()
@@ -74,43 +74,36 @@ func blueprintWrappingPrompt(t *testing.T, database *sql.DB, promptID, teamID st
 	return blueprintID
 }
 
-// createTriggerForTestRouting + setTriggerEnabledForTestRouting are
-// trigger-shape helpers used by drain_test + rederive_test. They
-// wrap EventHandlerStore.Create / Update, building a
-// kind='trigger' EventHandler from the legacy-shaped fields.
-// createTriggerForTestRouting builds a kind='trigger' EventHandler on the
-// local default team (team A). The trigger's BlueprintID field is supplied
-// holding a PROMPT id (the legacy shape); this helper wraps that prompt in a
-// single-step team-A blueprint and rebinds BlueprintID to the blueprint id, so
-// the trigger satisfies the same-team blueprint FK.
-func createTriggerForTestRouting(t *testing.T, database *sql.DB, trig domain.EventHandler) {
+// createHandlerForTestRouting creates an event handler on the local default
+// team (team A) through EventHandlerStore.Create, in whatever mode the literal
+// names. The handler's BlueprintID field is supplied holding a PROMPT id; this
+// helper wraps that prompt in a single-step team-A blueprint and rebinds
+// BlueprintID to the blueprint id, so the handler satisfies the same-team
+// blueprint FK.
+func createHandlerForTestRouting(t *testing.T, database *sql.DB, h domain.EventHandler) {
 	t.Helper()
-	trig.Kind = domain.EventHandlerKindTrigger
-	if trig.TriggerType == "" {
-		trig.TriggerType = domain.TriggerTypeEvent
+	if h.BlueprintID != "" {
+		h.BlueprintID = blueprintWrappingPrompt(t, database, h.BlueprintID, runmode.LocalDefaultTeamID)
 	}
-	if trig.BlueprintID != "" {
-		trig.BlueprintID = blueprintWrappingPrompt(t, database, trig.BlueprintID, runmode.LocalDefaultTeamID)
-	}
-	if _, err := testEventHandlerStore(database).Create(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, trig); err != nil {
-		t.Fatalf("createTriggerForTestRouting %s: %v", trig.ID, err)
+	if _, err := testEventHandlerStore(database).Create(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, h); err != nil {
+		t.Fatalf("createHandlerForTestRouting %s: %v", h.ID, err)
 	}
 }
 
-// setTriggerEnabledForTestRouting flips a trigger's enabled bit through the
-// same read-then-Update the PATCH route performs, so the fixture and the
-// product reach the stored row by one path.
-func setTriggerEnabledForTestRouting(t *testing.T, database *sql.DB, id string, enabled bool) {
+// setHandlerModeForTestRouting moves a handler to mode through the same
+// read-then-Update the PATCH route performs, so the fixture and the product
+// reach the stored row by one path.
+func setHandlerModeForTestRouting(t *testing.T, database *sql.DB, id, mode string) {
 	t.Helper()
 	ctx := context.Background()
 	store := testEventHandlerStore(database)
-	trig, err := store.Get(ctx, runmode.LocalDefaultOrgID, id)
-	if err != nil || trig == nil {
-		t.Fatalf("setTriggerEnabledForTestRouting %s: get: %v", id, err)
+	h, err := store.Get(ctx, runmode.LocalDefaultOrgID, id)
+	if err != nil || h == nil {
+		t.Fatalf("setHandlerModeForTestRouting %s: get: %v", id, err)
 	}
-	trig.Enabled = enabled
-	if _, err := store.Update(ctx, runmode.LocalDefaultOrgID, *trig); err != nil {
-		t.Fatalf("setTriggerEnabledForTestRouting %s: %v", id, err)
+	h.Mode = mode
+	if _, err := store.Update(ctx, runmode.LocalDefaultOrgID, *h); err != nil {
+		t.Fatalf("setHandlerModeForTestRouting %s: %v", id, err)
 	}
 }
 
@@ -118,7 +111,7 @@ func setTriggerEnabledForTestRouting(t *testing.T, database *sql.DB, id string, 
 // free-function. Routes through the store so test fixtures and
 // production share the same insert SQL. The SQLite store pins
 // LocalDefaultTeamID (team A), so this owns the row to team A — for a
-// prompt a second team's trigger/chain must reference, use
+// prompt a second team's handler/chain must reference, use
 // insertPromptForTeam.
 func createTestPrompt(t *testing.T, database *sql.DB, p domain.Prompt) {
 	t.Helper()
@@ -130,7 +123,7 @@ func createTestPrompt(t *testing.T, database *sql.DB, p domain.Prompt) {
 
 // insertPromptForTeam seeds a user prompt owned by a specific team via a
 // raw INSERT. createTestPrompt routes through PromptStore.Create which pins
-// LocalDefaultTeamID (team A); a team-B trigger or chain step can only bind
+// LocalDefaultTeamID (team A); a team-B handler or chain step can only bind
 // a prompt its own team owns under the same-team composite FK, so
 // team-B fixtures seed their prompt here with the matching team_id.
 func insertPromptForTeam(t *testing.T, database *sql.DB, id, teamID string) {
@@ -146,7 +139,7 @@ func insertPromptForTeam(t *testing.T, database *sql.DB, id, teamID string) {
 // insertBlueprintForTeam seeds a user blueprint (+ a 1-step list wrapping
 // promptID) owned by a specific team via raw INSERTs. Mirrors
 // insertPromptForTeam: the SQLite BlueprintStore.Create / ReplaceSteps pin
-// LocalDefaultTeamID (team A), so a team-B trigger fixture that must reference
+// LocalDefaultTeamID (team A), so a team-B handler fixture that must reference
 // a team-B blueprint seeds it here with the matching team_id. Returns the
 // blueprint id.
 func insertBlueprintForTeam(t *testing.T, database *sql.DB, blueprintID, promptID, teamID string) string {
@@ -166,16 +159,9 @@ func insertBlueprintForTeam(t *testing.T, database *sql.DB, blueprintID, promptI
 	return blueprintID
 }
 
-// intPtr / floatPtr are convenience wrappers for the pointer-shaped
-// per-kind fields on domain.EventHandler. Trigger rows carry
-// BreakerThreshold (*int) and MinAutonomySuitability (*float64); test
-// fixtures with literal values pass them through these helpers.
-func intPtr(v int) *int           { return &v }
-func floatPtr(v float64) *float64 { return &v }
-
-// seedHandlerFKTargets seeds the prompts AND blueprints that shipped triggers
-// reference so EventHandlerStore.Seed's trigger rows resolve their FK to a
-// same-team blueprint (a trigger fires a blueprint, not a prompt
+// seedHandlerFKTargets seeds the prompts AND blueprints that shipped handlers
+// reference so EventHandlerStore.Seed's rows resolve their FK to a
+// same-team blueprint (a handler runs a blueprint, not a prompt
 // directly). Production's SeedShippedIntoTeam seeds prompts → blueprints (each
 // wrapping its prompt as a 1-step list) → handlers; tests that call Seed
 // directly replicate that ordering here. Returns the system_slug →
@@ -200,7 +186,7 @@ func seedHandlerFKTargets(t *testing.T, database *sql.DB) map[string]string {
 	out := map[string]string{}
 	for _, s := range slugs {
 		// The handler FK only needs a same-team prompt + blueprint to exist; plain
-		// user rows satisfy it (this test resolves the trigger's blueprint through
+		// user rows satisfy it (this test resolves the handler's blueprint through
 		// the returned slug→id map, not by system_slug). The id is a random UUID.
 		promptID := uuid.New().String()
 		if _, err := prompts.Create(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,

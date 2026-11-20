@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import TriggerConfigPanel from './TriggerConfigPanel'
-import type { TriggerHandler } from '../types'
+import type { EventHandler } from '../types'
 import { jsonBody } from '../test/apiResponse'
 
 // What's under test is the header's blueprint badge, so the predicate editor
@@ -11,19 +11,20 @@ vi.mock('../hooks/useEventSources', () => ({
   useEventSources: () => ({ stateOf: () => 'available', canProduce: () => true }),
 }))
 
-const trigger: TriggerHandler = {
+const trigger: EventHandler = {
   id: 'trigger-1',
-  kind: 'trigger',
+  mode: 'automate',
   team_id: 'team-a',
   event_type: 'github:pr:ci_check_failed',
+  name: 'CI fix',
   scope_predicate_json: null,
-  enabled: true,
+  default_priority: 0.5,
+  sort_order: 0,
   source: 'user',
   applies_to_unowned: false,
   created_at: '2026-11-02T00:00:00Z',
   updated_at: '2026-11-02T00:00:00Z',
   blueprint_id: 'bp/1',
-  trigger_type: 'event',
   breaker_threshold: 4,
   min_autonomy_suitability: 0,
 }

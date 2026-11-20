@@ -72,11 +72,10 @@ func TestRunJiraCycleForOrg_ChecksDriftHourly(t *testing.T) {
 		t.Fatalf("ReplaceForTeam: %v", err)
 	}
 	predicate := `{"priority_id_in":["9"]}`
-	priority, order := 0.5, 0
 	handler, err := stores.EventHandlers.Create(ctx, org, team, domain.EventHandler{
-		ID: "00000000-0000-0000-0000-0000000000aa", Kind: domain.EventHandlerKindRule,
-		EventType: domain.EventJiraIssueAssigned, Name: "Urgent work", Enabled: true,
-		ScopePredicateJSON: &predicate, DefaultPriority: &priority, SortOrder: &order,
+		ID: "00000000-0000-0000-0000-0000000000aa", Mode: domain.EventHandlerModeWatch,
+		EventType: domain.EventJiraIssueAssigned, Name: "Urgent work",
+		ScopePredicateJSON: &predicate, DefaultPriority: 0.5, BreakerThreshold: 4,
 	})
 	if err != nil {
 		t.Fatalf("create handler: %v", err)

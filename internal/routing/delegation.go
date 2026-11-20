@@ -718,7 +718,7 @@ func triggerDelegateOpts(orgID string, trigger domain.EventHandler, triggeringEv
 	return delegate.DelegateOpts{
 		OrgID:               orgID,
 		ExplicitBlueprintID: trigger.BlueprintID,
-		TriggerType:         "event",
+		TriggerType:         domain.TriggerTypeEvent,
 		TriggerID:           trigger.ID,
 		TriggeringEventID:   triggeringEventID,
 		ActorAgentID:        actorAgentID,

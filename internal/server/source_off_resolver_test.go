@@ -115,28 +115,20 @@ func TestSourceOff_LinearCatalogAndTrackedTeamsAskLinearNothing(t *testing.T) {
 	}
 }
 
-// The event-handler PATCH and promote check every catalog id they add with the
-// tracker. With the tracker off that check answers the pause instead of a 502
-// about an outage; a 422 the body already earned still wins.
+// The event-handler PATCH checks every catalog id it adds with the tracker.
+// With the tracker off that check answers the pause instead of a 502 about an
+// outage; a 422 the body already earned still wins.
 func TestSourceOff_EventHandlerCatalogCheckAsksJiraNothing(t *testing.T) {
 	r := newJiraCatalogRig(t)
-	seedBlueprintForTrigger(t, r.s, "bp-jira-off")
-	rule := func() string {
-		t.Helper()
-		code, created := r.createRule(t, domain.EventJiraIssueAssigned, nil)
-		if code != http.StatusCreated {
-			t.Fatalf("seed rule: %d: %v", code, created)
-		}
-		return created["id"].(string)
+	code, created := r.createRule(t, domain.EventJiraIssueAssigned, nil)
+	if code != http.StatusCreated {
+		t.Fatalf("seed handler: %d: %v", code, created)
 	}
-	patched, promoted := rule(), rule()
+	patched := created["id"].(string)
 	adding := map[string]any{"status_id_in": []string{statusInProgressID}}
 	requests := func() map[string]*httptest.ResponseRecorder {
 		return map[string]*httptest.ResponseRecorder{
 			"patch": doJSON(t, r.s, http.MethodPatch, "/api/event-handlers/"+patched, map[string]any{"scope_predicate": adding}),
-			"promote": doJSON(t, r.s, http.MethodPost, "/api/event-handlers/"+promoted+"/promote", map[string]any{
-				"blueprint_id": "bp-jira-off", "breaker_threshold": 3, "min_autonomy_suitability": 0.0, "scope_predicate": adding,
-			}),
 		}
 	}
 

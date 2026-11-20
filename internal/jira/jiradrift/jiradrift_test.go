@@ -247,8 +247,8 @@ func TestPassRules_OneReadPerProject(t *testing.T) {
 
 func handler(id, team, eventType, predicate string) domain.EventHandler {
 	return domain.EventHandler{
-		ID: id, Kind: domain.EventHandlerKindTrigger, TeamID: team, EventType: eventType,
-		Enabled: true, ScopePredicateJSON: &predicate,
+		ID: id, Mode: domain.EventHandlerModeAutomate, TeamID: team, EventType: eventType,
+		ScopePredicateJSON: &predicate, Name: id, DefaultPriority: 0.5, BreakerThreshold: 4,
 	}
 }
 
@@ -274,8 +274,8 @@ func TestPassHandlers(t *testing.T) {
 		errs:       map[string]error{"statuses:10002": classified(upstream.Rejected)},
 	}
 
-	disabled := handler("disabled", "team-a", statusChanged, `{"new_status_id_in":["999"]}`)
-	disabled.Enabled = false
+	off := handler("off", "team-a", statusChanged, `{"new_status_id_in":["999"]}`)
+	off.Mode = domain.EventHandlerModeOff
 	handlers := []domain.EventHandler{
 		// A status another of the team's projects has is not gone.
 		handler("other-project", "team-a", statusChanged, `{"new_status_id_in":["90"]}`),
@@ -287,10 +287,10 @@ func TestPassHandlers(t *testing.T) {
 		handler("unread", "team-b", statusChanged, `{"new_status_id_in":["999"]}`),
 		// team-c tracks nothing, so receives no Jira event to match.
 		handler("untracked", "team-c", statusChanged, `{"new_status_id_in":["999"]}`),
-		disabled,
+		off,
 	}
 	kinds.JiraPredicateDrift.Set(ctx, org, kinds.JiraHandlerFilter{HandlerID: "unread"}, true)
-	kinds.JiraPredicateDrift.Set(ctx, org, kinds.JiraHandlerFilter{HandlerID: "disabled"}, true)
+	kinds.JiraPredicateDrift.Set(ctx, org, kinds.JiraHandlerFilter{HandlerID: "off"}, true)
 	kinds.JiraPredicateDrift.Set(ctx, org, kinds.JiraHandlerFilter{HandlerID: "untracked"}, true)
 
 	NewPass(f).Handlers(ctx, org, rules, handlers)
@@ -303,10 +303,10 @@ func TestPassHandlers(t *testing.T) {
 		t.Fatalf("open = %v, want partial and priority raised and unread kept", keys)
 	}
 	if got := open["partial"]; !slices.Equal(got.Statuses, []string{"999"}) || got.Stopped || got.TeamID != "team-a" {
-		t.Errorf("partial = %+v, want status 999 gone and the trigger still firing", got)
+		t.Errorf("partial = %+v, want status 999 gone and the handler still matching", got)
 	}
 	if got := open["priority"]; !slices.Equal(got.Priorities, []string{"7"}) || len(got.IssueTypes) != 0 || !got.Stopped {
-		t.Errorf("priority = %+v, want priority 7 gone, stopping the trigger", got)
+		t.Errorf("priority = %+v, want priority 7 gone, stopping the handler", got)
 	}
 	if slices.Contains(f.calls, "issue_types:10002") {
 		t.Errorf("reads = %v: team-b's filters name no issue type", f.calls)
@@ -322,16 +322,16 @@ func TestPassHandler_SetsOneHandler(t *testing.T) {
 	f := &fakeJira{statuses: map[string][]jira.Status{"10000": jiraStatuses(workflow)}}
 	kinds.JiraPredicateDrift.Set(ctx, org, kinds.JiraHandlerFilter{HandlerID: "other"}, true)
 
-	h := handler("rule", "team-a", domain.EventJiraIssueStatusChanged, `{"new_status_id_in":["999"]}`)
-	h.Kind, h.Name = domain.EventHandlerKindRule, "Ready work"
+	h := handler("watch", "team-a", domain.EventJiraIssueStatusChanged, `{"new_status_id_in":["999"]}`)
+	h.Mode, h.Name = domain.EventHandlerModeWatch, "Ready work"
 	NewPass(f).Handler(ctx, org, h, projects)
-	rec.Active(t, org, kinds.JiraPredicateDrift, "rule", "other")
+	rec.Active(t, org, kinds.JiraPredicateDrift, "watch", "other")
 
 	fixed := `{"new_status_id_in":["2"]}`
 	h.ScopePredicateJSON = &fixed
 	NewPass(f).Handler(ctx, org, h, projects)
 	if keys := keysOf(rec.Open(org, kinds.JiraPredicateDrift)); !slices.Equal(keys, []string{"other"}) {
-		t.Errorf("open = %v, want the fixed rule resolved and the other left", keys)
+		t.Errorf("open = %v, want the fixed handler resolved and the other left", keys)
 	}
 }
 

@@ -140,11 +140,11 @@ func TestHandleEventHandlersList_HidesGatedHandler(t *testing.T) {
 	configureEventSources(t, s)
 	// The jira rule is created before gating, since its create is refused once
 	// gated; the github rule after, since gating jira must not refuse it.
-	jiraID := createUserRuleFor(t, s, domain.EventJiraIssueAssigned)
+	jiraID := createWatchHandlerFor(t, s, domain.EventJiraIssueAssigned)
 	gateJiraForTest(t)
-	githubID := createUserRuleFor(t, s, domain.EventGitHubPROpened)
+	githubID := createWatchHandlerFor(t, s, domain.EventGitHubPROpened)
 
-	got := listEventHandlers(t, s, "rule")
+	got := listEventHandlers(t, s)
 	var sawJira, sawGithub bool
 	for _, h := range got {
 		if h["id"] == jiraID {
@@ -165,11 +165,11 @@ func TestHandleEventHandlersList_HidesGatedHandler(t *testing.T) {
 func TestHandleEventHandlersList_GatedHandlerVisibleWithFeature(t *testing.T) {
 	s := newTestServer(t)
 	configureEventSources(t, s)
-	jiraID := createUserRuleFor(t, s, domain.EventJiraIssueAssigned)
+	jiraID := createWatchHandlerFor(t, s, domain.EventJiraIssueAssigned)
 	gateJiraForTest(t)
 	grantTestGateFeature(t)
 
-	got := listEventHandlers(t, s, "rule")
+	got := listEventHandlers(t, s)
 	var sawJira bool
 	for _, h := range got {
 		if h["id"] == jiraID {
@@ -186,7 +186,7 @@ func TestHandleEventHandlerCreate_RejectsGatedEventType(t *testing.T) {
 	configureEventSources(t, s)
 	gateJiraForTest(t)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/rules", map[string]any{
+	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers", map[string]any{
 		"event_type":       domain.EventJiraIssueAssigned,
 		"name":             "gated rule",
 		"default_priority": 0.5,
@@ -207,7 +207,7 @@ func TestHandleEventHandlerCreate_AllowsGatedEventTypeWithFeature(t *testing.T) 
 	gateJiraForTest(t)
 	grantTestGateFeature(t)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/rules", map[string]any{
+	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers", map[string]any{
 		"event_type":       domain.EventJiraIssueAssigned,
 		"name":             "now allowed",
 		"default_priority": 0.5,
@@ -223,8 +223,8 @@ func TestHandleEventHandlerCreate_AllowsGatedEventTypeWithFeature(t *testing.T) 
 func TestEventHandlerList_DropsGatedKeepsUngated(t *testing.T) {
 	s := newTestServer(t)
 	configureEventSources(t, s)
-	ghRule := createUserRuleFor(t, s, domain.EventGitHubPROpened)
-	jiraRule := createUserRuleFor(t, s, domain.EventJiraIssueAssigned)
+	ghRule := createWatchHandlerFor(t, s, domain.EventGitHubPROpened)
+	jiraRule := createWatchHandlerFor(t, s, domain.EventJiraIssueAssigned)
 
 	gateJiraForTest(t)
 
@@ -244,26 +244,4 @@ func TestEventHandlerList_DropsGatedKeepsUngated(t *testing.T) {
 	if page.Total() != len(page.Items) {
 		t.Errorf("total = %d but the page held %d rows", page.Total(), len(page.Items))
 	}
-}
-
-// createUserRuleFor creates a user-source rule bound to eventType and returns
-// its id.
-func createUserRuleFor(t *testing.T, s *Server, eventType string) string {
-	t.Helper()
-	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/rules", map[string]any{
-		"event_type":       eventType,
-		"name":             "rule for " + eventType,
-		"default_priority": 0.5,
-		"sort_order":       0,
-	})
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("seed rule for %s: %d: %s", eventType, rec.Code, rec.Body.String())
-	}
-	var got map[string]any
-	_ = json.Unmarshal(rec.Body.Bytes(), &got)
-	id, ok := got["id"].(string)
-	if !ok || id == "" {
-		t.Fatalf("seed rule for %s: missing id in response: %s", eventType, rec.Body.String())
-	}
-	return id
 }

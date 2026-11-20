@@ -9,6 +9,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
+	"github.com/sky-ai-eng/triage-factory/internal/notify/notifytest"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -276,12 +277,16 @@ func TestMatchHandlers_MatchesThroughTheCurrentView(t *testing.T) {
 	database := newTestDB(t)
 	createTestPrompt(t, database, domain.Prompt{ID: "p5", Name: "Test5", Body: "Do", Source: "user"})
 	pred := `{"author_id_in":["583231"]}`
-	createTriggerForTestRouting(t, database, domain.EventHandler{
-		ID: "t-view-event", Kind: domain.EventHandlerKindTrigger,
-		BlueprintID: "p5", TriggerType: domain.TriggerTypeEvent,
-		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: intPtr(4),
-		MinAutonomySuitability: floatPtr(0), Enabled: true,
-		ScopePredicateJSON: &pred,
+	createHandlerForTestRouting(t, database, domain.EventHandler{
+		ID:                     "t-view-event",
+		Name:                   "t-view-event",
+		DefaultPriority:        0.5,
+		Mode:                   domain.EventHandlerModeAutomate,
+		BlueprintID:            "p5",
+		EventType:              domain.EventGitHubPRCICheckFailed,
+		BreakerThreshold:       4,
+		MinAutonomySuitability: 0,
+		ScopePredicateJSON:     &pred,
 	})
 	r := reDeriveRouter(t, database, refusingDelegator{})
 
@@ -296,5 +301,58 @@ func TestMatchHandlers_MatchesThroughTheCurrentView(t *testing.T) {
 	viewErr = errors.New("db down")
 	if _, _, _, err := r.matchHandlers(context.Background(), runmode.LocalDefaultOrgID, evt, teamScopeCache{}); err == nil {
 		t.Error("matchHandlers with a failing view = nil error; want the view's error")
+	}
+}
+
+// TestHandleEvent_HandlerModes: a matching handler's mode alone decides what a
+// CI failure on a member's pull request does. Watch makes a task and runs
+// nothing, automate makes a task and runs the handler's blueprint, and off
+// does nothing at all. Every handler here carries a blueprint and an
+// immediate autonomy floor, so watch and off fire nothing for want of the
+// mode, not of a blueprint. Notify's raise with no task is
+// TestNotify_ConditionRaisedAndResolvedByItsCloseRelation.
+func TestHandleEvent_HandlerModes(t *testing.T) {
+	for _, c := range []struct {
+		mode        string
+		tasks, runs int
+	}{
+		{domain.EventHandlerModeWatch, 1, 0},
+		{domain.EventHandlerModeAutomate, 1, 1},
+		{domain.EventHandlerModeOff, 0, 0},
+	} {
+		t.Run(c.mode, func(t *testing.T) {
+			database := newTestDB(t)
+			setReviewHost(t, database)
+			seedUserOnTeam(t, database, runmode.LocalDefaultTeamID, "aidan")
+			enableTeamAutoDelegate(t, database, runmode.LocalDefaultTeamID)
+			createTestPrompt(t, database, domain.Prompt{ID: "p-mode", Name: "Mode", Body: "x", Source: "user"})
+			createHandlerForTestRouting(t, database, domain.EventHandler{
+				ID:               "h-mode",
+				Mode:             c.mode,
+				Name:             "CI failed",
+				EventType:        domain.EventGitHubPRCICheckFailed,
+				DefaultPriority:  0.5,
+				BlueprintID:      "p-mode",
+				BreakerThreshold: 4,
+			})
+			entityID := reviewEntity(t, database, "owner/repo#mode")
+			stub := &stubDelegator{db: database}
+			rec := notifytest.Record(t)
+
+			emitCI(t, firingRouter(database, stub), entityID, "aidan")
+
+			if n := activeTaskCount(t, database, entityID); n != c.tasks {
+				t.Errorf("active tasks = %d, want %d", n, c.tasks)
+			}
+			if stub.calls != int64(c.runs) {
+				t.Errorf("runs started = %d, want %d", stub.calls, c.runs)
+			}
+			if rows := firingsFor(t, database, entityID); len(rows) != 0 {
+				t.Errorf("queued firings = %+v, want none", rows)
+			}
+			if got := rec.Events(runmode.LocalDefaultOrgID); len(got) != 0 {
+				t.Errorf("raised %+v, want no notification", got)
+			}
+		})
 	}
 }

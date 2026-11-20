@@ -84,18 +84,19 @@ func sqliteTaskTeamFilter(teamIDs []string, args []any) (string, []any) {
 	return fmt.Sprintf(" AND (t.team_id IN (%s) OR EXISTS (SELECT 1 FROM task_teams tt WHERE tt.task_id = t.id AND tt.team_id IN (%s)))", ph, ph), args
 }
 
-// sqliteTaskRuleOrderJoin attaches each task's matching event_handler rule
-// sort_order (the lowest, when several rules cover the event type) so the list
-// ordering can put "CI is broken" above "someone asked for a review" without
-// the caller knowing the rule set. It counts only rules sqliteMatchableHandler
-// admits. LEFT JOIN: a task whose event type no such rule covers still lists,
-// ordered by the COALESCE default. The derived table is org-scoped so another
-// org's rules can't influence ordering.
+// sqliteTaskRuleOrderJoin attaches each task's matching event handler
+// sort_order (the lowest, when several handlers that make a task cover the
+// event type) so the list ordering can put "CI is broken" above "someone asked
+// for a review" without the caller knowing the handler set. It counts only
+// handlers in watch or automate that sqliteActiveHandler admits. LEFT JOIN: a
+// task whose event type no such handler covers still lists, ordered by the
+// COALESCE default. The derived table is org-scoped so another org's handlers
+// can't influence ordering.
 const sqliteTaskRuleOrderJoin = `
 	LEFT JOIN (
 		SELECT org_id, event_type, MIN(sort_order) AS sort_order
 		FROM event_handlers
-		WHERE kind = 'rule' AND ` + sqliteMatchableHandler + `
+		WHERE mode IN ('watch', 'automate') AND ` + sqliteActiveHandler + `
 		GROUP BY org_id, event_type
 	) tr ON t.event_type = tr.event_type AND t.org_id = tr.org_id`
 
@@ -2114,7 +2115,7 @@ func (s *taskStore) ListTrippedBreakersSystem(ctx context.Context, orgID string)
 		JOIN blueprint_runs br ON br.trigger_id = h.id AND br.blueprint_id = h.blueprint_id
 		JOIN tasks t ON t.id = br.task_id AND t.org_id = h.org_id
 		JOIN entities e ON e.id = t.entity_id AND e.state = 'active'
-		WHERE h.org_id = ? AND h.kind = 'trigger' AND h.enabled AND h.deleted_at IS NULL
+		WHERE h.org_id = ? AND h.mode = 'automate' AND h.deleted_at IS NULL
 		  AND `+breakerFailureSQL("br", "t")+`
 		GROUP BY h.id, t.entity_id, h.breaker_threshold
 		HAVING COUNT(*) >= h.breaker_threshold

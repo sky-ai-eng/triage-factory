@@ -400,7 +400,7 @@ func (r *Router) processFiring(ctx context.Context, cf dbpkg.ClaimedFiring) {
 		requeue(workitem.OutcomeTransient, fmt.Errorf("trigger lookup: %w", err))
 		return
 	}
-	if trigger == nil || trigger.Kind != domain.EventHandlerKindTrigger || !trigger.Enabled {
+	if trigger == nil || !trigger.Automates() {
 		skip(domain.PendingFiringSkipTriggerDisabled)
 		return
 	}

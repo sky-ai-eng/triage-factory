@@ -46,9 +46,9 @@ func newSQLiteBreakerSeeder(conn *sql.DB) dbtest.BreakerSeeder {
 		t.Helper()
 		triggerID := uuid.New().String()
 		exec(t, "seed trigger", `
-			INSERT INTO event_handlers (id, creator_user_id, team_id, kind, event_type, source,
+			INSERT INTO event_handlers (id, creator_user_id, team_id, mode, event_type, source, name,
 			                            blueprint_id, breaker_threshold, min_autonomy_suitability)
-			VALUES (?, ?, ?, 'trigger', ?, 'user', ?, ?, 0)
+			VALUES (?, ?, ?, 'automate', ?, 'user', 'Breaker', ?, ?, 0)
 		`, triggerID, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID, domain.EventGitHubPRCICheckFailed, blueprintID, threshold)
 		return triggerID
 	}
@@ -109,9 +109,9 @@ func newSQLiteBreakerSeeder(conn *sql.DB) dbtest.BreakerSeeder {
 			t.Helper()
 			return seedRun(t, taskID, nil, blueprintID, "manual", runmode.LocalDefaultUserID, status, startedAt)
 		},
-		SetTrigger: func(t *testing.T, triggerID string, enabled bool, threshold int) {
+		SetTrigger: func(t *testing.T, triggerID, mode string, threshold int) {
 			t.Helper()
-			exec(t, "set trigger", `UPDATE event_handlers SET enabled = ?, breaker_threshold = ? WHERE id = ?`, enabled, threshold, triggerID)
+			exec(t, "set trigger", `UPDATE event_handlers SET mode = ?, breaker_threshold = ? WHERE id = ?`, mode, threshold, triggerID)
 		},
 		DeleteTrigger: func(t *testing.T, triggerID string) {
 			t.Helper()

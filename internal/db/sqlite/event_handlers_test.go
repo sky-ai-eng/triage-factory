@@ -14,8 +14,8 @@ import (
 )
 
 // TestEventHandlerStore_SQLite runs the shared conformance suite
-// against the SQLite impl. Trigger fixtures FK to blueprints(id, org_id);
-// the seedBlueprints hook inserts the named rows via BlueprintStore so the
+// against the SQLite impl. A handler's blueprint FKs to blueprints(id,
+// org_id); the seedBlueprints hook inserts the named rows via BlueprintStore so the
 // harness stays schema-blind.
 func TestEventHandlerStore_SQLite(t *testing.T) {
 	dbtest.RunEventHandlerStoreConformance(t, func(t *testing.T) (db.EventHandlerStore, string, string, dbtest.BlueprintSeeder, dbtest.ShippedHandlerIDBySlug) {
@@ -28,7 +28,7 @@ func TestEventHandlerStore_SQLite(t *testing.T) {
 			t.Helper()
 			out := make(map[string]string, len(slugs))
 			for _, slug := range slugs {
-				// The trigger→blueprint FK only needs a same-team blueprint row to
+				// The handler→blueprint FK only needs a same-team blueprint row to
 				// exist; a plain user blueprint satisfies it (the seeded system-slug
 				// shape is exercised in the shipped-defaults sync suite).
 				id := uuid.New().String()
@@ -68,6 +68,12 @@ func TestTriggerDelete_SQLite(t *testing.T) {
 					t.Fatalf("seed blueprint: %v", err)
 				}
 				return id
+			},
+			DeleteBlueprint: func(t *testing.T, id string) {
+				t.Helper()
+				if err := stores.Blueprints.Delete(t.Context(), orgID, id); err != nil {
+					t.Fatalf("delete blueprint %s: %v", id, err)
+				}
 			},
 			Run: func(t *testing.T, triggerID string) string {
 				t.Helper()
@@ -120,9 +126,9 @@ func TestArchivedTeamHandlers_SQLite(t *testing.T) {
 				id := uuid.New().String()
 				if _, err := conn.ExecContext(t.Context(), `
 					INSERT INTO event_handlers
-						(id, org_id, team_id, creator_user_id, kind, event_type, enabled, source,
+						(id, org_id, team_id, creator_user_id, mode, event_type, source,
 						 name, default_priority, sort_order, created_at, updated_at)
-					VALUES (?, ?, ?, ?, 'rule', ?, 1, 'user', ?, 0.5, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+					VALUES (?, ?, ?, ?, 'watch', ?, 'user', ?, 0.5, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 				`, id, orgID, teamID, runmode.LocalDefaultUserID, domain.EventGitHubPRCICheckFailed, "rule "+id[:8]); err != nil {
 					t.Fatalf("seed rule on team %s: %v", teamID, err)
 				}

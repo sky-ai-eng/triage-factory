@@ -1,24 +1,25 @@
 import { useEffect, useState } from 'react'
 import { motion, AnimatePresence } from 'motion/react'
-import * as Switch from '@radix-ui/react-switch'
 import { Tooltip } from '../ui/tooltip/Tooltip'
 import { Info } from 'lucide-react'
-import type { Blueprint, TriggerHandler, EventType } from '../types'
+import type { Blueprint, EventHandler, EventHandlerMode, EventType } from '../types'
 import EventBadge from './EventBadge'
+import EventHandlerModeControl from './EventHandlerModeControl'
 import PredicateEditor from './PredicateEditor'
 import Slider from './Slider'
 import { toast } from './Toast/toastStore'
-import { apiFetch, apiJSON } from '../lib/apiClient'
-import { blueprintsBase, handlersBase } from '../lib/scope'
+import { apiJSON } from '../lib/apiClient'
+import { blueprintsBase } from '../lib/scope'
+import { deleteEventHandler, hasBlueprint, updateEventHandler } from '../lib/eventHandlers'
 import { useEventSources } from '../hooks/useEventSources'
 import { sourceCannotFireNote, sourceKindOf } from '../lib/eventSources'
 
 interface TriggerConfigPanelProps {
   open: boolean
-  trigger: TriggerHandler | null
+  trigger: EventHandler | null
   // When true the panel is read-only (TFAC-447): inputs are disabled and the
   // Save/Delete affordances are withheld, so a team viewer can inspect a
-  // trigger's config without being offered writes that 403 server-side.
+  // handler's config without being offered writes that 403 server-side.
   readOnly?: boolean
   onClose: () => void
   onSaved: () => void
@@ -35,25 +36,24 @@ export default function TriggerConfigPanel({
   onDeleted,
   onRefresh,
 }: TriggerConfigPanelProps) {
-  const handlerBase = handlersBase()
   const { stateOf } = useEventSources()
   const [predicate, setPredicate] = useState<Record<string, unknown>>({})
   const [minAutonomy, setMinAutonomy] = useState(0)
   const [breakerThreshold, setBreakerThreshold] = useState(4)
-  const [enabled, setEnabled] = useState(true)
-  // applies_to_unowned — the explicit "watch" reach opt-in (TFAC-517). On a
-  // trigger it grants orphan reach AND fires, so the whole orphan auto-delegation
-  // can be configured here without a companion task rule.
+  const [mode, setMode] = useState<EventHandlerMode>('watch')
+  // applies_to_unowned — the explicit reach opt-in. On a handler in automate it
+  // grants orphan reach AND fires, so the whole orphan auto-delegation can be
+  // configured here.
   const [appliesToUnowned, setAppliesToUnowned] = useState(false)
   const [promptName, setPromptName] = useState('')
   const [saving, setSaving] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
-  // Event-type catalog, fetched once per panel open (not per trigger). Used to
+  // Event-type catalog, fetched once per panel open (not per handler). Used to
   // decide whether the applies_to_unowned toggle is meaningful for this event.
   const [eventTypes, setEventTypes] = useState<EventType[]>([])
 
   // Fetch the catalog once when the panel opens — it's session-static, so there's
-  // no need to re-fetch on every trigger selection.
+  // no need to re-fetch on every handler selection.
   useEffect(() => {
     if (!open) return
     let cancelled = false
@@ -73,7 +73,7 @@ export default function TriggerConfigPanel({
   const eventWatchInert =
     eventTypes.find((et) => et.id === trigger?.event_type)?.supports_watch === false
 
-  // Why this trigger's source can no longer produce events, or null when it
+  // Why this handler's source can no longer produce events, or null when it
   // can. Reads the row's own derived flag — the state is only consulted for
   // the prose — so the panel and the list agree by construction.
   const triggerSourceKind = sourceKindOf(trigger?.event_type ?? '')
@@ -82,7 +82,7 @@ export default function TriggerConfigPanel({
       ? sourceCannotFireNote(triggerSourceKind, stateOf(triggerSourceKind))
       : null
 
-  // Initialize state when trigger changes
+  // Initialize state when the handler changes
   useEffect(() => {
     if (!trigger) return
     let cancelled = false
@@ -90,44 +90,40 @@ export default function TriggerConfigPanel({
     setPredicate(parsePredicate(trigger.scope_predicate_json))
     setMinAutonomy(trigger.min_autonomy_suitability)
     setBreakerThreshold(trigger.breaker_threshold)
-    setEnabled(trigger.enabled)
+    setMode(trigger.mode)
     setAppliesToUnowned(trigger.applies_to_unowned)
     setConfirmDelete(false)
     setPromptName('')
 
     // The bound blueprint's name is the badge. A failed read leaves it empty.
-    apiJSON<Pick<Blueprint, 'name'>>(
-      `${blueprintsBase()}/${encodeURIComponent(trigger.blueprint_id)}`,
-    )
-      .then((bp) => {
-        if (!cancelled && bp?.name) setPromptName(bp.name)
-      })
-      .catch(() => {})
+    if (trigger.blueprint_id) {
+      apiJSON<Pick<Blueprint, 'name'>>(
+        `${blueprintsBase()}/${encodeURIComponent(trigger.blueprint_id)}`,
+      )
+        .then((bp) => {
+          if (!cancelled && bp?.name) setPromptName(bp.name)
+        })
+        .catch(() => {})
+    }
 
     return () => {
       cancelled = true
     }
   }, [trigger])
 
-  const handleToggle = async (checked: boolean) => {
+  const handleModeChange = async (next: EventHandlerMode) => {
     if (!trigger) return
-    setEnabled(checked)
+    const prev = mode
+    setMode(next)
     try {
-      // The PATCH answers with the handler resource, so the switch settles on
+      // The PATCH answers with the handler resource, so the control settles on
       // the stored value rather than on what we optimistically assumed.
-      const saved = await apiJSON<TriggerHandler>(
-        `${handlerBase}/${encodeURIComponent(trigger.id)}`,
-        {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ enabled: checked }),
-        },
-      )
-      setEnabled(saved.enabled)
+      const saved = await updateEventHandler(trigger.id, { mode: next })
+      setMode(saved.mode)
       onRefresh?.()
     } catch (err) {
-      setEnabled(!checked)
-      toast.failed(err, 'Could not toggle the trigger.')
+      setMode(prev)
+      toast.failed(err, 'Could not change the mode.')
     }
   }
 
@@ -144,14 +140,10 @@ export default function TriggerConfigPanel({
         // event type the flag cannot widen.
         ...(eventWatchInert ? {} : { applies_to_unowned: appliesToUnowned }),
       }
-      await apiFetch(`${handlerBase}/${encodeURIComponent(trigger.id)}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      })
+      await updateEventHandler(trigger.id, body)
       onSaved()
     } catch (err) {
-      toast.failed(err, 'Could not save the trigger.')
+      toast.failed(err, 'Could not save the event handler.')
     } finally {
       setSaving(false)
     }
@@ -160,10 +152,10 @@ export default function TriggerConfigPanel({
   const handleDelete = async () => {
     if (!trigger) return
     try {
-      await apiFetch(`${handlerBase}/${encodeURIComponent(trigger.id)}`, { method: 'DELETE' })
+      await deleteEventHandler(trigger.id)
       onDeleted()
     } catch (err) {
-      toast.failed(err, 'Could not delete the trigger.')
+      toast.failed(err, 'Could not delete the event handler.')
     }
   }
 
@@ -192,17 +184,8 @@ export default function TriggerConfigPanel({
             {/* Header */}
             <div className="px-5 pt-5 pb-3 border-b border-line-1 shrink-0">
               <div className="flex items-center justify-between mb-3">
-                <h2 className="text-body font-semibold text-ink-1">Trigger Config</h2>
+                <h2 className="text-body font-semibold text-ink-1">Event handler</h2>
                 <div className="flex items-center gap-3">
-                  <Switch.Root
-                    checked={enabled}
-                    onCheckedChange={handleToggle}
-                    disabled={readOnly || sourceUnavailable !== null}
-                    title={sourceUnavailable ?? undefined}
-                    className="w-[34px] h-[18px] rounded-full bg-tint-3 data-[state=checked]:bg-warm transition-colors disabled:opacity-50"
-                  >
-                    <Switch.Thumb className="block w-[14px] h-[14px] bg-raised rounded-full shadow-float transition-transform translate-x-[2px] data-[state=checked]:translate-x-[18px]" />
-                  </Switch.Root>
                   <button
                     onClick={onClose}
                     className="text-ink-3 hover:text-ink-2 transition-colors text-lg leading-none px-1"
@@ -221,13 +204,22 @@ export default function TriggerConfigPanel({
                   </span>
                 )}
               </div>
-              {/* The trigger's source can no longer produce events. It is kept
-                  and shown — deleting a configured trigger because a
-                  credential was unbound is not the product's call — but arming
-                  it is inert, so the toggle above is too. */}
+              <div className="mt-3" title={sourceUnavailable ?? undefined}>
+                <EventHandlerModeControl
+                  mode={mode}
+                  eventType={trigger.event_type}
+                  hasBlueprint={hasBlueprint(trigger)}
+                  onChange={handleModeChange}
+                  disabled={readOnly || sourceUnavailable !== null}
+                />
+              </div>
+              {/* The handler's source can no longer produce events. It is kept
+                  and shown — deleting a configured handler because a
+                  credential was unbound is not the product's call — but
+                  turning it on is inert, so the mode control above is too. */}
               {sourceUnavailable && (
                 <p className="text-reported text-ink-3 italic mt-2">
-                  {sourceUnavailable} This trigger can&rsquo;t fire.
+                  {sourceUnavailable} This handler can&rsquo;t fire.
                 </p>
               )}
             </div>
@@ -287,8 +279,8 @@ export default function TriggerConfigPanel({
                 />
               </Section>
 
-              {/* Apply to unowned entities — the explicit "watch" reach opt-in
-                  (TFAC-517). On a trigger this grants orphan reach AND fires, so
+              {/* Apply to unowned entities — the explicit reach opt-in. On a
+                  handler in automate this grants orphan reach AND fires, so
                   the whole orphan auto-delegation is configured here. Off by
                   default; carries an eyes-open warning. Hidden for events the
                   catalog marks inert (pool / requested-party —

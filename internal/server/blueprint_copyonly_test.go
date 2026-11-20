@@ -79,9 +79,13 @@ func TestBlueprintCreate_AutoWrapRequiresPromptName(t *testing.T) {
 
 // --- C: prompt-delete pairing --------------------------------------------
 
+// Deleting the only prompt of a one-step blueprint retires the blueprint with
+// it, and detaches the handler that automated it, as a blueprint delete does.
 func TestPromptDelete_SoleOwnerPairSoftDeletesBoth(t *testing.T) {
 	s := newTestServer(t)
+	configureEventSources(t, s)
 	bp, p := createWrappedBlueprint(t, s, "Solo")
+	handlerID := attachHandler(t, s, bp, domain.EventGitHubPRCICheckFailed)
 
 	del := doJSON(t, s, http.MethodDelete, "/api/prompts/"+p, nil)
 	if del.Code != http.StatusOK {
@@ -95,25 +99,38 @@ func TestPromptDelete_SoleOwnerPairSoftDeletesBoth(t *testing.T) {
 	if blueprintListed(t, s, bp) {
 		t.Fatalf("sole-owner blueprint %s still listed after pairing delete", bp)
 	}
+	g := doJSON(t, s, http.MethodGet, "/api/event-handlers/"+handlerID, nil)
+	if g.Code != http.StatusOK {
+		t.Fatalf("GET handler after the delete: %d: %s", g.Code, g.Body.String())
+	}
+	var h map[string]any
+	if err := json.Unmarshal(g.Body.Bytes(), &h); err != nil {
+		t.Fatalf("decode handler: %v", err)
+	}
+	if h["mode"] != domain.EventHandlerModeWatch || h["blueprint_id"] != nil {
+		t.Errorf("handler after its blueprint's only prompt was deleted = mode %v, blueprint %v; want watch with no blueprint", h["mode"], h["blueprint_id"])
+	}
 }
 
-// Deleting a step prompt of a triggered multi-step blueprint splits it: the
-// steps before it keep the blueprint's id and trigger (with none before it,
-// both are gone), and the steps after it become a new trigger-less blueprint.
+// Deleting a step prompt of a multi-step blueprint a handler automates splits
+// it: the steps before it keep the blueprint's id and its handler, the steps
+// after it become a new blueprint no handler references, and with no steps
+// before it the blueprint is retired and its handler detached, left live in
+// watch with no blueprint.
 func TestPromptDelete_SplitsMultiStepBlueprint(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		n, at int
 	}{
-		{"tail keeps the id and trigger", 3, 2},
-		{"head retires the blueprint and detaches its trigger", 3, 0},
-		{"mid splits off a trigger-less downstream", 4, 1},
+		{"tail keeps the id and handler", 3, 2},
+		{"head retires the blueprint and detaches its handler", 3, 0},
+		{"mid splits off a downstream no handler references", 4, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newTestServer(t)
 			configureEventSources(t, s)
 			bp, ps := createChainBlueprint(t, s, "Chain", tc.n)
-			attachTrigger(t, s, bp, "github:pr:ci_check_failed")
+			handler := attachHandler(t, s, bp, "github:pr:ci_check_failed")
 
 			code, orphaned := deletePrompt(t, s, ps[tc.at])
 			if code != http.StatusOK {
@@ -126,19 +143,20 @@ func TestPromptDelete_SplitsMultiStepBlueprint(t *testing.T) {
 				t.Fatalf("deleted prompt GET: expected 404, got %d", g.Code)
 			}
 
-			// A head delete retires the blueprint with its entry prompt and
-			// deletes its trigger rather than leave it on a deleted row.
-			wantTriggers := 1
 			if tc.at == 0 {
-				wantTriggers = 0
 				if blueprintExists(t, s, bp) {
 					t.Error("head delete left the original blueprint readable")
 				}
-			} else if got := stepPromptIDs(t, s, bp); !equalStrings(got, ps[:tc.at]) {
-				t.Errorf("upstream steps = %v, want %v", got, ps[:tc.at])
-			}
-			if n := len(triggersForBlueprint(t, s, bp)); n != wantTriggers {
-				t.Errorf("original blueprint trigger count = %d, want %d", n, wantTriggers)
+				if got := getEventHandler(t, s, handler); got["blueprint_id"] != nil || got["mode"] != domain.EventHandlerModeWatch {
+					t.Errorf("handler after the head delete = %v, want it live in watch with no blueprint", got)
+				}
+			} else {
+				if got := stepPromptIDs(t, s, bp); !equalStrings(got, ps[:tc.at]) {
+					t.Errorf("upstream steps = %v, want %v", got, ps[:tc.at])
+				}
+				if got := handlerIDsForBlueprint(t, s, bp); len(got) != 1 || !got[handler] {
+					t.Errorf("handlers on the original blueprint = %v, want %s", got, handler)
+				}
 			}
 
 			if tc.at == tc.n-1 {
@@ -151,8 +169,8 @@ func TestPromptDelete_SplitsMultiStepBlueprint(t *testing.T) {
 			if got := stepPromptIDs(t, s, down); !equalStrings(got, ps[tc.at+1:]) {
 				t.Errorf("downstream steps = %v, want %v", got, ps[tc.at+1:])
 			}
-			if n := len(triggersForBlueprint(t, s, down)); n != 0 {
-				t.Errorf("downstream trigger count = %d, want 0 (trigger-less)", n)
+			if n := len(handlersForBlueprint(t, s, down)); n != 0 {
+				t.Errorf("downstream handler count = %d, want 0", n)
 			}
 		})
 	}
@@ -227,34 +245,27 @@ func createChainBlueprint(t *testing.T, s *Server, name string, n int) (blueprin
 	return bp, promptIDs
 }
 
-// attachTrigger wires a user trigger to blueprintID for eventType and returns
-// the trigger id.
-func attachTrigger(t *testing.T, s *Server, blueprintID, eventType string) string {
+// attachHandler creates a handler in automate on blueprintID for eventType
+// and returns its id.
+func attachHandler(t *testing.T, s *Server, blueprintID, eventType string) string {
 	t.Helper()
-	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/triggers", map[string]any{
+	return createHandlerID(t, s, map[string]any{
 		"event_type":               eventType,
+		"mode":                     domain.EventHandlerModeAutomate,
 		"blueprint_id":             blueprintID,
 		"breaker_threshold":        3,
 		"min_autonomy_suitability": 0.0,
 	})
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("attachTrigger to %s: %d: %s", blueprintID, rec.Code, rec.Body.String())
-	}
-	var tr struct {
-		ID string `json:"id"`
-	}
-	_ = json.Unmarshal(rec.Body.Bytes(), &tr)
-	return tr.ID
 }
 
-// seedTriggerRun records a run of triggerID: a conversation and its blueprint
-// run, both carrying the trigger_id that references the trigger. Returns the
+// seedHandlerRun records a run of handlerID: a conversation and its blueprint
+// run, both carrying the trigger_id that references the handler. Returns the
 // conversation id.
-func seedTriggerRun(t *testing.T, s *Server, triggerID, suffix string) string {
+func seedHandlerRun(t *testing.T, s *Server, handlerID, suffix string) string {
 	t.Helper()
 	conversationID := seedSteerConversation(t, s.db, suffix, dbtest.SeedConcluded)
-	execSQL(t, s.db, `UPDATE conversations SET trigger_id = ? WHERE id = ?`, triggerID, conversationID)
-	execSQL(t, s.db, `UPDATE blueprint_runs SET trigger_id = ? WHERE id = (SELECT blueprint_run_id FROM conversations WHERE id = ?)`, triggerID, conversationID)
+	execSQL(t, s.db, `UPDATE conversations SET trigger_id = ? WHERE id = ?`, handlerID, conversationID)
+	execSQL(t, s.db, `UPDATE blueprint_runs SET trigger_id = ? WHERE id = (SELECT blueprint_run_id FROM conversations WHERE id = ?)`, handlerID, conversationID)
 	return conversationID
 }
 
@@ -272,12 +283,12 @@ func runTriggerIDs(t *testing.T, s *Server, conversationID string) (conversation
 	return conversation, blueprintRun
 }
 
-// triggersForBlueprint returns the trigger handlers bound to blueprintID.
-func triggersForBlueprint(t *testing.T, s *Server, blueprintID string) []map[string]any {
+// handlersForBlueprint returns the handlers, in any mode, bound to
+// blueprintID.
+func handlersForBlueprint(t *testing.T, s *Server, blueprintID string) []map[string]any {
 	t.Helper()
-	all := listEventHandlers(t, s, "trigger")
 	var out []map[string]any
-	for _, h := range all {
+	for _, h := range listEventHandlers(t, s) {
 		if h["blueprint_id"] == blueprintID {
 			out = append(out, h)
 		}
@@ -285,12 +296,12 @@ func triggersForBlueprint(t *testing.T, s *Server, blueprintID string) []map[str
 	return out
 }
 
-// triggerIDsForBlueprint returns the ids of the trigger handlers bound to
+// handlerIDsForBlueprint returns the ids of the handlers bound to
 // blueprintID.
-func triggerIDsForBlueprint(t *testing.T, s *Server, blueprintID string) map[string]bool {
+func handlerIDsForBlueprint(t *testing.T, s *Server, blueprintID string) map[string]bool {
 	t.Helper()
 	out := map[string]bool{}
-	for _, h := range triggersForBlueprint(t, s, blueprintID) {
+	for _, h := range handlersForBlueprint(t, s, blueprintID) {
 		id, _ := h["id"].(string)
 		out[id] = true
 	}

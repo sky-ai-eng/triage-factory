@@ -3,8 +3,6 @@ package db
 import (
 	"encoding/json"
 	"reflect"
-
-	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // PredicateJSONEqual reports whether two scope_predicate_json values are
@@ -40,116 +38,124 @@ func PredicateJSONEqual(a, b string) bool {
 type HandlerSyncAction int
 
 const (
-	// HandlerSkip: the team's row is user_modified or soft-deleted, or (for a
-	// trigger) its shipped blueprint slug didn't resolve — leave it alone.
+	// HandlerSkip: the team's row is user_modified or soft-deleted — leave it
+	// alone.
 	HandlerSkip HandlerSyncAction = iota
 	// HandlerEqual: the team's row already equals shipped content — no writes.
 	HandlerEqual
 	// HandlerInsert: the team has no row for this shipped system_slug.
 	HandlerInsert
-	// HandlerApply: rewrite the diverging content fields of an existing row.
+	// HandlerApply: rewrite the content fields of an existing row.
 	HandlerApply
 )
 
 // TeamHandlerRow is the team-side loaded state of one shipped event handler,
 // keyed by its system_slug. Exists is false when the team has no row for
 // (org, team, slug) at all; Deleted marks a soft-deleted occupant of that
-// slot. Content fields are populated regardless of kind (irrelevant fields
-// read as the zero value) — the caller compares only the fields its kind
-// carries.
+// slot.
 type TeamHandlerRow struct {
 	Exists       bool
 	Deleted      bool
 	UserModified bool
 	ID           string
 
-	Predicate string // "" == NULL (match-all)
-
-	// Rule-only.
+	Predicate       string // "" == NULL (match-all)
 	Name            string
 	DefaultPriority float64
-
-	// Trigger-only. BlueprintID is the team's resolved blueprint-copy id
-	// (never a slug) — comparable directly against a resolved shipped target.
+	// BlueprintID is the team's resolved blueprint-copy id (never a slug),
+	// "" for NULL — comparable directly against a resolved shipped target.
 	BlueprintID            string
 	BreakerThreshold       int
 	MinAutonomySuitability float64
 }
 
-// HandlerSyncPlan is the executable result of PlanHandlerSync. For
-// HandlerInsert / HandlerApply, only the fields relevant to the handler's kind
-// are meaningful; the impl writes the rest as NULL per the CHECK-constrained
-// per-kind shape (unchanged from Create/Seed).
+// HandlerSyncPlan is the executable result of PlanHandlerSync.
 type HandlerSyncPlan struct {
 	Action HandlerSyncAction
 
-	Predicate string
-
-	// Rule-only.
+	Predicate       string
 	Name            string
 	DefaultPriority float64
-	// SortOrder is meaningful only on HandlerInsert (the shipped starting
-	// value for a brand-new row) — HandlerApply never writes it, matching the
-	// "sort_order is presentation order the user owns" rule.
-	SortOrder int
-
-	// Trigger-only.
+	// WriteBlueprint says whether the plan writes blueprint_id at all. It is
+	// false when the shipped handler names a blueprint the team has no live
+	// copy of: an insert then writes NULL, and an apply leaves the column as
+	// it is.
+	WriteBlueprint bool
+	// BlueprintID is the team's blueprint-copy id to write, "" for NULL.
 	BlueprintID            string
 	BreakerThreshold       int
 	MinAutonomySuitability float64
+	// Mode and SortOrder are meaningful only on HandlerInsert (the shipped
+	// starting values for a brand-new row) — HandlerApply never writes
+	// either, because what a handler does and where it sorts are the team's.
+	Mode      string
+	SortOrder int
 }
 
 // PlanHandlerSync decides what EventHandlerStore.Sync must do for one shipped
-// handler, given the loaded team-side row and (for a trigger) its shipped
-// blueprint slug already resolved to the team's blueprint-copy id.
-// blueprintResolved is false when the shipped blueprint slug has no
-// (non-deleted) team copy — the caller must not wire a trigger to a blueprint
-// that isn't there. Pure and dialect-agnostic.
+// handler, given the loaded team-side row and its shipped blueprint slug
+// already resolved to the team's blueprint-copy id. blueprintResolved is
+// false when the shipped handler names a blueprint slug with no (non-deleted)
+// team copy; a handler that names none resolves to "" with blueprintResolved
+// true. Pure and dialect-agnostic.
 func PlanHandlerSync(shipped ShippedEventHandler, resolvedBlueprintID string, blueprintResolved bool, row TeamHandlerRow) HandlerSyncPlan {
 	if row.Exists && (row.Deleted || row.UserModified) {
 		return HandlerSyncPlan{Action: HandlerSkip}
 	}
-	if shipped.Kind == domain.EventHandlerKindTrigger && !blueprintResolved {
-		return HandlerSyncPlan{Action: HandlerSkip}
-	}
 
-	want := HandlerSyncPlan{Predicate: shipped.Predicate}
-	switch shipped.Kind {
-	case domain.EventHandlerKindRule:
-		want.Name = shipped.Name
-		want.DefaultPriority = shipped.DefaultPriority
-		want.SortOrder = shipped.SortOrder
-	case domain.EventHandlerKindTrigger:
+	want := HandlerSyncPlan{
+		Predicate:              shipped.Predicate,
+		Name:                   shipped.Name,
+		DefaultPriority:        shipped.DefaultPriority,
+		WriteBlueprint:         blueprintResolved,
+		BreakerThreshold:       shipped.BreakerThreshold,
+		MinAutonomySuitability: shipped.MinAutonomySuitability,
+		Mode:                   shipped.Mode,
+		SortOrder:              shipped.SortOrder,
+	}
+	if blueprintResolved {
 		want.BlueprintID = resolvedBlueprintID
-		want.BreakerThreshold = shipped.BreakerThreshold
-		want.MinAutonomySuitability = shipped.MinAutonomySuitability
 	}
 
 	if !row.Exists {
 		want.Action = HandlerInsert
 		return want
 	}
-	if handlerContentEqual(shipped.Kind, row, want) {
+	if handlerContentEqual(row, want) {
 		return HandlerSyncPlan{Action: HandlerEqual}
 	}
 	want.Action = HandlerApply
 	return want
 }
 
+// ResolveShippedBlueprint resolves a shipped handler's blueprint slug against
+// a team's slug→id map, in the shape PlanHandlerSync takes: a handler that
+// names no blueprint resolves to "" and true, and one whose slug has no copy
+// to "" and false.
+func ResolveShippedBlueprint(h ShippedEventHandler, blueprintIDsBySlug map[string]string) (string, bool) {
+	if h.BlueprintID == "" {
+		return "", true
+	}
+	id, ok := blueprintIDsBySlug[h.BlueprintID]
+	if !ok || id == "" {
+		return "", false
+	}
+	return id, true
+}
+
 // handlerContentEqual reports whether a loaded team handler row already
 // matches the shipped content the sync would write. Deliberately excludes
-// enabled and sort_order — neither counts as content (see PlanHandlerSync).
-func handlerContentEqual(kind string, row TeamHandlerRow, want HandlerSyncPlan) bool {
+// mode and sort_order — neither counts as content (see PlanHandlerSync) — and
+// blueprint_id when the plan does not write it.
+func handlerContentEqual(row TeamHandlerRow, want HandlerSyncPlan) bool {
 	if !PredicateJSONEqual(row.Predicate, want.Predicate) {
 		return false
 	}
-	switch kind {
-	case domain.EventHandlerKindRule:
-		return row.Name == want.Name && row.DefaultPriority == want.DefaultPriority
-	case domain.EventHandlerKindTrigger:
-		return row.BlueprintID == want.BlueprintID &&
-			row.BreakerThreshold == want.BreakerThreshold &&
-			row.MinAutonomySuitability == want.MinAutonomySuitability
+	if want.WriteBlueprint && row.BlueprintID != want.BlueprintID {
+		return false
 	}
-	return true
+	return row.Name == want.Name &&
+		row.DefaultPriority == want.DefaultPriority &&
+		row.BreakerThreshold == want.BreakerThreshold &&
+		row.MinAutonomySuitability == want.MinAutonomySuitability
 }

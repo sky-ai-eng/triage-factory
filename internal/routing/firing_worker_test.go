@@ -242,15 +242,15 @@ func setupDrainScenarioN(t *testing.T, database *sql.DB, suffix string) (entityI
 
 	trig := domain.EventHandler{
 		ID:                     "t-drain-" + suffix,
-		Kind:                   domain.EventHandlerKindTrigger,
+		Name:                   "t-drain-" + suffix,
+		DefaultPriority:        0.5,
+		Mode:                   domain.EventHandlerModeAutomate,
 		BlueprintID:            "p-drain-" + suffix,
-		TriggerType:            domain.TriggerTypeEvent,
 		EventType:              domain.EventGitHubPRCICheckFailed,
-		BreakerThreshold:       intPtr(4),
-		MinAutonomySuitability: floatPtr(0),
-		Enabled:                true,
+		BreakerThreshold:       4,
+		MinAutonomySuitability: 0,
 	}
-	createTriggerForTestRouting(t, database, trig)
+	createHandlerForTestRouting(t, database, trig)
 	triggerID = trig.ID
 	return
 }
@@ -397,13 +397,13 @@ func TestFiringWorker_SnoozedTask(t *testing.T) {
 	requireSkipped(t, rows[0], domain.PendingFiringSkipTaskClosed)
 }
 
-// TestFiringWorker_DisabledTrigger: a trigger disabled while its firing
-// waited must not fire.
-func TestFiringWorker_DisabledTrigger(t *testing.T) {
+// TestFiringWorker_HandlerLeftAutomate: a handler moved to watch while its
+// firing waited must not fire — it still makes tasks, but runs nothing.
+func TestFiringWorker_HandlerLeftAutomate(t *testing.T) {
 	database := newTestDB(t)
 	entityID, taskID, triggerID, eventID := setupDrainScenario(t, database)
 	enqueueFiring(t, database, entityID, taskID, triggerID, eventID)
-	setTriggerEnabledForTestRouting(t, database, triggerID, false)
+	setHandlerModeForTestRouting(t, database, triggerID, domain.EventHandlerModeWatch)
 	drainOnce(t, drainRouter(database, sqlitestore.New(database).PendingFirings, &stubDelegator{db: database}))
 
 	rows := firingsFor(t, database, entityID)
@@ -441,12 +441,15 @@ func TestFiringWorker_MultipleStaleFirings(t *testing.T) {
 		promptID := []string{"p-1", "p-2", "p-3"}[i]
 		createTestPrompt(t, database, domain.Prompt{ID: promptID, Name: promptID, Body: "x", Source: "user"})
 		trigID := []string{"tr-1", "tr-2", "tr-3"}[i]
-		createTriggerForTestRouting(t, database, domain.EventHandler{
-			ID: trigID, Kind: domain.EventHandlerKindTrigger,
-			BlueprintID: promptID, TriggerType: domain.TriggerTypeEvent,
-			EventType:        domain.EventGitHubPRCICheckFailed,
-			BreakerThreshold: intPtr(4), MinAutonomySuitability: floatPtr(0),
-			Enabled: true,
+		createHandlerForTestRouting(t, database, domain.EventHandler{
+			ID:                     trigID,
+			Name:                   trigID,
+			DefaultPriority:        0.5,
+			Mode:                   domain.EventHandlerModeAutomate,
+			BlueprintID:            promptID,
+			EventType:              domain.EventGitHubPRCICheckFailed,
+			BreakerThreshold:       4,
+			MinAutonomySuitability: 0,
 		})
 		enqueueFiring(t, database, entityID, taskID, trigID, eventID)
 	}
@@ -489,12 +492,15 @@ func TestFiringWorker_SecondFiringDefersAtNoCostThenFiresAfterTheEnd(t *testing.
 			database := newTestDB(t)
 			entityID, taskID, triggerID, eventID := setupDrainScenario(t, database)
 			createTestPrompt(t, database, domain.Prompt{ID: "p-second", Name: "P2", Body: "x", Source: "user"})
-			createTriggerForTestRouting(t, database, domain.EventHandler{
-				ID: "t-second", Kind: domain.EventHandlerKindTrigger,
-				BlueprintID: "p-second", TriggerType: domain.TriggerTypeEvent,
-				EventType:        domain.EventGitHubPRCICheckFailed,
-				BreakerThreshold: intPtr(4), MinAutonomySuitability: floatPtr(0),
-				Enabled: true,
+			createHandlerForTestRouting(t, database, domain.EventHandler{
+				ID:                     "t-second",
+				Name:                   "t-second",
+				DefaultPriority:        0.5,
+				Mode:                   domain.EventHandlerModeAutomate,
+				BlueprintID:            "p-second",
+				EventType:              domain.EventGitHubPRCICheckFailed,
+				BreakerThreshold:       4,
+				MinAutonomySuitability: 0,
 			})
 			enqueueFiring(t, database, entityID, taskID, triggerID, eventID)
 			enqueueFiring(t, database, entityID, taskID, "t-second", eventID)
@@ -558,12 +564,15 @@ func TestFiringWorker_RunStillRunningAfterItsConversationEndsHoldsTheRow(t *test
 	database := newTestDB(t)
 	entityID, taskID, triggerID, eventID := setupDrainScenario(t, database)
 	createTestPrompt(t, database, domain.Prompt{ID: "p-second", Name: "P2", Body: "x", Source: "user"})
-	createTriggerForTestRouting(t, database, domain.EventHandler{
-		ID: "t-second", Kind: domain.EventHandlerKindTrigger,
-		BlueprintID: "p-second", TriggerType: domain.TriggerTypeEvent,
-		EventType:        domain.EventGitHubPRCICheckFailed,
-		BreakerThreshold: intPtr(4), MinAutonomySuitability: floatPtr(0),
-		Enabled: true,
+	createHandlerForTestRouting(t, database, domain.EventHandler{
+		ID:                     "t-second",
+		Name:                   "t-second",
+		DefaultPriority:        0.5,
+		Mode:                   domain.EventHandlerModeAutomate,
+		BlueprintID:            "p-second",
+		EventType:              domain.EventGitHubPRCICheckFailed,
+		BreakerThreshold:       4,
+		MinAutonomySuitability: 0,
 	})
 	enqueueFiring(t, database, entityID, taskID, triggerID, eventID)
 	enqueueFiring(t, database, entityID, taskID, "t-second", eventID)

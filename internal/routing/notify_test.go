@@ -19,15 +19,15 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// seedNotifyRule inserts an enabled, match-all notify rule on eventType for
+// seedNotifyRule inserts a match-all handler in notify on eventType for
 // teamID and returns its id.
 func seedNotifyRule(t *testing.T, database *sql.DB, teamID, eventType string) string {
 	t.Helper()
 	id := uuid.New().String()
 	if _, err := database.Exec(`
 		INSERT INTO event_handlers
-			(id, org_id, team_id, creator_user_id, kind, event_type, enabled, source, name, created_at, updated_at)
-		VALUES (?, ?, ?, ?, 'notify', ?, 1, 'user', ?, ?, ?)
+			(id, org_id, team_id, creator_user_id, mode, event_type, source, name, created_at, updated_at)
+		VALUES (?, ?, ?, ?, 'notify', ?, 'user', ?, ?, ?)
 	`, id, runmode.LocalDefaultOrgID, teamID, runmode.LocalDefaultUserID, eventType, "notify "+eventType, time.Now(), time.Now()); err != nil {
 		t.Fatalf("seed notify rule: %v", err)
 	}
@@ -60,10 +60,11 @@ func githubEvent(entityID, eventType, dedupKey string, meta any) domain.Event {
 	}
 }
 
-// A notify rule on a type a typed close relation closes raises a condition
-// naming the rule, with no task when no rule or trigger matched; the relation
-// that closes the task closes the notification, on the same gate: a pass with
-// a check still failing leaves it, a green suite resolves it.
+// A notify handler on a type a typed close relation closes raises a condition
+// naming the handler, with no task when no handler that makes one matched;
+// the relation that closes the task closes the notification, on the same
+// gate: a pass with a check still failing leaves it, a green suite resolves
+// it.
 func TestNotify_ConditionRaisedAndResolvedByItsCloseRelation(t *testing.T) {
 	rec := notifytest.Record(t)
 	database, r, entityID := notifyFixture(t)

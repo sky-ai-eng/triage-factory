@@ -128,10 +128,10 @@ func TestBodyUpdated_PollToRule(t *testing.T) {
 			mustDrain(t, router)
 			check(1, 0)
 			if _, err := database.Exec(`INSERT INTO event_handlers
-				(id, org_id, team_id, creator_user_id, kind, event_type, scope_predicate_json,
-				 enabled, source, name, default_priority, sort_order, created_at, updated_at)
-				VALUES ('body-rule', ?, ?, ?, 'rule', ?, '{"has_label":"other"}',
-				 1, 'user', 'Body edits', 0.6, 100, ?, ?)`, org, team, runmode.LocalDefaultUserID, eventType, time.Now(), time.Now()); err != nil {
+				(id, org_id, team_id, creator_user_id, mode, event_type, scope_predicate_json,
+				 source, name, default_priority, sort_order, created_at, updated_at)
+				VALUES ('body-rule', ?, ?, ?, 'watch', ?, '{"has_label":"other"}',
+				 'user', 'Body edits', 0.6, 100, ?, ?)`, org, team, runmode.LocalDefaultUserID, eventType, time.Now(), time.Now()); err != nil {
 				t.Fatal(err)
 			}
 			poll("Edit with a mismatching predicate")

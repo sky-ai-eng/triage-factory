@@ -1,4 +1,5 @@
 import type { Connection } from '@xyflow/react'
+import type { EventHandlerCreate } from '../lib/eventHandlers'
 
 // Connection planning for BindingGraph. Every connect gesture is resolved
 // against blueprint membership (decision 5 — always render/route from
@@ -11,9 +12,9 @@ import type { Connection } from '@xyflow/react'
 
 export type ConnPlan =
   | { ok: false; reason: string }
-  // event → a blueprint's entry prompt: create a trigger.
+  // event → a blueprint's entry prompt: create an event handler.
   | { ok: true; kind: 'trigger'; eventType: string; blueprintId: string }
-  // tail of one chain → entry of a trigger-less chain: atomic merge.
+  // tail of one chain → entry of a chain no handler references: atomic merge.
   | { ok: true; kind: 'merge'; host: string; source: string }
 
 export interface Membership {
@@ -23,17 +24,18 @@ export interface Membership {
   steps: Record<string, string[]>
   // prompt id → its owning blueprint (1:1 — prompts are copy-only).
   promptToBlueprint: Record<string, string>
-  // blueprint id → the event types of its triggers.
+  // blueprint id → the event types of the handlers that reference it.
   triggerEvents: Record<string, string[]>
 }
 
 export const EVENT_ALREADY_RUNS_BLUEPRINT = 'This event already runs this blueprint'
 
 // A merge, and a sequence reconnect, which merges its target in, absorbs only
-// a trigger-less blueprint.
-export const DETACH_BEFORE_MERGE = 'Detach the downstream blueprint’s trigger before merging it in'
+// a blueprint no event handler references.
+export const DETACH_BEFORE_MERGE =
+  'Detach the downstream blueprint’s event handlers before merging it in'
 
-// eventRunsBlueprint reports whether a trigger on eventType already targets
+// eventRunsBlueprint reports whether a handler on eventType already references
 // blueprintId. The API takes a second one; the canvas refuses it, because it
 // draws one edge per event and blueprint.
 export function eventRunsBlueprint(
@@ -99,4 +101,20 @@ export function planConnection(c: Connection, m: Membership): ConnPlan {
   }
 
   return { ok: false, reason: 'Unsupported connection' }
+}
+
+// handlerForConnection is the handler an event → entry connection creates: a
+// new one, in off, on the event and the blueprint the edge joins. Drawing the
+// edge attaches the blueprint; turning the handler on is a choice of its own,
+// and the connection never reuses another handler of the event.
+export function handlerForConnection(
+  plan: { eventType: string; blueprintId: string },
+  teamId: string,
+): EventHandlerCreate {
+  return {
+    team_id: teamId,
+    event_type: plan.eventType,
+    blueprint_id: plan.blueprintId,
+    mode: 'off',
+  }
 }

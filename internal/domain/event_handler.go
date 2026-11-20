@@ -1,72 +1,55 @@
 package domain
 
 import (
+	"encoding/json"
+	"slices"
 	"strings"
 	"time"
 )
 
-// EventHandler unifies the former TaskRule + PromptTrigger domain types
-// into one primitive. The kind discriminator selects per-kind behavior:
+// EventHandler is one team's answer to one event type: a predicate the event
+// must match, and a mode saying what a matching event does.
 //
-//	kind="rule"    — declarative; creates an unclaimed task (human triage).
-//	                 default_priority, sort_order, name are required.
-//	                 prompt_id, breaker_threshold, min_autonomy_suitability
-//	                 must be nil.
-//	kind="trigger" — auto-delegation; creates a task and
-//	                 stamps claimed_by_agent_id at creation. blueprint_id,
-//	                 breaker_threshold, min_autonomy_suitability are
-//	                 required. default_priority, sort_order must be nil.
-//	                 A trigger always fires a blueprint (length >= 1); a
-//	                 single prompt is just a 1-step blueprint.
-//	kind="notify"  — tells its team's members about a matching event
-//	                 through a notification, and creates no task. name is
-//	                 required; every rule- and trigger-only field must be
-//	                 nil. Always user-authored.
+//	mode="off"      — nothing.
+//	mode="notify"   — tells the team's members through a notification and
+//	                  makes no task.
+//	mode="watch"    — makes a task.
+//	mode="automate" — makes a task and runs the handler's blueprint on it.
 //
-// The CHECK constraints on event_handlers enforce the shape pair at the
-// SQL level; both backends rely on it.
+// Every field is held in every mode, and a mode reads the ones it needs: a
+// handler keeps its blueprint when it leaves automate, and its priority when
+// it notifies. The one tie between a field and a mode is that automate needs a
+// blueprint, which a CHECK on event_handlers enforces.
 type EventHandler struct {
 	ID                 string  `json:"id"`
-	Kind               string  `json:"kind"` // "rule" | "trigger"
+	Mode               string  `json:"mode"`
 	EventType          string  `json:"event_type"`
 	ScopePredicateJSON *string `json:"scope_predicate_json"`
-	Enabled            bool    `json:"enabled"`
 	Source             string  `json:"source"` // "system" | "user"
-	// TeamID is the owning team — NOT NULL, the sole scoping signal
-	// (the visibility column was dropped; every handler is
-	// team-owned). The router reads this to route tasks created off
-	// matched rules to the correct team's queue.
+	// TeamID is the owning team — NOT NULL, the sole scoping signal. The
+	// router routes a task a handler makes to this team's queue, and a
+	// notification a handler raises to this team's members.
 	TeamID string `json:"team_id"`
-	// AppliesToUnowned is the explicit per-rule routing-scope flag
-	// (TFAC-517) that replaced the source-as-scope heuristic. When true,
-	// the rule's team is added to a matched task's visibility even for
-	// entities the team doesn't own (external/ambiguous authors) — the
-	// deliberate "watch" opt-in. When false (the default), visibility
-	// rides ownership only: the team sees a task off this rule only when
-	// the owning-team ladder resolves the team as owner. It is a routing
-	// column read in ownerLadderRouting (via explicitWatchTeams), NOT a
-	// matchPredicate predicate — "is the author a member of this team"
-	// needs an author→team DB resolution the metadata-only predicate
-	// can't do. A watcher never beats a MEMBER team to ownership (the
-	// TFAC-514 no-steal invariant); but on a truly unowned entity (an
-	// external author, no member owner at all) an opted-in watcher whose
-	// team also has a configured auto-delegation may fire and consolidate
-	// ownership onto itself — the eyes-open behavior.
-	//
-	// It is a per-HANDLER flag, valid on both kinds: a rule grants
-	// visibility reach; a trigger grants the same reach AND (being a
-	// trigger) fires on the orphan, letting a team configure orphan
-	// auto-delegation entirely from the prompts page with no companion
-	// rule. The router reads it off both kinds via explicitWatchTeams. A
-	// watcher whose opt-in is only a rule (no trigger) surfaces the card
-	// NULL-owned and nothing fires.
+	// AppliesToUnowned is the explicit per-handler routing-scope flag. When
+	// true, the handler's team is added to a matched task's visibility even
+	// for entities the team doesn't own (external or ambiguous authors). When
+	// false (the default), visibility rides ownership only: the team sees a
+	// task off this handler only when the owning-team ladder resolves the team
+	// as owner. It is a routing column read in ownerLadderRouting (via
+	// explicitWatchTeams), NOT a matchPredicate predicate — "is the author a
+	// member of this team" needs an author→team DB resolution the
+	// metadata-only predicate can't do. A watcher never beats a MEMBER team to
+	// ownership; but on a truly unowned entity (an external author, no member
+	// owner at all) an opted-in watcher whose handler automates may fire and
+	// consolidate ownership onto itself. A handler that makes a task without
+	// automating surfaces the card NULL-owned and nothing fires.
 	AppliesToUnowned bool `json:"applies_to_unowned"`
 	// SystemSlug is the stable identifier for shipped handlers
-	// ("system-rule-ci-check-failed", "system-trigger-ci-fix"). Empty for
-	// user-authored team handlers — the team event_handlers scanners don't
-	// surface it (it's a seed/idempotency key, not request data); the
-	// per-team copy keys on (org_id, team_id, system_slug). omitempty so it
-	// stays absent from team-handler responses that never set it.
+	// ("system-handler-ci-check-failed"). Empty for user-authored team
+	// handlers — the team event_handlers scanners don't surface it (it's a
+	// seed/idempotency key, not request data); the per-team copy keys on
+	// (org_id, team_id, system_slug). omitempty so it stays absent from
+	// team-handler responses that never set it.
 	SystemSlug string `json:"system_slug,omitempty"`
 	// CreatorUserID is the user who authored a user-source handler, empty for
 	// a shipped one. It is attribution only.
@@ -76,32 +59,87 @@ type EventHandler struct {
 	// UserModified is the shipped-content sync's "never clobber a user edit"
 	// signal (mirrors domain.Blueprint.UserModified): true once a team's copy
 	// of a shipped handler has diverged from current shipped content via a
-	// content-mutating write (Update on a non-enabled field, Promote,
-	// RetargetBlueprint). An enabled-only Update and Reorder never set it —
-	// activation state and presentation order are the user's to own
+	// content-mutating write. A write of mode or sort_order alone never sets
+	// it — what a handler does and where it sorts are the team's to own
 	// regardless. Always false for user-authored (non-system_slug) rows.
 	UserModified bool `json:"user_modified"`
 
-	// Rule and notify (nil for triggers).
-	Name            string   `json:"name"`             // required for rules and notify rules
-	DefaultPriority *float64 `json:"default_priority"` // 0.0–1.0
-	SortOrder       *int     `json:"sort_order"`
-
-	// Trigger-only (zero/nil for rules).
-	BlueprintID            string   `json:"blueprint_id"`
-	TriggerType            string   `json:"trigger_type"` // V1: only "event"
-	BreakerThreshold       *int     `json:"breaker_threshold"`
-	MinAutonomySuitability *float64 `json:"min_autonomy_suitability"`
+	Name string `json:"name"`
+	// DefaultPriority is the priority a task the handler makes starts at,
+	// 0.0–1.0.
+	DefaultPriority float64 `json:"default_priority"`
+	SortOrder       int     `json:"sort_order"`
+	// BlueprintID is the blueprint the handler runs in automate, empty when
+	// it has none (JSON null).
+	BlueprintID            string  `json:"-"`
+	BreakerThreshold       int     `json:"breaker_threshold"`
+	MinAutonomySuitability float64 `json:"min_autonomy_suitability"`
 }
 
-// EventHandler kinds.
+// eventHandlerJSON is EventHandler's wire shape: blueprint_id is null when the
+// handler has none, which BlueprintID's empty string stands for in Go.
+type eventHandlerJSON struct {
+	eventHandlerAlias
+	BlueprintID *string `json:"blueprint_id"`
+}
+
+type eventHandlerAlias EventHandler
+
+// MarshalJSON writes an empty BlueprintID as null.
+func (h EventHandler) MarshalJSON() ([]byte, error) {
+	out := eventHandlerJSON{eventHandlerAlias: eventHandlerAlias(h)}
+	if h.BlueprintID != "" {
+		id := h.BlueprintID
+		out.BlueprintID = &id
+	}
+	return json.Marshal(out)
+}
+
+// UnmarshalJSON reads a null or absent blueprint_id as an empty BlueprintID.
+func (h *EventHandler) UnmarshalJSON(data []byte) error {
+	var in eventHandlerJSON
+	if err := json.Unmarshal(data, &in); err != nil {
+		return err
+	}
+	*h = EventHandler(in.eventHandlerAlias)
+	if in.BlueprintID != nil {
+		h.BlueprintID = *in.BlueprintID
+	}
+	return nil
+}
+
+// EventHandler modes.
 const (
-	EventHandlerKindRule    = "rule"
-	EventHandlerKindTrigger = "trigger"
-	EventHandlerKindNotify  = "notify"
+	EventHandlerModeOff      = "off"
+	EventHandlerModeNotify   = "notify"
+	EventHandlerModeWatch    = "watch"
+	EventHandlerModeAutomate = "automate"
 )
 
-// NotifyRuleSource reports whether a notify rule may be written on eventType:
+// EventHandlerModes is every mode, in the order the product lists them.
+var EventHandlerModes = []string{EventHandlerModeOff, EventHandlerModeNotify, EventHandlerModeWatch, EventHandlerModeAutomate}
+
+// ValidEventHandlerMode reports whether mode is one of EventHandlerModes.
+func ValidEventHandlerMode(mode string) bool {
+	return slices.Contains(EventHandlerModes, mode)
+}
+
+// MakesTask reports whether a matching event makes a task: watch or automate.
+func (h EventHandler) MakesTask() bool {
+	return h.Mode == EventHandlerModeWatch || h.Mode == EventHandlerModeAutomate
+}
+
+// Automates reports whether a matching event runs the handler's blueprint.
+func (h EventHandler) Automates() bool {
+	return h.Mode == EventHandlerModeAutomate
+}
+
+// Notifies reports whether a matching event raises a notification.
+func (h EventHandler) Notifies() bool {
+	return h.Mode == EventHandlerModeNotify
+}
+
+// NotifyRuleSource reports whether a handler may notify on eventType:
 // a GitHub, Jira or Linear event, whose tracked-set gate core owns and can
 // answer strictly. An extension's source gate narrows and may fail open,
 // which is acceptable for a task and a disclosure for a notification.
@@ -116,8 +154,6 @@ const (
 	EventHandlerSourceUser   = "user"
 )
 
-// TriggerTypeEvent is the V1 trigger_type value carried by triggers
-// (event_handlers with kind='trigger'). Persisted only on the
-// conversations row (conversations.trigger_type); the column was dropped from
-// the prior prompt_triggers table during unification.
+// TriggerTypeEvent is the trigger_type a conversation or blueprint run carries
+// when an event handler's firing started it.
 const TriggerTypeEvent = "event"

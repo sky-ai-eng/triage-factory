@@ -153,14 +153,11 @@ func newSQLitePendingFiringsSeeder(conn *sql.DB, stores db.Stores) dbtest.Pendin
 			t.Fatalf("seed task: %v", err)
 		}
 
-		// event_handler (trigger kind): FK target of pending_firings
-		// .trigger_id. The kind-specific CHECK requires triggers to set
-		// blueprint_id + breaker_threshold + min_autonomy_suitability and to
-		// leave the rule-only columns (name, default_priority, sort_order)
-		// NULL.
+		// event_handler in automate: FK target of pending_firings.trigger_id,
+		// and automate needs its blueprint.
 		if _, err := conn.Exec(`
-			INSERT INTO event_handlers (id, kind, event_type, blueprint_id, breaker_threshold, min_autonomy_suitability, enabled, source, creator_user_id, team_id)
-			VALUES (?, 'trigger', ?, ?, 4, 0, 1, 'user', ?, ?)
+			INSERT INTO event_handlers (id, mode, event_type, name, blueprint_id, breaker_threshold, min_autonomy_suitability, source, creator_user_id, team_id)
+			VALUES (?, 'automate', ?, 'Pending firing', ?, 4, 0, 'user', ?, ?)
 		`, triggerID, domain.EventGitHubPRCICheckFailed, blueprintID, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID); err != nil {
 			t.Fatalf("seed trigger: %v", err)
 		}

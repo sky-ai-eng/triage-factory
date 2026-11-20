@@ -238,7 +238,7 @@ func TestImportAll_UsesDiscoveredPathForDefaultName(t *testing.T) {
 	}
 }
 
-func TestImportAll_DoesNotHideDuplicatePromptReferencedByTrigger(t *testing.T) {
+func TestImportAll_DoesNotHideDuplicatePromptReferencedByHandler(t *testing.T) {
 	home := t.TempDir()
 	project := t.TempDir()
 	t.Setenv("HOME", home)
@@ -246,8 +246,8 @@ func TestImportAll_DoesNotHideDuplicatePromptReferencedByTrigger(t *testing.T) {
 
 	database := newTestDB(t)
 	body := "Triage and prioritize incoming work."
-	keepID := "imported-duplicate-with-trigger"
-	hideID := "imported-duplicate-no-trigger"
+	keepID := "imported-duplicate-with-handler"
+	hideID := "imported-duplicate-no-handler"
 
 	prompts := testPromptStore(database)
 	ctx := t.Context()
@@ -257,7 +257,7 @@ func TestImportAll_DoesNotHideDuplicatePromptReferencedByTrigger(t *testing.T) {
 		Body:   body,
 		Source: "imported",
 	}); err != nil {
-		t.Fatalf("create triggered duplicate prompt: %v", err)
+		t.Fatalf("create referenced duplicate prompt: %v", err)
 	}
 	if _, err := prompts.Create(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Prompt{
 		ID:     hideID,
@@ -268,40 +268,39 @@ func TestImportAll_DoesNotHideDuplicatePromptReferencedByTrigger(t *testing.T) {
 		t.Fatalf("create unreferenced duplicate prompt: %v", err)
 	}
 
-	trigger := domain.EventHandler{
-		ID:                     "trigger-keep-imported-prompt",
-		Kind:                   domain.EventHandlerKindTrigger,
-		BlueprintID:            keepID,
-		TriggerType:            domain.TriggerTypeEvent,
-		EventType:              domain.EventGitHubPRReviewRequested,
-		BreakerThreshold:       intPtr(4),
-		MinAutonomySuitability: floatPtr(0),
-		Enabled:                true,
+	handler := domain.EventHandler{
+		ID:               "handler-keep-imported-prompt",
+		Mode:             domain.EventHandlerModeAutomate,
+		Name:             "Review",
+		BlueprintID:      keepID,
+		EventType:        domain.EventGitHubPRReviewRequested,
+		DefaultPriority:  0.5,
+		BreakerThreshold: 4,
 	}
-	createTriggerForTestSkills(t, database, trigger)
+	createHandlerForTestSkills(t, database, handler)
 
 	result := ImportAll(t.Context(), database, testPromptStore(database))
 	if len(result.Errors) > 0 {
 		t.Fatalf("ImportAll errors: %v", result.Errors)
 	}
 
-	storedTrigger := getTriggerForTestSkills(t, database, trigger.ID)
-	if storedTrigger == nil {
-		t.Fatal("expected trigger to remain after import")
+	storedHandler := getHandlerForTestSkills(t, database, handler.ID)
+	if storedHandler == nil {
+		t.Fatal("expected handler to remain after import")
 	}
-	// The trigger now references a blueprint wrapping keepID; resolve through
-	// its first step to confirm it still points at the kept prompt.
-	steps, err := sqlitestore.New(database).Blueprints.ListSteps(t.Context(), runmode.LocalDefaultOrgID, storedTrigger.BlueprintID)
+	// The handler references a blueprint wrapping keepID; resolve through its
+	// first step to confirm it still points at the kept prompt.
+	steps, err := sqlitestore.New(database).Blueprints.ListSteps(t.Context(), runmode.LocalDefaultOrgID, storedHandler.BlueprintID)
 	if err != nil || len(steps) == 0 {
-		t.Fatalf("resolve trigger blueprint steps: steps=%v err=%v", steps, err)
+		t.Fatalf("resolve handler blueprint steps: steps=%v err=%v", steps, err)
 	}
 	if steps[0].StepPromptID != keepID {
-		t.Fatalf("expected trigger blueprint to keep prompt %q, got %q", keepID, steps[0].StepPromptID)
+		t.Fatalf("expected handler blueprint to keep prompt %q, got %q", keepID, steps[0].StepPromptID)
 	}
 	if promptHidden(t, database, keepID) {
-		t.Fatalf("prompt %q has a trigger and should not be hidden", keepID)
+		t.Fatalf("prompt %q has a handler and should not be hidden", keepID)
 	}
 	if !promptHidden(t, database, hideID) {
-		t.Fatalf("prompt %q is duplicate without trigger and should be hidden", hideID)
+		t.Fatalf("prompt %q is duplicate without a handler and should be hidden", hideID)
 	}
 }

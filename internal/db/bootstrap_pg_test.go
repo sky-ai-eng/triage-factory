@@ -2,6 +2,7 @@ package db_test
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"strings"
 	"testing"
@@ -10,6 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/promptseed"
 )
 
@@ -113,8 +115,9 @@ func TestAppPoolRead_NoClaims_WrapsPermErr(t *testing.T) {
 // TestSeedShippedIntoTeam_Postgres_TwoTeamsAndIdempotent is the TFAC-658
 // acceptance pin on the real two-pool Postgres store: a fresh org's first
 // team (BootstrapNewOrg) and a later second team (BootstrapNewTeam) both get
-// the full shipped set as their own distinct rows, with rules enabled /
-// triggers disabled and the per-prompt model override preserved, and
+// the full shipped set as their own distinct rows, with each handler in its
+// shipped mode on its own team's blueprint copy and the per-prompt model
+// override preserved, and
 // re-running bootstrap against the first team is a no-op (same row ids).
 func TestSeedShippedIntoTeam_Postgres_TwoTeamsAndIdempotent(t *testing.T) {
 	h := pgtest.Shared(t)
@@ -155,23 +158,25 @@ func TestSeedShippedIntoTeam_Postgres_TwoTeamsAndIdempotent(t *testing.T) {
 		t.Errorf("system-pr-review-aggregate model: team1=%q team2=%q; want %q on both", p1Model, p2Model, wantModel)
 	}
 
-	handlerEnabled := func(team, slug string) bool {
-		t.Helper()
-		var enabled bool
-		if err := h.AdminDB.QueryRowContext(ctx,
-			`SELECT enabled FROM event_handlers WHERE org_id = $1 AND team_id = $2 AND system_slug = $3`,
-			orgID, team, slug,
-		).Scan(&enabled); err != nil {
-			t.Fatalf("read handler %s/%s: %v", team, slug, err)
-		}
-		return enabled
-	}
+	// Each team's handler ships in watch and references that team's own copy
+	// of its blueprint.
 	for _, team := range []string{team1, team2} {
-		if !handlerEnabled(team, "system-rule-ci-check-failed") {
-			t.Errorf("team %s: shipped rule system-rule-ci-check-failed is disabled; want enabled", team)
+		var mode string
+		var blueprintSlug, blueprintTeam sql.NullString
+		if err := h.AdminDB.QueryRowContext(ctx,
+			`SELECT h.mode, b.system_slug, b.team_id::text
+			   FROM event_handlers h
+			   LEFT JOIN blueprints b ON b.id = h.blueprint_id AND b.org_id = h.org_id
+			  WHERE h.org_id = $1 AND h.team_id = $2 AND h.system_slug = $3`,
+			orgID, team, "system-handler-ci-check-failed",
+		).Scan(&mode, &blueprintSlug, &blueprintTeam); err != nil {
+			t.Fatalf("read handler %s/system-handler-ci-check-failed: %v", team, err)
 		}
-		if handlerEnabled(team, "system-trigger-ci-fix") {
-			t.Errorf("team %s: shipped trigger system-trigger-ci-fix is enabled; want disabled (shipped convention)", team)
+		if mode != domain.EventHandlerModeWatch {
+			t.Errorf("team %s: system-handler-ci-check-failed mode = %q, want %q", team, mode, domain.EventHandlerModeWatch)
+		}
+		if blueprintSlug.String != "system-ci-fix" || blueprintTeam.String != team {
+			t.Errorf("team %s: system-handler-ci-check-failed blueprint = %v on team %v, want the team's own system-ci-fix", team, blueprintSlug, blueprintTeam)
 		}
 	}
 

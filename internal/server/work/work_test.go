@@ -795,8 +795,8 @@ func parkLocalFiring(t *testing.T, database *sql.DB, title string) int64 {
 		t.Fatalf("seed blueprint step: %v", err)
 	}
 	if _, err := database.Exec(`
-		INSERT INTO event_handlers (id, kind, event_type, blueprint_id, breaker_threshold, min_autonomy_suitability, enabled, source, creator_user_id, team_id)
-		VALUES (?, 'trigger', ?, ?, 4, 0, 1, 'user', ?, ?)
+		INSERT INTO event_handlers (id, mode, name, event_type, blueprint_id, breaker_threshold, min_autonomy_suitability, source, creator_user_id, team_id)
+		VALUES (?, 'automate', 'BP', ?, ?, 4, 0, 'user', ?, ?)
 	`, triggerID, domain.EventGitHubPRCICheckFailed, blueprintID, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID); err != nil {
 		t.Fatalf("seed trigger: %v", err)
 	}

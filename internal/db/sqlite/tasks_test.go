@@ -308,9 +308,9 @@ func TestTaskRuleOrder_SQLite(t *testing.T) {
 				id := uuid.New().String()
 				if _, err := conn.ExecContext(t.Context(), `
 					INSERT INTO event_handlers
-						(id, org_id, team_id, creator_user_id, kind, event_type, enabled, source,
+						(id, org_id, team_id, creator_user_id, mode, event_type, source,
 						 name, default_priority, sort_order, created_at, updated_at)
-					VALUES (?, ?, ?, ?, 'rule', ?, 1, 'user', ?, 0.5, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+					VALUES (?, ?, ?, ?, 'watch', ?, 'user', ?, 0.5, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 				`, id, orgID, teamID, runmode.LocalDefaultUserID, eventType, "rule "+id[:8], sortOrder); err != nil {
 					t.Fatalf("seed rule on team %s: %v", teamID, err)
 				}

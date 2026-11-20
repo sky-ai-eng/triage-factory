@@ -25,20 +25,15 @@ type routes struct{}
 // mode, which has no /org page, on /settings.
 func (routes) OrgSettings() Href { return Href{route: orgSettingsRoute} }
 
-// Trigger is a trigger, open in the prompts editor of the team that owns it.
-func (routes) Trigger(triggerID string) Href {
-	return Href{route: promptsRoute, query: url.Values{"trigger": {triggerID}}}
+// Trigger is an event handler with a blueprint, open in the prompts editor of
+// the team that owns it.
+func (routes) Trigger(handlerID string) Href {
+	return Href{route: promptsRoute, query: url.Values{"trigger": {handlerID}}}
 }
 
-// TaskRule is a task rule, open in the rule editor on the triage page.
-func (routes) TaskRule(ruleID string) Href {
-	return Href{route: triageRoute, query: url.Values{"rule": {ruleID}}}
-}
-
-// NotifyRule is a notify rule, open in the notify rules editor on the triage
-// page.
-func (routes) NotifyRule(ruleID string) Href {
-	return Href{route: triageRoute, query: url.Values{"notify_rule": {ruleID}}}
+// EventHandler is an event handler, open in its editor on the triage page.
+func (routes) EventHandler(handlerID string) Href {
+	return Href{route: triageRoute, query: url.Values{"rule": {handlerID}}}
 }
 
 // TeamJiraRules is team teamID's Jira status rules for the jira_projects row

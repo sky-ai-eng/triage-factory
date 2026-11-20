@@ -35,11 +35,11 @@ func trackLinearTeams(t *testing.T, s *Server, ids ...string) {
 	}
 }
 
-// createLinearRule creates a rule of eventType with predicate and returns the
+// createLinearRule creates a handler of eventType with predicate and returns the
 // response.
 func createLinearRule(t *testing.T, s *Server, eventType string, predicate map[string]any) (int, map[string]any) {
 	t.Helper()
-	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/rules", map[string]any{
+	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers", map[string]any{
 		"event_type":      eventType,
 		"name":            "scoped",
 		"scope_predicate": predicate,
@@ -66,7 +66,7 @@ func TestEventHandlerLinearTeamIn_CreateAcceptsTrackedTeams(t *testing.T) {
 // answers to are each refused, every one reported, and nothing is written.
 func TestEventHandlerLinearTeamIn_CreateRefusesWhatTheTeamDoesNotTrack(t *testing.T) {
 	s := newLinearTeamInServer(t, linearTeamEng)
-	before := len(listEventHandlers(t, s, "rule"))
+	before := len(listEventHandlers(t, s))
 
 	code, got := createLinearRule(t, s, domain.EventLinearIssueStatusChanged, map[string]any{
 		"linear_team_id_in": []string{linearTeamEng, linearTeamOps, "ENG", linearTeamGhost},
@@ -80,8 +80,8 @@ func TestEventHandlerLinearTeamIn_CreateRefusesWhatTheTeamDoesNotTrack(t *testin
 			t.Errorf("fault %d = %q, want it to name linear_team_id_in and %q", i, messages[i], want)
 		}
 	}
-	if after := len(listEventHandlers(t, s, "rule")); after != before {
-		t.Errorf("a refused create changed the rule count from %d to %d", before, after)
+	if after := len(listEventHandlers(t, s)); after != before {
+		t.Errorf("a refused create changed the handler count from %d to %d", before, after)
 	}
 }
 
@@ -113,7 +113,7 @@ func TestEventHandlerLinearTeamIn_PatchChecksOnlyAddedTeams(t *testing.T) {
 	s := newLinearTeamInServer(t, linearTeamEng)
 	code, created := createLinearRule(t, s, domain.EventLinearIssueCommented, map[string]any{"linear_team_id_in": []string{linearTeamEng}})
 	if code != http.StatusCreated {
-		t.Fatalf("seed rule: %d: %v", code, created)
+		t.Fatalf("seed handler: %d: %v", code, created)
 	}
 	id := created["id"].(string)
 	trackLinearTeams(t, s, linearTeamOps)
@@ -141,22 +141,6 @@ func TestEventHandlerLinearTeamIn_PatchChecksOnlyAddedTeams(t *testing.T) {
 	_ = json.Unmarshal(stored.Body.Bytes(), &row)
 	if row["scope_predicate_json"] != kept {
 		t.Errorf("refused PATCH changed the predicate: %v, want %s", row["scope_predicate_json"], kept)
-	}
-}
-
-func TestEventHandlerLinearTeamIn_CreateTriggerRefusesUntrackedTeams(t *testing.T) {
-	s := newLinearTeamInServer(t, linearTeamEng)
-	seedBlueprintForTrigger(t, s, "p-linear-team-in")
-
-	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/triggers", map[string]any{
-		"event_type":      domain.EventLinearIssueAssigned,
-		"blueprint_id":    "p-linear-team-in",
-		"scope_predicate": map[string]any{"linear_team_id_in": []string{linearTeamOps}},
-	})
-	var got map[string]any
-	_ = json.Unmarshal(rec.Body.Bytes(), &got)
-	if messages := repoInFaultMessages(t, rec.Code, got); len(messages) != 1 {
-		t.Errorf("faults = %q, want one", messages)
 	}
 }
 
@@ -227,7 +211,7 @@ func TestLinearTeamInFaults_PlainMemberUnderRLS_Postgres(t *testing.T) {
 // value (a cleared parent) is stored.
 func TestEventHandlerLinearParent_RefusesAnIdentifier(t *testing.T) {
 	s := newLinearTeamInServer(t, linearTeamEng)
-	before := len(listEventHandlers(t, s, "rule"))
+	before := len(listEventHandlers(t, s))
 
 	code, got := createLinearRule(t, s, domain.EventLinearIssueParentChanged, map[string]any{
 		"linear_team_id_in": []string{linearTeamOps},
@@ -240,8 +224,8 @@ func TestEventHandlerLinearParent_RefusesAnIdentifier(t *testing.T) {
 	if !strings.HasPrefix(messages[1], "new_parent_id: ") || !strings.Contains(messages[1], `"ENG-12"`) {
 		t.Errorf("fault = %q, want it to name new_parent_id and the identifier", messages[1])
 	}
-	if after := len(listEventHandlers(t, s, "rule")); after != before {
-		t.Errorf("a refused create changed the rule count from %d to %d", before, after)
+	if after := len(listEventHandlers(t, s)); after != before {
+		t.Errorf("a refused create changed the handler count from %d to %d", before, after)
 	}
 
 	for _, parent := range []string{linearIssueUUID, ""} {
@@ -254,7 +238,7 @@ func TestEventHandlerLinearParent_RefusesAnIdentifier(t *testing.T) {
 		}
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/rules", map[string]any{
+	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers", map[string]any{
 		"event_type":      domain.EventLinearIssueParentChanged,
 		"name":            "scoped",
 		"scope_predicate": map[string]any{"new_parent": "ENG-12"},
@@ -288,7 +272,7 @@ func TestLinearTeamInFaults_RegisteredForEveryLinearType(t *testing.T) {
 // are stored.
 func TestEventHandlerLinearPeople_RefusesAName(t *testing.T) {
 	s := newLinearTeamInServer(t, linearTeamEng)
-	before := len(listEventHandlers(t, s, "rule"))
+	before := len(listEventHandlers(t, s))
 
 	code, got := createLinearRule(t, s, domain.EventLinearIssueAssigned, map[string]any{
 		"assignee_in": []string{linearUserAda, "alice"},
@@ -307,8 +291,8 @@ func TestEventHandlerLinearPeople_RefusesAName(t *testing.T) {
 	if messages := repoInFaultMessages(t, code, got); len(messages) != 1 || !strings.HasPrefix(messages[0], "commenter_in: ") {
 		t.Errorf("commenter_in faults = %q, want one naming commenter_in", messages)
 	}
-	if after := len(listEventHandlers(t, s, "rule")); after != before {
-		t.Errorf("refused creates changed the rule count from %d to %d", before, after)
+	if after := len(listEventHandlers(t, s)); after != before {
+		t.Errorf("refused creates changed the handler count from %d to %d", before, after)
 	}
 
 	code, got = createLinearRule(t, s, domain.EventLinearIssueAssigned, map[string]any{

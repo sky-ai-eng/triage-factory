@@ -268,7 +268,7 @@ func TestLocal_EventRowOutlivesItsLinkAndItsEntity(t *testing.T) {
 	}
 	linked := Event(EventSpec{Render: func(p EventParams, _ Recipient) Content {
 		return Content{Title: p.EntityKey, Body: p.RuleName, Actions: []Action{
-			Link("Open", External(p.EntityURL)), Link("Open the team rule", Routes.NotifyRule(p.HandlerID))}}
+			Link("Open", External(p.EntityURL)), Link("Open the event handler", Routes.EventHandler(p.HandlerID))}}
 	}, Resolved: testEventResolved})
 	linked.Raise(ctx, org, EventRaise{EventType: domain.EventGitHubPRCICheckFailed, Source: "github", Entity: *entity, Condition: true,
 		Rules: []EventRule{{HandlerID: "h1", TeamID: team, Name: "Mine"}}})
@@ -277,8 +277,8 @@ func TestLocal_EventRowOutlivesItsLinkAndItsEntity(t *testing.T) {
 		t.Fatalf("rows = %+v; want the row, without the link its entity cannot give", got)
 	}
 	actions, err := decodeActions(got[0].Actions)
-	if err != nil || len(actions) != 1 || actions[0].Label != "Open the team rule" {
-		t.Errorf("actions = %+v, %v; want only the rule link", actions, err)
+	if err != nil || len(actions) != 1 || actions[0].Label != "Open the event handler" {
+		t.Errorf("actions = %+v, %v; want only the handler link", actions, err)
 	}
 	hub.take(t)
 
@@ -321,7 +321,7 @@ func TestLocal_EventRaiseFailsOnUnreadableSettings(t *testing.T) {
 	}
 	linked := Event(EventSpec{Render: func(p EventParams, _ Recipient) Content {
 		return Content{Title: p.EntityKey, Body: p.RuleName, Actions: []Action{
-			Link("Open", External(p.EntityURL)), Link("Open the team rule", Routes.NotifyRule(p.HandlerID))}}
+			Link("Open", External(p.EntityURL)), Link("Open the event handler", Routes.EventHandler(p.HandlerID))}}
 	}, Resolved: testEventResolved})
 	linked.Raise(ctx, org, EventRaise{EventType: domain.EventGitHubPRCICheckFailed, Source: "github", Entity: *entity, Condition: true,
 		Rules: []EventRule{{HandlerID: "h1", TeamID: team, Name: "Mine"}}})

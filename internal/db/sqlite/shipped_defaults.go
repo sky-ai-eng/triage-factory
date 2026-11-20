@@ -127,8 +127,7 @@ func (s *shippedDefaultsStore) SeedShippedIntoTeam(ctx context.Context, orgID, t
 	}
 
 	// Phase 3: handlers. EventHandlerStore.Seed already does exactly this —
-	// rules enabled unless marked Disabled, triggers disabled (shipped
-	// convention), each trigger's blueprint slug resolved through
+	// each handler in its shipped mode, its blueprint slug resolved through
 	// blueprintIDsBySlug — so reuse it rather than duplicate its SQL.
 	if err := s.eventHandlers.Seed(ctx, orgID, teamID, blueprintIDsBySlug); err != nil {
 		return fmt.Errorf("shipped_defaults seed: %w", err)
@@ -164,7 +163,7 @@ func (s *shippedDefaultsStore) SyncShippedIntoTeam(ctx context.Context, orgID, t
 		}
 	}
 
-	// Handlers sync last: a trigger's blueprint binding re-resolves by shipped
+	// Handlers sync last: a handler's blueprint binding re-resolves by shipped
 	// slug against the blueprint state the loop above just produced (fresh
 	// inserts included), so it must run after every blueprint unit has synced.
 	blueprintIDsBySlug, err := s.resolveBlueprintIDsBySlug(ctx, orgID, teamID, shippedBlueprints)
@@ -179,9 +178,10 @@ func (s *shippedDefaultsStore) SyncShippedIntoTeam(ctx context.Context, orgID, t
 
 // resolveBlueprintIDsBySlug reads each shipped blueprint's current
 // non-deleted team-copy id, for EventHandlerStore.Sync to resolve a shipped
-// trigger's blueprint slug against. A slug with no non-deleted row (missing,
-// or soft-deleted by the user) is omitted — Sync then skips any trigger that
-// targets it rather than wiring a dangling or resurrected reference.
+// handler's blueprint slug against. A slug with no non-deleted row (missing,
+// or soft-deleted by the user) is omitted — Sync then leaves the blueprint_id
+// of a handler that names it as it is rather than wiring a dangling or
+// resurrected reference.
 func (s *shippedDefaultsStore) resolveBlueprintIDsBySlug(ctx context.Context, orgID, teamID string, shippedBlueprints []domain.SeedBlueprint) (map[string]string, error) {
 	ids := make(map[string]string, len(shippedBlueprints))
 	for _, b := range shippedBlueprints {

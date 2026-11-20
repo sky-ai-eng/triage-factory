@@ -12,12 +12,12 @@ Triage Factory polls GitHub and Linear, turns state changes into events, and can
 
 This arc extends that model so:
 
-1. Events can **auto-fire** matching prompts without user intervention (SKY-142, SKY-147).
+1. Events can **auto-fire** matching blueprints without user intervention, through an event handler in `automate` (SKY-142, SKY-147).
 2. Each run leaves a **durable memory file** so the next iteration on the same task knows what was tried and why (SKY-141).
 3. CI failures re-fire **reliably** across retries, new commits, and newly-failing checks (SKY-140, SKY-144).
 4. Agents can pull **full CI logs** into a scratch directory and read them with native tools (SKY-146).
-5. Agents can **declare a task impossible**, tripping the trigger's circuit breaker on that entity after repeated failures (SKY-148).
-6. Trigger rules are **parameterizable** with predicates including the critical label-opt-in story (SKY-149).
+5. Agents can **declare a task impossible**, tripping the event handler's circuit breaker on that entity after repeated failures (SKY-148).
+6. Event handlers are **parameterizable** with predicates including the critical label-opt-in story (SKY-149).
 
 Follow-ups: retention (SKY-145), bulk/parallel delegation (SKY-143 — design-only, exploratory).
 
@@ -60,7 +60,7 @@ The resume helper built for SKY-141 is **reused by the open-run resume path** (w
 
 Manual runs = human is in the loop and takes responsibility. Auto runs = system must enforce safety rails. This distinction is threaded through via `agent_runs.trigger_source` (`'manual' | 'auto'`, added in SKY-147).
 
-The circuit breaker counts only runs a trigger fired (`blueprint_runs.trigger_type = 'event'`), per entity and trigger. A person's completed run on the entity **does** reset it (success is success, regardless of origin), but a person's failed run is ignored. When implementing any counter/breaker logic, always filter on `trigger_type`.
+The circuit breaker counts only runs an event handler fired (`blueprint_runs.trigger_type = 'event'`), per entity and handler. A person's completed run on the entity **does** reset it (success is success, regardless of origin), but a person's failed run is ignored. When implementing any counter/breaker logic, always filter on `trigger_type`.
 
 ### 6. "Only two acceptable reasons to stop"
 
@@ -73,9 +73,9 @@ This framing is essential because it gives the circuit breaker a clean signal �
 
 Note the distinction between `task_unsolvable` (voluntary, agent-declared) and `failed` (involuntary, spawner-assigned when the runtime under the run dies). Both count toward the breaker, but they're kept as distinct statuses because they have different debugging paths (`failed` usually means our env is broken; `task_unsolvable` means the agent genuinely can't). A turn the model did not finish (a refusal, a reply cut off at the output limit) is neither: it records no verdict, and the conversation parks `open` for a person.
 
-### 7. `prompt_bindings` is untouched; `prompt_triggers` is new
+### 7. `prompt_bindings` is untouched; automation is an event handler
 
-`prompt_bindings` already exists and serves swipe UX (which prompt pre-fills the picker when a user taps delegate). **Do not modify it** in the auto-delegation work. `prompt_triggers` is a new table (SKY-142) for automation rules. Keeping them separate prevents swipe UX from regressing and keeps the concepts sharp.
+`prompt_bindings` already exists and serves swipe UX (which prompt pre-fills the picker when a user taps delegate). **Do not modify it** in the auto-delegation work. Automation lives on `event_handlers`: a handler in `automate` makes the task and runs its blueprint on it, one in `watch` makes the task only, one in `notify` tells the team, and one in `off` does nothing. Keeping them separate prevents swipe UX from regressing and keeps the concepts sharp.
 
 ### 8. No ALTER TABLE migrations
 
@@ -93,7 +93,7 @@ cd frontend && pnpm install --frozen-lockfile && pnpm run build && cd .. && go b
 
 ### 11. Same-task absorption: follow-up firings fold into a live run
 
-When a trigger fires for an entity that **already has a live auto run**, the router doesn't always spawn a second run. The rule is **same-task absorption**: if the firing's _own task_ owns that live run, the new event folds into it — delivered as an **injection mid-run** (a fresh user message into the running conversation), and the standing claim carries over. Any _other_ firing — a different task's, or a busy state with no live run to fold into — defers onto `pending_firings` and runs when the entity frees up, exactly as before.
+When an event handler fires for an entity that **already has a live auto run**, the router doesn't always spawn a second run. The rule is **same-task absorption**: if the firing's _own task_ owns that live run, the new event folds into it — delivered as an **injection mid-run** (a fresh user message into the running conversation), and the standing claim carries over. Any _other_ firing — a different task's, or a busy state with no live run to fold into — defers onto `pending_firings` and runs when the entity frees up, exactly as before.
 
 A deferred firing does not always become a run of its own. While the task's blueprint is still running, the next engagement to start under it (the next step's launch, usually) is handed each event queued since that run started as the same injection. The firing is settled once the run ends: as injected if the note was read, and otherwise the note is withdrawn and the firing goes on as below. A task that is closed hands nothing over. If the blueprint finishes first and its finish closes the task, the task's newest event is routed again, once, which creates a new task and a fresh run; that second routing skips the close phase, the notifications and the disposition the first one already produced. If the blueprint finishes and the task stays open, the firing starts a fresh run on that task.
 
@@ -102,7 +102,7 @@ A task can also come back. When another event resolved a task (CI passing closes
 Two consequences if you're the agent working the run:
 
 - **Your conversation can grow mid-run.** A run isn't a snapshot of one triggering event: more same-task events (a new Slack follow-up in the thread, a re-fired CI failure) can arrive as injected user messages while you're working. Treat a later injection as the current intent.
-- **Absorbed means absorbed.** There's no separate compensation path for a folded-in event. If the run fails, that event fails with it, and the per-(entity, trigger) breaker owns repeated failure uniformly — the same posture as the original triggering event.
+- **Absorbed means absorbed.** There's no separate compensation path for a folded-in event. If the run fails, that event fails with it, and the per-(entity, handler) breaker owns repeated failure uniformly — the same posture as the original triggering event.
 
 This replaced the old per-event-type `Additive` boolean (now deleted): absorption is one universal, task-scoped rule rather than a flag each new event type had to opt into, which also makes cross-task absorption (folding a follow-up into an _unrelated_ task's run) structurally impossible. Same task ⇒ same owning team, so no principal-boundary guard is needed. The gate lives in `internal/routing`'s `tryAutoDelegate` (`delegation.go`).
 
@@ -118,7 +118,7 @@ Files you'll almost certainly need. **Verify each before editing** — line numb
 | `internal/domain/prompt.go`        | `Prompt` and `PromptBinding` domain types.                                                                                                          |
 | `internal/db/db.go`                | Schema. All table definitions live in `CREATE TABLE` statements here.                                                                               |
 | `internal/db/event_types.go`       | Registered event types (CI failure, PR new commits, etc.).                                                                                          |
-| `internal/db/prompts.go`           | Existing prompt DB helpers — template for new `prompt_triggers` helpers.                                                                            |
+| `internal/db/event_handlers_store.go` | Event handlers: the store interface and the shipped handlers. A handler's `mode` decides whether a matching event makes a task and runs its blueprint. |
 | `internal/eventing/tracker/tracker.go`      | Event emission and `CreateEvent` — the hook point for SKY-147.                                                                                      |
 | `internal/eventing/tracker/diff.go`         | Snapshot-to-snapshot diff logic. SKY-140 and SKY-144 both edit this. CI failure emission was around lines 48-60 at writing time.                    |
 | `internal/github/status.go`        | GitHub API client. Around line 91 is where check runs are fetched — see SKY-144 for what's already in the response that we're currently discarding. |
@@ -178,10 +178,10 @@ Sequential, one dev:
 1. **SKY-140** — `head_sha` tracking. Independent, small, foundational.
 2. **SKY-144** — structured check runs + CI re-trigger fix. Needs 140.
 3. **SKY-141** — task memory with write-before-finish gate. Ships value standalone (manual delegations benefit immediately).
-4. **SKY-142** — `prompt_triggers` table. Independent.
+4. **SKY-142** — automation rules (event handlers in `automate`). Independent.
 5. **SKY-146** — log download CLI. Needs 144.
 6. **SKY-148** — task_unsolvable + circuit breaker. Schema first per the ordering note above.
-7. **SKY-147** — auto-delegation hook + default CI-fix trigger. Needs 141, 142, 144, 146, and ideally 148's schema.
+7. **SKY-147** — auto-delegation hook + the CI-fix blueprint on the shipped CI handler. Needs 141, 142, 144, 146, and ideally 148's schema.
 8. **SKY-149** — scope predicates + label opt-in. Needs 147.
 
 Follow-ups:

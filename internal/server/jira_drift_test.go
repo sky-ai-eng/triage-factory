@@ -67,9 +67,10 @@ func TestJiraProjectsPut_DecidesStatusDriftFromTheWorkflowItRead(t *testing.T) {
 	rec.Inactive(t, org, kinds.JiraStatusDrift)
 }
 
-// A task rule save that changes its filter or enabled state checks drift at once:
-// enabling one naming a status no tracked project has raises it, removing the
-// status resolves it, and disabling or deleting resolves it without asking Jira.
+// A handler save that changes its filter or moves it into or out of off checks
+// drift at once: turning on one naming a status no tracked project has raises
+// it, removing the status resolves it, and turning it off or deleting it
+// resolves it without asking Jira.
 func TestEventHandlerSave_ChecksJiraPredicateDrift(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 	r := newJiraCatalogRig(t)
@@ -85,20 +86,19 @@ func TestEventHandlerSave_ChecksJiraPredicateDrift(t *testing.T) {
 	r.track(t, r.sky)
 	rec := notifytest.Record(t)
 
-	if code, got := r.patch(t, id, map[string]any{"enabled": false}); code != http.StatusOK {
-		t.Fatalf("disable = %d: %v", code, got)
+	if code, got := r.patch(t, id, map[string]any{"mode": domain.EventHandlerModeOff}); code != http.StatusOK {
+		t.Fatalf("turn off = %d: %v", code, got)
 	}
 	rec.Inactive(t, org, kinds.JiraPredicateDrift)
 
-	if code, got := r.patch(t, id, map[string]any{"enabled": true}); code != http.StatusOK {
-		t.Fatalf("enable = %d: %v", code, got)
+	if code, got := r.patch(t, id, map[string]any{"mode": domain.EventHandlerModeWatch}); code != http.StatusOK {
+		t.Fatalf("turn on = %d: %v", code, got)
 	}
 	rec.Active(t, org, kinds.JiraPredicateDrift, id)
 	if open := rec.Open(org, kinds.JiraPredicateDrift); len(open) == 1 {
 		got := open[0].Params.(kinds.JiraHandlerFilter)
-		if got.HandlerKind != domain.EventHandlerKindRule || got.RuleName != "scoped" ||
-			len(got.Statuses) != 1 || got.Statuses[0] != opsOnlyStatusID || got.Stopped {
-			t.Errorf("params = %+v, want the OPS status gone and the rule still matching In Progress", got)
+		if got.HandlerName != "scoped" || len(got.Statuses) != 1 || got.Statuses[0] != opsOnlyStatusID || got.Stopped {
+			t.Errorf("params = %+v, want the OPS status gone and the handler still matching In Progress", got)
 		}
 	}
 

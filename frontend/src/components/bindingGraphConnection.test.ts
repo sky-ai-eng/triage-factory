@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import type { Connection } from '@xyflow/react'
 import {
   EVENT_ALREADY_RUNS_BLUEPRINT,
+  handlerForConnection,
   planConnection,
   type Membership,
 } from './bindingGraphConnection'
@@ -34,6 +35,19 @@ describe('planConnection', () => {
     expect(planConnection(connect('et:github:pr:ci_check_failed', 'p:p0'), triggered)).toEqual({
       ok: false,
       reason: EVENT_ALREADY_RUNS_BLUEPRINT,
+    })
+  })
+})
+
+describe('handlerForConnection', () => {
+  it('creates a new handler in off on the event and the blueprint', () => {
+    expect(
+      handlerForConnection({ eventType: 'github:pr:ci_check_failed', blueprintId: 'bp' }, 'team-a'),
+    ).toEqual({
+      team_id: 'team-a',
+      event_type: 'github:pr:ci_check_failed',
+      blueprint_id: 'bp',
+      mode: 'off',
     })
   })
 })

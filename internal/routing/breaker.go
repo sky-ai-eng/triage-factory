@@ -20,7 +20,7 @@ const DefaultBreakerSyncInterval = 30 * time.Second
 // failed write corrects itself on the next one. subject is the entity's key
 // when the caller has it; an empty one is read.
 func (r *Router) breakerHolds(ctx context.Context, orgID string, trigger domain.EventHandler, entityID, subject string) (bool, error) {
-	threshold := derefIntDefault(trigger.BreakerThreshold, 0)
+	threshold := trigger.BreakerThreshold
 	streak, err := r.tasks.BreakerStreakSystem(ctx, orgID, entityID, trigger.ID)
 	if err != nil {
 		return false, err

@@ -9,10 +9,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
-// Reconnection mutations, the canvas gesture of dragging an arrow's head onto
-// a new target: the sequence-edge re-target (atomic split + merge, leaving an
-// orphaned downstream) and the trigger-edge re-target (in-place blueprint_id
-// move).
+// Reconnection, the canvas gesture of dragging a sequence arrow's head onto a
+// new target: an atomic split + merge, leaving an orphaned downstream.
 
 type reconnectView struct {
 	Host              blueprintWithStepsView `json:"host"`
@@ -85,7 +83,7 @@ func TestBlueprintReconnect_TriggeredTargetRejected(t *testing.T) {
 	configureEventSources(t, s)
 	b, p := createChainBlueprint(t, s, "Chain", 3)
 	target, _ := createWrappedBlueprint(t, s, "TriggeredTarget")
-	attachTrigger(t, s, target, "github:pr:ci_check_failed")
+	attachHandler(t, s, target, "github:pr:ci_check_failed")
 	rec := doJSON(t, s, http.MethodPost, "/api/blueprints/"+b+"/reconnect", map[string]any{
 		"at_step_index":       1,
 		"target_blueprint_id": target,
@@ -126,77 +124,5 @@ func TestBlueprintReconnect_MissingIndexRejected(t *testing.T) {
 	})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("reconnect without at_step_index: expected 400, got %d: %s", rec.Code, rec.Body.String())
-	}
-}
-
-// --- trigger-edge re-target (POST /api/event-handlers/{id}/retarget) ------
-
-func TestEventHandlerRetarget_MovesTriggerPreservingID(t *testing.T) {
-	s := newTestServer(t)
-	from, _ := createWrappedBlueprint(t, s, "From")
-	to, _ := createWrappedBlueprint(t, s, "To")
-	trigID := attachTrigger(t, s, from, "github:pr:ci_check_failed")
-
-	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/"+trigID+"/retarget", map[string]any{
-		"blueprint_id": to,
-	})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("retarget: expected 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-	var h map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &h); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if h["id"] != trigID {
-		t.Errorf("trigger id changed: got %v, want %s (move must preserve the row)", h["id"], trigID)
-	}
-	if h["blueprint_id"] != to {
-		t.Errorf("blueprint_id=%v, want %s", h["blueprint_id"], to)
-	}
-	// The source blueprint is now trigger-less, the target carries the trigger.
-	if got := len(triggersForBlueprint(t, s, from)); got != 0 {
-		t.Errorf("source has %d triggers after move, want 0", got)
-	}
-	if got := len(triggersForBlueprint(t, s, to)); got != 1 {
-		t.Errorf("target has %d triggers after move, want 1", got)
-	}
-}
-
-func TestEventHandlerRetarget_OntoTriggeredBlueprint(t *testing.T) {
-	s := newTestServer(t)
-	from, _ := createWrappedBlueprint(t, s, "From")
-	to, _ := createWrappedBlueprint(t, s, "To")
-	trigID := attachTrigger(t, s, from, "github:pr:ci_check_failed")
-	resident := attachTrigger(t, s, to, "github:pr:review_changes_requested")
-
-	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/"+trigID+"/retarget", map[string]any{
-		"blueprint_id": to,
-	})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("retarget onto triggered blueprint: expected 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-	if got := triggerIDsForBlueprint(t, s, to); len(got) != 2 || !got[trigID] || !got[resident] {
-		t.Errorf("triggers on the target = %v, want %s and the moved %s", got, resident, trigID)
-	}
-}
-
-func TestEventHandlerRetarget_RuleRejected(t *testing.T) {
-	s := newTestServer(t)
-	configureEventSources(t, s)
-	to, _ := createWrappedBlueprint(t, s, "To")
-	rule := doJSON(t, s, http.MethodPost, "/api/event-handlers/rules", map[string]any{
-		"event_type": "github:pr:ci_check_failed",
-		"name":       "a rule",
-	})
-	if rule.Code != http.StatusCreated {
-		t.Fatalf("create rule: %d: %s", rule.Code, rule.Body.String())
-	}
-	var rh map[string]any
-	_ = json.Unmarshal(rule.Body.Bytes(), &rh)
-	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/"+rh["id"].(string)+"/retarget", map[string]any{
-		"blueprint_id": to,
-	})
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("retarget a rule: expected 409, got %d: %s", rec.Code, rec.Body.String())
 	}
 }

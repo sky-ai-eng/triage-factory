@@ -42,7 +42,7 @@ func TestEventHandlerLinearCatalog_RefusesNamesAndUntrackedIDs(t *testing.T) {
 	trackLinearTeams(t, s, linearTeamEng)
 	opsOnly := fixtureUUID("linear-state-ops-only")
 	fake.SetStates(linearTeamOps, linear.WorkflowState{ID: opsOnly, Name: "Queued", Type: "unstarted"})
-	before := len(listEventHandlers(t, s, "rule"))
+	before := len(listEventHandlers(t, s))
 
 	code, got := createLinearRule(t, s, domain.EventLinearIssueAssigned, map[string]any{
 		"status_id_in":    []string{linearStateTodo, "Todo", opsOnly},
@@ -59,8 +59,8 @@ func TestEventHandlerLinearCatalog_RefusesNamesAndUntrackedIDs(t *testing.T) {
 		"label_group_id_in": []string{linearLabelHard, "Difficulty"},
 	})
 	wantFieldFaults(t, code, got, fieldFault{"label_group_id_in", linearLabelHard}, fieldFault{"label_group_id_in", "Difficulty"})
-	if after := len(listEventHandlers(t, s, "rule")); after != before {
-		t.Errorf("a refused create changed the rule count from %d to %d", before, after)
+	if after := len(listEventHandlers(t, s)); after != before {
+		t.Errorf("a refused create changed the handler count from %d to %d", before, after)
 	}
 }
 
@@ -71,7 +71,7 @@ func TestEventHandlerLinearCatalog_AsksLinearOnlyAboutAddedIDs(t *testing.T) {
 	trackLinearTeams(t, s, linearTeamEng)
 	code, created := createLinearRule(t, s, domain.EventLinearIssueAssigned, map[string]any{"status_id_in": []string{linearStateTodo}})
 	if code != http.StatusCreated {
-		t.Fatalf("seed rule: %d: %v", code, created)
+		t.Fatalf("seed handler: %d: %v", code, created)
 	}
 	id := created["id"].(string)
 

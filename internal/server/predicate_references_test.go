@@ -56,10 +56,10 @@ func orNil(s *string) string {
 	return *s
 }
 
-// labelRule creates a rule on referenceCheckEventType scoped to label.
+// labelRule creates a handler on referenceCheckEventType scoped to label.
 func labelRule(t *testing.T, s *Server, label string) *httptest.ResponseRecorder {
 	t.Helper()
-	return doJSON(t, s, http.MethodPost, "/api/event-handlers/rules", map[string]any{
+	return doJSON(t, s, http.MethodPost, "/api/event-handlers", map[string]any{
 		"event_type":      referenceCheckEventType,
 		"name":            "labelled",
 		"scope_predicate": map[string]any{"has_label": label},
