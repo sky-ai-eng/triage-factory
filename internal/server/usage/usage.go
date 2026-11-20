@@ -822,8 +822,8 @@ func resolveSpendUserProfiles(ctx context.Context, tx db.TxStores, rows []domain
 	return profiles, nil
 }
 
-// resolveSpendRuleNames maps each distinct firing trigger (autonomous rows) to a
-// human-readable rule name. It uses the plain app-pool Get (RLS-scoped), NOT
+// resolveSpendRuleNames maps each distinct firing event handler (autonomous
+// rows) to its name. It uses the plain app-pool Get (RLS-scoped), NOT
 // GetSystem, and runs for two callers — both safe under that scoping:
 //   - /api/teams/{team_id}/usage (any mode): the caller is a team member (team-admin gate),
 //     and event_handlers / blueprints RLS lets a member read their own team's rows.
@@ -832,9 +832,8 @@ func resolveSpendUserProfiles(ctx context.Context, tx db.TxStores, rows []domain
 //     per-rule detail off the org rollup is moot at N=1.
 //
 // The MULTI-mode org rollup never calls this (it omits by_rule), so no cross-team
-// per-rule read ever happens. A trigger event_handler always carries a NULL name
-// (the trigger_shape CHECK forces it), so the meaningful label is the blueprint it
-// fires; we fall back to that, then to "" (the FE shows the id).
+// per-rule read ever happens. Every handler carries a name; a handler deleted
+// since its run labels as "" (the FE shows the id).
 func resolveSpendRuleNames(ctx context.Context, tx db.TxStores, orgID string, rows []domain.SpendRow) (map[string]string, error) {
 	names := map[string]string{}
 	for _, r := range rows {
@@ -851,16 +850,7 @@ func resolveSpendRuleNames(ctx context.Context, tx db.TxStores, orgID string, ro
 		}
 		name := ""
 		if eh != nil {
-			name = eh.Name // non-empty only for rules; triggers carry NULL.
-			if name == "" && eh.BlueprintID != "" {
-				bp, err := tx.Blueprints.Get(ctx, orgID, eh.BlueprintID)
-				if err != nil {
-					return nil, err
-				}
-				if bp != nil {
-					name = bp.Name
-				}
-			}
+			name = eh.Name
 		}
 		names[tid] = name
 	}

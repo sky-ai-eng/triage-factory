@@ -358,12 +358,14 @@ func (h *Handler) handlePromptDelete(w http.ResponseWriter, r *http.Request) {
 		// blueprint_steps RESTRICT FK. Resolve the prompt's owning blueprint:
 		//   - owner is a 1-step blueprint this prompt solely constitutes (the
 		//     auto-wrap case) → soft-delete that blueprint alongside the prompt so
-		//     the wrapper doesn't linger.
+		//     the wrapper doesn't linger, detaching its handlers as a blueprint
+		//     delete does.
 		//   - owner is a ≥2-step blueprint (a real composition) → fragment the
 		//     chain per the split rule (DeleteStep): the component still headed by
-		//     the original entry keeps the trigger + id; every other component
-		//     becomes a new trigger-less blueprint; a head delete additionally
-		//     detaches the trigger (its target entry prompt is the one going away).
+		//     the original entry keeps its handlers + id; every other component
+		//     becomes a new blueprint no handler references; a head delete
+		//     additionally detaches the handlers (their entry prompt is the one
+		//     going away).
 		//   - no owner (prompt removed from all blueprints already) → just delete
 		//     the prompt.
 		ownerID, owned, e := tx.Blueprints.StepPromptOwner(r.Context(), orgID, id)
@@ -377,6 +379,9 @@ func (h *Handler) handlePromptDelete(w http.ResponseWriter, r *http.Request) {
 			}
 			if len(steps) == 1 {
 				// Sole-owner pair-delete (auto-wrap case): retire the wrapper.
+				if e := tx.EventHandlers.DetachBlueprint(r.Context(), orgID, ownerID); e != nil {
+					return e
+				}
 				if e := tx.Blueprints.Delete(r.Context(), orgID, ownerID); e != nil {
 					return e
 				}

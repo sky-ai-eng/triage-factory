@@ -79,9 +79,13 @@ func TestBlueprintCreate_AutoWrapRequiresPromptName(t *testing.T) {
 
 // --- C: prompt-delete pairing --------------------------------------------
 
+// Deleting the only prompt of a one-step blueprint retires the blueprint with
+// it, and detaches the handler that automated it, as a blueprint delete does.
 func TestPromptDelete_SoleOwnerPairSoftDeletesBoth(t *testing.T) {
 	s := newTestServer(t)
+	configureEventSources(t, s)
 	bp, p := createWrappedBlueprint(t, s, "Solo")
+	handlerID := attachHandler(t, s, bp, domain.EventGitHubPRCICheckFailed)
 
 	del := doJSON(t, s, http.MethodDelete, "/api/prompts/"+p, nil)
 	if del.Code != http.StatusOK {
@@ -94,6 +98,17 @@ func TestPromptDelete_SoleOwnerPairSoftDeletesBoth(t *testing.T) {
 	// And its sole-owner blueprint vanished too.
 	if blueprintListed(t, s, bp) {
 		t.Fatalf("sole-owner blueprint %s still listed after pairing delete", bp)
+	}
+	g := doJSON(t, s, http.MethodGet, "/api/event-handlers/"+handlerID, nil)
+	if g.Code != http.StatusOK {
+		t.Fatalf("GET handler after the delete: %d: %s", g.Code, g.Body.String())
+	}
+	var h map[string]any
+	if err := json.Unmarshal(g.Body.Bytes(), &h); err != nil {
+		t.Fatalf("decode handler: %v", err)
+	}
+	if h["mode"] != domain.EventHandlerModeWatch || h["blueprint_id"] != nil {
+		t.Errorf("handler after its blueprint's only prompt was deleted = mode %v, blueprint %v; want watch with no blueprint", h["mode"], h["blueprint_id"])
 	}
 }
 
