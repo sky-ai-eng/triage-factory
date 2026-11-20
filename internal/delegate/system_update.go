@@ -171,11 +171,12 @@ func (c claimSystem) systemUpdate() *agentloop.SystemUpdate {
 //   - A conversation that has been opened sends what its row holds, and tells
 //     the conversation what changed since the newest of the saved parts and
 //     its last update.
-//   - A row from before the parts were saved holds no shared prompt and no
-//     parts. It is sent the shared prompt this claim composed and the block it
-//     holds (or the composed one, when it holds none), which is what every
-//     claim sent before, and those are saved with the composed parts, so the
-//     next claim can compare.
+//   - An opened row with no parts is an SDK conversation an earlier release
+//     saved, or one whose first claim's save did not land. It is sent the
+//     shared prompt this claim composed and the block it holds (or the
+//     composed one, when it holds none), which is what every claim of such a
+//     conversation sent before, and those are saved with the composed parts,
+//     so the next claim can compare.
 //   - A row this claim could not read is sent what the claim composed and is
 //     left alone: it may hold the first claim's blocks, and a transient
 //     failure must not overwrite them.

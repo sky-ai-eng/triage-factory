@@ -292,12 +292,12 @@ func TestPersistSystemBlocks_RefusedOnceTheEngagementIsFencedOut(t *testing.T) {
 	}
 }
 
-// TestNativeClaim_ARowFromBeforeThePartsSavesThem covers rows saved before
-// the shared prompt and the parts were. An opened row with nothing on it
-// composes and saves both blocks, as a launch does; one with a block keeps it
-// and is saved with today's shared prompt and parts. Either way the claim
-// after it compares rather than composing a third time.
-func TestNativeClaim_ARowFromBeforeThePartsSavesThem(t *testing.T) {
+// TestNativeClaim_AnOpenedRowWithNoPartsSavesThem covers an opened row that
+// holds no parts: on this runtime, one whose first claim's save did not land.
+// A row with nothing on it composes and saves both blocks, as a launch does;
+// one with a block keeps it and is saved with today's shared prompt and parts.
+// Either way the claim after it compares rather than composing a third time.
+func TestNativeClaim_AnOpenedRowWithNoPartsSavesThem(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		block string
@@ -306,10 +306,10 @@ func TestNativeClaim_ARowFromBeforeThePartsSavesThem(t *testing.T) {
 		{name: "a row with only block 2", block: "<run_context>\nRun root: /work\n</run_context>\n\nthe launched mission"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newLaunchFixture(t, "native-legacy")
+			f := newLaunchFixture(t, "native-no-parts")
 			f.open(t)
 			if _, err := f.database.Exec(`UPDATE conversations SET system_block = ? WHERE id = ?`, tc.block, f.conv.ID); err != nil {
-				t.Fatalf("seed the legacy block: %v", err)
+				t.Fatalf("seed the row's block: %v", err)
 			}
 			replay := f.s.nativeClaimReplay(context.Background(), runmode.LocalDefaultOrgID, f.conv.ID)
 			if !replay.opened || replay.saved.Parts != nil || replay.readErr != nil {
@@ -321,7 +321,7 @@ func TestNativeClaim_ARowFromBeforeThePartsSavesThem(t *testing.T) {
 			}
 			saved := f.storedBlocks(t)
 			if saved.Prompt != agentprompt.Build(nativeSpec(agentprompt.SurfaceMachinist)) || saved.Parts == nil {
-				t.Fatal("the claim did not save today's shared prompt and parts onto the legacy row")
+				t.Fatal("the claim did not save today's shared prompt and parts onto the row")
 			}
 			if tc.block != "" && saved.Block != tc.block {
 				t.Errorf("the claim replaced the block the row held;\n%s", saved.Block)

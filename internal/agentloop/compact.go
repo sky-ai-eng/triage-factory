@@ -157,6 +157,10 @@ func (e *Engine) adoptCurrentSystem(ctx context.Context, params Params) Params {
 	if params.Current == nil {
 		return params
 	}
+	// TODO(TFAC-1512): the save is a second write after the compaction's
+	// transaction, so a failure or a crash between the two leaves the change
+	// only in the summary for this engagement and has the next claim deliver
+	// the update again. It belongs in the commit's own transaction.
 	if e.Hooks.SaveSystemBlocks != nil {
 		if err := e.Hooks.SaveSystemBlocks(ctx, *params.Current); err != nil {
 			e.warn("saving the conversation's system blocks after a compaction failed; the engagement keeps the blocks it was sending",
