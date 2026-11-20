@@ -165,21 +165,15 @@ func (s *blueprintStore) GetAllForUpdate(ctx context.Context, orgID string, ids 
 // whose lock waited on a retire is read again as that retire committed it,
 // fails deleted_at IS NULL, and is left out.
 func lockBlueprintsPG(ctx context.Context, q queryer, orgID string, ids []string) (map[string]*domain.Blueprint, error) {
-	valid := make([]string, 0, len(ids))
-	for _, id := range ids {
-		if isValidUUID(id) {
-			valid = append(valid, id)
-		}
-	}
-	held := make(map[string]*domain.Blueprint, len(valid))
-	if len(valid) == 0 {
+	held := make(map[string]*domain.Blueprint, len(ids))
+	if len(ids) == 0 {
 		return held, nil
 	}
 	rows, err := q.QueryContext(ctx, `
 		SELECT `+pgBlueprintColumns+`
 		FROM blueprints WHERE org_id = $1 AND id = ANY($2) AND deleted_at IS NULL
 		ORDER BY id
-		FOR UPDATE`, orgID, valid)
+		FOR UPDATE`, orgID, ids)
 	if err != nil {
 		return nil, fmt.Errorf("lock blueprints: %w", err)
 	}
