@@ -728,7 +728,7 @@ function BindingGraphInner({
   )
 
   // Delete a whole blueprint (server soft-deletes the box + its copy-only step
-  // prompts and detaches the bound trigger). Core does the request + error toast
+  // prompts and detaches its triggers). Core does the request + error toast
   // only — no UI side effects, no refetch — so it composes inside a bulk batch
   // (one refetch at the end).
   const deleteBlueprintCore = useCallback(async (blueprintId: string): Promise<boolean> => {

@@ -1108,19 +1108,18 @@ type TaskStore interface {
 
 	// --- Breaker ---
 	//
-	// A trigger's breaker is keyed on its blueprint: every run a trigger
-	// fires is a blueprint run, and the streak counts the blueprint's
-	// event-fired runs on the entity whichever trigger fired them, so every
-	// trigger on one blueprint reads the same streak against its own
-	// threshold. It counts blueprint runs, so a run of several steps counts
-	// once.
+	// A trigger's breaker is its own: it counts the blueprint runs that
+	// trigger fired of its current blueprint, so another trigger on the same
+	// blueprint, or the trigger's runs of a blueprint it was retargeted away
+	// from, neither count toward it nor reset it. It counts blueprint runs,
+	// so a run of several steps counts once.
 
-	// BreakerStreakSystem counts the failed and aborted blueprint runs of
-	// blueprintID that an event fired on entityID's tasks and that no
-	// resetting run started at or after: a completed run of the same
-	// blueprint, or a completed run a person started on the entity, of any
-	// blueprint. A person's failed run neither counts nor resets.
-	BreakerStreakSystem(ctx context.Context, orgID, entityID, blueprintID string) (domain.BreakerStreak, error)
+	// BreakerStreakSystem counts the failed and aborted blueprint runs that
+	// triggerID fired of its current blueprint on entityID's tasks, and that
+	// no resetting run started at or after: a completed run the trigger fired
+	// of that blueprint, or a completed run a person started on the entity,
+	// of any blueprint. A person's failed run neither counts nor resets.
+	BreakerStreakSystem(ctx context.Context, orgID, entityID, triggerID string) (domain.BreakerStreak, error)
 	// ListTrippedBreakersSystem returns every enabled, undeleted trigger in
 	// the org whose BreakerStreakSystem on an active entity has reached its
 	// breaker_threshold, ordered by trigger id then entity id.
