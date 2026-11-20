@@ -51,6 +51,9 @@ type memTranscript struct {
 	// context inside the commit, which is how a shutdown or a stop is really
 	// observed by a commit that was already in flight.
 	failCompact func() error
+	// savedBlocks is every set of system blocks a committed Compact saved, in
+	// commit order. A commit carrying none adds nothing.
+	savedBlocks []domain.SystemBlocks
 }
 
 func newMemTranscript(seed ...domain.Message) *memTranscript {
@@ -156,8 +159,9 @@ func (t *memTranscript) Insert(_ context.Context, _ string, msg *domain.Message)
 
 // Compact mirrors the store op: insert the optional reply row (forced
 // inactive), insert the result row, flip the span, re-seq undelivered rows
-// to fractions after the result row in their existing relative order.
-func (t *memTranscript) Compact(_ context.Context, _, conversationID string, replyRow, resultRow *domain.Message, inactiveIDs []int) error {
+// to fractions after the result row in their existing relative order, and
+// save the blocks it carries.
+func (t *memTranscript) Compact(_ context.Context, _, conversationID string, replyRow, resultRow *domain.Message, inactiveIDs []int, blocks *domain.SystemBlocks) error {
 	if t.failCompact != nil {
 		fail := t.failCompact
 		t.failCompact = nil
@@ -209,6 +213,9 @@ func (t *memTranscript) Compact(_ context.Context, _, conversationID string, rep
 	for n, i := range queued {
 		seq := float64(resultRow.ID) + float64(n+1)/float64(len(queued)+1)
 		t.rows[i].Seq = &seq
+	}
+	if blocks != nil {
+		t.savedBlocks = append(t.savedBlocks, *blocks)
 	}
 	return nil
 }

@@ -166,8 +166,8 @@ func (t *nativeTranscript) Insert(ctx context.Context, orgID string, msg *domain
 // the result row always, the reconstructed reply row when the forced-shape
 // path produced one (delivered + inactive is compacted history, which the
 // display keeps).
-func (t *nativeTranscript) Compact(ctx context.Context, orgID, conversationID string, replyRow, resultRow *domain.Message, inactiveIDs []int) error {
-	if err := t.spawner.conversations.CompactForClaimSystem(ctx, orgID, conversationID, t.claimID, replyRow, resultRow, inactiveIDs); err != nil {
+func (t *nativeTranscript) Compact(ctx context.Context, orgID, conversationID string, replyRow, resultRow *domain.Message, inactiveIDs []int, blocks *domain.SystemBlocks) error {
+	if err := t.spawner.conversations.CompactForClaimSystem(ctx, orgID, conversationID, t.claimID, replyRow, resultRow, inactiveIDs, blocks); err != nil {
 		return err
 	}
 	t.spawner.activityFor(t.conversation).touch()

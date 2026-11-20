@@ -82,9 +82,38 @@ type systemComposition struct {
 	stepEnd string
 }
 
+// storable is the composition with every per-run text made storable: invalid
+// UTF-8 replaced and NUL removed. The blocks are saved on the conversation row,
+// and the parts there and on every system-update row; Postgres refuses both
+// bytes, and some of these texts are not TF's own (a knowledge document's first
+// line, or a file name an agent wrote into a run tree it owns). One such byte
+// would fail every write that saves the blocks, a native compaction's commit
+// among them, on every claim the conversation gets. Both renderings start from
+// it, so the bytes sent, saved and compared are the same.
+func (c systemComposition) storable() systemComposition {
+	c.mission = storableText(c.mission)
+	c.stepEnd = storableText(c.stepEnd)
+	lines := make([]domain.SystemPart, len(c.runContext))
+	for i, p := range c.runContext {
+		lines[i] = domain.SystemPart{Key: p.Key, Text: storableText(p.Text)}
+	}
+	c.runContext = lines
+	tools := make([]agentprompt.ToolsPart, len(c.tools))
+	for i, t := range c.tools {
+		tools[i] = agentprompt.ToolsPart{Key: t.Key, Text: storableText(t.Text)}
+	}
+	c.tools = tools
+	return c
+}
+
+func storableText(s string) string {
+	return strings.ReplaceAll(strings.ToValidUTF8(s, "\uFFFD"), "\x00", "")
+}
+
 // blocks renders the composition: the two blocks as they are sent, and the
 // parts they were rendered from.
 func (c systemComposition) blocks() domain.SystemBlocks {
+	c = c.storable()
 	tools := make([]string, 0, len(c.tools))
 	for _, t := range c.tools {
 		tools = append(tools, t.Text)
@@ -99,6 +128,7 @@ func (c systemComposition) blocks() domain.SystemBlocks {
 // parts is the composition as the pieces an update compares, in the order
 // each block renders them.
 func (c systemComposition) parts() *domain.SystemParts {
+	c = c.storable()
 	sections := agentprompt.Sections(c.spec)
 	parts := &domain.SystemParts{Shared: make([]domain.SystemPart, 0, len(sections))}
 	for _, sec := range sections {
@@ -328,17 +358,6 @@ func capitalize(s string) string {
 		return s
 	}
 	return strings.ToUpper(s[:1]) + s[1:]
-}
-
-// saveSystemBlocksHook is the engine's SaveSystemBlocks for a native
-// engagement: a compaction committed, so the blocks the claim composed become
-// the conversation's, saved with the parts they were composed from.
-func (s *Spawner) saveSystemBlocksHook(orgID, conversationID, claimID string, current domain.SystemBlocks) func(context.Context, agentloop.SystemBlocks) error {
-	return func(ctx context.Context, blocks agentloop.SystemBlocks) error {
-		saved := domain.SystemBlocks{Prompt: blocks.Prompt, Block: blocks.Addendum, Parts: current.Parts}
-		_, err := s.conversations.SetSystemBlocksForClaimSystem(context.WithoutCancel(ctx), orgID, conversationID, claimID, saved)
-		return err
-	}
 }
 
 // runContextOrder is the order the run-context parts render in, which is the
