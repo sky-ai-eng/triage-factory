@@ -17,9 +17,15 @@ import (
 // TestEntityKey_SQLite runs the key half of the entity identity model against
 // the SQLite EntityStore, a fresh database per subtest.
 func TestEntityKey_SQLite(t *testing.T) {
-	dbtest.RunEntityKeyConformance(t, func(t *testing.T) (db.EntityStore, string) {
+	dbtest.RunEntityKeyConformance(t, func(t *testing.T) (db.EntityStore, string, func(*testing.T, string, time.Time)) {
 		t.Helper()
-		return sqlitestore.New(newSQLiteForEntityTest(t)).Entities, runmode.LocalDefaultOrgID
+		conn := newSQLiteForEntityTest(t)
+		return sqlitestore.New(conn).Entities, runmode.LocalDefaultOrgID, func(t *testing.T, entityID string, at time.Time) {
+			t.Helper()
+			if _, err := conn.Exec(`UPDATE entities SET created_at = ? WHERE id = ?`, at.UTC(), entityID); err != nil {
+				t.Fatalf("set created_at: %v", err)
+			}
+		}
 	})
 }
 

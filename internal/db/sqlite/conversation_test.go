@@ -285,6 +285,18 @@ func newSQLiteConversationSeeder(conn *sql.DB) dbtest.ConversationSeeder {
 				t.Fatalf("backdate completed_at of %s: %v", conversationID, err)
 			}
 		},
+		AgeClaims: func(t *testing.T, conversationID string, d time.Duration) {
+			t.Helper()
+			ageSQLiteClaims(t, conn, conversationID, d)
+		},
+		BackdateParkedAt: func(t *testing.T, conversationID string, age time.Duration) {
+			t.Helper()
+			if _, err := conn.Exec(
+				`UPDATE conversations SET parked_at = datetime('now', ?) WHERE id = ?`,
+				fmt.Sprintf("-%d seconds", int64(age.Seconds())), conversationID); err != nil {
+				t.Fatalf("backdate parked_at of %s: %v", conversationID, err)
+			}
+		},
 		StoredShape: func(t *testing.T, conversationID string) dbtest.StoredConversationShape {
 			t.Helper()
 			var shape dbtest.StoredConversationShape

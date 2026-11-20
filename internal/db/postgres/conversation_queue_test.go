@@ -72,7 +72,10 @@ func TestConversationQueueStore_Postgres_ClaimCycle(t *testing.T) {
 		t.Fatalf("claimed team_id = %q, want %q (task-derived)", got.TeamID, wantTeam)
 	}
 
-	// Requeue → re-claimable, attempts retained.
+	// Requeue → re-claimable, attempts retained. The claim is aged a second
+	// first: the count takes a hand-back released strictly after the episode
+	// began, and the mint and the claim can share an instant with it.
+	agePgClaims(t, h.AdminDB, conversationID, time.Second)
 	if _, err := stores.ConversationQueue.RequeueConversation(ctx, orgID, conversationID, got.ClaimID, db.RequeueSetupFailure, 0, "transient"); err != nil {
 		t.Fatalf("RequeueConversation: %v", err)
 	}
@@ -1005,13 +1008,7 @@ func TestClaimPredicate_Postgres(t *testing.T) {
 			},
 			Age: func(t *testing.T, convID string, d time.Duration) {
 				t.Helper()
-				pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET queued_at = queued_at - $2 * interval '1 microsecond' WHERE id = $1`,
-					convID, d.Microseconds())
-				pgtest.MustExec(t, h.AdminDB, `
-					UPDATE claims SET
-						claimed_at  = claimed_at  - $2 * interval '1 microsecond',
-						released_at = released_at - $2 * interval '1 microsecond'
-					WHERE conversation_id = $1`, convID, d.Microseconds())
+				agePgClaims(t, h.AdminDB, convID, d)
 			},
 			CollapseClaimTimestamps: func(t *testing.T, convID string) {
 				t.Helper()
@@ -1362,6 +1359,19 @@ func TestClaimableProbe_Postgres(t *testing.T) {
 	})
 }
 
+// agePgClaims moves a conversation's queued_at and its claims' claimed_at and
+// released_at d earlier.
+func agePgClaims(t *testing.T, conn *sql.DB, convID string, d time.Duration) {
+	t.Helper()
+	pgtest.MustExec(t, conn, `UPDATE conversations SET queued_at = queued_at - $2 * interval '1 microsecond' WHERE id = $1`,
+		convID, d.Microseconds())
+	pgtest.MustExec(t, conn, `
+		UPDATE claims SET
+			claimed_at  = claimed_at  - $2 * interval '1 microsecond',
+			released_at = released_at - $2 * interval '1 microsecond'
+		WHERE conversation_id = $1`, convID, d.Microseconds())
+}
+
 func pgClaimLeaseFixture(t *testing.T, h *pgtest.Harness) dbtest.ClaimLeaseFixture {
 	t.Helper()
 	h.Reset(t)
@@ -1372,6 +1382,10 @@ func pgClaimLeaseFixture(t *testing.T, h *pgtest.Harness) dbtest.ClaimLeaseFixtu
 	return dbtest.ClaimLeaseFixture{
 		Stores: stores,
 		OrgID:  orgID,
+		AgeClaims: func(t *testing.T, conversationID string, d time.Duration) {
+			t.Helper()
+			agePgClaims(t, h.AdminDB, conversationID, d)
+		},
 		StageStep: func(t *testing.T) (string, string) {
 			t.Helper()
 			taskID := seedPgTask(t, h, orgID, userID)

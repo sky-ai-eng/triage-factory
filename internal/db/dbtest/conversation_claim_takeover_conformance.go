@@ -27,7 +27,9 @@ func RunClaimTakeoverConformance(t *testing.T, mk ClaimLeaseFactory) {
 
 	// stageClaimed stages one step and claims it under the given identity.
 	// Staging and claiming one at a time keeps the claim scan unambiguous:
-	// the step just staged is the only claimable one.
+	// the step just staged is the only claimable one. The claim is aged a
+	// second, so a release after it is later on the clock than the episode
+	// it began, which the budgets count strictly after.
 	stageClaimed := func(t *testing.T, f ClaimLeaseFixture, executorID string, bootEpoch int64) *domain.Conversation {
 		t.Helper()
 		id, _ := f.StageStep(t)
@@ -38,6 +40,7 @@ func RunClaimTakeoverConformance(t *testing.T, mk ClaimLeaseFactory) {
 		if got == nil || got.ID != id {
 			t.Fatalf("ClaimNextConversation(%s/%d) = %+v, want conversation %s", executorID, bootEpoch, got, id)
 		}
+		f.AgeClaims(t, id, time.Second)
 		return got
 	}
 	claimState := func(t *testing.T, f ClaimLeaseFixture, claimID string) (released bool, outcome string) {

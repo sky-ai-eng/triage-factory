@@ -719,6 +719,16 @@ func TestTaskStore_SQLite_MemoryPendingConformance(t *testing.T) {
 					t.Fatalf("backdate ended_at of %s: %v", conversationID, err)
 				}
 			},
+			AgeAttempt: func(t *testing.T, attemptID string, age time.Duration) {
+				t.Helper()
+				at := time.Now().UTC().Add(-age)
+				if _, err := conn.Exec(`
+					UPDATE conversation_memory_attempts
+					SET started_at = ?, completed_at = CASE WHEN completed_at IS NULL THEN NULL ELSE ? END
+					WHERE id = ?`, at, at, attemptID); err != nil {
+					t.Fatalf("age attempt: %v", err)
+				}
+			},
 			Conversation: func(t *testing.T, taskID, suffix string) string {
 				t.Helper()
 				convID := uuid.New().String()

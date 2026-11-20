@@ -951,6 +951,10 @@ func sqliteClaimLeaseFixtureOn(t *testing.T) (dbtest.ClaimLeaseFixture, *sql.DB)
 	return dbtest.ClaimLeaseFixture{
 		Stores: stores,
 		OrgID:  runmode.LocalDefaultOrgID,
+		AgeClaims: func(t *testing.T, conversationID string, d time.Duration) {
+			t.Helper()
+			ageSQLiteClaims(t, conn, conversationID, d)
+		},
 		StageStep: func(t *testing.T) (string, string) {
 			t.Helper()
 			seq++

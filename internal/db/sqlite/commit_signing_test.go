@@ -1,6 +1,7 @@
 package sqlite_test
 
 import (
+	"database/sql"
 	"testing"
 	"time"
 
@@ -17,9 +18,26 @@ import (
 // the SQLite impl, on the local sentinel org and user BootstrapSchemaForTest
 // seeds for the foreign keys.
 func TestOrgCommitSignerStore_SQLite_Conformance(t *testing.T) {
-	dbtest.RunOrgCommitSignerStoreConformance(t, func(t *testing.T) (db.OrgCommitSignerStore, string, string) {
+	dbtest.RunOrgCommitSignerStoreConformance(t, func(t *testing.T) (db.OrgCommitSignerStore, string, string, func(*testing.T, time.Duration)) {
 		conn := openSQLiteForTest(t)
-		return sqlitestore.New(conn).OrgCommitSigners, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID
+		age := func(t *testing.T, d time.Duration) {
+			t.Helper()
+			var since time.Time
+			var checked sql.NullTime
+			if err := conn.QueryRow(`SELECT status_since, checked_at FROM org_commit_signers WHERE org_id = ?`,
+				runmode.LocalDefaultOrgID).Scan(&since, &checked); err != nil {
+				t.Fatalf("read the signer's stamps: %v", err)
+			}
+			var checkedAt any
+			if checked.Valid {
+				checkedAt = checked.Time.Add(-d).UTC()
+			}
+			if _, err := conn.Exec(`UPDATE org_commit_signers SET status_since = ?, checked_at = ? WHERE org_id = ?`,
+				since.Add(-d).UTC(), checkedAt, runmode.LocalDefaultOrgID); err != nil {
+				t.Fatalf("age the signer: %v", err)
+			}
+		}
+		return sqlitestore.New(conn).OrgCommitSigners, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, age
 	})
 }
 
@@ -69,6 +87,16 @@ func sqliteCommitSignatureStore(t *testing.T) (db.CommitSignatureStore, string, 
 				t.Fatalf("seed repository: %v", err)
 			}
 			return repo.ID
+		},
+		AgePush: func(t *testing.T, signatureID string, d time.Duration) {
+			t.Helper()
+			var pushed time.Time
+			if err := conn.QueryRow(`SELECT pushed_at FROM commit_signatures WHERE id = ?`, signatureID).Scan(&pushed); err != nil {
+				t.Fatalf("read pushed_at: %v", err)
+			}
+			if _, err := conn.Exec(`UPDATE commit_signatures SET pushed_at = ? WHERE id = ?`, pushed.Add(-d).UTC(), signatureID); err != nil {
+				t.Fatalf("age the push: %v", err)
+			}
 		},
 	}
 	return sqlitestore.New(conn).CommitSignatures, runmode.LocalDefaultOrgID, seed

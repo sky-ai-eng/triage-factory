@@ -102,7 +102,10 @@ func TestConversationSignalStore_Postgres(t *testing.T) {
 		t.Error("unacked signal reported acked=true")
 	}
 
-	// PurgeAcked only removes rows older than the cutoff.
+	// PurgeAcked only removes rows older than the cutoff. The ack is moved a
+	// minute back, so a cutoff of now is past it whatever the clock's
+	// resolution.
+	pgtest.MustExec(t, h.AdminDB, `UPDATE conversation_signals SET acked_at = acked_at - interval '1 minute' WHERE id = $1`, id1)
 	n, err := stores.ConversationSignals.PurgeAcked(ctx, 24*time.Hour)
 	if err != nil {
 		t.Fatalf("purge (too recent): %v", err)

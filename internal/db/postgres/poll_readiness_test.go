@@ -125,11 +125,17 @@ func TestPollReadinessStore_Postgres_LastPollTimes(t *testing.T) {
 // connection-status contract against the Postgres impl. The store is
 // admin-pool only, so there is no RLS path to wire it through.
 func TestPollReadinessStore_Postgres_ConnectionConformance(t *testing.T) {
-	dbtest.RunPollReadinessConnectionConformance(t, func(t *testing.T) (db.PollReadinessStore, string) {
+	dbtest.RunPollReadinessConnectionConformance(t, func(t *testing.T) (db.PollReadinessStore, string, func(*testing.T, string, time.Duration)) {
 		h := pgtest.Shared(t)
 		h.Reset(t)
 		orgID, _, _ := pgtest.SeedOrgWithUser(t, h, "connections")
-		return pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey).PollReadiness, orgID
+		age := func(t *testing.T, source string, d time.Duration) {
+			t.Helper()
+			pgtest.MustExec(t, h.AdminDB, `
+				UPDATE poll_readiness SET connection_changed_at = connection_changed_at - $3 * interval '1 microsecond'
+				WHERE org_id = $1 AND source = $2`, orgID, source, d.Microseconds())
+		}
+		return pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey).PollReadiness, orgID, age
 	})
 }
 
