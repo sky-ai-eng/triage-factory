@@ -1619,7 +1619,7 @@ export default function Board() {
                     }
                   >
                     {loading ? (
-                      <LaneSkeleton />
+                      <LaneSkeleton cards={SKELETON_CARDS[colId]} />
                     ) : (
                       <ColumnContents
                         colId={colId}
@@ -1976,11 +1976,14 @@ const SortableCard = memo(function SortableCard({
 
 // The lanes are mounted from the first paint, so the board keeps its shape
 // (the mastheads, the centring, and any collapsed rails) while the first read
-// is out, and the first page replaces these cards in place.
-function LaneSkeleton() {
+// is out, and the first page replaces these cards in place. The counts differ
+// per lane so the three do not read as one column repeated.
+const SKELETON_CARDS: Record<ColumnId, number> = { queued: 3, in_progress: 2, done: 4 }
+
+function LaneSkeleton({ cards }: { cards: number }) {
   return (
     <>
-      {[0, 1, 2].map((n) => (
+      {Array.from({ length: cards }, (_, n) => (
         <TaskCardSkeleton key={n} n={n} />
       ))}
     </>

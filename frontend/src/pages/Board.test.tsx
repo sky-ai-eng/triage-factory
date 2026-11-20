@@ -297,7 +297,11 @@ describe('the board lanes', () => {
     renderBoard()
     expect(screen.getByLabelText('Search Queued')).toBeInTheDocument()
     expect(screen.getByRole('status')).toHaveTextContent('Loading board…')
-    expect(document.querySelectorAll('[data-skeleton]')).toHaveLength(9)
+    const lanes = document.querySelectorAll('.bc-col')
+    expect(lanes).toHaveLength(3)
+    for (const lane of lanes) {
+      expect(lane.querySelectorAll('[data-skeleton]').length).toBeGreaterThan(0)
+    }
 
     await act(async () => land())
     await screen.findByText(FREE.title)
