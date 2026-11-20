@@ -196,9 +196,10 @@ function Brackets({ lit, asking }: { lit: boolean; asking: boolean }) {
 // is the whole trick, since reserving 8px where the text will take 16 makes
 // the lane jump when it lands.
 const LINE_BODY = 'calc(var(--text-secondary) * var(--leading-body))'
-function Bar({ w, i = 0 }: { w: string; i?: number }) {
+const LINE_TITLE = 'calc(var(--text-card-title) * var(--leading-tight))'
+function Bar({ w, i = 0, line = LINE_BODY }: { w: string; i?: number; line?: string }) {
   return (
-    <span aria-hidden style={{ display: 'flex', alignItems: 'center', height: LINE_BODY }}>
+    <span aria-hidden style={{ display: 'flex', alignItems: 'center', height: line }}>
       <span
         style={{
           display: 'block',
@@ -671,6 +672,41 @@ export function TaskCard({
           </div>
         )
       )}
+    </div>
+  )
+}
+
+// The card a lane holds before its first page lands. Each bar takes the
+// height of the line it stands for, so the lane does not jump when real cards
+// replace these. `n` varies the lengths so a lane of them does not read as one
+// card repeated.
+export function TaskCardSkeleton({ n = 0 }: { n?: number }) {
+  const title = ['72%', '58%', '80%'][n % 3]
+  const summary = ['88%', '94%', '76%'][n % 3]
+  return (
+    <div className="tc" aria-hidden data-skeleton>
+      <div className="tc-head">
+        <span style={SLOT}>
+          <span
+            style={{
+              width: 7,
+              height: 7,
+              borderRadius: 'var(--radius-pill)',
+              boxShadow: 'inset 0 0 0 1px var(--color-line-2)',
+            }}
+          />
+        </span>
+        <span style={{ flex: 1, minWidth: 0 }}>
+          <Bar w={title} i={0} line={LINE_TITLE} />
+        </span>
+      </div>
+      <span>
+        <Bar w={summary} i={1} />
+        <Bar w="52%" i={2} />
+      </span>
+      <div className="tc-foot">
+        <Bar w="48px" i={3} line="16px" />
+      </div>
     </div>
   )
 }
