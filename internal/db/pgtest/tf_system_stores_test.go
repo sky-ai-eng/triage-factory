@@ -152,6 +152,11 @@ func TestTfSystem_CommitSignatureStoreConformance(t *testing.T) {
 				t.Helper()
 				return SeedRepository(t, h, orgID, "acme", "app-"+uuid.New().String()[:8])
 			},
+			AgePush: func(t *testing.T, signatureID string, d time.Duration) {
+				t.Helper()
+				MustExec(t, h.AdminDB, `UPDATE commit_signatures SET pushed_at = pushed_at - $3 * interval '1 microsecond' WHERE org_id = $1 AND id = $2`,
+					orgID, signatureID, d.Microseconds())
+			},
 		}
 		return pgstore.New(h.SystemDB, h.AppDB, SecretKey).CommitSignatures, orgID, seed
 	})
