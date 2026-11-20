@@ -1173,7 +1173,7 @@ These are internal signals, not shown in the triage UI.
 | **Delegation Complete** | `system:delegation:completed` | An agent delegation run completed successfully |
 | **Delegation Failed** | `system:delegation:failed` | An agent delegation run failed |
 | **Task Auto-suspended** *(deprecated)* | `system:task:auto_suspended` | Per-task breaker trip; no longer emitted |
-| **Prompt Auto-suspended** | `system:prompt:auto_suspended` | Not emitted. The breaker is per (entity, trigger), and a trip opens the `routing.breaker_tripped` notification for the trigger's team (`specs/durable-notifications.md`) |
+| **Prompt Auto-suspended** | `system:prompt:auto_suspended` | Not emitted. The breaker is per (entity, trigger), counting only the trigger's runs under its current predicate and blueprint (`specs/auto-delegation-briefing.md`), and a trip opens the `routing.breaker_tripped` notification for the trigger's team (`specs/durable-notifications.md`) |
 | **Conversation Status** | `system:conversation:status` | A delegated run's status changed (mirrors the `conversation_update` websocket event) |
 | **Conversation Activity** | `system:conversation:activity` | A delegated run invoked a tool (mirrors the `message` websocket event, `tool_use` messages only) |
 | **Routing Disposition** | `system:routing:disposition` | `Router.HandleEvent` finished handling one event — frozen, source turned off by an org admin, taskless (no handler/owner/unroutable), task created/bumped, or an internal error. Lets an async event source (e.g. Slack) learn synchronously-unavailable routing outcomes |

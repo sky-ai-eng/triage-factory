@@ -4,13 +4,14 @@
 -- predicate, compared as text. A person's run, and a run with no trigger,
 -- records ''.
 --
--- Shipped handlers carried {"author_id_in":[]} and {"assignee_in":[]}, which
--- mean match-all and which the API stores as NULL, so the first save of one
--- through the API would rewrite its text and start its breaker over. They now
--- ship as NULL, and the rows below, shipped or not, take that form before the
--- backfill reads them. Only the event types the shipped handlers name are
--- rewritten: each has the field, so the empty list matches everything there,
--- while the matcher refuses the field on a type without it.
+-- Stored handlers can hold {"author_id_in":[]} or {"assignee_in":[]}, the
+-- form shipped handlers were seeded with. Both match everything, and their
+-- canonical form is NULL, so a save of the same predicate would change its
+-- text and start its breaker over. Rows holding either, shipped or not, are
+-- rewritten to NULL before the backfill reads them. Only the event types the
+-- shipped handlers name are rewritten: each has the field, so the empty list
+-- matches everything there, while the matcher refuses the field on a type
+-- without it.
 --
 -- Every existing event-fired run then records its trigger's predicate as it
 -- stands, so a streak that holds before the upgrade holds after it.

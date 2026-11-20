@@ -1122,10 +1122,10 @@ type TaskStore interface {
 	// another trigger on the same blueprint, the trigger's runs of a
 	// blueprint it was retargeted away from, and its runs under a predicate
 	// it no longer holds neither count toward it nor reset it. Predicates are
-	// compared as the text the trigger row stores, which is canonical, so a
-	// trigger edited back to an earlier predicate, or retargeted back to an
-	// earlier blueprint, counts the runs it fired under it again. It counts
-	// blueprint runs, so a run of several steps counts once.
+	// compared as the text the trigger row stores, so a trigger edited back
+	// to an earlier predicate, or retargeted back to an earlier blueprint,
+	// counts the runs it fired under it again. It counts blueprint runs, so a
+	// run of several steps counts once.
 
 	// BreakerStreakSystem counts the failed and aborted blueprint runs that
 	// triggerID fired of its current blueprint under its current predicate
@@ -1134,8 +1134,8 @@ type TaskStore interface {
 	// or a completed run a person started on the entity, of any blueprint. A
 	// person's failed run neither counts nor resets.
 	BreakerStreakSystem(ctx context.Context, orgID, entityID, triggerID string) (domain.BreakerStreak, error)
-	// ListTrippedBreakersSystem returns every enabled, undeleted trigger in
-	// the org whose BreakerStreakSystem on an active entity has reached its
+	// ListTrippedBreakersSystem returns every undeleted handler in automate
+	// in the org whose BreakerStreakSystem on an active entity has reached its
 	// breaker_threshold, ordered by trigger id then entity id.
 	ListTrippedBreakersSystem(ctx context.Context, orgID string) ([]domain.TrippedBreaker, error)
 

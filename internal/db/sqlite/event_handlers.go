@@ -45,12 +45,11 @@ func (s *eventHandlerStore) Seed(ctx context.Context, orgID, teamID string, blue
 	}
 	var inserted int64
 
-	// Shipped predicates are inserted as written. The GitHub handlers' empty
-	// `author_id_in` and the Jira and Linear handlers' empty `assignee_in`
-	// match everyone; owner routing scopes them at event time, resolving the
-	// PR author's (or the issue assignee's) team through the owning-team
-	// ladder, so a user who connects a source after the seed is scoped the
-	// same way.
+	// Shipped predicates are inserted as written, and every shipped handler
+	// matches all events of its type: owner routing scopes the ones about a
+	// PR or an issue at event time, resolving the PR author's (or the issue
+	// assignee's) team through the owning-team ladder, so a user who connects
+	// a source after the seed is scoped the same way.
 	for _, h := range db.ShippedEventHandlers {
 		blueprintID, resolved := db.ResolveShippedBlueprint(h, blueprintIDsBySlug)
 		plan := db.PlanHandlerSync(h, blueprintID, resolved, db.TeamHandlerRow{})
