@@ -460,10 +460,9 @@ type BlueprintStore interface {
 	// unchanged since both blueprints share them (validated same-team by the
 	// caller). The host's updated_at is bumped.
 	//
-	// The caller must reject a triggered source for a clean 422; the partial-
-	// unique event_handlers index is the hard backstop. MergeInto itself does
-	// not touch event_handlers — the source carrying no trigger is a
-	// precondition, not something this method enforces or repairs.
+	// The caller must reject a triggered source for a clean 422. MergeInto
+	// itself does not touch event_handlers — the source carrying no trigger is
+	// a precondition, not something this method enforces or repairs.
 	//
 	// Stamps user_modified true on the host (see the stamping contract
 	// above); the source is retired, not stamped.

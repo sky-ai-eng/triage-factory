@@ -183,8 +183,7 @@ func TestDefer_ClaimCommitsWithTheQueuedFiring(t *testing.T) {
 	s.task.ClaimedByAgentID = ""
 
 	// A second trigger on the same task, with the run still live: the gate is
-	// busy, so this defers onto pending_firings. Its own blueprint keeps the
-	// one-trigger-per-blueprint constraint happy.
+	// busy, so this defers onto pending_firings.
 	createTestPrompt(t, s.db, domain.Prompt{ID: "p-defer-2", Name: "P2", Body: "x", Source: "user"})
 	second := domain.EventHandler{
 		ID:                     "trig-defer-2",

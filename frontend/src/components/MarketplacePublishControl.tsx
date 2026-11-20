@@ -204,7 +204,7 @@ function PublishDialog({
   // republish submit replaces the listing's full event-type set, so seeding
   // from anything less than the real current value would silently drop
   // facets on save); a first publish prefills name from the object and
-  // event types from the suggestion (the attached trigger's event_type).
+  // event types from the suggestion (the attached triggers' event types).
   useEffect(() => {
     if (!open) return
     setError('')

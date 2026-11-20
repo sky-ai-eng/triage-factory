@@ -21,7 +21,7 @@ const DefaultBreakerSyncInterval = 30 * time.Second
 // when the caller has it; an empty one is read.
 func (r *Router) breakerHolds(ctx context.Context, orgID string, trigger domain.EventHandler, entityID, subject string) (bool, error) {
 	threshold := derefIntDefault(trigger.BreakerThreshold, 0)
-	streak, err := r.tasks.BreakerStreakSystem(ctx, orgID, entityID, trigger.BlueprintID)
+	streak, err := r.tasks.BreakerStreakSystem(ctx, orgID, entityID, trigger.ID)
 	if err != nil {
 		return false, err
 	}

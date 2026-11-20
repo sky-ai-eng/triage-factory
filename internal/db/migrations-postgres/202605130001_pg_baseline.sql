@@ -2171,12 +2171,6 @@ CREATE INDEX idx_event_handlers_org_kind ON public.event_handlers USING btree (o
 CREATE INDEX idx_event_handlers_blueprint ON public.event_handlers USING btree (org_id, blueprint_id) WHERE (blueprint_id IS NOT NULL);
 
 
--- At most one trigger per blueprint; blueprint_id IS NOT NULL already implies
--- kind='trigger'. deleted_at IS NULL frees the slot on soft delete.
-
-CREATE UNIQUE INDEX event_handlers_one_trigger_per_blueprint ON public.event_handlers USING btree (org_id, blueprint_id) WHERE (blueprint_id IS NOT NULL AND deleted_at IS NULL);
-
-
 CREATE INDEX idx_events_org_entity_created ON public.events USING btree (org_id, entity_id, created_at DESC);
 
 

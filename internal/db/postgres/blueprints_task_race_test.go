@@ -18,11 +18,9 @@ import (
 )
 
 // raceFixture is one entity plus a factory for firings against a chosen task
-// on it. Each firing carries its own blueprint, trigger and triggering event
-// (event_handlers_one_trigger_per_blueprint means each trigger needs its own
-// blueprint), so the (triggering_event_id, trigger_id) replay fence never
-// engages and the only thing that can stop a firing is the one-active-run
-// index under test.
+// on it. Each firing carries its own blueprint, trigger and triggering event,
+// so the (triggering_event_id, trigger_id) replay fence never engages and the
+// only thing that can stop a firing is the one-active-run index under test.
 type raceFixture struct {
 	orgID    string
 	entityID string

@@ -387,10 +387,10 @@ func (h *Handler) handlePromptDelete(w http.ResponseWriter, r *http.Request) {
 					// step must be present — a miss is a store inconsistency.
 					return fmt.Errorf("prompt %s not found among steps of owning blueprint %s", id, ownerID)
 				}
-				// Head delete: the trigger fired into the entry prompt that's going
-				// away, so detach it (the downstream wasn't authored as the trigger's
+				// Head delete: the triggers fired into the entry prompt that's going
+				// away, so detach them (the downstream wasn't authored as their
 				// target) via EventHandlers.Delete, matching DELETE
-				// /api/event-handlers/{id}, which keeps the trigger as a deleted row
+				// /api/event-handlers/{id}, which keeps each trigger as a deleted row
 				// so the runs that reference it keep their trigger_id.
 				if stepIndex == 0 {
 					triggers, te := tx.EventHandlers.ListForBlueprint(r.Context(), orgID, ownerID)
