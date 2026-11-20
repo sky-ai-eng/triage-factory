@@ -434,6 +434,12 @@ type BlueprintStore interface {
 	// goroutine that continues past the request lifecycle.
 	GetSystem(ctx context.Context, orgID string, id string) (*domain.Blueprint, error)
 
+	// GetLiveSystem is GetSystem filtering deleted_at IS NULL, as Get does: a
+	// soft-deleted blueprint answers (nil, nil). Planning an event-fired run
+	// reads through it, because a handler can be left on a blueprint its team
+	// deleted, and a run of one would execute steps the team deleted.
+	GetLiveSystem(ctx context.Context, orgID string, id string) (*domain.Blueprint, error)
+
 	// IncrementUsage bumps usage_count by 1.
 	// IncrementUsage / IncrementUsageSystem are exempt from the returned-row
 	// rule: fire-and-forget bookkeeping. The counter is bumped on the way past

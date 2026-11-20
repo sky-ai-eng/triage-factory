@@ -116,6 +116,10 @@ func (s *blueprintStore) GetSystem(ctx context.Context, orgID string, id string)
 	return getBlueprint(ctx, s.admin, orgID, id, true)
 }
 
+func (s *blueprintStore) GetLiveSystem(ctx context.Context, orgID string, id string) (*domain.Blueprint, error) {
+	return getBlueprint(ctx, s.admin, orgID, id, false)
+}
+
 func (s *blueprintStore) GetForShare(ctx context.Context, orgID string, id string) (*domain.Blueprint, error) {
 	return s.getLocked(ctx, orgID, id, "FOR SHARE")
 }

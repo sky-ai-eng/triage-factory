@@ -33,7 +33,8 @@ var (
 	ErrPromptUnspecified = errors.New("delegate: no prompt specified")
 
 	// ErrBlueprintNotFound — the caller passed a blueprint id that doesn't
-	// resolve to any row it can see. Race-correctable.
+	// resolve to a live blueprint it can see: none has the id, or the one
+	// that had it is deleted. Race-correctable.
 	ErrBlueprintNotFound = errors.New("delegate: blueprint not found")
 
 	// ErrBlueprintUnspecified — the caller passed an empty blueprint id. The
@@ -57,7 +58,9 @@ var (
 // triggerType to honor RLS exactly as resolvePrompt does: "manual" loads via
 // the app pool under the user's synthetic claims (so a caller can't run a
 // blueprint they can't see); "event" stays on the admin pool (the router is a
-// system actor with no user identity).
+// system actor with no user identity). Both read only a live blueprint: an
+// event handler can be left on one its team deleted, and a run planned on it
+// would execute the steps the team deleted.
 func (s *Spawner) resolveBlueprint(orgID, explicitBlueprintID, triggerType, creatorUserID string) (*domain.Blueprint, error) {
 	if explicitBlueprintID == "" {
 		return nil, fmt.Errorf("%w — select one from the picker", ErrBlueprintUnspecified)
@@ -76,7 +79,7 @@ func (s *Spawner) resolveBlueprint(orgID, explicitBlueprintID, triggerType, crea
 			return nil
 		})
 	} else {
-		b, err = s.blueprints.GetSystem(context.Background(), orgID, explicitBlueprintID)
+		b, err = s.blueprints.GetLiveSystem(context.Background(), orgID, explicitBlueprintID)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to load blueprint %s: %w", explicitBlueprintID, err)

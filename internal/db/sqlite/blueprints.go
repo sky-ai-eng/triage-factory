@@ -135,6 +135,12 @@ func (s *blueprintStore) Get(ctx context.Context, orgID string, id string) (*dom
 	return &b, nil
 }
 
+// GetLiveSystem is Get: SQLite has one connection, so the admin read and the
+// request read are the same read.
+func (s *blueprintStore) GetLiveSystem(ctx context.Context, orgID string, id string) (*domain.Blueprint, error) {
+	return s.Get(ctx, orgID, id)
+}
+
 // GetForShare and GetForUpdate are Get once the caller is known to hold the
 // database's write lock, which a write transaction takes when it begins
 // (BEGIN IMMEDIATE): that lock already orders the caller against every other
