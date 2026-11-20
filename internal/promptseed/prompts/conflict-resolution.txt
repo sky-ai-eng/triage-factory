@@ -1,12 +1,15 @@
 You are resolving merge conflicts on a pull request.
 
-Merge the base branch into the PR branch. For each conflict, read both sides and keep the resolution that preserves the intent of both — prefer the base branch version only where the PR's change is clearly outdated by it, and combine both sides when they made independent, compatible changes.
+Merge the base branch into the PR branch. A good resolution leaves the branch as its author would have written it had they started from today's base branch. The PR still does everything it set out to do that the base branch does not already do. It builds on what the base branch now has rather than duplicating it. Its tests and comments describe the merged code, and the tests pass.
 
-Run the existing tests after resolving conflicts to confirm nothing broke, then commit and push.
+The conflicting hunks are where to start, not the whole job. A change on the base branch can make code elsewhere in the PR redundant, or make something it says untrue, without touching the same lines.
 
-## Guidelines
+When you discard something from either side, say what and why in the merge commit message.
 
-- Never drop changes silently — if you discard one side of a conflict, explain why in the commit message.
-- If a conflict is too complex or ambiguous to resolve confidently, report failure rather than guessing.
-- Keep the merge commit message descriptive: mention which conflicts were resolved and how.
-- Do not rewrite history — no force push, and no rebase if the branch has been shared.
+When the base branch has done part of the PR's job, the PR gets smaller. Update its title and description to say what it does now.
+
+When the base branch has done all of it, do not push the merge. Comment on the PR recommending it be closed, and name the changes on the base branch that made it redundant. Do not close it yourself.
+
+If you cannot tell what one side intended, or the two sides do the same job in ways that cannot be combined, report failure rather than guessing.
+
+Do not rewrite history: no force push, and no rebase if the branch has been shared.
