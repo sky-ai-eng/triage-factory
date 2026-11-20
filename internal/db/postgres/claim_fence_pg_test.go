@@ -525,8 +525,8 @@ func TestClaimFence_ConversationWritersTakeTheReleaseOrder(t *testing.T) {
 			_, err := fx.store.SetSessionForClaimSystem(ctx, fx.orgID, fx.conversationID, fx.claimID, "sess-racing")
 			return err
 		}},
-		{"SetSystemBlock", func(fx fenceFixture) error {
-			_, err := fx.store.SetSystemBlockForClaimSystem(ctx, fx.orgID, fx.conversationID, fx.claimID, "block")
+		{"SetSystemBlocks", func(fx fenceFixture) error {
+			_, err := fx.store.SetSystemBlocksForClaimSystem(ctx, fx.orgID, fx.conversationID, fx.claimID, domain.SystemBlocks{Block: "block"})
 			return err
 		}},
 		{"SetWorktreePath", func(fx fenceFixture) error {

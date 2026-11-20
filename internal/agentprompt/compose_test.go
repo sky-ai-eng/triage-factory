@@ -254,3 +254,23 @@ func TestBuild_NativeSectionOrder(t *testing.T) {
 		t.Error("the handoff addendum is composed into the shared prefix, forking it per step")
 	}
 }
+
+// TestSections_JoinToBuild: a caller compares two compositions block file by
+// block file, so the files it compares must be the whole of what Build sends.
+func TestSections_JoinToBuild(t *testing.T) {
+	for _, spec := range allSpecs() {
+		sections := Sections(spec)
+		texts := make([]string, 0, len(sections))
+		seen := map[string]bool{}
+		for _, sec := range sections {
+			if seen[sec.Path] {
+				t.Errorf("%+v: block %s appears twice; a comparison keyed by path would merge them", spec, sec.Path)
+			}
+			seen[sec.Path] = true
+			texts = append(texts, sec.Text)
+		}
+		if got := strings.Join(texts, "\n\n") + "\n"; got != Build(spec) {
+			t.Errorf("%+v: the sections do not join to Build", spec)
+		}
+	}
+}

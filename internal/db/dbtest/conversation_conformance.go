@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -2330,8 +2331,8 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		refuse("SetSessionForClaimSystem", err)
 		_, err = store.SetWorktreePathForClaimSystem(ctx, orgID, conversationID, claimID, "/tmp/zombie")
 		refuse("SetWorktreePathForClaimSystem", err)
-		_, err = store.SetSystemBlockForClaimSystem(ctx, orgID, conversationID, claimID, "<run_context>zombie</run_context>")
-		refuse("SetSystemBlockForClaimSystem", err)
+		_, err = store.SetSystemBlocksForClaimSystem(ctx, orgID, conversationID, claimID, domain.SystemBlocks{Block: "<run_context>zombie</run_context>"})
+		refuse("SetSystemBlocksForClaimSystem", err)
 		_, err = store.InsertMessageForClaimSystem(ctx, orgID, claimID, &domain.Message{
 			ConversationID: conversationID, Role: "assistant", Content: "zombie", Delivered: &pending,
 		})
@@ -2875,21 +2876,21 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
-	// The fourth resume coordinate, which unlike the other three is read back
-	// through a door of its own rather than off the conversation projection —
-	// so the round trip is the contract, and both halves of it are here.
-	t.Run("SystemBlockRoundTrips_AndTheDefaultIsEmptyRatherThanNull", func(t *testing.T) {
+	// The system prompt a conversation's claims send, which unlike the other
+	// resume coordinates is read back through a door of its own rather than off
+	// the conversation projection — so the round trip is the contract, and both
+	// halves of it are here.
+	t.Run("SystemBlocksRoundTrip_AndTheDefaultIsEmptyRatherThanNull", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		conversationID := seedConversationForTest(t, orgID, seed, "running")
 
-		// Never written: the column answers with the empty string, not NULL and
-		// not an error. This is the pre-launch read and the read of a
-		// conversation whose block really was empty, and the resume cannot tell
-		// them apart because it does not need to — both send the framework
-		// blocks alone.
-		if got, err := store.SystemBlockSystem(ctx, orgID, conversationID); err != nil || got != "" {
-			t.Fatalf("SystemBlockSystem before any launch = (%q, %v), want (\"\", nil)", got, err)
+		// Never written: the two blocks answer with the empty string, not NULL
+		// and not an error, and the parts with nil. This is the pre-launch read,
+		// and the read of a row saved before the shared prompt and the parts
+		// were.
+		if got, err := store.SystemBlocksSystem(ctx, orgID, conversationID); err != nil || got.Prompt != "" || got.Block != "" || got.Parts != nil {
+			t.Fatalf("SystemBlocksSystem before any launch = (%+v, %v), want empty blocks and no parts", got, err)
 		}
 
 		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-block", 1); err != nil {
@@ -2899,30 +2900,100 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 
 		// Multi-line text with the markup a real block carries, so a backend
 		// that mangles or truncates it fails here rather than in a prompt.
-		const block = "<run_context>\nRun root: /work\n</run_context>\n\n<tools>\ngh pr view\n</tools>\n\nreview the pull request"
-		written, err := store.SetSystemBlockForClaimSystem(ctx, orgID, conversationID, claimID, block)
-		if err != nil {
-			t.Fatalf("SetSystemBlockForClaimSystem: %v", err)
+		blocks := domain.SystemBlocks{
+			Prompt: "You are the machinist.\n\nGit is backed by a proxy.\n",
+			Block:  "<run_context>\nRun root: /work\n</run_context>\n\n<tools>\ngh pr view\n</tools>\n\nreview the pull request",
+			Parts: &domain.SystemParts{
+				Shared: []domain.SystemPart{
+					{Key: "identity/machinist.txt", Text: "You are the machinist."},
+					{Key: "github/multi.txt", Text: "Git is backed by a proxy."},
+				},
+				Conversation: []domain.SystemPart{
+					{Key: "run_context.run_root", Text: "Run root: /work"},
+					{Key: "tools.github", Text: "gh pr view"},
+				},
+			},
 		}
-		AssertWriteReturnedStoredRow(t, "SetSystemBlockForClaimSystem", *written, func() (*domain.Conversation, error) {
+		written, err := store.SetSystemBlocksForClaimSystem(ctx, orgID, conversationID, claimID, blocks)
+		if err != nil {
+			t.Fatalf("SetSystemBlocksForClaimSystem: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "SetSystemBlocksForClaimSystem", *written, func() (*domain.Conversation, error) {
 			return store.Get(ctx, orgID, conversationID)
 		})
-		if got, err := store.SystemBlockSystem(ctx, orgID, conversationID); err != nil || got != block {
-			t.Fatalf("SystemBlockSystem = (%q, %v), want the block back verbatim", got, err)
+		got, err := store.SystemBlocksSystem(ctx, orgID, conversationID)
+		if err != nil {
+			t.Fatalf("SystemBlocksSystem: %v", err)
+		}
+		if got.Prompt != blocks.Prompt || got.Block != blocks.Block {
+			t.Fatalf("SystemBlocksSystem = (%q, %q), want both blocks back verbatim", got.Prompt, got.Block)
+		}
+		if got.Parts == nil || !reflect.DeepEqual(*got.Parts, *blocks.Parts) {
+			t.Fatalf("SystemBlocksSystem parts = %+v, want %+v", got.Parts, blocks.Parts)
 		}
 
-		// A crash re-claim composes the append again and overwrites: the column
-		// is what the harness was LAST handed, which is what its next resume
-		// has to replay.
-		if _, err := store.SetSystemBlockForClaimSystem(ctx, orgID, conversationID, claimID, "recomposed"); err != nil {
-			t.Fatalf("re-stamp the system block: %v", err)
+		// A compaction saves the blocks the engagement composed in place of the
+		// first claim's: the columns are what the conversation's next call
+		// sends. A nil Parts clears them.
+		if _, err := store.SetSystemBlocksForClaimSystem(ctx, orgID, conversationID, claimID, domain.SystemBlocks{Prompt: "next release", Block: "recomposed"}); err != nil {
+			t.Fatalf("re-stamp the system blocks: %v", err)
 		}
-		if got, _ := store.SystemBlockSystem(ctx, orgID, conversationID); got != "recomposed" {
-			t.Errorf("system block after a re-launch = %q, want recomposed", got)
+		if got, _ := store.SystemBlocksSystem(ctx, orgID, conversationID); got.Prompt != "next release" || got.Block != "recomposed" || got.Parts != nil {
+			t.Errorf("system blocks after a re-stamp = %+v, want the new blocks and no parts", got)
 		}
 
-		if _, err := store.SystemBlockSystem(ctx, orgID, "00000000-0000-0000-0000-0000000000ff"); !errors.Is(err, db.ErrNoSuchConversation) {
-			t.Errorf("SystemBlockSystem for an unknown id = %v, want ErrNoSuchConversation", err)
+		if _, err := store.SystemBlocksSystem(ctx, orgID, "00000000-0000-0000-0000-0000000000ff"); !errors.Is(err, db.ErrNoSuchConversation) {
+			t.Errorf("SystemBlocksSystem for an unknown id = %v, want ErrNoSuchConversation", err)
+		}
+	})
+
+	// The newest system update in the assembly window is what a re-claim
+	// compares with, so the read has to skip what a compaction flipped and
+	// every row that is not one.
+	t.Run("LatestSystemUpdate_IsTheNewestActiveUpdate", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		conversationID := seedConversationForTest(t, orgID, seed, "running")
+
+		if got, err := store.LatestSystemUpdateSystem(ctx, orgID, conversationID); err != nil || got != nil {
+			t.Fatalf("LatestSystemUpdateSystem with no rows = (%+v, %v), want (nil, nil)", got, err)
+		}
+
+		insert := func(msg domain.Message) int {
+			t.Helper()
+			msg.ConversationID = conversationID
+			id, err := store.InsertMessageSystem(ctx, orgID, &msg)
+			if err != nil {
+				t.Fatalf("InsertMessageSystem: %v", err)
+			}
+			return int(id)
+		}
+		update := func(content string) domain.Message {
+			return domain.Message{Role: "system", Subtype: domain.MessageSubtypeSystemUpdate, Content: content,
+				Metadata: map[string]any{domain.MessageMetadataSystemParts: map[string]any{"shared": []any{}}}}
+		}
+		insert(update("first update"))
+		insert(domain.Message{Role: "user", Content: "a person's message"})
+		older := insert(update("second update"))
+		if n, err := store.SetWindowStateSystem(ctx, orgID, conversationID, float64(older), domain.MessageWindowActive, domain.MessageWindowInactive); err != nil || n != 2 {
+			t.Fatalf("SetWindowStateSystem = (%d, %v), want the first update and the message flipped", n, err)
+		}
+		if got, err := store.LatestSystemUpdateSystem(ctx, orgID, conversationID); err != nil || got == nil || got.ID != older {
+			t.Fatalf("LatestSystemUpdateSystem past a compacted update = (%+v, %v), want row %d", got, err, older)
+		}
+
+		newer := insert(update("third update"))
+		insert(domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionSystemNote, Content: "a note"})
+		insert(domain.Message{Role: "assistant", Content: "a reply"})
+		got, err := store.LatestSystemUpdateSystem(ctx, orgID, conversationID)
+		if err != nil || got == nil {
+			t.Fatalf("LatestSystemUpdateSystem = (%+v, %v), want the third update", got, err)
+		}
+		if got.ID != newer || got.Content != "third update" || got.Role != "system" {
+			t.Errorf("LatestSystemUpdateSystem = row %d %q (%s), want row %d, the newest update", got.ID, got.Content, got.Role, newer)
+		}
+		if _, ok := got.Metadata[domain.MessageMetadataSystemParts]; !ok {
+			t.Errorf("the update's metadata lost its parts: %+v", got.Metadata)
 		}
 	})
 

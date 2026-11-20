@@ -246,9 +246,9 @@ function buildRows(messages: Message[], worktree: string | undefined): React.Rea
 
   const rows: React.ReactNode[] = []
   for (const msg of messages) {
-    // A system-authored user row — a stop note, an executor-changed notice,
-    // a compaction result — is the machine explaining itself, and gets a
-    // marker line rather than a YOU line. Checked before the operator arm
+    // A system-authored row — a stop note, an executor-changed notice, a
+    // compaction result, a system update — is the machine explaining itself,
+    // and gets a marker line rather than a YOU line. Checked before the operator arm
     // below, which would otherwise attribute every one of them to the person
     // reading the screen.
     if (isSystemNotice(msg)) {

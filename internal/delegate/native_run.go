@@ -141,21 +141,10 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 
 	// The SDK path's twin again: the task team's knowledge base plus every
 	// other team's published root, copied in before the jail starts so it is
-	// present at first read. Skipped on a tree that already belongs to the
-	// sandbox identity, which this process cannot write inside: a warm blueprint
-	// step keeps the first step's copy and renders no manifest for it.
-	//
-	// So the manifest is not what decides what block 2 says about it. The rule a
-	// few lines down decides, and it is one rule for every section of the block:
-	// a new step composes its own, and a conversation that has already been
-	// opened replays the one its launch composed — manifest included, whoever
-	// owns its tree by then.
-	knowledge := ""
-	if handedOff {
-		delegateLog.Debug("run tree already handed to the sandbox identity; team knowledge not refreshed for this step", "conversation", conversationID, "cwd", claudeCwd)
-	} else {
-		knowledge = s.stageTeamKnowledge(stagingCtx, orgID, cfg.teamID, claudeCwd)
-	}
+	// present at first read. A tree that already belongs to the sandbox
+	// identity, which this process cannot write inside, keeps the copy it
+	// holds, and the listing names what that copy is.
+	knowledge := s.knowledgeForClaim(stagingCtx, orgID, cfg.teamID, claudeCwd, handedOff)
 
 	replay := s.nativeClaimReplay(stagingCtx, orgID, conversationID)
 	priorMemory := prepareInheritedMemory(claudeCwd, handedOff, replay.opened)
@@ -167,7 +156,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	// same for every native run; everything about this one is block 2 and the
 	// opening row.
 	launchText := s.buildNativeLaunchText(ctx, conversationID, task, mission, cfg, knowledge, replay)
-	systemPrompt := nativeSystemPrompt(cfg.surface)
+	system := launchText.system
 
 	// The task context's retention. Nothing is pinned through a compaction, so
 	// the row carrying these bytes is summarized like any other, and this file is
@@ -183,16 +172,16 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	if ctx.Err() != nil {
 		return stopped()
 	}
-	// Block 2 goes on the row before the agent gets it, so the next claim of this
-	// conversation is handed these bytes rather than composing a second set that
-	// agrees with them by care. Only a claim that knows the row holds nothing
-	// writes — see claimReplay.stampable, which is what keeps a failed read from
-	// overwriting a launch's block with a recomposition of it.
+	// The system blocks go on the row before the agent gets them, so the next
+	// claim of this conversation is handed these bytes rather than composing a
+	// second set. Only a claim that knows what the row holds writes (see
+	// resolveClaimSystem), which is what keeps a failed read from overwriting
+	// the first claim's blocks with a recomposition of them.
 	//
 	// Below the stop read for the same reason the phase write is: a fence
 	// refusal means a successor owns the conversation, which is not what a user
 	// cancel is, and only one of the two parks with a cancel recorded.
-	if replay.stampable && s.persistSystemBlock(ctx, orgID, conversationID, cfg.claimID, launchText.systemBlock) {
+	if system.stamp && s.persistSystemBlocks(ctx, orgID, conversationID, cfg.claimID, system.sent) {
 		return engagementDisposition{fenced: true}
 	}
 	if s.updatePhase(ctx, orgID, conversationID, cfg.claimID, domain.ClaimPhaseAgentStarting) {
@@ -312,6 +301,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 			// file, so every tool call is where the mirror looks.
 			AfterToolCall:       mirror.afterToolCall,
 			ShouldStopAfterTurn: s.turnEndNudges(orgID, conversationID, task, finalBlueprintStepOf(cfg), cfg.interactive),
+			SaveSystemBlocks:    s.saveSystemBlocksHook(orgID, conversationID, cfg.claimID, system.current),
 		}),
 		Activity: engineActivity{s.activityFor(conversationID)},
 		ActivityBounds: agentloop.ActivityBounds{
@@ -329,8 +319,10 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 		Model:            model,
 		Effort:           effort,
 		SwitchableModels: switchable,
-		SystemPrompt:     systemPrompt,
-		SystemAddendum:   launchText.systemBlock,
+		SystemPrompt:     system.sent.Prompt,
+		SystemAddendum:   system.sent.Block,
+		Current:          &agentloop.SystemBlocks{Prompt: system.current.Prompt, Addendum: system.current.Block},
+		SystemUpdate:     system.systemUpdate(),
 		HasBlueprint:     cfg.hasBlueprint(),
 		// Derived from the very ceiling this jail was launched under, not from
 		// a constant that could drift from it.
@@ -465,28 +457,13 @@ func (s *Spawner) mintOpeningTurn(ctx context.Context, transcript agentloop.Tran
 	return err
 }
 
-// nativeSystemPrompt is the shared half of the run's system prompt: the
-// composed framework blocks and nothing else.
-//
-// Nothing about the particular run is in it, including the handoff addendum a
-// non-terminal step carries — that is per step, so it rides the conversation's
-// own block instead. What is left is identical for every native run against the
-// same spec, which is what lets it be block 1, the one the cache breakpoint is
-// stamped on and every conversation in the org reads.
-func nativeSystemPrompt(surface agentprompt.Surface) string {
-	return agentprompt.Build(nativeSpec(surface))
-}
-
 // nativeLaunchText is the two pieces of composed text one native engagement
 // needs, split by the channel each belongs in: TF's own words go in the
-// conversation's system block, the externally-authored task context goes in a
-// user row.
+// system blocks, the externally-authored task context goes in a user row.
 type nativeLaunchText struct {
-	// systemBlock is block 2 — the run's facts, its verb reference, its
-	// mission and its step addendum, sent behind block 1's cache breakpoint.
-	// Composed by the claim that opens the conversation and replayed verbatim by
-	// every claim after it, so it is the same string for the life of the row.
-	systemBlock string
+	// system is the system prompt the claim sends — the two blocks the
+	// conversation's first claim sent — and what changed since.
+	system claimSystem
 	// taskContext is the opening user row's content: the <task_context> the
 	// launch renders, and on every later claim the bytes that row holds. It is
 	// what the claim retains as the task-context file.
@@ -494,70 +471,71 @@ type nativeLaunchText struct {
 }
 
 // buildNativeLaunchText resolves this claim's inputs and produces both halves.
-// The compositions themselves are composeConversationSystemBlock and
+// The compositions themselves are nativeSystemComposition and
 // BuildTaskContext; what lives here is the reads they need.
 //
-// replay.block is the block 2 the conversation was launched with, empty when
-// this claim IS that launch. Given one, block 2 is neither composed nor read
-// for: the stored bytes are the answer, and every live input a fresh
-// composition would reach for is one that may have moved since — a team's
-// branch convention, and the knowledge manifest, which is empty on a run tree
-// this process no longer owns. Recomposing would change the model's own
-// instructions mid-conversation and miss the cache entry those bytes were
-// warmed on.
+// Both system blocks are composed on every claim, from today's inputs, and
+// resolveClaimSystem decides what the claim sends: a launch sends what it
+// composed, and a conversation that has been opened sends what its first claim
+// sent, with an update for what changed since.
 //
-// The task context follows the same rule on the opening row. A conversation
-// that has been opened is handed its row's content (replay.taskContext), and
-// nothing that feeds a task context is read or fetched: no opening row is
-// minted again, so a new composition would reach only the task-context file,
-// where it would stop being a copy of the row the conversation actually opened
-// with. Only the launch composes one, from the event fields, artifacts and PR
+// The task context follows the opening row's rule. A conversation that has
+// been opened is handed its row's content (replay.taskContext), and nothing
+// that feeds a task context is read or fetched: no opening row is minted
+// again, so a new composition would reach only the task-context file, where it
+// would stop being a copy of the row the conversation actually opened with.
+// Only the launch composes one, from the event fields, artifacts and PR
 // history it reads.
 //
 // Nothing in it fails. A read or the PR history fetch that fails leaves its
 // part out of the task context rather than refusing the launch.
 func (s *Spawner) buildNativeLaunchText(ctx context.Context, conversationID string, task domain.Task, mission string, cfg runConfig, knowledge string, replay claimReplay) nativeLaunchText {
-	systemBlock := replay.block
-	if systemBlock == "" {
-		// The handoff addendum is this step's, not this spec's, so it rides
-		// block 2 rather than the shared prompt. appendSysPrompt is the same
-		// signal the SDK path hands its harness — set exactly when a later step
-		// follows this one.
-		nonTerminal := ""
-		if cfg.appendSysPrompt != "" {
-			nonTerminal = agentprompt.NonTerminalCompletion()
-		}
-
-		// The native blocks name the in-jail paths and the `tfac` applet
-		// outright, so the run context carries only what differs per run and
-		// those blocks cannot state for themselves: that the task is already
-		// closed, the work that overlaps it, the path of the checkout its
-		// setup built, the branch convention, the sources this run cannot
-		// reach, and this run's staged knowledge.
-		systemBlock = composeConversationSystemBlock(
-			mission,
-			runContext("", s.closedTaskContext(context.WithoutCancel(ctx), cfg.orgID, task.ID),
-				s.siblingWorkContext(context.WithoutCancel(ctx), cfg.orgID, conversationID), "",
-				agentVisibleCheckout(cfg.runRoot, cfg.prCheckout), agentVisibleCheckout(cfg.runRoot, cfg.baseCheckout),
-				s.resolveBranchTemplate(ctx, task), "", cfg.sources.notes, knowledge),
-			cfg.sources.tools(agentprompt.RuntimeNative),
-			nonTerminal,
-		)
-	}
+	current := s.nativeSystemComposition(ctx, conversationID, task, mission, cfg, knowledge).blocks()
+	system := s.resolveClaimSystem(ctx, cfg.orgID, conversationID, replay.opened, replay.saved, replay.readErr, current)
 
 	if replay.opened {
-		return nativeLaunchText{systemBlock: systemBlock, taskContext: replay.taskContext}
+		return nativeLaunchText{system: system, taskContext: replay.taskContext}
 	}
 	metadataJSON := s.taskEventMetadata(context.WithoutCancel(ctx), cfg.orgID, task)
 	artifacts, deliverables := s.taskArtifacts(context.WithoutCancel(ctx), cfg.orgID, task.ID)
 	return nativeLaunchText{
-		systemBlock: systemBlock,
+		system: system,
 		// The task context is the one section that stays a transcript row.
 		// It is built entirely from external data — PR titles, commit
 		// subjects, issue bodies — which is why it carries untrusted markers,
 		// and text sitting inside the agent's own instructions reads as
 		// instruction however it is marked.
 		taskContext: BuildTaskContext(task, cfg.container(), metadataJSON, cfg.prSkeleton.render(ctx), s.taskVulnerablePackage(context.WithoutCancel(ctx), cfg.orgID, task), artifacts, deliverables),
+	}
+}
+
+// nativeSystemComposition is what a native claim composes its two system
+// blocks from. Block 1 is the framework blocks for its surface, the same for
+// every native run; everything about this run is block 2.
+//
+// The native blocks name the in-jail paths and the `tfac` applet outright, so
+// the run context carries only what differs per run and those blocks cannot
+// state for themselves: that the task is closed, the work that overlaps it,
+// the path of the checkout its setup built, the branch convention, the sources
+// this run cannot reach, and the knowledge its tree holds.
+//
+// The handoff addendum is this step's, not this spec's, so it rides block 2
+// rather than the shared prompt. appendSysPrompt is the same signal the SDK
+// path hands its harness — set exactly when a later step follows this one.
+func (s *Spawner) nativeSystemComposition(ctx context.Context, conversationID string, task domain.Task, mission string, cfg runConfig, knowledge string) systemComposition {
+	stepEnd := ""
+	if cfg.appendSysPrompt != "" {
+		stepEnd = agentprompt.NonTerminalCompletion()
+	}
+	return systemComposition{
+		spec:    nativeSpec(cfg.surface),
+		mission: mission,
+		runContext: runContextLines("", s.closedTaskContext(context.WithoutCancel(ctx), cfg.orgID, task.ID),
+			s.siblingWorkContext(context.WithoutCancel(ctx), cfg.orgID, conversationID), "",
+			agentVisibleCheckout(cfg.runRoot, cfg.prCheckout), agentVisibleCheckout(cfg.runRoot, cfg.baseCheckout),
+			s.resolveBranchTemplate(ctx, task), "", cfg.sources.notes, knowledge),
+		tools:   cfg.sources.toolParts(agentprompt.RuntimeNative),
+		stepEnd: stepEnd,
 	}
 }
 
@@ -568,61 +546,50 @@ type claimReplay struct {
 	// task-context row, in any window state (OpeningTaskContextSystem), which
 	// is this runtime's "has it run before" and stands in for the prior session
 	// id the SDK path has. It decides which memory file the claim may trust,
-	// whether block 2 is this claim's to compose, and whether the task context
-	// is composed or replayed.
+	// which system blocks the claim sends, and whether the task context is
+	// composed or replayed.
 	opened bool
-	// block is the block 2 to run under, verbatim: what the launch stamped on an
-	// opened conversation. Empty when this claim must compose its own.
-	block string
+	// saved is what the conversation's row holds: the system blocks its first
+	// claim sent, and the parts they were composed from.
+	saved domain.SystemBlocks
+	// readErr is set when either read failed. The row may then hold the first
+	// claim's blocks, and a claim that overwrote them on a transient error
+	// would make one failed read the permanent prompt of every claim after it.
+	// Such a claim composes — it still needs blocks to run — and leaves the
+	// row alone, so the next one can reach the first claim's bytes.
+	readErr error
 	// taskContext is the content of an opened conversation's task-context row,
 	// the task context its opening sent, and what this claim retains as the
 	// task-context file. Set whenever opened is, whichever read failed after the
 	// transcript's.
 	taskContext string
-	// stampable is whether this claim may put what it composes on the row, and
-	// it is true only when the row is KNOWN to hold nothing. A read that failed
-	// is not that: an opened conversation's row may already carry the launch's
-	// bytes, and a claim that overwrote them on a transient error would make one
-	// failed read the permanent prompt of every claim after it. Such a claim
-	// composes — it still needs a block to run — and leaves the row alone, so
-	// the next one can reach the launch's bytes.
-	stampable bool
 }
 
 // nativeClaimReplay resolves that, over at most two reads.
 //
-// It reads the stored block directly rather than through launchedSystemBlock,
-// which degrades a failed read to the empty block. That is the right answer for
-// the SDK resume, whose only use of the value is the string it sends and which
-// never writes the column back; here the difference between "empty" and
-// "unreadable" decides a write, so it has to survive.
-//
 // Neither read failing refuses the claim. An opening this process cannot read
 // is treated as unopened, which is the cheap mistake for the memory file it
 // gates — crediting this run with a predecessor's notes corrupts the entity's
-// durable record, while distrusting its own costs one run's notes. Both failures
-// then cost this turn a recomposed block 2, and neither costs the row its own.
+// durable record, while distrusting its own costs one run's notes. Either
+// failure then sends this turn the blocks the claim composed, and neither
+// costs the row its own.
 func (s *Spawner) nativeClaimReplay(ctx context.Context, orgID, conversationID string) claimReplay {
 	taskContext, opened, err := s.conversations.OpeningTaskContextSystem(ctx, orgID, conversationID)
 	if err != nil {
-		delegateLog.Warn("read the conversation's opening to classify this claim failed; composing this engagement's block 2 and leaving the row's to the next claim",
+		delegateLog.Warn("read the conversation's opening to classify this claim failed; composing this engagement's system blocks and leaving the row's to the next claim",
 			"conversation", conversationID, "error", err)
-		return claimReplay{}
+		return claimReplay{readErr: err}
 	}
 	if !opened {
-		// This claim IS the launch, so the block it composes is the one the row
-		// owes every claim after it.
-		return claimReplay{stampable: true}
+		return claimReplay{}
 	}
-	block, err := s.conversations.SystemBlockSystem(ctx, orgID, conversationID)
+	saved, err := s.conversations.SystemBlocksSystem(ctx, orgID, conversationID)
 	if err != nil {
-		delegateLog.Warn("read the launch's system block failed; this engagement composes its own block 2 and leaves the row's to the next claim",
+		delegateLog.Warn("read the conversation's system blocks failed; this engagement composes its own and leaves the row's to the next claim",
 			"conversation", conversationID, "org_id", orgID, "error", err)
-		return claimReplay{opened: true, taskContext: taskContext}
+		return claimReplay{opened: true, taskContext: taskContext, readErr: err}
 	}
-	// An empty block on an opened conversation is a row from before this runtime
-	// stamped one. It composes live, once, and stamps what it composed.
-	return claimReplay{opened: true, block: block, taskContext: taskContext, stampable: block == ""}
+	return claimReplay{opened: true, saved: saved, taskContext: taskContext}
 }
 
 // nativeSpec is the prompt selector for every native engagement.

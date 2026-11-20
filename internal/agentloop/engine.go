@@ -107,6 +107,29 @@ type Hooks struct {
 	// what was asked and what has happened since. A hook that never returns
 	// "" is bounded by the spend guard like any other work.
 	ShouldStopAfterTurn func(ctx context.Context, turn int, finalText string) (nudge string)
+
+	// SaveSystemBlocks makes blocks the conversation's saved system blocks,
+	// the ones its next claim sends. The engine calls it when a compaction
+	// commits and the engagement moves onto Params.Current, and moves only
+	// once it returns nil (see adoptCurrentSystem).
+	SaveSystemBlocks func(ctx context.Context, blocks SystemBlocks) error
+}
+
+// SystemBlocks is the system prompt of a call: the shared prompt, then the
+// conversation's own block.
+type SystemBlocks struct {
+	Prompt   string
+	Addendum string
+}
+
+// SystemUpdate is the system message a claim adds to the conversation when
+// the system blocks it composed differ from the ones the conversation last
+// received. The driver composes it; the engine writes it.
+type SystemUpdate struct {
+	// Content says what changed, part by part.
+	Content string
+	// Metadata is stored on the row, for the next claim to compare with.
+	Metadata map[string]any
 }
 
 // Params is one engagement: everything the loop needs that isn't a dependency.
@@ -141,7 +164,25 @@ type Params struct {
 	// composes it, for the same reason it composes SystemPrompt: the loop
 	// never writes prompt text it did not receive. Empty sends a
 	// single-block system message.
+	//
+	// Both are the blocks the conversation's earlier turns were sent, which
+	// the provider binds their thinking to, so every call sends them until a
+	// compaction commits.
 	SystemAddendum string
+
+	// Current is the system blocks as this claim composed them from today's
+	// inputs. Once a compaction commits, nothing a thinking block is bound to
+	// is sent again, so every call after it sends these (adoptCurrentSystem).
+	// Nil keeps SystemPrompt and SystemAddendum for the whole engagement.
+	Current *SystemBlocks
+
+	// SystemUpdate tells the conversation how Current differs from the blocks
+	// it last received. The engine writes it as a delivered role:"system" row
+	// after the engagement's first drain, so it follows the input that started
+	// the claim and precedes the first call, and every later call sends it
+	// back unchanged. Nil writes none, and so does a compaction committing
+	// before the drain, since Current then carries the change itself.
+	SystemUpdate *SystemUpdate
 
 	// HasBlueprint offers the flow-control tool. True for a delegation,
 	// where the conversation executes a blueprint against a task; false for
@@ -311,6 +352,12 @@ type Result struct {
 	ParkGuard Guard
 	// Model is the model a ResultProviderSwitch is for.
 	Model string
+	// SystemPrompt and SystemAddendum are the system blocks the engagement
+	// was sending when it ended: the Params' own, or Params.Current once a
+	// compaction moved onto it. A caller that runs the conversation on, as a
+	// warm claim's next turn does, sends these.
+	SystemPrompt   string
+	SystemAddendum string
 	// Err carries the underlying cause on ResultFailed,
 	// ResultUpstreamUnavailable and ResultToolHostLost.
 	Err error
@@ -418,6 +465,9 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 	// carries it, whichever Result it returns.
 	var spent spend
 	defer func() { result.CostUSD = float64(spent) }()
+	// The system blocks the engagement ends on, read off this frame's params,
+	// which a compaction can move onto the claim's composition.
+	defer func() { result.SystemPrompt, result.SystemAddendum = params.SystemPrompt, params.SystemAddendum }()
 
 	// The span open now: the preparation's, then each iteration's in turn.
 	// Whichever one the engagement ends in is ended here, with the result.
@@ -439,7 +489,8 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 	// repair → compact → drain → call, so the summarize call reads exactly
 	// what the previous engagement left and queued input stays queued
 	// through it.
-	if err := e.compactOnResume(pctx, params, &spent); err != nil {
+	compacted, err := e.compactOnResume(pctx, params, &spent)
+	if err != nil {
 		if ctx.Err() != nil {
 			return e.cancelled(ctx, started, 0)
 		}
@@ -448,6 +499,9 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 		}
 		e.insertNotice(pctx, params, "Compacting this conversation on resume failed: "+err.Error())
 		return e.failed(ctx, started, 0, fmt.Errorf("compact on resume: %w", err))
+	}
+	if compacted {
+		params = e.adoptCurrentSystem(pctx, params)
 	}
 	current.next(prepareOK)
 
@@ -525,6 +579,7 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 				e.insertNotice(ctx, params, "Compacting this conversation failed: "+err.Error())
 				return e.failed(ctx, started, turn, fmt.Errorf("compact conversation: %w", err))
 			}
+			params = e.adoptCurrentSystem(ctx, params)
 			it.next(turnCompacted)
 			continue
 		}
@@ -534,6 +589,18 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 		// there is no special first-call case.
 		if err := e.drain(ctx, params, bareDrain); err != nil {
 			return e.failed(ctx, started, turn, fmt.Errorf("drain pending input: %w", err))
+		}
+
+		// 2a. The claim's system update, once, behind the input the first
+		// drain delivered and ahead of the first call. A failed write leaves the
+		// conversation on the blocks it already has, which is what it is sent,
+		// and the next claim composes the update again.
+		if params.SystemUpdate != nil {
+			if err := e.insertSystemUpdate(ctx, params); err != nil {
+				e.warn("writing the claim's system update failed; the engagement runs without it",
+					"conversation", params.ConversationID, "error", err)
+			}
+			params.SystemUpdate = nil
 		}
 
 		// 2b. Rows — one post-flush read serves the park-notice dedupe and
@@ -610,6 +677,7 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 				if cerr := e.compaction(ctx, compactOverflow, func(ctx context.Context) error {
 					return e.compactWindowFull(ctx, params, &spent)
 				}); cerr == nil {
+					params = e.adoptCurrentSystem(ctx, params)
 					it.next(turnCompacted)
 					continue
 				} else if ctx.Err() != nil {
@@ -761,6 +829,7 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 				e.insertNotice(ctx, params, "Compacting this conversation failed: "+err.Error())
 				return e.failed(ctx, started, turn, fmt.Errorf("compact after context window wall: %w", err))
 			}
+			params = e.adoptCurrentSystem(ctx, params)
 			bareDrain = false
 			it.next(turnCompacted)
 			continue

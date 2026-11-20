@@ -400,9 +400,9 @@ func (c *leaseRecoveringConversations) SetWorktreePathForClaimSystem(ctx context
 	return conv, err
 }
 
-func (c *leaseRecoveringConversations) SetSystemBlockForClaimSystem(ctx context.Context, orgID, conversationID, claimID, block string) (conv *domain.Conversation, err error) {
+func (c *leaseRecoveringConversations) SetSystemBlocksForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, blocks domain.SystemBlocks) (conv *domain.Conversation, err error) {
 	err = c.s.retryAfterRecovery(ctx, claimID, func() (e error) {
-		conv, e = c.ConversationStore.SetSystemBlockForClaimSystem(ctx, orgID, conversationID, claimID, block)
+		conv, e = c.ConversationStore.SetSystemBlocksForClaimSystem(ctx, orgID, conversationID, claimID, blocks)
 		return e
 	})
 	return conv, err

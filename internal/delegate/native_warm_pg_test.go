@@ -129,7 +129,9 @@ type warmOpts struct {
 	noPersonMessage bool
 	// beforeStart runs once the claim is held, before the first turn.
 	beforeStart func(f *warmEngagement)
-	turns       []gateTurn
+	// params adjusts what the first turn runs under.
+	params func(*agentloop.Params)
+	turns  []gateTurn
 }
 
 // startWarmEngagement claims the fixture's conversation on X and runs its
@@ -227,6 +229,9 @@ func startWarmEngagement(t *testing.T, o warmOpts) *warmEngagement {
 		transcript: transcript,
 		ckpt:       ckpt,
 		release:    func() { f.jailStopped.Store(true) },
+	}
+	if o.params != nil {
+		o.params(&tail.params)
 	}
 
 	// Registered after the fixture's own cleanups, so it runs first: an
@@ -505,6 +510,37 @@ func TestWarmClaim_SecondMessageRunsOnTheSameClaim(t *testing.T) {
 			second.NewSandbox, second.Workspace, second.WorkspaceAsOf, second.ExecutorChanged)
 	}
 	f.assertTurnEnded(t, "also updated the README")
+}
+
+// A warm claim's later turn is the same claim, so it writes no second system
+// update, and it sends the blocks the claim's first turn ended on.
+func TestWarmClaim_ASecondTurnWritesNoSecondSystemUpdate(t *testing.T) {
+	f := startWarmEngagement(t, warmOpts{window: time.Minute, turns: []gateTurn{{text: "fixed it"}, {text: "also updated the README"}},
+		params: func(p *agentloop.Params) {
+			p.SystemUpdate = &agentloop.SystemUpdate{Content: "<system-update>\nthe branch convention changed\n</system-update>"}
+		}})
+	f.awaitWarm(t, 1)
+	if err := f.followUp("now update the README too"); err != nil {
+		t.Fatalf("follow-up from the control pod: %v", err)
+	}
+	f.awaitWarm(t, 2)
+
+	rows, err := f.stores.Conversations.ListForAssemblySystem(context.Background(), f.orgID, f.conversationID)
+	if err != nil {
+		t.Fatalf("list transcript: %v", err)
+	}
+	updates := 0
+	for _, r := range rows {
+		if r.Role == "system" && r.Subtype == domain.MessageSubtypeSystemUpdate {
+			updates++
+		}
+	}
+	if updates != 1 {
+		t.Errorf("system updates = %d, want the claim's one", updates)
+	}
+	if second := f.run(1).params; second.SystemUpdate != nil || second.SystemPrompt != f.run(0).result.SystemPrompt {
+		t.Errorf("the second turn runs under (update %v, prompt %q), want no update and the first turn's prompt", second.SystemUpdate, second.SystemPrompt)
+	}
 }
 
 // At expiry the claim is let go and the conversation is not touched: it has

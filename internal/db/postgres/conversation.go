@@ -1322,19 +1322,24 @@ func (s *conversationStore) SetWorktreePathSystem(ctx context.Context, orgID, co
 	return setConversationWorktreePath(ctx, s.admin, orgID, conversationID, path)
 }
 
-// SetSystemBlockForClaimSystem stamps the system append this engagement
-// launched with, refused once a successor holds the conversation. Fenced-only:
-// nothing without a claim composes an append.
-func (s *conversationStore) SetSystemBlockForClaimSystem(ctx context.Context, orgID, conversationID, claimID, block string) (*domain.Conversation, error) {
+// SetSystemBlocksForClaimSystem stamps the system prompt this engagement
+// sends, refused once a successor holds the conversation. Fenced-only: nothing
+// without a claim composes a prompt.
+func (s *conversationStore) SetSystemBlocksForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, blocks domain.SystemBlocks) (*domain.Conversation, error) {
+	parts, err := db.MarshalSystemParts(blocks.Parts)
+	if err != nil {
+		return nil, err
+	}
 	var result *domain.Conversation
-	err := inTx(ctx, s.admin, func(q queryer) error {
+	err = inTx(ctx, s.admin, func(q queryer) error {
 		if err := assertClaimActiveForConversationWrite(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
 		r, err := writeConversationReturning(ctx, q, `
-			UPDATE conversations SET system_block = $1 WHERE org_id = $2 AND id = $3
+			UPDATE conversations SET system_prompt = $1, system_block = $2, system_parts = $3::jsonb
+			WHERE org_id = $4 AND id = $5
 			RETURNING *
-		`, block, orgID, conversationID)
+		`, blocks.Prompt, blocks.Block, parts, orgID, conversationID)
 		if err != nil {
 			return err
 		}
@@ -1347,17 +1352,27 @@ func (s *conversationStore) SetSystemBlockForClaimSystem(ctx context.Context, or
 	return result, nil
 }
 
-// SystemBlockSystem reads that stamp back for the engagement picking the
+// SystemBlocksSystem reads that stamp back for the engagement picking the
 // conversation back up — the admin pool, like every other engagement-facing
 // read: the dispatcher holds no JWT claims.
-func (s *conversationStore) SystemBlockSystem(ctx context.Context, orgID, conversationID string) (string, error) {
-	var block string
+func (s *conversationStore) SystemBlocksSystem(ctx context.Context, orgID, conversationID string) (domain.SystemBlocks, error) {
+	var (
+		blocks domain.SystemBlocks
+		parts  sql.NullString
+	)
 	err := s.admin.QueryRowContext(ctx,
-		`SELECT system_block FROM conversations WHERE org_id = $1 AND id = $2`, orgID, conversationID).Scan(&block)
+		`SELECT system_prompt, system_block, system_parts FROM conversations WHERE org_id = $1 AND id = $2`,
+		orgID, conversationID).Scan(&blocks.Prompt, &blocks.Block, &parts)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", db.ErrNoSuchConversation
+		return domain.SystemBlocks{}, db.ErrNoSuchConversation
 	}
-	return block, err
+	if err != nil {
+		return domain.SystemBlocks{}, err
+	}
+	if blocks.Parts, err = db.UnmarshalSystemParts(parts); err != nil {
+		return domain.SystemBlocks{}, err
+	}
+	return blocks, nil
 }
 
 // SetWorktreePathForClaimSystem is SetWorktreePathSystem behind the fence — the
@@ -2984,6 +2999,28 @@ func (s *conversationStore) ListForAssemblySystem(ctx context.Context, orgID, co
 	}
 	defer rows.Close()
 	return scanMessageRows(rows)
+}
+
+// LatestSystemUpdateSystem — see the interface doc. The admin pool, for the
+// reason ListForAssemblySystem uses it.
+func (s *conversationStore) LatestSystemUpdateSystem(ctx context.Context, orgID, conversationID string) (*domain.Message, error) {
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT `+pgMessageColumns+`
+		FROM messages
+		WHERE org_id = $1 AND conversation_id = $2 AND role = 'system' AND subtype = $3
+		  AND window_state <> 'inactive'
+		ORDER BY COALESCE(seq, (id)::double precision) DESC, id DESC
+		LIMIT 1
+	`, orgID, conversationID, domain.MessageSubtypeSystemUpdate)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	msgs, err := scanMessageRows(rows)
+	if err != nil || len(msgs) == 0 {
+		return nil, err
+	}
+	return &msgs[0], nil
 }
 
 // OpeningTaskContextSystem — see the interface doc. Reads every window state,

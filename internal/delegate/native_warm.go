@@ -122,6 +122,12 @@ func (s *Spawner) runNativeTail(ctx context.Context, n nativeTail) engagementDis
 			params.Workspace = domain.WorkspaceProvenanceUnknown
 			params.WorkspaceAsOf = nil
 			params.ExecutorChanged = false
+			// The claim's system update is in the transcript by now, and a
+			// compaction in an earlier turn may have moved the engagement onto
+			// the blocks the claim composed. The next turn sends what the last
+			// one ended on and writes no second update.
+			params.SystemUpdate = nil
+			params.SystemPrompt, params.SystemAddendum = result.SystemPrompt, result.SystemAddendum
 			result = accumulateTurns(result, n.run(ctx, params))
 		case warmLetGo:
 			return s.letGoWarm(ctx, n, result, snapshotReasonWarmRelease)

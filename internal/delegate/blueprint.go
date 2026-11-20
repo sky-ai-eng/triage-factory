@@ -376,6 +376,16 @@ func nonterminalStepSysPrompt(i, total int) string {
 	return ""
 }
 
+// missionTaskTitle is the task title a step's mission names: the one its
+// plan froze when the run was minted, or the task's current title for a plan
+// frozen before titles were.
+func missionTaskTitle(planStep domain.BlueprintPlanStep, task domain.Task) string {
+	if planStep.TaskTitle != "" {
+		return planStep.TaskTitle
+	}
+	return task.Title
+}
+
 // buildBlueprintStepWrapperPrompt produces the per-step user prompt carrying
 // step-specific data. The base completion contract (the composed framework
 // prompt) plus the non-terminal addendum (agentprompt.NonTerminalCompletion,
@@ -386,7 +396,10 @@ func nonterminalStepSysPrompt(i, total int) string {
 // The skill's path is spelled from it in full because the agent works from
 // inside a checkout, where a path relative to the run root resolves into the
 // repository instead.
-func buildBlueprintStepWrapperPrompt(task domain.Task, step domain.BlueprintStep, stepPrompt *domain.Prompt, slug, agentRunRoot string, total int, nextStepName string) string {
+//
+// taskTitle is the title the plan froze (missionTaskTitle), so every claim of
+// a step composes the same mission however the task is renamed meanwhile.
+func buildBlueprintStepWrapperPrompt(taskTitle string, step domain.BlueprintStep, stepPrompt *domain.Prompt, slug, agentRunRoot string, total int, nextStepName string) string {
 	mission := strings.TrimSpace(step.Brief)
 	if mission == "" {
 		mission = stepPrompt.Name
@@ -394,7 +407,7 @@ func buildBlueprintStepWrapperPrompt(task domain.Task, step domain.BlueprintStep
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "You are step %d of %d in a blueprint firing on this task.\n\n", step.StepIndex+1, total)
-	fmt.Fprintf(&b, "Task: %s\n", strings.TrimSpace(task.Title))
+	fmt.Fprintf(&b, "Task: %s\n", strings.TrimSpace(taskTitle))
 	fmt.Fprintf(&b, "Mission for this step: %s\n\n", mission)
 	fmt.Fprintf(&b, "Skill slug: %q (materialized at %s)\n", slug, filepath.Join(agentRunRoot, ".claude", "skills", slug, "SKILL.md"))
 	isFinal := step.StepIndex+1 == total

@@ -125,6 +125,30 @@ func RegisterToolsReference(source, text string) {
 // applet its blocks teach, so its section spells them that way; an SDK run's
 // `triagefactory exec` is resolved to a binary path by the caller.
 func ToolsReferenceForSources(runtime Runtime, kinds []string) string {
+	parts := ToolsReferenceParts(runtime, kinds)
+	texts := make([]string, 0, len(parts))
+	for _, p := range parts {
+		texts = append(texts, p.Text)
+	}
+	return strings.Join(texts, "\n\n")
+}
+
+// ToolsWorkspaceKey is the ToolsPart key of the workspace verbs, which the
+// issue trackers share.
+const ToolsWorkspaceKey = "workspace"
+
+// ToolsPart is one source's share of a <tools> section: the source kind (or
+// ToolsWorkspaceKey) and its reference, spelled for the runtime.
+type ToolsPart struct {
+	Key  string
+	Text string
+}
+
+// ToolsReferenceParts is ToolsReferenceForSources one part at a time, in the
+// same canonical order: ToolsReferenceForSources is their texts joined by a
+// blank line. A caller comparing two sections reads which sources were added,
+// removed or reworded from it, which the joined string cannot say.
+func ToolsReferenceParts(runtime Runtime, kinds []string) []ToolsPart {
 	seen := make(map[string]bool, len(kinds))
 	var core, registered []string
 	for _, k := range kinds {
@@ -142,33 +166,34 @@ func ToolsReferenceForSources(runtime Runtime, kinds []string) string {
 	slices.Sort(core) // "github", then "jira", then "linear"
 	slices.Sort(registered)
 
-	parts := make([]string, 0, len(core)+1+len(registered))
+	parts := make([]ToolsPart, 0, len(core)+1+len(registered))
 	tracker := false
 	for _, k := range core {
 		switch k {
 		case "github":
 			if runtime != RuntimeNative {
-				parts = append(parts, githubTools)
+				parts = append(parts, ToolsPart{Key: k, Text: githubTools})
 			}
 		case "jira":
-			parts = append(parts, jiraTools)
+			parts = append(parts, ToolsPart{Key: k, Text: jiraTools})
 			tracker = true
 		case "linear":
-			parts = append(parts, linearTools)
+			parts = append(parts, ToolsPart{Key: k, Text: linearTools})
 			tracker = true
 		}
 	}
 	if tracker {
-		parts = append(parts, workspaceTools)
+		parts = append(parts, ToolsPart{Key: ToolsWorkspaceKey, Text: workspaceTools})
 	}
 	for _, k := range registered {
-		parts = append(parts, strings.TrimSpace(toolsReferenceRegistry[k]))
+		parts = append(parts, ToolsPart{Key: k, Text: strings.TrimSpace(toolsReferenceRegistry[k])})
 	}
-	out := strings.Join(parts, "\n\n")
 	if runtime == RuntimeNative {
-		out = strings.ReplaceAll(out, "triagefactory exec", prog.AppletName)
+		for i := range parts {
+			parts[i].Text = strings.ReplaceAll(parts[i].Text, "triagefactory exec", prog.AppletName)
+		}
 	}
-	return out
+	return parts
 }
 
 // ToolsReferenceFor returns the registered tools-reference text for source

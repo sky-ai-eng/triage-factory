@@ -138,6 +138,106 @@ func (s *Spawner) stageTeamKnowledge(ctx context.Context, orgID, teamID, cwd str
 	return renderKnowledgeManifest(staged)
 }
 
+// knowledgeForClaim stages this claim's knowledge and returns the listing of
+// it, or "" when there is none.
+//
+// A tree already handed to the sandbox identity cannot be written by this
+// process, so it keeps the copy it holds, and the listing is built from that
+// copy (stagedKnowledgeListing): it describes what the agent can read, which
+// is what every claim's listing has to do.
+func (s *Spawner) knowledgeForClaim(ctx context.Context, orgID, teamID, cwd string, handedOff bool) string {
+	if handedOff {
+		delegateLog.Debug("run tree already handed to the sandbox identity; listing the knowledge it holds", "cwd", cwd)
+		return s.stagedKnowledgeListing(ctx, orgID, teamID, cwd)
+	}
+	return s.stageTeamKnowledge(ctx, orgID, teamID, cwd)
+}
+
+// stagedKnowledgeListing renders the manifest of the knowledge files a run
+// tree holds, grouped and ordered as stageTeamKnowledge renders them, so a
+// tree whose copy has not changed lists exactly what its staging listed.
+//
+// Each contributing team's directory is labelled by the team's name where the
+// team is still active, and by its directory otherwise: the files are there
+// to read either way. A file that cannot be read is listed without a summary.
+func (s *Spawner) stagedKnowledgeListing(ctx context.Context, orgID, teamID, cwd string) string {
+	root := filepath.Join(cwd, scratchDirName, knowledgeDirName)
+	staged := stagedKnowledge{}
+	add := func(dir, label string) {
+		entries := listStagedKnowledgeFiles(filepath.Join(root, filepath.FromSlash(dir)))
+		if len(entries) == 0 {
+			return
+		}
+		staged.groups = append(staged.groups, knowledgeGroup{dir: dir, label: label, entries: entries})
+		staged.files += len(entries)
+	}
+	add(knowledgeTeamDirName, "your team's knowledge base")
+
+	dirs, err := os.ReadDir(filepath.Join(root, knowledgeOrgDirName))
+	if err != nil && !os.IsNotExist(err) {
+		delegateLog.Warn("list the run tree's knowledge failed; the listing leaves other teams' knowledge out", "path", root, "error", err)
+	}
+	onDisk := map[string]bool{}
+	for _, d := range dirs {
+		if d.IsDir() {
+			onDisk[d.Name()] = true
+		}
+	}
+	if len(onDisk) > 0 {
+		for _, other := range s.otherTeamsWithKnowledge(ctx, orgID, teamID) {
+			if onDisk[other.Slug] {
+				add(path.Join(knowledgeOrgDirName, other.Slug), "published by "+other.Name)
+				delete(onDisk, other.Slug)
+			}
+		}
+		rest := make([]string, 0, len(onDisk))
+		for name := range onDisk {
+			rest = append(rest, name)
+		}
+		sort.Strings(rest)
+		for _, name := range rest {
+			add(path.Join(knowledgeOrgDirName, name), "published by "+name)
+		}
+	}
+	if staged.files == 0 {
+		return ""
+	}
+	return renderKnowledgeManifest(staged)
+}
+
+// listStagedKnowledgeFiles is every file under dir, by its slash-separated
+// path relative to dir, with the summary staging would have given it, sorted
+// by path.
+func listStagedKnowledgeFiles(dir string) []stagedEntry {
+	var entries []stagedEntry
+	_ = filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		rel, relErr := filepath.Rel(dir, p)
+		if relErr != nil {
+			return nil
+		}
+		entries = append(entries, stagedEntry{path: filepath.ToSlash(rel), summary: stagedFileSummary(p)})
+		return nil
+	})
+	sort.Slice(entries, func(i, j int) bool { return entries[i].path < entries[j].path })
+	return entries
+}
+
+// stagedFileSummary reads as much of a staged file as copyKnowledgeFile keeps
+// for its summary, and summarizes it the same way.
+func stagedFileSummary(p string) string {
+	f, err := os.Open(p)
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = f.Close() }()
+	head := make([]byte, 4*knowledgeSummaryMaxLen)
+	n, _ := io.ReadFull(f, head)
+	return firstLineSummary(string(head[:n]))
+}
+
 // clearStagedKnowledge empties the knowledge tree so this launch can rebuild
 // it from the store. Three things make that a correctness step rather than
 // housekeeping, and the second is the sharp one:

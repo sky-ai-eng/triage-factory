@@ -67,6 +67,26 @@ describe('ScreenTranscript system-authored rows', () => {
     expect(screen.queryByText('you')).not.toBeInTheDocument()
   })
 
+  it('renders a system update as a marker, not as operator speech', () => {
+    render(
+      <ScreenTranscript
+        conversation={conversation()}
+        messages={[
+          msg({ content: 'which test?' }),
+          msg({
+            role: 'system',
+            subtype: 'system-update',
+            content: 'Your system prompt has changed since this conversation last received it.',
+          }),
+        ]}
+      />,
+    )
+    expect(
+      screen.getByText('Your system prompt has changed since this conversation last received it.'),
+    ).toBeInTheDocument()
+    expect(screen.getAllByText('you')).toHaveLength(1)
+  })
+
   it('still renders a mid-work steer as operator speech', () => {
     render(
       <ScreenTranscript

@@ -49,14 +49,14 @@ func hostileStrings(task domain.Task, metadataJSON, skeleton string) []string {
 // conversation in the org reads. A per-run section added here later fails this
 // instead of quietly forking the fleet's cached prefix per run.
 func TestNativeSystemPrompt_IsBlockOneAlone(t *testing.T) {
-	if got, want := nativeSystemPrompt(agentprompt.SurfaceMachinist), agentprompt.Build(nativeSpec(agentprompt.SurfaceMachinist)); got != want {
+	if got, want := nativeBlockOne(), agentprompt.Build(nativeSpec(agentprompt.SurfaceMachinist)); got != want {
 		t.Errorf("block 1 is not the composed blocks alone;\ngot  %.200q\nwant %.200q", got, want)
 	}
 	addendum := strings.TrimSpace(agentprompt.NonTerminalCompletion())
 	if addendum == "" {
 		t.Fatal("the native handoff addendum is empty; this test would pass vacuously")
 	}
-	if strings.Contains(nativeSystemPrompt(agentprompt.SurfaceMachinist), addendum) {
+	if strings.Contains(nativeBlockOne(), addendum) {
 		t.Error("block 1 carries the handoff addendum, which is per step and belongs in block 2")
 	}
 }
@@ -66,8 +66,8 @@ func TestNativeSystemPrompt_IsBlockOneAlone(t *testing.T) {
 // step position, the task behind them — still compose the same block 1, so the
 // entry written at its breakpoint is one the whole fleet reads.
 func TestNativeSystemPrompt_IsByteIdenticalAcrossRuns(t *testing.T) {
-	first := nativeSystemPrompt(agentprompt.SurfaceMachinist)
-	if second := nativeSystemPrompt(agentprompt.SurfaceMachinist); first != second {
+	first := nativeBlockOne()
+	if second := nativeBlockOne(); first != second {
 		t.Fatal("two runs of the same spec composed different block 1s")
 	}
 	// The missions differ; block 1 cannot, because no mission reaches it.
@@ -145,7 +145,7 @@ func TestNativeLaunchText_KeepsExternalTextOutOfTheInstructionChannel(t *testing
 	block2 := composeConversationSystemBlock(mission, runContext("", "", "", "", "", "", "tfac/SKY-9", "", "", ""), "verbs here", "")
 	opening := BuildTaskContext(task, "", metadataJSON, skeleton, nil, nil, nil)
 
-	for _, sys := range []string{nativeSystemPrompt(agentprompt.SurfaceMachinist), block2} {
+	for _, sys := range []string{nativeBlockOne(), block2} {
 		for _, bad := range hostileStrings(task, metadataJSON, skeleton) {
 			if strings.Contains(sys, bad) {
 				t.Errorf("externally-authored text reached a system block: %.60q", bad)
@@ -183,6 +183,7 @@ func TestNativeLaunchText_AnOpenedConversationKeepsItsOpeningRow(t *testing.T) {
 	got := f.s.buildNativeLaunchText(context.Background(), f.conv.ID, f.task(t), "have another look", runConfig{
 		orgID:      runmode.LocalDefaultOrgID,
 		teamID:     runmode.LocalDefaultTeamID,
+		surface:    agentprompt.SurfaceMachinist,
 		sources:    sourceDocs{kinds: []string{"github"}},
 		prSkeleton: prSkeletonSource{client: ghclient.NewClient(srv.URL, "t"), owner: "owner", repo: "repo", prNumber: 7},
 	}, "", replay).taskContext
@@ -203,4 +204,14 @@ func TestNativeOpeningRow_IsTheTaskContextAlone(t *testing.T) {
 			t.Errorf("%s reappeared in the opening row", unwanted)
 		}
 	}
+}
+
+// nativeBlockOne is block 1 of a non-terminal native step's composition, the
+// shape that carries the most per-step text for block 1 to keep out.
+func nativeBlockOne() string {
+	return systemComposition{
+		spec:    nativeSpec(agentprompt.SurfaceMachinist),
+		mission: "Review the pull request.",
+		stepEnd: agentprompt.NonTerminalCompletion(),
+	}.blocks().Prompt
 }

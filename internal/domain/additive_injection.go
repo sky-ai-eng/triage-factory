@@ -169,12 +169,12 @@ func TaskClosedNote(c TaskClose, a TaskNoteAudience) string {
 	return taskCloseCause(c) + " " + guidance
 }
 
-// TaskClosedRunContext is the <run_context> line of a run launched on a task
-// that is already closed. It says what was true at the launch, since the
-// block it rides is fixed for the conversation's life and the task can
-// reopen under it, and it names nothing a source authored.
+// TaskClosedRunContext is the <run_context> line of a claim on a task that is
+// closed. Every claim composes it, and one whose conversation already holds
+// the line delivers a change to it as a system update, so it says what is true
+// at the claim rather than at the launch. It names nothing a source authored.
 func TaskClosedRunContext(c TaskClose) string {
-	return "Task state: this task was already closed when this run started. " + taskCloseCause(c)
+	return "Task state: this task is closed. " + taskCloseCause(c)
 }
 
 // taskCloseCause is the sentence saying how the task closed, shared by the
@@ -337,26 +337,27 @@ type SiblingWorkRecipient struct {
 	DedupKey       string
 }
 
-// SiblingWorkRunContext is the <run_context> block of a launch whose work
-// overlaps other tasks: one line per task, "" for none. It says what was
-// true at the launch, since the block is fixed for the conversation's life
-// and a later assignment reaches the run as a note. It names no person, and
-// nothing a source authored beyond the entity's key.
+// SiblingWorkRunContext is the <run_context> block of a claim whose work
+// overlaps other tasks: one line per task, "" for none. Every claim composes
+// it, and a change reaches a conversation that already holds it as a system
+// update, so it says what is true at the claim; an assignment while the claim
+// runs reaches the run as a note. It names no person, and nothing a source
+// authored beyond the entity's key.
 func SiblingWorkRunContext(tasks []SiblingTask) string {
-	return siblingWorkBlock("Overlapping work: when this run started, these other tasks were on the pull request or issue this task is on, "+
+	return siblingWorkBlock("Overlapping work: these other tasks are on the pull request or issue this task is on, "+
 		"or on one that this run's work or theirs touched.", tasks)
 }
 
 // SiblingWorkNote is the agent-facing copy catching up a conversation that
 // had concluded and was woken by a person's message: the same listing as the
-// launch's block, as of the wake. "" for none. Bare, like TaskClosedNote.
+// run context's, as of the wake. "" for none. Bare, like TaskClosedNote.
 func SiblingWorkNote(tasks []SiblingTask) string {
 	return siblingWorkBlock("This is the work that overlaps this conversation's now: these other tasks are on the pull request or issue this task is on, "+
 		"or on one that this conversation's work or theirs touched.", tasks)
 }
 
-// siblingWorkBlock renders the listing under leadIn, shared by the launch's
-// block and the wake's note so the two describe a task the same way.
+// siblingWorkBlock renders the listing under leadIn, shared by the run
+// context's line and the wake's note so the two describe a task the same way.
 func siblingWorkBlock(leadIn string, tasks []SiblingTask) string {
 	if len(tasks) == 0 {
 		return ""
