@@ -370,7 +370,7 @@ alert's description, shown beside it in Grafana, says what to check.
 | `TasksOpenOnClosedEntity`          | warning  | An org has tasks open on a pull request or issue that Triage Factory has closed, which is a bug.                                                        |
 | `SlackDeliveriesRetried`           | warning  | Slack retried deliveries to an app in the last 15 minutes.                                                                                              |
 | `SlackSigningSecretMismatch`       | warning  | Deliveries to the deployment Slack app's Events API endpoint were not signed with `TF_SLACK_SIGNING_SECRET`, and none verified, in the last 15 minutes. |
-| `SlackDeploymentDeliveriesStale`   | warning  | Deliveries to the deployment Slack app's Events API endpoint were refused as stale, and none verified, in the last 15 minutes.                          |
+| `SlackDeploymentDeliveriesStale`   | warning  | A control pod refused deliveries to the deployment Slack app's Events API endpoint as stale, and verified none, in the last 15 minutes.                 |
 | `SlackAppRateLimited`              | warning  | Slack dropped an app's event deliveries for its Events API limit in the last 15 minutes.                                                                |
 | `SlackSocketsDownFleetWide`        | critical | More than half of the orgs' own Socket Mode Slack apps have had no open connection to Slack, for 10 minutes.                                            |
 | `SlackDeliveriesRefusedFleetWide`  | critical | More than half of the orgs' own Events API Slack apps are failing the signature check on most deliveries, for 10 minutes.                               |

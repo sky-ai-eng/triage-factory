@@ -687,7 +687,7 @@ tests:
 - name: SlackDeploymentDeliveriesStale fires on a new series' first sample with nothing verified, and clears once 15m has passed
   interval: 1m
   input_series:
-  - series: 'tf_slack_webhook_deployment_deliveries_total{app_id="A1",signature="stale"}'
+  - series: 'tf_slack_webhook_deployment_deliveries_total{instance="control-1:9464",app_id="A1",signature="stale"}'
     values: '_x3 1x45'
   alert_rule_test:
   - eval_time: 2m
@@ -697,15 +697,16 @@ tests:
     alertname: SlackDeploymentDeliveriesStale
     exp_alerts:
     - exp_labels:
+        instance: 'control-1:9464'
         app_id: A1
         severity: warning
       exp_annotations:
-        summary: 'Deliveries to the deployment Slack app are refused as stale'
-        description: 'In the last 15 minutes, deliveries for app A1 reached /api/webhooks/slack with a timestamp more than five minutes from control''s clock, and none verified. If the clock on a host running control is that far off, every delivery fails, and Slack turns the app''s event subscriptions off once more than 95% of them fail within an hour. Compare that clock with the real time and fix the host''s time sync. A replayed or forged request also counts, so check the clock before changing anything.'
+        summary: 'Control pod control-1:9464 is refusing the deployment Slack app''s deliveries as stale'
+        description: 'In the last 15 minutes, control pod control-1:9464 refused deliveries for app A1 at /api/webhooks/slack because their timestamp was more than five minutes from its clock, and verified none. If that pod''s host clock is that far off, every delivery that reaches the pod fails, and once that is more than 95% of the app''s deliveries within an hour, Slack turns the app''s event subscriptions off. Compare the host''s clock with the real time and fix its time sync. A replayed or forged request also counts, so check the clock before changing anything.'
   - eval_time: 30m
     alertname: SlackDeploymentDeliveriesStale
     exp_alerts: []
-- name: SlackDeploymentDeliveriesStale fires while every delivery is stale, summed across control pods
+- name: SlackDeploymentDeliveriesStale fires for each pod whose deliveries are all stale
   interval: 1m
   input_series:
   - series: 'tf_slack_webhook_deployment_deliveries_total{instance="control-1:9464",app_id="A1",signature="stale"}'
@@ -717,17 +718,43 @@ tests:
     alertname: SlackDeploymentDeliveriesStale
     exp_alerts:
     - exp_labels:
+        instance: 'control-1:9464'
         app_id: A1
         severity: warning
       exp_annotations:
-        summary: 'Deliveries to the deployment Slack app are refused as stale'
-        description: 'In the last 15 minutes, deliveries for app A1 reached /api/webhooks/slack with a timestamp more than five minutes from control''s clock, and none verified. If the clock on a host running control is that far off, every delivery fails, and Slack turns the app''s event subscriptions off once more than 95% of them fail within an hour. Compare that clock with the real time and fix the host''s time sync. A replayed or forged request also counts, so check the clock before changing anything.'
-- name: SlackDeploymentDeliveriesStale does not fire while the app's deliveries verify
+        summary: 'Control pod control-1:9464 is refusing the deployment Slack app''s deliveries as stale'
+        description: 'In the last 15 minutes, control pod control-1:9464 refused deliveries for app A1 at /api/webhooks/slack because their timestamp was more than five minutes from its clock, and verified none. If that pod''s host clock is that far off, every delivery that reaches the pod fails, and once that is more than 95% of the app''s deliveries within an hour, Slack turns the app''s event subscriptions off. Compare the host''s clock with the real time and fix its time sync. A replayed or forged request also counts, so check the clock before changing anything.'
+    - exp_labels:
+        instance: 'control-2:9464'
+        app_id: A1
+        severity: warning
+      exp_annotations:
+        summary: 'Control pod control-2:9464 is refusing the deployment Slack app''s deliveries as stale'
+        description: 'In the last 15 minutes, control pod control-2:9464 refused deliveries for app A1 at /api/webhooks/slack because their timestamp was more than five minutes from its clock, and verified none. If that pod''s host clock is that far off, every delivery that reaches the pod fails, and once that is more than 95% of the app''s deliveries within an hour, Slack turns the app''s event subscriptions off. Compare the host''s clock with the real time and fix its time sync. A replayed or forged request also counts, so check the clock before changing anything.'
+- name: SlackDeploymentDeliveriesStale names the one pod refusing while another pod verifies
   interval: 1m
   input_series:
-  - series: 'tf_slack_webhook_deployment_deliveries_total{app_id="A1",signature="stale"}'
+  - series: 'tf_slack_webhook_deployment_deliveries_total{instance="control-1:9464",app_id="A1",signature="stale"}'
+    values: '1+2x50'
+  - series: 'tf_slack_webhook_deployment_deliveries_total{instance="control-2:9464",app_id="A1",signature="verified"}'
+    values: '1+2x50'
+  alert_rule_test:
+  - eval_time: 30m
+    alertname: SlackDeploymentDeliveriesStale
+    exp_alerts:
+    - exp_labels:
+        instance: 'control-1:9464'
+        app_id: A1
+        severity: warning
+      exp_annotations:
+        summary: 'Control pod control-1:9464 is refusing the deployment Slack app''s deliveries as stale'
+        description: 'In the last 15 minutes, control pod control-1:9464 refused deliveries for app A1 at /api/webhooks/slack because their timestamp was more than five minutes from its clock, and verified none. If that pod''s host clock is that far off, every delivery that reaches the pod fails, and once that is more than 95% of the app''s deliveries within an hour, Slack turns the app''s event subscriptions off. Compare the host''s clock with the real time and fix its time sync. A replayed or forged request also counts, so check the clock before changing anything.'
+- name: SlackDeploymentDeliveriesStale does not fire while the pod's deliveries verify
+  interval: 1m
+  input_series:
+  - series: 'tf_slack_webhook_deployment_deliveries_total{instance="control-1:9464",app_id="A1",signature="stale"}'
     values: '_x3 1x45'
-  - series: 'tf_slack_webhook_deployment_deliveries_total{app_id="A1",signature="verified"}'
+  - series: 'tf_slack_webhook_deployment_deliveries_total{instance="control-1:9464",app_id="A1",signature="verified"}'
     values: '1+1x50'
   alert_rule_test:
   - eval_time: 5m
@@ -736,9 +763,9 @@ tests:
 - name: SlackDeploymentDeliveriesStale does not fire for other refusals
   interval: 1m
   input_series:
-  - series: 'tf_slack_webhook_deployment_deliveries_total{app_id="A1",signature="mismatch"}'
+  - series: 'tf_slack_webhook_deployment_deliveries_total{instance="control-1:9464",app_id="A1",signature="mismatch"}'
     values: '_x3 1+1x45'
-  - series: 'tf_slack_webhook_deployment_deliveries_total{app_id="A1",signature="malformed"}'
+  - series: 'tf_slack_webhook_deployment_deliveries_total{instance="control-1:9464",app_id="A1",signature="malformed"}'
     values: '_x3 1+1x45'
   alert_rule_test:
   - eval_time: 5m

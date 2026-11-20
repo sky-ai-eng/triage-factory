@@ -72,38 +72,42 @@ groups:
             secret before changing it. Each control pod logs a WARN line for
             these, at most one a minute.
 
-      # Deliveries to the deployment app's Events API endpoint refused because
-      # their timestamp is more than five minutes from control's clock, and
-      # none verified. A control host clock that far off refuses every
-      # delivery this way. One running fast usually breaks GitHub App tokens
-      # too, so UpstreamFailingFleetWide may fire first; one running slow
-      # breaks only this. Anyone can replay or forge a stale request, which
-      # the verified-delivery condition rules out while Slack is delivering;
-      # in a quiet window a single one can still fire it, so it is a warning.
+      # A control pod refused deliveries to the deployment app's Events API
+      # endpoint because their timestamp is more than five minutes from its
+      # clock, and verified none. A host clock that far off refuses every
+      # delivery that reaches its pod. One running fast usually breaks GitHub
+      # App tokens too, so UpstreamFailingFleetWide may fire first; one running
+      # slow breaks only this. Grouped by pod, because each pod checks the
+      # timestamp against its own host's clock: one host can drift while the
+      # others keep verifying, and that pod is what the operator fixes. Anyone
+      # can replay or forge a stale request, which the verified-delivery
+      # condition rules out while Slack is delivering to the pod; in a quiet
+      # window a single one can still fire it, so it is a warning.
       - alert: SlackDeploymentDeliveriesStale
         expr: |
           (
-            sum by (app_id) (increase(tf_slack_webhook_deployment_deliveries_total{signature="stale"}[15m])) > 0
+            sum by (instance, app_id) (increase(tf_slack_webhook_deployment_deliveries_total{signature="stale"}[15m])) > 0
             or
-            sum by (app_id) (
+            sum by (instance, app_id) (
               tf_slack_webhook_deployment_deliveries_total{signature="stale"}
               unless last_over_time(tf_slack_webhook_deployment_deliveries_total{signature="stale"}[15m] offset 15m)
             ) > 0
           )
-          unless on (app_id)
-          sum by (app_id) (increase(tf_slack_webhook_deployment_deliveries_total{signature="verified"}[15m])) > 0
+          unless on (instance, app_id)
+          sum by (instance, app_id) (increase(tf_slack_webhook_deployment_deliveries_total{signature="verified"}[15m])) > 0
         labels:
           severity: warning
         annotations:
-          summary: "Deliveries to the deployment Slack app are refused as stale"
+          summary: "Control pod {{ $labels.instance }} is refusing the deployment Slack app's deliveries as stale"
           description: >-
-            In the last 15 minutes, deliveries for app {{ $labels.app_id }}
-            reached /api/webhooks/slack with a timestamp more than five minutes
-            from control's clock, and none verified. If the clock on a host
-            running control is that far off, every delivery fails, and Slack
-            turns the app's event subscriptions off once more than 95% of them
-            fail within an hour. Compare that clock with the real time and fix
-            the host's time sync. A replayed or forged request also counts, so
+            In the last 15 minutes, control pod {{ $labels.instance }} refused
+            deliveries for app {{ $labels.app_id }} at /api/webhooks/slack
+            because their timestamp was more than five minutes from its clock,
+            and verified none. If that pod's host clock is that far off, every
+            delivery that reaches the pod fails, and once that is more than 95%
+            of the app's deliveries within an hour, Slack turns the app's event
+            subscriptions off. Compare the host's clock with the real time and
+            fix its time sync. A replayed or forged request also counts, so
             check the clock before changing anything.
 
       # Slack sent app_rate_limited: the app went past the Events API's

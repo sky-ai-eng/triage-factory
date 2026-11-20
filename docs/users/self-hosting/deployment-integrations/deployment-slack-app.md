@@ -224,8 +224,9 @@ Each of these is a line in `docker compose logs control`, except where noted.
 - **Control's clock is off** (Events API) — not logged. Triage Factory answers
   each delivery 401 and counts it in
   `tf_slack_webhook_deployment_deliveries_total` under `signature="stale"`.
-  That count rising with nothing under `signature="verified"` means the clock
-  on a host running control is more than five minutes from the real time; a
+  Each control pod counts its own, and the alert names the pod. That count
+  rising on a pod with nothing under `signature="verified"` on the same pod
+  means that pod's host clock is more than five minutes from the real time; a
   replayed or forged request also counts, so a few and then nothing is not
   this. Fix the host's time sync; no restart is needed.
 
