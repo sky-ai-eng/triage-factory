@@ -159,6 +159,13 @@ type PromptStore interface {
 	// JWT-claims context.
 	GetSystem(ctx context.Context, orgID string, id string) (*domain.Prompt, error)
 
+	// GetLiveSystem is GetSystem filtering deleted_at IS NULL, as Get does: a
+	// soft-deleted prompt answers (nil, nil), and a hidden one is returned.
+	// Planning an event-fired run reads its step prompts through it, because
+	// a live blueprint's step can be left on a prompt its team deleted, and a
+	// run of it would execute the deleted prompt.
+	GetLiveSystem(ctx context.Context, orgID string, id string) (*domain.Prompt, error)
+
 	// IncrementUsageSystem mirrors IncrementUsage but routes through
 	// the admin pool in Postgres. The delegate spawner bumps
 	// usage_count from inside a goroutine that continues past the

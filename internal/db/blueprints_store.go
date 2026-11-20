@@ -429,9 +429,8 @@ type BlueprintStore interface {
 	// is not a step in any blueprint.
 	StepPromptOwner(ctx context.Context, orgID string, promptID string) (blueprintID string, ok bool, err error)
 
-	// GetSystem mirrors Get but routes through the admin pool in Postgres.
-	// The delegate spawner resolves a trigger/manual blueprint from a
-	// goroutine that continues past the request lifecycle.
+	// GetSystem is Get on the admin pool in Postgres, except that it also
+	// resolves a soft-deleted blueprint, as a past run's blueprint can be.
 	GetSystem(ctx context.Context, orgID string, id string) (*domain.Blueprint, error)
 
 	// GetLiveSystem is GetSystem filtering deleted_at IS NULL, as Get does: a

@@ -265,6 +265,11 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 		if got == nil {
 			t.Fatalf("Get should still return hidden rows by ID")
 		}
+		// So does GetLiveSystem: a hidden prompt can still be a live
+		// blueprint's step, and an event firing of it runs.
+		if got, err := store.GetLiveSystem(ctx, orgID, "u-hidden"); err != nil || got == nil || got.ID != "u-hidden" {
+			t.Fatalf("GetLiveSystem hidden = (%v, %v); want the hidden row", got, err)
+		}
 	})
 
 	t.Run("List_SearchMatchesName", func(t *testing.T) {
@@ -502,6 +507,10 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 		got, err := store.GetSystem(ctx, orgID, "sd-1")
 		if err != nil || got == nil {
 			t.Fatalf("GetSystem after soft-delete = (%v, %v); want a row", got, err)
+		}
+		// GetLiveSystem hides it, as Get does: a new run must not start on it.
+		if got, err := store.GetLiveSystem(ctx, orgID, "sd-1"); err != nil || got != nil {
+			t.Fatalf("GetLiveSystem after soft-delete = (%v, %v); want (nil, nil)", got, err)
 		}
 	})
 

@@ -34,7 +34,8 @@ var (
 
 	// ErrBlueprintNotFound — the caller passed a blueprint id that doesn't
 	// resolve to a live blueprint it can see: none has the id, or the one
-	// that had it is deleted. Race-correctable.
+	// that had it is deleted. Either holds until the caller names another
+	// blueprint, so a retry of the same firing is refused the same way.
 	ErrBlueprintNotFound = errors.New("delegate: blueprint not found")
 
 	// ErrBlueprintUnspecified — the caller passed an empty blueprint id. The
@@ -116,7 +117,7 @@ func (s *Spawner) resolveBlueprintSteps(orgID, blueprintID, triggerType, creator
 // Routing splits on triggerType to honor the prompts_select RLS policy:
 //
 //   - triggerType == "event": router-fired runs have no user identity to
-//     check against. Stay on the admin pool (GetSystem) — the event
+//     check against. Stay on the admin pool (GetLiveSystem) — the event
 //     subscriber is a system actor.
 //   - triggerType == "manual": load via the app pool under the
 //     requesting user's synthetic claims so prompts_select filters out
@@ -150,7 +151,7 @@ func (s *Spawner) resolvePrompt(orgID string, task domain.Task, explicitPromptID
 			return nil
 		})
 	} else {
-		p, err = s.prompts.GetSystem(context.Background(), orgID, explicitPromptID)
+		p, err = s.prompts.GetLiveSystem(context.Background(), orgID, explicitPromptID)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to load prompt %s: %w", explicitPromptID, err)
