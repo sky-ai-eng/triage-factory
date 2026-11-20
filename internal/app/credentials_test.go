@@ -7,11 +7,15 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/zalando/go-keyring"
 	_ "modernc.org/sqlite"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/llm/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -152,5 +156,47 @@ func TestResolveAIModelForTeam_UnreadableStateRefuses(t *testing.T) {
 
 	if _, err := resolveAIModelForTeam(context.Background(), stores, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID); err == nil {
 		t.Error("an unreadable settings row resolved a model instead of refusing")
+	}
+}
+
+// A local run resolves the key its org bound, and only that. The keychain is
+// one bag for every state root of the OS user, so a key in it that this state
+// root's settings row does not name is not this org's, and the run stays on the
+// host's credentials.
+func TestBuildRunCredentials_LocalResolvesWhatTheSettingsRowBound(t *testing.T) {
+	keyring.MockInit()
+	auth.ResetSecretBackendForTest(t)
+	stores, _ := enableSetStores(t, nil, nil, "")
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+	if err := stores.Secrets.Put(ctx, org, integrations.KeyAnthropicAPIKey, "sk-ant-in-the-keychain", "test"); err != nil {
+		t.Fatalf("store key: %v", err)
+	}
+
+	a := &App{stores: stores}
+	if err := a.buildRunCredentials(); err != nil {
+		t.Fatalf("buildRunCredentials: %v", err)
+	}
+	if a.llmResolver != nil {
+		t.Error("local built an STS role resolver; local cannot bind role mode")
+	}
+
+	env, err := agentproc.ResolveCredentialsForBundle(ctx, a.runSecrets, org, domain.ModelAliasSonnet)
+	if err != nil {
+		t.Fatalf("resolve before the bind: %v", err)
+	}
+	if len(env) != 0 {
+		t.Errorf("an org on the host's credentials resolved %v from a key its settings do not name", env)
+	}
+
+	if _, err := stores.Orgs.SetAnthropicKeyRef(ctx, org, integrations.KeyAnthropicAPIKey); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	env, err = agentproc.ResolveCredentialsForBundle(ctx, a.runSecrets, org, domain.ModelAliasSonnet)
+	if err != nil {
+		t.Fatalf("resolve after the bind: %v", err)
+	}
+	if got := env["ANTHROPIC_API_KEY"]; got != "sk-ant-in-the-keychain" {
+		t.Errorf("ANTHROPIC_API_KEY = %q, want the bound key", got)
 	}
 }
