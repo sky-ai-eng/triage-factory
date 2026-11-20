@@ -449,7 +449,7 @@ export default function LinearTeamRulesGroup({
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Search Linear teams"
           aria-label="Search Linear teams"
-          className="w-full bg-transparent border-0 focus:outline-none text-body text-ink-1 placeholder-ink-3"
+          className="w-full bg-transparent border-0 text-body text-ink-1 placeholder-ink-3"
         />
       </div>
 

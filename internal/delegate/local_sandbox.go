@@ -95,10 +95,11 @@ func (s *Spawner) startLocalSandbox(conversationID, rootKey, cwd string, ghChann
 		// run that does not sign.
 		AllowedSignersFile: signing.allowedSignersPath(),
 	}
-	if ghChannel != nil {
+	if ghChannel.Live() {
 		// The conversation's own gh config + trust file. Only this
 		// conversation's dir comes back through the state-root mask, so a
-		// concurrent run's channel is as absent as the database is.
+		// concurrent run's channel is as absent as the database is. A channel
+		// that is not live holds nothing the run reads, so it is left masked.
 		spec.GHChannelDir = paths.GHChannelDir(conversationID)
 	}
 	return &localSandboxChannel{spec: spec, daemon: daemon}, nil

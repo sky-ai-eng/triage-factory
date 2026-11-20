@@ -138,6 +138,12 @@ type BlueprintPlanStep struct {
 	AllowedTools string `json:"allowed_tools"`
 	Model        string `json:"model"`
 	Brief        string `json:"brief"`
+	// TaskTitle is the task's title when the run was minted, which every
+	// step's mission names. Frozen with the rest of the plan so a step's
+	// instructions do not change when the pull request or issue is renamed.
+	// Empty on a plan frozen before titles were, which names the task's
+	// current title instead.
+	TaskTitle string `json:"task_title,omitempty"`
 }
 
 // Prompt reconstructs the *Prompt the dispatcher hands to MaterializeStepSkill

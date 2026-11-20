@@ -174,7 +174,7 @@ function ScreenTranscript({ messages, conversation, hasOlder, loadingOlder, onLo
         tabIndex={0}
         role="log"
         aria-label="Agent run transcript"
-        className="absolute inset-0 overflow-y-auto px-5 py-5 focus:outline-none md:px-8"
+        className="absolute inset-0 overflow-y-auto px-5 py-5 md:px-8"
       >
         <div ref={contentRef}>
           {hasOlder && (
@@ -246,9 +246,9 @@ function buildRows(messages: Message[], worktree: string | undefined): React.Rea
 
   const rows: React.ReactNode[] = []
   for (const msg of messages) {
-    // A system-authored user row — a stop note, an executor-changed notice,
-    // a compaction result — is the machine explaining itself, and gets a
-    // marker line rather than a YOU line. Checked before the operator arm
+    // A system-authored row — a stop note, an executor-changed notice, a
+    // compaction result, a system update — is the machine explaining itself,
+    // and gets a marker line rather than a YOU line. Checked before the operator arm
     // below, which would otherwise attribute every one of them to the person
     // reading the screen.
     if (isSystemNotice(msg)) {

@@ -576,30 +576,81 @@ func (s *conversationStore) SetWorktreePath(ctx context.Context, orgID, conversa
 	return scanConversationReturning(row)
 }
 
-// setSystemBlock is the write behind SetSystemBlockForClaimSystem, split out so
-// the fenced door can run it inside the fence's own transaction. No unfenced
-// door exposes it: only the engagement that composed the append writes it.
-func (s *conversationStore) setSystemBlock(ctx context.Context, orgID, conversationID, block string) (*domain.Conversation, error) {
+// setSystemBlocks is the write behind SetSystemBlocksForClaimSystem, split out
+// so the fenced door can run it inside the fence's own transaction. No
+// unfenced door exposes it: only the engagement that composed the prompt
+// writes it.
+func (s *conversationStore) setSystemBlocks(ctx context.Context, orgID, conversationID string, blocks domain.SystemBlocks) (*domain.Conversation, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
+	parts, err := db.MarshalSystemParts(blocks.Parts)
+	if err != nil {
+		return nil, err
+	}
 	row := s.q.QueryRowContext(ctx, `
-		UPDATE conversations SET system_block = ? WHERE id = ?
-		RETURNING `+sqliteConversationReturningColumns, block, conversationID)
+		UPDATE conversations SET system_prompt = ?, system_block = ?, system_parts = ? WHERE id = ?
+		RETURNING `+sqliteConversationReturningColumns, blocks.Prompt, blocks.Block, parts, conversationID)
 	return scanConversationReturning(row)
 }
 
-func (s *conversationStore) SystemBlockSystem(ctx context.Context, orgID, conversationID string) (string, error) {
+func (s *conversationStore) SystemBlocksSystem(ctx context.Context, orgID, conversationID string) (domain.SystemBlocks, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return "", err
+		return domain.SystemBlocks{}, err
 	}
-	var block string
+	var (
+		blocks domain.SystemBlocks
+		parts  sql.NullString
+	)
 	err := s.q.QueryRowContext(ctx,
-		`SELECT system_block FROM conversations WHERE id = ?`, conversationID).Scan(&block)
+		`SELECT system_prompt, system_block, system_parts FROM conversations WHERE id = ?`,
+		conversationID).Scan(&blocks.Prompt, &blocks.Block, &parts)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", db.ErrNoSuchConversation
+		return domain.SystemBlocks{}, db.ErrNoSuchConversation
 	}
-	return block, err
+	if err != nil {
+		return domain.SystemBlocks{}, err
+	}
+	if blocks.Parts, err = db.UnmarshalSystemParts(parts); err != nil {
+		return domain.SystemBlocks{}, err
+	}
+	return blocks, nil
+}
+
+// LatestSystemUpdateSystem — see the interface doc.
+func (s *conversationStore) LatestSystemUpdateSystem(ctx context.Context, orgID, conversationID string) (*domain.Message, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT `+sqliteMessageColumns+`
+		FROM messages
+		WHERE conversation_id = ? AND role = 'system' AND subtype = ? AND window_state <> 'inactive'
+		ORDER BY COALESCE(seq, id) DESC, id DESC
+		LIMIT 1
+	`, conversationID, domain.MessageSubtypeSystemUpdate)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	msgs, err := scanMessageRows(rows)
+	if err != nil || len(msgs) == 0 {
+		return nil, err
+	}
+	return &msgs[0], nil
+}
+
+// WithdrawSystemUpdateSystem — see the interface doc.
+func (s *conversationStore) WithdrawSystemUpdateSystem(ctx context.Context, orgID, conversationID string, id int) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	_, err := s.q.ExecContext(ctx, `
+		UPDATE messages SET delivered = 0, window_state = 'inactive'
+		WHERE conversation_id = ? AND id = ?
+		  AND role = 'system' AND subtype = ? AND window_state = 'active'
+	`, conversationID, id, domain.MessageSubtypeSystemUpdate)
+	return err
 }
 
 func (s *conversationStore) SetExecutorSystem(ctx context.Context, orgID, conversationID, executorID string, bootEpoch int64) (*domain.ExecutorClaim, error) {
@@ -1974,13 +2025,13 @@ func (s *conversationStore) SetSessionForClaimSystem(ctx context.Context, orgID,
 	return result, nil
 }
 
-func (s *conversationStore) SetSystemBlockForClaimSystem(ctx context.Context, orgID, conversationID, claimID, block string) (*domain.Conversation, error) {
+func (s *conversationStore) SetSystemBlocksForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, blocks domain.SystemBlocks) (*domain.Conversation, error) {
 	var result *domain.Conversation
 	err := inTx(ctx, s.q, func(q queryer) error {
 		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
-		r, err := (&conversationStore{q: q}).setSystemBlock(ctx, orgID, conversationID, block)
+		r, err := (&conversationStore{q: q}).setSystemBlocks(ctx, orgID, conversationID, blocks)
 		result = r
 		return err
 	})

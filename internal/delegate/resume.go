@@ -267,20 +267,17 @@ type ResumeOptions struct {
 	// runs that never had a repo context.
 	GitHubOwner string
 
-	// SystemBlock is this conversation's own system block as its launch
-	// composed it — conversations.system_block, read back by the claim
-	// (launchedSystemBlock). The append this resume hands the harness is the
-	// framework blocks in front of it, which is byte-for-byte what the launch
-	// sent.
+	// SystemBlocks is the system prompt this resume hands the harness: the
+	// shared framework prompt and the conversation's own block as its first
+	// claim sent them (resumeClaimSystem), which is byte-for-byte the append
+	// the session was started with.
 	//
-	// It is a captured value rather than something composed here for the same
-	// reason Model is: recomposing would read the prompt row, the team settings
-	// and the knowledge base as they are today, and a conversation woken a week
-	// after it parked would be told to do something nobody asked it to do. Empty
-	// is a legal value — a conversation whose block really was empty, and a
-	// conversation launched before the column existed both resume on the
-	// framework blocks alone.
-	SystemBlock string
+	// They are captured values rather than something composed here for the
+	// same reason Model is: the provider binds the session's thinking to the
+	// append, and a recomposition would read the prompt row, the team settings
+	// and the knowledge base as they are today. What changed since reaches the
+	// session in the resume's message instead.
+	SystemBlocks domain.SystemBlocks
 
 	// ExtraAllowedTools carries the prompt/agent-derived tool extensions
 	// so a resumed session has the same --allowedTools as the initial
@@ -521,15 +518,10 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 		// prompt that was appended to it, so a turn sent without this one wakes
 		// on Claude Code's defaults — no framework blocks, no mission, no step
 		// addendum. The CLI path resolves against THIS process's binary, which
-		// is why the stored half stops at the block.
-		SystemPrompt: sdkSystemPrompt(surfaceFor(opts.conversationType), opts.SystemBlock, agentproc.AgentVisibleBinary(selfBin)),
+		// is why the saved blocks stop short of it.
+		SystemPrompt: sdkSystemPrompt(opts.SystemBlocks, agentproc.AgentVisibleBinary(selfBin)),
 
-		// gh is granted only alongside a live channel — see runAgent's note.
-		AllowedTools: agentproc.BuildAllowedToolsFor(agentproc.AllowedToolsOptions{
-			SelfBin: selfBin,
-			Extras:  opts.ExtraAllowedTools,
-			GH:      ghChannel != nil,
-		}),
+		AllowedTools:   sdkAllowedTools(selfBin, opts.ExtraAllowedTools, ghChannel),
 		ExtraEnv:       extraEnv,
 		TraceID:        conversationID,
 		ConversationID: conversationID,

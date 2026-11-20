@@ -202,7 +202,7 @@ export default function Login() {
                 if (notice) setNotice(null)
               }}
               placeholder="you@company.com"
-              className="w-full rounded-xl border border-line-1 bg-raised px-3.5 py-2.5 text-body text-ink-1 placeholder:text-ink-3 focus:border-warm focus:bg-raised focus:outline-none"
+              className="w-full rounded-xl border border-line-1 bg-raised px-3.5 py-2.5 text-body text-ink-1 placeholder:text-ink-3 focus:border-warm focus:bg-raised"
             />
           </div>
 

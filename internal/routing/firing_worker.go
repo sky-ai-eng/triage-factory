@@ -164,28 +164,31 @@ func closedByRunFinish(task *domain.Task) bool {
 
 // newestEventSince returns the event a reroute of f's task routes: the task's
 // newest event when it is newer than the one f was queued for, else f's own.
-// The comparison is what keeps a task whose timeline is missing f's event
-// from being rerouted with an older one. Nil when f's event row is gone.
+// Asking for an event newer than f's, rather than for the newest, is what
+// keeps a task whose timeline is missing f's event from being rerouted with
+// an older one. The comparison is the store's because the insertion order
+// that breaks a created_at tie is not on an Event. Nil when f's event row is
+// gone.
 func (r *Router) newestEventSince(ctx context.Context, f domain.PendingFiring) (*domain.Event, error) {
 	ev, err := r.events.GetSystem(ctx, f.OrgID, f.TriggeringEventID)
 	if err != nil || ev == nil {
 		return nil, err
 	}
-	latestID, err := r.tasks.LatestEventIDSystem(ctx, f.OrgID, f.TaskID)
+	newerID, err := r.tasks.LatestEventAfterSystem(ctx, f.OrgID, f.TaskID, ev.ID)
 	if err != nil {
 		return nil, err
 	}
-	if latestID == "" || latestID == ev.ID {
+	if newerID == "" {
 		return ev, nil
 	}
-	latest, err := r.events.GetSystem(ctx, f.OrgID, latestID)
+	newer, err := r.events.GetSystem(ctx, f.OrgID, newerID)
 	if err != nil {
 		return nil, err
 	}
-	if latest != nil && latest.CreatedAt.After(ev.CreatedAt) {
-		return latest, nil
+	if newer == nil {
+		return ev, nil
 	}
-	return ev, nil
+	return newer, nil
 }
 
 // processFiring runs one claimed firing as one unit: renew the lease,

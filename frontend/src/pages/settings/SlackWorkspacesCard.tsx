@@ -381,11 +381,7 @@ function ConnectArea({
       <div className="space-y-3">
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
           <a href={slackInstallStartURL(orgId, returnTo)} className={primaryButtonClass}>
-            {/* The label takes its color on a span: the global link color is
-                unlayered CSS, which outranks a utility class on the <a>.
-                TODO(TFAC-1490): the span goes once the global link color is
-                layered below utilities, and the <a> carries text-warm-ink. */}
-            <span className="text-warm-ink">Add to Slack</span>
+            Add to Slack
           </a>
           <button
             type="button"

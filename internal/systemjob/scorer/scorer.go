@@ -71,8 +71,8 @@ type batchScoreFn func(ctx context.Context, tasks []TaskInput, orgID, model stri
 // llmResolveFunc is the RunOptions.LLMResolver shape a background LLM job
 // carries — the brain-side llmcred adapter (llmcred.SystemEnvResolver) that
 // mints short-lived STS creds for a role-mode Bedrock org and passes stored
-// material through otherwise. nil in local mode (ambient) and in tests, where
-// Run keeps its built-in raw-secret resolution.
+// material through otherwise. nil in local mode, which cannot bind role mode,
+// and in tests, where Run keeps its built-in raw-secret resolution.
 type llmResolveFunc func(ctx context.Context, orgID, model string) (map[string]string, error)
 
 // scoreTasks runs the AI scoring pipeline on a set of tasks for the Runner's
@@ -210,7 +210,8 @@ func scoreBatch(ctx context.Context, tasks []TaskInput, orgID, model string, sec
 	// aborts in-flight scoring calls instead of waiting for the model to
 	// time out. LLMResolver routes a role-mode Bedrock org through
 	// internal/cred/llmcred so the direct API call is signed with a freshly-minted
-	// short-lived STS session credential (TFAC-616); nil for local/ambient.
+	// short-lived STS session credential (TFAC-616); nil in local, which cannot
+	// bind role mode.
 	result, err := recorder.Complete(ctx, systemllm.CompleteOptions{
 		OrgID:        orgID,
 		Job:          systemllm.JobScorer,

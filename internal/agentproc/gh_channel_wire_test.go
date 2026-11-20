@@ -261,6 +261,81 @@ func TestLocalGHChannel_IgnoresUserGHConfig(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(home, ".config", "gh", "config.yml")); err == nil {
 		t.Error("gh wrote into the user's config dir; GH_CONFIG_DIR must redirect it")
 	}
+
+	// A request that names github.com around GH_HOST finds the refusing token
+	// rather than falling through to the OS keyring, where `gh auth login`
+	// keeps the user's credential.
+	if got := wireGHAuthToken(t, env, "github.com"); got != ghNoCredentialToken {
+		t.Errorf("gh auth token --hostname github.com = %q, want the refusing token", got)
+	}
+}
+
+// A run whose channel did not start has no TF-owned gh, so the gh on its PATH
+// is the user's own. Under that run's env it must find no credential of the
+// user's for any host: not in their ~/.config/gh, and not in the OS keyring,
+// which gh reads for a host whose token variable is unset. A keyring cannot be
+// staged here, so the test pins the precedence that leaves it unread: for
+// github.com, a ghe.com tenancy, and a GHES host, gh answers with the refusing
+// token from the env, and so does gh as git's credential helper, the one
+// `gh auth setup-git` installs.
+func TestLocalGHChannel_NotLiveRunFindsNoUserCredential(t *testing.T) {
+	const humanToken = "gho_the_humans_own_token"
+	home := t.TempDir()
+	userGH := filepath.Join(home, ".config", "gh")
+	if err := os.MkdirAll(userGH, 0o700); err != nil {
+		t.Fatalf("mkdir user gh config: %v", err)
+	}
+	hosts := "github.com:\n    oauth_token: " + humanToken + "\n    user: a-real-person\n" +
+		"github.corp.example:\n    oauth_token: " + humanToken + "\n    user: a-real-person\n"
+	if err := os.WriteFile(filepath.Join(userGH, "hosts.yml"), []byte(hosts), 0o600); err != nil {
+		t.Fatalf("write user hosts.yml: %v", err)
+	}
+	configDir := filepath.Join(t.TempDir(), "config")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatalf("mkdir run gh config: %v", err)
+	}
+
+	// The real gh stands in for the user's own installation, first on PATH as
+	// it would be on their machine.
+	env := append([]string{
+		"HOME=" + home,
+		"PATH=" + wireBinDir(t) + string(os.PathListSeparator) + "/usr/bin:/bin",
+	}, directGHChannelEnv(&GHChannelParams{ConfigDir: configDir})...)
+
+	for _, host := range []string{"github.com", "acme.ghe.com", "github.corp.example"} {
+		if got := wireGHAuthToken(t, env, host); got != ghNoCredentialToken {
+			t.Errorf("gh auth token --hostname %s = %q, want the refusing token", host, got)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", "gh auth git-credential get")
+	cmd.Env = env
+	cmd.Dir = t.TempDir()
+	cmd.Stdin = strings.NewReader("protocol=https\nhost=github.com\n\n")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("gh auth git-credential get: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "password="+ghNoCredentialToken+"\n") || strings.Contains(string(out), humanToken) {
+		t.Errorf("gh auth git-credential get = %q, want the refusing token as the password", out)
+	}
+}
+
+// wireGHAuthToken is the token gh resolves for host under env.
+func wireGHAuthToken(t *testing.T, env []string, host string) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", "gh auth token --hostname "+host)
+	cmd.Env = env
+	cmd.Dir = t.TempDir()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("gh auth token --hostname %s: %v\n%s", host, err, out)
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // Close stops the listener and removes the channel directory. A run that

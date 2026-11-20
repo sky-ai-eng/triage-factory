@@ -218,24 +218,24 @@ func (s *factoryReadStore) RecentEventsByEntity(ctx context.Context, orgID strin
 	// Single window-partitioned query — Postgres' param limit is
 	// 65535 (uint16), so the entire entityIDs slice fits in one
 	// round-trip even at factoryEntityLimit=500 without chunking.
-	// Tie-break on event id (uuid) to keep ordering stable when
-	// two events share an event_at to the microsecond.
+	// Tie-break on seq, insertion order: events often share an event_at,
+	// since GitHub reports source times to the second.
 	query := `
 		SELECT entity_id, event_type, event_at, detected_at
 		FROM (
 			SELECT entity_id, event_type,
 				COALESCE(occurred_at, created_at) AS event_at,
 				created_at AS detected_at,
-				id AS event_id,
+				seq,
 				ROW_NUMBER() OVER (
 					PARTITION BY entity_id
-					ORDER BY COALESCE(occurred_at, created_at) DESC, id DESC
+					ORDER BY COALESCE(occurred_at, created_at) DESC, seq DESC
 				) AS rn
 			FROM events
 			WHERE org_id = $1 AND entity_id = ANY($2)
 		) ranked
 		WHERE rn <= $3
-		ORDER BY entity_id, event_at ASC, event_id ASC
+		ORDER BY entity_id, event_at ASC, seq ASC
 	`
 	rows, err := s.q.QueryContext(ctx, query, orgID, entityIDs, perEntity)
 	if err != nil {

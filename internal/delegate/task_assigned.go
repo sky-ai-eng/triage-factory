@@ -146,10 +146,9 @@ func (s *Spawner) siblingWork(ctx context.Context, orgID, conversationID string)
 	return tasks
 }
 
-// siblingWorkContext is the <run_context> block of a launch whose work
-// overlaps other tasks, "" when none does. Read at the launch and fixed for
-// the conversation's life; an assignment after it reaches the run as a note
-// (TellTaskAssigned).
+// siblingWorkContext is the <run_context> block of a claim whose work
+// overlaps other tasks, "" when none does. Read at every claim; an assignment
+// while the claim runs reaches the run as a note (TellTaskAssigned).
 func (s *Spawner) siblingWorkContext(ctx context.Context, orgID, conversationID string) string {
 	return domain.SiblingWorkRunContext(s.siblingWork(ctx, orgID, conversationID))
 }
@@ -157,10 +156,10 @@ func (s *Spawner) siblingWorkContext(ctx context.Context, orgID, conversationID 
 // tellWokenOfSiblingWork catches up a conversation a person's message woke
 // after it had concluded, with the work that overlaps it now
 // (domain.SiblingWorkNote). Nothing told it of an assignment while it sat,
-// since only live conversations are told, and a resume replays the
-// <run_context> the conversation launched with. Stages nothing when no work
-// overlaps. A conversation woken from parked was live all along and is not
-// told here.
+// since only live conversations are told; the claim's own system update
+// carries the run context's line as well, and the note says it at the tool
+// boundary the run reads first. Stages nothing when no work overlaps. A
+// conversation woken from parked was live all along and is not told here.
 func (s *Spawner) tellWokenOfSiblingWork(ctx context.Context, orgID, conversationID string) {
 	body := domain.SiblingWorkNote(s.siblingWork(ctx, orgID, conversationID))
 	if body == "" {

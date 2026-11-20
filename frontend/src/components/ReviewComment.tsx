@@ -227,7 +227,7 @@ export default function ReviewComment({
               <textarea
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
-                className="w-full min-h-[80px] text-card-title leading-relaxed text-ink-1 bg-raised border border-line-1 rounded-lg px-3 py-2 font-mono resize-y focus:outline-none focus:border-warm/30 focus:ring-1 focus:ring-warm/10"
+                className="w-full min-h-[80px] text-card-title leading-relaxed text-ink-1 bg-raised border border-line-1 rounded-lg px-3 py-2 font-mono resize-y focus:border-warm/30 focus:ring-1 focus:ring-warm/10"
                 autoFocus
               />
               {error && (

@@ -549,7 +549,7 @@ export default function PromptPicker({
                       aria-controls={listboxId}
                       aria-activedescendant={selId ? optionId(selId) : undefined}
                       aria-autocomplete="list"
-                      className="w-full px-2.5 py-1.5 rounded-lg border border-line-1 bg-raised text-ui text-ink-1 placeholder:text-ink-3 focus:outline-none focus:border-warm/40 focus:ring-1 focus:ring-warm/20 transition-colors"
+                      className="w-full px-2.5 py-1.5 rounded-lg border border-line-1 bg-raised text-ui text-ink-1 placeholder:text-ink-3 focus:border-warm/40 focus:ring-1 focus:ring-warm/20 transition-colors"
                     />
                   </div>
                   <div

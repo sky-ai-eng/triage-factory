@@ -2,6 +2,7 @@ package dbtest
 
 import (
 	"context"
+	"reflect"
 	"strconv"
 	"testing"
 	"time"
@@ -352,6 +353,31 @@ func RunFactoryReadStoreConformance(t *testing.T, mk FactoryStoreFactory) {
 		}
 		if len(got[b]) != 1 {
 			t.Errorf("entity B: returned %d events, want 1", len(got[b]))
+		}
+	})
+
+	// Events sharing a source time, as GitHub's second-resolution
+	// timestamps often make them, keep the order they were recorded in.
+	t.Run("RecentEventsByEntity_BreaksATieByInsertion", func(t *testing.T) {
+		store, orgID, seed := mk(t)
+		ctx := context.Background()
+		at := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+		a := seed.Entity(t, "re-tie")
+		recorded := []string{"github:pr:opened", "github:pr:ready_for_review", "github:pr:ci_check_failed", "github:pr:ci_check_passed"}
+		for _, eventType := range recorded {
+			seed.Event(t, a, eventType, "", at, at)
+		}
+
+		got, err := store.RecentEventsByEntity(ctx, orgID, []string{a}, 3)
+		if err != nil {
+			t.Fatalf("RecentEventsByEntity: %v", err)
+		}
+		var order []string
+		for _, ev := range got[a] {
+			order = append(order, ev.EventType)
+		}
+		if want := recorded[1:]; !reflect.DeepEqual(order, want) {
+			t.Errorf("event order = %v, want the last 3 recorded, in the order recorded: %v", order, want)
 		}
 	})
 

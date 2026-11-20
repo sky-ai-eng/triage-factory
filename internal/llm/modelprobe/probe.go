@@ -96,9 +96,10 @@ type Result struct {
 // this call exactly as a run would. Probing through a different path than runs
 // use would test something other than what runs do.
 //
-// Both are nil in local mode, where runs resolve nothing here either: the
-// subprocess authenticates from the host environment, and handing it the same
-// two nils a run gets is what keeps the probe honest about that.
+// In local mode the resolver is nil and the reader answers only for the
+// providers the org bound, as a run's does: an org on the host's credentials
+// resolves nothing, and the subprocess authenticates from the host
+// environment.
 type Prober struct {
 	secrets  agentproc.SecretsReader
 	resolver func(ctx context.Context, orgID, model string) (map[string]string, error)

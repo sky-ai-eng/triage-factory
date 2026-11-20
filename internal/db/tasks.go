@@ -1086,10 +1086,19 @@ type TaskStore interface {
 	// bumped the task: its newest task_events row of kind 'spawned', 'bumped'
 	// or 'injected' (a bump folded into a live conversation, whose row
 	// MarkEventInjectedSystem rewrote), ordered by the event's created_at,
-	// newest first, ties broken by event id descending. "" when the task has
-	// no such row. primary_event_id stays the spawning event; this is what a
-	// delegated run is briefed with. Admin pool, org_id bound by argument.
+	// newest first. Two events can share a created_at, and a tie goes to the
+	// later insert (SQLite's rowid, Postgres's events.seq). "" when the task
+	// has no such row. primary_event_id stays the spawning event; this is what
+	// a delegated run is briefed with. Admin pool, org_id bound by argument.
 	LatestEventIDSystem(ctx context.Context, orgID, taskID string) (string, error)
+
+	// LatestEventAfterSystem returns the id of the newest of those events
+	// that is newer than eventID, in LatestEventIDSystem's order, or "" when
+	// none is. eventID need not be on the task's timeline, but it must name an
+	// event: "" also answers an id with no event row, so a caller that needs
+	// to tell the two apart reads the event first. Admin pool, org_id bound by
+	// argument.
+	LatestEventAfterSystem(ctx context.Context, orgID, taskID, eventID string) (string, error)
 
 	// MarkEventInjectedSystem flips the (task_id, event_id) timeline row's
 	// kind to "injected" in place — the event bumped the task AND was folded

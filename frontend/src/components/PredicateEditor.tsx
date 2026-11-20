@@ -339,7 +339,7 @@ function EnumField({
     <select
       value={value ?? ''}
       onChange={(e) => onChange(e.target.value || undefined)}
-      className="w-full px-3 py-2 rounded-lg border border-line-1 bg-raised text-body text-ink-1 focus:outline-none focus:border-warm/40 focus:ring-1 focus:ring-warm/20 transition-colors"
+      className="w-full px-3 py-2 rounded-lg border border-line-1 bg-raised text-body text-ink-1 focus:border-warm/40 focus:ring-1 focus:ring-warm/20 transition-colors"
     >
       <option value="">Any</option>
       {options.map((opt) => (
@@ -490,7 +490,7 @@ function StringField({
       value={value ?? ''}
       onChange={(e) => onChange(e.target.value || undefined)}
       placeholder={placeholder ?? 'any'}
-      className="w-full px-3 py-2 rounded-lg border border-line-1 bg-raised text-body text-ink-1 placeholder:text-ink-3 focus:outline-none focus:border-warm/40 focus:ring-1 focus:ring-warm/20 transition-colors"
+      className="w-full px-3 py-2 rounded-lg border border-line-1 bg-raised text-body text-ink-1 placeholder:text-ink-3 focus:border-warm/40 focus:ring-1 focus:ring-warm/20 transition-colors"
     />
   )
 }
@@ -510,7 +510,7 @@ function IntField({
       value={value ?? ''}
       onChange={(e) => onChange(e.target.value ? Number(e.target.value) : undefined)}
       placeholder="any"
-      className="w-full px-3 py-2 rounded-lg border border-line-1 bg-raised text-body text-ink-1 placeholder:text-ink-3 focus:outline-none focus:border-warm/40 focus:ring-1 focus:ring-warm/20 transition-colors"
+      className="w-full px-3 py-2 rounded-lg border border-line-1 bg-raised text-body text-ink-1 placeholder:text-ink-3 focus:border-warm/40 focus:ring-1 focus:ring-warm/20 transition-colors"
     />
   )
 }

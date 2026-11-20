@@ -1075,10 +1075,24 @@ func TestTaskRequestedReviewer_Postgres(t *testing.T) {
 func TestTaskLatestEvent_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
-	dbtest.RunTaskLatestEventConformance(t, func(t *testing.T) (db.Stores, string, string) {
+	dbtest.RunTaskLatestEventConformance(t, func(t *testing.T) dbtest.TaskLatestEventFixture {
 		t.Helper()
 		h.Reset(t)
 		orgID, _, _ := seedPgOrgUserAgent(t, h)
-		return stores, orgID, firstTeamForOrg(t, h, orgID)
+		return dbtest.TaskLatestEventFixture{
+			Stores: stores,
+			OrgID:  orgID,
+			TeamID: firstTeamForOrg(t, h, orgID),
+			SetCreatedAt: func(t *testing.T, eventID string, at time.Time) {
+				t.Helper()
+				res, err := h.AdminDB.Exec(`UPDATE events SET created_at = $1 WHERE org_id = $2 AND id = $3`, at.UTC(), orgID, eventID)
+				if err != nil {
+					t.Fatalf("set created_at: %v", err)
+				}
+				if n, _ := res.RowsAffected(); n != 1 {
+					t.Fatalf("set created_at: %d rows for event %s, want 1", n, eventID)
+				}
+			},
+		}
 	})
 }

@@ -197,7 +197,7 @@ type PRCoherenceTargetQuery struct {
 // table they land on, and the split decides what each returns:
 //
 //   - conversations writes (CompleteForClaimSystem, SetSession, SetWorktreePath,
-//     SetSystemBlockForClaimSystem and their System/ForClaimSystem twins)
+//     SetSystemBlocksForClaimSystem and their System/ForClaimSystem twins)
 //     return (*domain.Conversation, error),
 //     sharing Get's column list and scanner. A miss (no row with that id in
 //     the org) is ErrNoSuchConversation — reachable only on the unfenced
@@ -653,18 +653,19 @@ type ConversationStore interface {
 	// --- Transcript / messages ---
 	//
 	// messages.role is app-validated (no CHECK): "assistant" | "tool" |
-	// "user". "user" covers both a human's free-form message and the
-	// machine-authored rows around it; subtype discriminates the latter, and
-	// blank is a person's own message. Neither dialect CHECKs the column, so
-	// the vocabulary lives in Go: domain's MessageSubtype* constants —
-	// "injection:steer", "injection:executor-changed",
-	// "injection:new-sandbox", "injection:nudge",
-	// "injection:output-limit", "injection:compaction-request",
-	// "injection:compaction-result", "injection:memory",
-	// "injection:task-context", the staged notes' "injection:event" (a
-	// new-event injection) and "injection:system-note" (every other staged
-	// note), and "stop-note" — plus "system_note", which stored deliverable
-	// feedback rows carry.
+	// "user" | "system". "user" covers both a human's free-form message and
+	// the machine-authored rows around it; subtype discriminates the latter,
+	// and blank is a person's own message. "system" is a re-claim's system
+	// update and nothing else, always with subtype "system-update". Neither
+	// dialect CHECKs the column, so the vocabulary lives in Go: domain's
+	// MessageSubtype* constants — "injection:steer",
+	// "injection:executor-changed", "injection:new-sandbox",
+	// "injection:nudge", "injection:output-limit",
+	// "injection:compaction-request", "injection:compaction-result",
+	// "injection:memory", "injection:task-context", the staged notes'
+	// "injection:event" (a new-event injection) and "injection:system-note"
+	// (every other staged note), "stop-note" and "system-update" — plus
+	// "system_note", which stored deliverable feedback rows carry.
 	//
 	// InsertMessage/InsertMessageSystem/Messages/MessagesForConversations below serve
 	// today's readers (the SDK runtime's live stream, the UI transcript
@@ -1038,16 +1039,47 @@ type ConversationStore interface {
 	// Return shape and miss semantics match SetWorktreePath.
 	SetWorktreePathSystem(ctx context.Context, orgID, conversationID, path string) (*domain.Conversation, error)
 
-	// SystemBlockSystem reads back what SetSystemBlockForClaimSystem stored —
-	// the only read of that column, made by the engagement picking the
+	// SystemBlocksSystem reads back what SetSystemBlocksForClaimSystem stored —
+	// the only read of those columns, made by the engagement picking the
 	// conversation back up.
 	//
-	// Its own narrow read rather than a column on the conversation projection:
-	// the value is kilobytes of composed prompt text that exactly one code path
-	// wants, and the projection it would join is the one every list, dashboard
-	// and belt read goes through. ErrNoSuchConversation if conversationID names
-	// no row in the org; the empty string is a stored value (see the write).
-	SystemBlockSystem(ctx context.Context, orgID, conversationID string) (string, error)
+	// Its own narrow read rather than columns on the conversation projection:
+	// the values are kilobytes of composed prompt text that exactly one code
+	// path wants, and the projection they would join is the one every list,
+	// dashboard and belt read goes through. ErrNoSuchConversation if
+	// conversationID names no row in the org; empty strings are stored values
+	// (see the write), and Parts is nil on a row that never recorded any.
+	SystemBlocksSystem(ctx context.Context, orgID, conversationID string) (domain.SystemBlocks, error)
+
+	// LatestSystemUpdateSystem returns the conversation's newest system-update
+	// row (role 'system', subtype domain.MessageSubtypeSystemUpdate) that is
+	// still in the assembly window, or nil when it has none. Its metadata holds
+	// the parts the conversation's blocks were composed from at that claim,
+	// which is what the next claim compares with.
+	//
+	// An inactive row does not count: a compaction that flips one also makes
+	// the blocks it brought the conversation up to the saved ones
+	// (SetSystemBlocksForClaimSystem), so the saved parts are newer than it.
+	// Newest is the highest assembly key, COALESCE(seq, id).
+	LatestSystemUpdateSystem(ctx context.Context, orgID, conversationID string) (*domain.Message, error)
+
+	// WithdrawSystemUpdateSystem takes back a system-update row whose text
+	// never reached the model. The named row, when it is an active
+	// system-update row of the conversation, flips undelivered and inactive,
+	// which marks a row that never happened: the transcript reads and
+	// LatestSystemUpdateSystem both skip it, so the next claim compares with
+	// what the conversation did receive and sends the change again. Any other
+	// id is left alone.
+	//
+	// The caller is an SDK launch whose opening input carried the update and
+	// was never sent (agentproc.RunOptions.OnOpeningUnsent). Unfenced, as the
+	// staged notes the same input carried are restored unfenced: it runs as
+	// the engagement ends, and only the engagement that wrote the row knows
+	// its id.
+	//
+	// Exempt from the returned-row rule: an undo its caller fires and never
+	// reads back.
+	WithdrawSystemUpdateSystem(ctx context.Context, orgID, conversationID string, id int) error
 
 	// EndConversationSystem is EndConversation on the admin pool — see the
 	// app-pool door for the predicate, the return shape and the miss
@@ -1187,27 +1219,30 @@ type ConversationStore interface {
 	// Return shape matches SetSessionForClaimSystem.
 	SetWorktreePathForClaimSystem(ctx context.Context, orgID, conversationID, claimID, path string) (*domain.Conversation, error)
 
-	// SetSystemBlockForClaimSystem records the system append this engagement
-	// launched with — conversations.system_block, the conversation's own block:
-	// the run's facts, its verb reference, its mission and its step addendum,
-	// exactly as composed. The framework blocks in front of it are not stored;
-	// agentprompt.Build reproduces them from a fixed spec.
+	// SetSystemBlocksForClaimSystem records the system prompt this engagement
+	// sends — conversations.system_prompt (the shared framework prompt),
+	// conversations.system_block (the conversation's own block: the run's
+	// facts, its verb reference, its mission and its step addendum) and
+	// conversations.system_parts (the parts both were composed from), exactly
+	// as composed. All three are written together, so the parts describe the
+	// blocks beside them, with one exception: a row saved before parts were
+	// recorded keeps its block, and its next claim saves beside it the parts
+	// that claim composed, which is what the claims after it compare with.
 	//
 	// Written by the claim that launches the conversation, on either runtime,
-	// and read by every claim after it — so the bytes a later turn is sent are
-	// the launch's rather than a second composition from inputs that have since
-	// moved. Fenced for the reason the other two coordinates are: a zombie
-	// engagement's late write would hand the successor's next turn the mission
-	// the zombie was launched with. There is no unfenced door because there is
-	// no claimless writer: only the engagement that composes the append knows
-	// it.
+	// and by a native engagement whose compaction committed; read by every
+	// claim after it — so the bytes a later turn is sent are the ones its
+	// earlier turns were sent, which the provider binds their thinking to.
+	// Fenced for the reason the other coordinates are: a zombie engagement's
+	// late write would hand the successor's next turn the prompt the zombie
+	// composed. There is no unfenced door because there is no claimless
+	// writer: only the engagement that composes the prompt knows it.
 	//
-	// The empty string is a value, not a clear — every section of the block is
-	// optional, so a conversation with nothing to say in any of them stores
-	// nothing and continues on the framework blocks alone.
+	// Empty strings are values, not clears — every section of block 2 is
+	// optional. A nil Parts stores NULL.
 	//
 	// Return shape matches SetSessionForClaimSystem.
-	SetSystemBlockForClaimSystem(ctx context.Context, orgID, conversationID, claimID, block string) (*domain.Conversation, error)
+	SetSystemBlocksForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, blocks domain.SystemBlocks) (*domain.Conversation, error)
 
 	// MarkDeliveredForClaimSystem is the engagement's drain flush: the
 	// pending rows it folded into an assembly are only its to consume while

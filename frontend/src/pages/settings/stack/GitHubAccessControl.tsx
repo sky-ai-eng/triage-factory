@@ -1222,7 +1222,7 @@ function TokenScreen({
           if (e.key === 'Enter' && pat.trim() !== '') onSubmit(pat.trim())
         }}
         aria-invalid={!!error || undefined}
-        className={`w-full rounded-xl border bg-ground px-4 py-2.5 text-body text-ink-1 placeholder-ink-3 transition-colors focus:outline-none focus:ring-2 focus:ring-warm/30 ${
+        className={`w-full rounded-xl border bg-ground px-4 py-2.5 text-body text-ink-1 placeholder-ink-3 transition-colors focus:ring-2 focus:ring-warm/30 ${
           error ? 'border-alarm/50' : 'border-line-1 focus:border-warm/40'
         }`}
       />

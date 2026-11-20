@@ -13,8 +13,8 @@ import (
 // The migration under test, and the one before it, whose schema the tests
 // seed.
 const (
-	eventHandlerModes       int64 = 202611200003
-	beforeEventHandlerModes int64 = 202611200002
+	eventHandlerModes       int64 = 202611200004
+	beforeEventHandlerModes int64 = 202611200003
 )
 
 // The shipped CI pair's slugs before the migration, and the slug its handler

@@ -485,7 +485,7 @@ export default function JiraProjectRulesGroup({
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Search Jira projects"
           aria-label="Search Jira projects"
-          className="w-full bg-transparent border-0 focus:outline-none text-body text-ink-1 placeholder-ink-3"
+          className="w-full bg-transparent border-0 text-body text-ink-1 placeholder-ink-3"
         />
       </div>
 

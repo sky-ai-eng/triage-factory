@@ -27,7 +27,7 @@ import (
 type Manager struct {
 	scores     db.ScoreStore
 	entities   db.EntityStore
-	secrets    agentproc.SecretsReader // per-org LLM-credential reader (nil in local → ambient subscription; system-door reader in multi).
+	secrets    agentproc.SecretsReader // per-org LLM-credential reader (system-door reader; in local, narrowed to the providers the org's settings bound).
 	llmResolve llmResolveFunc          // brain-side role-aware LLM resolver (nil in local/tests).
 	recorder   *systemllm.Recorder     // captures per-batch LLM cost + tokens into system_llm_runs (TFAC-451)
 	limiter    *syslimit.Limiter       // shared system-job sandbox cap, injected into every per-org Runner.

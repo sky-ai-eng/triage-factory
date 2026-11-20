@@ -135,7 +135,7 @@ export default function ChainStepEditor({
                     update(next)
                   }}
                   placeholder="Optional one-line brief shown to the agent"
-                  className="mt-1.5 w-full px-2 py-1 rounded border border-line-1 bg-raised text-ui text-ink-2 placeholder:text-ink-3 focus:outline-none focus:border-warm/40 focus:ring-1 focus:ring-warm/20"
+                  className="mt-1.5 w-full px-2 py-1 rounded border border-line-1 bg-raised text-ui text-ink-2 placeholder:text-ink-3 focus:border-warm/40 focus:ring-1 focus:ring-warm/20"
                 />
               </div>
               <button
