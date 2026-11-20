@@ -734,12 +734,12 @@ func (s *Server) ListenAndServeContext(ctx context.Context, addr string) error {
 // Pair with apiMutating for state-changing routes, which additionally
 // adds the same-origin (CSRF) defense the cookie session needs.
 func (s *Server) api(pattern string, h http.HandlerFunc) {
-	s.mux.mount(pattern, mountAPI, s.withSession(h))
+	s.mux.mount(pattern, mountAPI, nil, s.withSession(h))
 }
 
-// mounts hands a handler subpackage the two mounts above.
+// mounts hands a handler subpackage the mounts above and below.
 func (s *Server) mounts() httpx.Mounts {
-	return httpx.Mounts{API: s.api, APIMutating: s.apiMutating}
+	return httpx.Mounts{API: s.api, APIMutating: s.apiMutating, Op: s.op}
 }
 
 // apiMutating mounts a state-changing /api/* route through both the
@@ -753,7 +753,26 @@ func (s *Server) mounts() httpx.Mounts {
 // CSRF outcome (CSRF rejections short-circuit before the handler runs
 // anyway, so the inner session middleware isn't reached for those).
 func (s *Server) apiMutating(pattern string, h http.HandlerFunc) {
-	s.mux.mount(pattern, mountAPIMutating, s.withCSRFOriginCheck(s.withSession(h)))
+	s.mux.mount(pattern, mountAPIMutating, nil, s.withCSRFOriginCheck(s.withSession(h)))
+}
+
+// op mounts a declared operation at its own pattern: a GET the way api does,
+// any other method the way apiMutating does.
+func (s *Server) op(op httpx.Operation, h http.HandlerFunc) {
+	pattern := op.Spec().Pattern
+	if strings.HasPrefix(pattern, http.MethodGet+" ") {
+		s.mux.mount(pattern, mountAPI, op, s.withSession(h))
+		return
+	}
+	s.mux.mount(pattern, mountAPIMutating, op, s.withCSRFOriginCheck(s.withSession(h)))
+}
+
+// rawOp mounts a declared operation straight on the mux, with no session or
+// CSRF wrap, for a pre-auth route that belongs in the API spec. It is
+// recorded as raw, so it must be on the pre-auth allowlist like any other raw
+// mount.
+func (s *Server) rawOp(op httpx.Operation, h http.Handler) {
+	s.mux.mount(op.Spec().Pattern, mountRaw, op, h)
 }
 
 // How a route was mounted: through api, through apiMutating, or straight on
@@ -764,10 +783,31 @@ const (
 	mountRaw         = "raw"
 )
 
-// routeMount is one pattern mounted on the server and how it was mounted.
+// routeMount is one pattern mounted on the server, how it was mounted, and
+// the operation that declares it, nil for a route mounted without one.
 type routeMount struct {
 	pattern string
 	via     string
+	op      httpx.Operation
+}
+
+// RouteEntry is one route the server mounted: its pattern, whether it was
+// mounted raw (with no session or CSRF wrap), and its declared operation, nil
+// for a route mounted without one.
+type RouteEntry struct {
+	Pattern string
+	Raw     bool
+	Op      httpx.Operation
+}
+
+// RouteTable returns every route the server mounted, extensions' included, in
+// mount order.
+func (s *Server) RouteTable() []RouteEntry {
+	out := make([]RouteEntry, len(s.mux.mounts))
+	for i, m := range s.mux.mounts {
+		out[i] = RouteEntry{Pattern: m.pattern, Raw: m.via == mountRaw, Op: m.op}
+	}
+	return out
 }
 
 // routeMux is the server's ServeMux, recording every mount made on it. The
@@ -783,14 +823,14 @@ type routeMux struct {
 
 // Handle and HandleFunc are the raw mounts: anything that reaches the mux
 // without going through api or apiMutating is recorded as raw.
-func (m *routeMux) Handle(pattern string, h http.Handler) { m.mount(pattern, mountRaw, h) }
+func (m *routeMux) Handle(pattern string, h http.Handler) { m.mount(pattern, mountRaw, nil, h) }
 
 func (m *routeMux) HandleFunc(pattern string, h func(http.ResponseWriter, *http.Request)) {
-	m.mount(pattern, mountRaw, http.HandlerFunc(h))
+	m.mount(pattern, mountRaw, nil, http.HandlerFunc(h))
 }
 
-func (m *routeMux) mount(pattern, via string, h http.Handler) {
-	m.mounts = append(m.mounts, routeMount{pattern: pattern, via: via})
+func (m *routeMux) mount(pattern, via string, op httpx.Operation, h http.Handler) {
+	m.mounts = append(m.mounts, routeMount{pattern: pattern, via: via, op: op})
 	m.ServeMux.Handle(pattern, h)
 }
 
@@ -896,7 +936,7 @@ func (s *Server) routes() {
 	// readiness probe (which would couple to DB + integrations) — the
 	// platforms use auto-restart on liveness failure and we don't want
 	// a flapping integration to recycle the whole process.
-	s.mux.HandleFunc("GET /api/health", s.handleHealth)
+	s.rawOp(opHealth, http.HandlerFunc(s.handleHealth))
 	// Readiness probe — bare path (not under /api/*), matching the universal
 	// k8s/ALB probe convention; Go 1.22's ServeMux matches this exact literal
 	// ahead of the "/" SPA catch-all regardless of registration order.
@@ -932,13 +972,13 @@ func (s *Server) routes() {
 	s.registerEntityRoutes()
 	s.registerAgentRoutes()
 
-	// Websocket: wrapped via s.api so the handshake sees claims in
-	// r.Context() (sentinel in local mode, real values in multi).
-	// handleWS pulls (userID, orgID) out and threads them into the
-	// hub's HandleWS so the per-connection scoping in pkg/websocket
-	// can filter Broadcast fanout without importing internal/server.
-	// Treated as GET-equivalent — no CSRF wrap.
-	s.api("GET /api/ws", s.handleWS)
+	// Websocket: a GET op, so s.op wraps it the way s.api does and the
+	// handshake sees claims in r.Context() (sentinel in local mode, real
+	// values in multi). handleWS pulls (userID, orgID) out and threads them
+	// into the hub's HandleWS so the per-connection scoping in pkg/websocket
+	// can filter Broadcast fanout without importing internal/server. No
+	// CSRF wrap, as for any GET.
+	s.op(opWS, s.handleWS)
 	s.registerDashboardRoutes()
 	s.registerPromptImportRoutes()
 	s.registerRepoRoutes()

@@ -33,7 +33,7 @@ func newBlueprintRaceRig(t *testing.T) *blueprintRaceRig {
 	r.bindGitHubPAT(t)
 	mux := http.NewServeMux()
 	mount := func(pattern string, h http.HandlerFunc) { mux.HandleFunc(pattern, h) }
-	m := httpx.Mounts{API: mount, APIMutating: mount}
+	m := httpx.Mounts{API: mount, APIMutating: mount, Op: func(op httpx.Operation, h http.HandlerFunc) { mount(op.Spec().Pattern, h) }}
 	blueprints.New(r.s.tx, r.s.az).Register(m)
 	prompts.New(r.s.db, r.s.tx, r.s.az).Register(m)
 	mux.HandleFunc("POST /api/event-handlers", r.eh.handleEventHandlerCreate)

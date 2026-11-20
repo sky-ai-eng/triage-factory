@@ -36,18 +36,30 @@ type body struct {
 	httpx.PageRequest
 	*hidden
 
-	At     time.Time       `json:"at"`
-	Ref    textRef         `json:"ref"`
-	Count  int             `json:"count,string"`
-	Items  []item          `json:"items"`
-	Again  []item          `json:"again"`
-	ByRef  map[textRef]int `json:"by_ref"`
-	Raw    json.RawMessage `json:"raw"`
-	Blob   []byte          `json:"blob"`
-	N      json.Number     `json:"n"`
-	Fine   string          `json:"fine"`
-	Hidden time.Time       `json:"-"`
+	At     time.Time              `json:"at"`
+	Ref    textRef                `json:"ref"`
+	Count  int                    `json:"count,string"`
+	Items  []item                 `json:"items"`
+	Again  []item                 `json:"again"`
+	ByRef  map[textRef]int        `json:"by_ref"`
+	Raw    json.RawMessage        `json:"raw"`
+	Patch  httpx.Patch[time.Time] `json:"patch"`
+	Blob   []byte                 `json:"blob"`
+	N      json.Number            `json:"n"`
+	Fine   string                 `json:"fine"`
+	Hidden time.Time              `json:"-"`
 	quiet  time.Time
+}
+
+// opBody is the Req of an op, which its Decode decodes into.
+type opBody struct {
+	When time.Time `json:"when"`
+}
+
+// ops declares ops, in a function so the fixture runs no constructor at init.
+func ops() {
+	httpx.NewJSONOp[opBody, struct{}](httpx.OpSpec{})
+	httpx.NewNoContentOp[httpx.NoBody](httpx.OpSpec{})
 }
 
 // decodeList decodes a body whose element type is a type parameter, which
@@ -61,6 +73,7 @@ func decodeList[T any](w http.ResponseWriter, r *http.Request) {
 
 func handle(w http.ResponseWriter, r *http.Request) {
 	decodeList[string](w, r)
+	ops()
 	var b body
 	if !httpx.DecodeJSONStrict(w, r, &b) {
 		return

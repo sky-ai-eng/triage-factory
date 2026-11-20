@@ -30,6 +30,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/server"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/ttlcache"
 	"go.opentelemetry.io/otel"
 
@@ -160,6 +161,8 @@ type routeMounter interface {
 	API(pattern string, h http.HandlerFunc)
 	APIMutating(pattern string, h http.HandlerFunc)
 	Raw(pattern string, h http.Handler)
+	Op(op httpx.Operation, h http.HandlerFunc)
+	RawOp(op httpx.Operation, h http.Handler)
 	SignedWebhookRateLimit(h http.Handler) http.Handler
 }
 
@@ -171,7 +174,7 @@ type routeMounter interface {
 func mountRoutes(api routeMounter, h *workspacesHandler, dh *deploymentAppHandler, ih *installHandler, ch *channelsHandler, wh *webhookHandler) {
 	api.API("GET /api/orgs/{org_id}/slack/manifest", h.handleManifest)
 	api.APIMutating("POST /api/orgs/{org_id}/slack/connections/import", h.handleConnect)
-	api.APIMutating("POST /api/orgs/{org_id}/slack/connections/list", h.handleList)
+	api.Op(opList, h.handleList)
 	api.API("GET /api/orgs/{org_id}/slack/connections/{workspace_id}/{api_app_id}", h.handleGet)
 	api.APIMutating("DELETE /api/orgs/{org_id}/slack/connections/{workspace_id}/{api_app_id}", h.handleDelete)
 	api.API("GET /api/orgs/{org_id}/slack/connections/{workspace_id}/{api_app_id}/activation-preview", h.handleActivationPreview)

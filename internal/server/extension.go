@@ -16,6 +16,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventing/eventbus"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // ExtensionAPI is the stable surface a registered server extension (the
@@ -44,6 +45,12 @@ type ExtensionAPI interface {
 	// session-gated route must go through API/APIMutating so the session+CSRF
 	// wrap applies.
 	Raw(pattern string, h http.Handler)
+	// Op mounts a declared operation at its own pattern: a GET the way API
+	// does, any other method the way APIMutating does.
+	Op(op httpx.Operation, h http.HandlerFunc)
+	// RawOp mounts a declared operation the way Raw does, for a pre-auth route
+	// that belongs in the API spec. The same restriction as Raw applies.
+	RawOp(op httpx.Operation, h http.Handler)
 	// PreAuthRateLimit wraps a handler in the per-IP pre-auth token bucket
 	// (no-op in local mode), for anonymous-reachable routes.
 	PreAuthRateLimit(h http.Handler) http.Handler
@@ -284,7 +291,9 @@ func (a serverExtensionAPI) API(pattern string, h http.HandlerFunc) { a.s.api(pa
 func (a serverExtensionAPI) APIMutating(pattern string, h http.HandlerFunc) {
 	a.s.apiMutating(pattern, h)
 }
-func (a serverExtensionAPI) Raw(pattern string, h http.Handler) { a.s.mux.Handle(pattern, h) }
+func (a serverExtensionAPI) Raw(pattern string, h http.Handler)        { a.s.mux.Handle(pattern, h) }
+func (a serverExtensionAPI) Op(op httpx.Operation, h http.HandlerFunc) { a.s.op(op, h) }
+func (a serverExtensionAPI) RawOp(op httpx.Operation, h http.Handler)  { a.s.rawOp(op, h) }
 func (a serverExtensionAPI) PreAuthRateLimit(h http.Handler) http.Handler {
 	return a.s.preAuthRateLimit(h)
 }

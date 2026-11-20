@@ -399,7 +399,7 @@ func newLocalRig(t *testing.T) *localRig {
 		})
 	}
 	New(stores.Tx, authz.New(database, stores.Tx), stores.ConversationQueue).
-		Register(httpx.Mounts{API: mount, APIMutating: mount})
+		Register(httpx.Mounts{API: mount, APIMutating: mount, Op: func(op httpx.Operation, h http.HandlerFunc) { mount(op.Spec().Pattern, h) }})
 	return &localRig{db: database, mux: mux}
 }
 

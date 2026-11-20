@@ -7,13 +7,21 @@ import (
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
+var opWS = httpx.NewWebSocketOp(httpx.OpSpec{
+	Pattern:     "GET /api/ws",
+	ID:          "open_event_stream",
+	Summary:     "Open the event stream",
+	Description: "Upgrades the connection to a websocket that streams events for the caller in their current organization, such as a changed task list or a run's new messages. Most events say only that a resource changed, and the client reads it again through its route.",
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
+
 // handleWS wraps the hub's HandleWS so the websocket package stays
 // free of any dependency on internal/server. Identity (userID, orgID)
 // is pulled out of r.Context() before the upgrade and passed to the
 // hub, which captures them on the per-connection struct for the
 // Broadcast-side scoping filter.
 //
-// /api/ws is mounted via s.api(...), so withSession has already run
+// /api/ws is mounted as a GET op through s.op, so withSession has already run
 // by the time we get here: in local mode both values are the sentinel
 // org/user, in multi mode they're the identity the request's credential
 // resolved to — a session cookie's, or an API token's (a non-browser client

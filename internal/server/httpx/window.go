@@ -1,7 +1,6 @@
 package httpx
 
 import (
-	"net/url"
 	"strings"
 	"time"
 )
@@ -10,8 +9,9 @@ import (
 // from the query string. Both absent → the current calendar month (UTC) up to
 // now. Each present value parses as RFC3339 or YYYY-MM-DD (a bare date → UTC
 // midnight). Returns a non-empty errMsg on a malformed value (the handler 400s
-// with it).
-func ParseWindow(q url.Values, now time.Time) (since, until time.Time, errMsg string) {
+// with it). q is the request's query: url.Values, or the QueryValues an op
+// hands its handler.
+func ParseWindow(q interface{ Get(string) string }, now time.Time) (since, until time.Time, errMsg string) {
 	sinceStr := strings.TrimSpace(q.Get("since"))
 	untilStr := strings.TrimSpace(q.Get("until"))
 	if sinceStr == "" && untilStr == "" {

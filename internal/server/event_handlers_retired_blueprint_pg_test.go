@@ -273,7 +273,7 @@ func newAbsorbRig(t *testing.T, wrap func(db.TxRunner) db.TxRunner) absorbRig {
 	r.bindGitHubPAT(t)
 	mux := http.NewServeMux()
 	mount := func(pattern string, h http.HandlerFunc) { mux.HandleFunc(pattern, h) }
-	blueprints.New(r.s.tx, r.s.az).Register(httpx.Mounts{API: mount, APIMutating: mount})
+	blueprints.New(r.s.tx, r.s.az).Register(httpx.Mounts{API: mount, APIMutating: mount, Op: func(op httpx.Operation, h http.HandlerFunc) { mount(op.Spec().Pattern, h) }})
 	return absorbRig{
 		viewerRig: r, mux: mux, afterList: afterList, beforeWrite: beforeWrite,
 		host: r.seedChain(t, "host", 2), absorbed: r.seedChain(t, "absorbed", 1),

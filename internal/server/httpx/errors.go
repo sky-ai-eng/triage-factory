@@ -116,9 +116,9 @@ const (
 // code from the registry above; Message is human prose; Field names the
 // payload field at fault and is set only when one specific field is.
 type ErrorItem struct {
-	Reason  string `json:"reason"`
-	Message string `json:"message"`
-	Field   string `json:"field,omitempty"`
+	Reason  string `json:"reason" doc:"A stable machine code for the fault, in upper snake case, such as INVALID_FIELD."`
+	Message string `json:"message" doc:"A description of the fault for a person to read."`
+	Field   string `json:"field,omitempty" doc:"The request field at fault, present only when the fault is in one field."`
 }
 
 // errorEnvelope is the wire shape WriteErrors emits — the whole of it. It
@@ -128,7 +128,7 @@ type ErrorItem struct {
 // reads the list through the shared parser, so the shim is gone: one shape,
 // no second spelling for a client to prefer.
 type errorEnvelope struct {
-	Errors []ErrorItem `json:"errors"`
+	Errors []ErrorItem `json:"errors" doc:"Every fault found in the request, at least one."`
 }
 
 // WriteErrors writes the error envelope: {"errors": [...]}. Always a list — a

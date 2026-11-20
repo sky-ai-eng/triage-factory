@@ -1,6 +1,7 @@
 package httpx
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -64,6 +65,25 @@ func PatchStrings(v *Validation, raw json.RawMessage, field string) ([]string, P
 	return patchValue[[]string](v, raw, field)
 }
 
+// Patch is a PATCH body field of type T. It keeps the field's raw bytes the
+// way a json.RawMessage field does, so absent and null stay apart, and names
+// the type the field takes, which a RawMessage cannot tell the API spec.
+type Patch[T any] struct{ raw json.RawMessage }
+
+// UnmarshalJSON keeps the bytes and never fails; absent fields never reach it.
+// A type fault in the value is reported by Read, which names the field.
+func (p *Patch[T]) UnmarshalJSON(b []byte) error {
+	p.raw = append(json.RawMessage(nil), b...)
+	return nil
+}
+
+// Read reports what the body said about the field, as PatchString and the
+// other readers do. A struct T refuses a key it does not declare, as the body
+// decode does.
+func (p Patch[T]) Read(v *Validation, field string) (T, PatchState) {
+	return patchValue[T](v, p.raw, field)
+}
+
 // patchValue is the shared body of the readers above: absent stays absent, the
 // literal null clears, and anything else must decode as T or it's a 400 naming
 // the field, in the words the strict body decode uses for the same fault.
@@ -76,7 +96,13 @@ func patchValue[T any](v *Validation, raw json.RawMessage, field string) (T, Pat
 		return zero, PatchClear
 	}
 	var out T
-	if err := json.Unmarshal(raw, &out); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&out); err != nil {
+		if name, ok := unknownFieldName(err); ok {
+			v.Invalid(field, fmt.Sprintf("%s has no field %q", field, name))
+			return zero, patchInvalid
+		}
 		var typeErr *json.UnmarshalTypeError
 		errors.As(err, &typeErr)
 		want, _ := jsonType(reflect.TypeFor[T](), typeErr)

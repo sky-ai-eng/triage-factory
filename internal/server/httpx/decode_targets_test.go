@@ -39,6 +39,15 @@ var decodeDoors = map[string]int{
 	"DecodeJSONStrictBytes": 2,
 }
 
+// opConstructors are the httpx constructors whose first type argument is the
+// Req their op's Decode decodes into. An op of NoBody decodes nothing.
+var opConstructors = map[string]bool{
+	"NewJSONOp":      true,
+	"NewListOp":      true,
+	"NewNoContentOp": true,
+	"NewBytesOp":     true,
+}
+
 const httpxPath = "github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 
 // decodeFinding is one refused shape: the decode target, the JSON path to
@@ -95,6 +104,7 @@ func TestDecodeTargets_FixtureFindings(t *testing.T) {
 		"the body embeds *decodetargets.hidden, a pointer to an unexported struct, which encoding/json cannot allocate",
 		"the body is a decodetargets.stamped, which decodes itself through UnmarshalJSON",
 		"the body is a time.Time, which decodes itself through UnmarshalJSON",
+		"when is a time.Time, which decodes itself through UnmarshalJSON",
 	}
 	slices.Sort(got)
 	if !slices.Equal(got, want) {
@@ -134,6 +144,15 @@ func scanDecodeTargets(t *testing.T, dir string, paths ...string) (int, []decode
 				if !ok {
 					return true
 				}
+				if req, ok := opRequestType(pkg.TypesInfo, call.Fun); ok {
+					targets++
+					pos := pkg.Fset.Position(call.Pos())
+					target := fmt.Sprintf("%s (%s)", pos, types.TypeString(req, types.RelativeTo(pkg.Types)))
+					walkDecodeTarget(req, "", map[types.Type]bool{}, func(path, reason string) {
+						findings = append(findings, decodeFinding{target: target, path: path, reason: reason})
+					})
+					return true
+				}
 				sel, ok := call.Fun.(*ast.SelectorExpr)
 				if !ok {
 					return true
@@ -165,10 +184,54 @@ func scanDecodeTargets(t *testing.T, dir string, paths ...string) (int, []decode
 	return targets, findings
 }
 
+// opRequestType returns the Req of an op constructor's instantiation, the
+// first type argument of httpx.NewJSONOp[Req, Resp] and its siblings. It is
+// false for any other call, and for an op whose Req is NoBody.
+func opRequestType(info *types.Info, fun ast.Expr) (types.Type, bool) {
+	switch idx := fun.(type) {
+	case *ast.IndexExpr:
+		fun = idx.X
+	case *ast.IndexListExpr:
+		fun = idx.X
+	default:
+		return nil, false
+	}
+	sel, ok := fun.(*ast.SelectorExpr)
+	if !ok {
+		return nil, false
+	}
+	fn, ok := info.Uses[sel.Sel].(*types.Func)
+	if !ok || fn.Pkg() == nil || fn.Pkg().Path() != httpxPath || !opConstructors[fn.Name()] {
+		return nil, false
+	}
+	inst, ok := info.Instances[sel.Sel]
+	if !ok || inst.TypeArgs.Len() == 0 {
+		return nil, false
+	}
+	req := inst.TypeArgs.At(0)
+	if isHTTPXType(req, "NoBody") {
+		return nil, false
+	}
+	return req, true
+}
+
+// isHTTPXType reports whether t is httpx's type of that name, or an
+// instantiation of it when it is generic.
+func isHTTPXType(t types.Type, name string) bool {
+	named, ok := t.(*types.Named)
+	if !ok {
+		return false
+	}
+	obj := named.Origin().Obj()
+	return obj.Pkg() != nil && obj.Pkg().Path() == httpxPath && obj.Name() == name
+}
+
 // walkDecodeTarget reports each refused shape in t, which decodes at path,
 // following encoding/json's rules for which fields it decodes.
 func walkDecodeTarget(t types.Type, path string, seen map[types.Type]bool, report func(path, reason string)) {
-	if isJSONType(t, "RawMessage") {
+	// A Patch keeps its bytes without failing, and Read reports a fault in
+	// the value under the field's name, whatever its T.
+	if isJSONType(t, "RawMessage") || isHTTPXType(t, "Patch") {
 		return
 	}
 	if isJSONType(t, "Number") {
