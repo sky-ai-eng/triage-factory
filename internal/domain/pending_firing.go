@@ -87,14 +87,29 @@ const (
 	// is the wrong path to wake it.
 	PendingFiringSkipTaskClosed      = "task_closed"
 	PendingFiringSkipTriggerDisabled = "trigger_disabled"
+	// PendingFiringSkipAutoDelegateDisabled: the team the firing acts as
+	// turned auto-delegation off (team_settings.auto_delegate_enabled) while
+	// the firing waited. The switch stops the team's automation, and a
+	// firing it queued before the switch is part of that automation.
+	PendingFiringSkipAutoDelegateDisabled = "auto_delegate_disabled"
+	// PendingFiringSkipBotDisabled: the team the firing acts as turned the
+	// bot off (team_agents.enabled) while the firing waited, for the reason
+	// PendingFiringSkipAutoDelegateDisabled gives.
+	PendingFiringSkipBotDisabled = "bot_disabled"
 	// PendingFiringSkipPredicateUnmatched: the firing's event does not match
 	// the trigger's scope predicate as the trigger holds it now, usually
-	// because a person narrowed the predicate while the firing waited. The
-	// router would not fire the trigger on the event if it arrived now, so
-	// the worker does not fire it either. A predicate the matcher cannot
-	// evaluate is no match, as it is for the router.
+	// because a person narrowed the predicate while the firing waited. An
+	// event arriving now would not fire the trigger, and the firing is the
+	// same decision made late. A predicate the matcher cannot evaluate is no
+	// match, since reading it as a match would widen the filter.
 	PendingFiringSkipPredicateUnmatched = "predicate_unmatched"
-	PendingFiringSkipBreakerTripped     = "breaker_tripped"
+	// PendingFiringSkipBelowAutonomyThreshold: the trigger's
+	// min_autonomy_suitability is above the task's score as both stand now,
+	// usually because a person raised the threshold while the firing waited,
+	// or the task has no score to compare with it. A missing score is not
+	// read as passing: the threshold exists to filter tasks out.
+	PendingFiringSkipBelowAutonomyThreshold = "below_autonomy_threshold"
+	PendingFiringSkipBreakerTripped         = "breaker_tripped"
 	// PendingFiringSkipClaimChanged: the task is no longer bot-claimed at
 	// firing time — a user took it over or requeued it — so the commitment
 	// the queued row carried is no longer current, and firing would put a

@@ -178,12 +178,7 @@ func TestFiringWorker_EndsThePriorConversation(t *testing.T) {
 	if err := database.QueryRow(`SELECT id FROM tasks WHERE entity_id = ?`, entityID).Scan(&taskID); err != nil {
 		t.Fatalf("resolve the task: %v", err)
 	}
-	if _, err := database.Exec(
-		`INSERT OR IGNORE INTO agents (id, org_id, display_name) VALUES (?, ?, 'Test Bot')`,
-		runmode.LocalDefaultAgentID, runmode.LocalDefaultOrgID,
-	); err != nil {
-		t.Fatalf("seed agent: %v", err)
-	}
+	seedLocalBot(t, database)
 	if ok, err := testTaskStore(database).StampAgentClaimIfUnclaimed(t.Context(), runmode.LocalDefaultOrgID, taskID, runmode.LocalDefaultAgentID, runmode.LocalDefaultTeamID); err != nil || !ok {
 		t.Fatalf("stamp claim: ok=%v err=%v", ok, err)
 	}

@@ -232,14 +232,10 @@ func setupDrainScenarioN(t *testing.T, database *sql.DB, suffix string) (entityI
 
 	// The worker checks task.ClaimedByAgentID before firing. In production
 	// the admission path (tryAutoDelegate) stamps the claim when a firing
-	// lands; the test setup here admits the firing directly, so stamp the
-	// claim explicitly with the local agent sentinel.
-	if _, err := database.Exec(
-		`INSERT OR IGNORE INTO agents (id, org_id, display_name) VALUES (?, ?, 'Test Bot')`,
-		runmode.LocalDefaultAgentID, runmode.LocalDefaultOrgID,
-	); err != nil {
-		t.Fatalf("seed agent: %v", err)
-	}
+	// lands, after the preflight has found the bot on for the team; the test
+	// setup here admits the firing directly, so seed the bot on the team and
+	// stamp the claim explicitly with the local agent sentinel.
+	seedLocalBot(t, database)
 	if ok, err := testTaskStore(database).StampAgentClaimIfUnclaimed(t.Context(), runmode.LocalDefaultOrgID, taskID, runmode.LocalDefaultAgentID, runmode.LocalDefaultTeamID); err != nil || !ok {
 		t.Fatalf("stamp claim: ok=%v err=%v", ok, err)
 	}
@@ -535,6 +531,119 @@ func TestFiringWorker_MatchesThroughTheCurrentView(t *testing.T) {
 	drainOnce(t, drainRouter(database, sqlitestore.New(database).PendingFirings, &stubDelegator{db: database}))
 	if b := firingsFor(t, database, entityB)[0]; b.Status != workitem.StatusReady || b.LastOutcome != "transient" || b.SkipReason != "" {
 		t.Errorf("firing whose view failed = %+v, want ready with the transient outcome", b)
+	}
+
+	// A trigger with no predicate matches every event of its type, so its
+	// firing reads no event and the failing view does not hold it up.
+	entityC, taskC, triggerC, eventC := setupDrainScenarioN(t, database, "c")
+	enqueueFiring(t, database, entityC, taskC, triggerC, eventC)
+	drainOnce(t, drainRouter(database, sqlitestore.New(database).PendingFirings, &stubDelegator{db: database}))
+	requireFired(t, firingsFor(t, database, entityC)[0])
+}
+
+// TestFiringWorker_AFiringWhoseEventIsGoneParksAtOnce: the row's event is
+// held by a foreign key, so a firing whose event cannot be found gets the
+// same answer on every retry and parks on its first attempt.
+func TestFiringWorker_AFiringWhoseEventIsGoneParksAtOnce(t *testing.T) {
+	database := newTestDB(t)
+	entityID, taskID, triggerID, eventID := setupDrainScenario(t, database)
+	enqueueFiring(t, database, entityID, taskID, triggerID, eventID)
+	setTriggerPredicate(t, database, triggerID, `{"author_id_in":["9001"]}`)
+	// The test database holds one connection, so the pragma covers the
+	// delete.
+	if _, err := database.Exec(`PRAGMA foreign_keys = off`); err != nil {
+		t.Fatalf("foreign keys off: %v", err)
+	}
+	if _, err := database.Exec(`DELETE FROM events WHERE id = ?`, eventID); err != nil {
+		t.Fatalf("delete the event: %v", err)
+	}
+	stub := &stubDelegator{db: database}
+	drainOnce(t, drainRouter(database, sqlitestore.New(database).PendingFirings, stub))
+
+	f := firingsFor(t, database, entityID)[0]
+	if f.Status != workitem.StatusParked || f.Attempt != 1 || f.LastOutcome != string(workitem.OutcomePermanent) {
+		t.Errorf("firing whose event is gone = %+v, want parked on its first attempt with the permanent outcome", f)
+	}
+	if stub.calls != 0 {
+		t.Errorf("Delegate called %d times for a firing whose event is gone", stub.calls)
+	}
+}
+
+// TestFiringWorker_HonorsTheTeamsSwitchesAtTheFiring: a team that turns off
+// auto-delegation, or the bot, while a firing it queued waits gets no run
+// from it.
+func TestFiringWorker_HonorsTheTeamsSwitchesAtTheFiring(t *testing.T) {
+	cases := []struct {
+		name   string
+		off    string
+		reason string
+	}{
+		{"auto_delegate_off", `UPDATE team_settings SET auto_delegate_enabled = 0 WHERE team_id = ?`, domain.PendingFiringSkipAutoDelegateDisabled},
+		{"bot_off", `UPDATE team_agents SET enabled = 0 WHERE team_id = ?`, domain.PendingFiringSkipBotDisabled},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			database := newTestDB(t)
+			entityID, taskID, triggerID, eventID := setupDrainScenario(t, database)
+			enqueueFiring(t, database, entityID, taskID, triggerID, eventID)
+			res, err := database.Exec(tc.off, runmode.LocalDefaultTeamID)
+			if err != nil {
+				t.Fatalf("turn the switch off: %v", err)
+			}
+			if n, _ := res.RowsAffected(); n != 1 {
+				t.Fatalf("turning the switch off touched %d rows, want 1", n)
+			}
+			stub := &stubDelegator{db: database}
+			drainOnce(t, drainRouter(database, sqlitestore.New(database).PendingFirings, stub))
+
+			requireSkipped(t, firingsFor(t, database, entityID)[0], tc.reason)
+			if stub.calls != 0 {
+				t.Errorf("Delegate called %d times for a team that turned its automation off", stub.calls)
+			}
+		})
+	}
+}
+
+// TestFiringWorker_MeetsTheTriggersThresholdAtTheFiring: a trigger that waits
+// on the task's score fires a queued firing only on a score at or above its
+// threshold as both stand when the worker fires. The trigger had no threshold
+// when the firing was queued.
+func TestFiringWorker_MeetsTheTriggersThresholdAtTheFiring(t *testing.T) {
+	cases := []struct {
+		name      string
+		threshold float64
+		score     *float64
+		fires     bool
+	}{
+		{"raised_above_the_score", 0.8, new(0.6), false},
+		{"raised_and_still_met", 0.5, new(0.6), true},
+		// A missing score is never read as passing.
+		{"raised_on_an_unscored_task", 0.5, nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			database := newTestDB(t)
+			entityID, taskID, triggerID, eventID := setupDrainScenario(t, database)
+			enqueueFiring(t, database, entityID, taskID, triggerID, eventID)
+			if tc.score != nil {
+				scoreTask(t, database, taskID, *tc.score)
+			}
+			if _, err := database.Exec(`UPDATE event_handlers SET min_autonomy_suitability = ? WHERE id = ?`, tc.threshold, triggerID); err != nil {
+				t.Fatalf("raise the threshold: %v", err)
+			}
+			stub := &stubDelegator{db: database}
+			drainOnce(t, drainRouter(database, sqlitestore.New(database).PendingFirings, stub))
+
+			f := firingsFor(t, database, entityID)[0]
+			if tc.fires {
+				requireFired(t, f)
+				return
+			}
+			requireSkipped(t, f, domain.PendingFiringSkipBelowAutonomyThreshold)
+			if stub.calls != 0 {
+				t.Errorf("Delegate called %d times on a task below the trigger's threshold", stub.calls)
+			}
+		})
 	}
 }
 
