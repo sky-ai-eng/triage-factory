@@ -344,43 +344,43 @@ The bundled Prometheus loads the rules in
 [`docker/observability/rules/`](../../../docker/observability/rules/). Each
 alert's description, shown beside it in Grafana, says what to check.
 
-| Alert                                | Severity | Fires when                                                                                                                                              |
-| ------------------------------------ | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `UpstreamFailingFleetWide`           | critical | More than half of the orgs using an upstream are failing against it, for 10 minutes.                                                                    |
-| `UpstreamDownFleetWide`              | critical | More than half of the orgs' last polls got no answer from GitHub or Jira, for 5 minutes.                                                                |
-| `ConversationsDeferred`              | warning  | Runs have waited 30 minutes on an unavailable model provider, or on GitHub during setup.                                                                |
-| `GitHubScopeDrift`                   | warning  | An org's teams have tracked repositories outside its GitHub App grant for an hour, so they are not polled.                                              |
-| `BackgroundBrainNotRunning`          | critical | No control pod has run polling, routing and scoring for 5 minutes.                                                                                      |
-| `WorkQueueStopped`                   | critical | A queue has ready work that nothing has claimed for about 10 minutes.                                                                                   |
-| `WorkQueueBehind`                    | warning  | An org's oldest ready item has waited past the queue's objective, for 5 minutes.                                                                        |
-| `WorkParked`                         | warning  | An org has work parked for 15 minutes, waiting for an admin under **Parked work** in the org settings.                                                  |
-| `MergeabilityProbesFailing`          | warning  | Most of an org's mergeability reads have failed for 30 minutes, so its merge conflicts are not being seen.                                              |
-| `ClaimsExpiredUnreleased`            | critical | A run's claim has stayed expired with no executor taking it over.                                                                                       |
-| `WorkspaceCheckpointsStale`          | warning  | A live run has gone 45 minutes without a workspace checkpoint.                                                                                          |
-| `WorkspaceCheckpointsFailing`        | warning  | A workspace checkpoint failed in the last hour.                                                                                                         |
-| `SidecarFrameOversized`              | critical | A run's credential sidecar sent a frame over the size limit. Treat that sidecar as compromised.                                                         |
-| `RunPausedAtMemoryLimit`             | warning  | A run paused in the last hour because its sandbox kept reaching `TF_CLAIM_MEMORY_LIMIT_MB`.                                                             |
-| `SandboxesLostToMemoryLimit`         | warning  | The memory limit ended more than nine sandboxes in the last hour.                                                                                       |
-| `CommitSigningStalled`               | critical | A commit signature request has waited over 5 seconds for a minute.                                                                                      |
-| `CommitSignaturesUnanswered`         | warning  | Signature requests went unanswered in the last 15 minutes.                                                                                              |
-| `CommitSignaturesRefusedForRun`      | warning  | A run asked to sign past its budget, after its engagement ended, or as someone other than the signer.                                                   |
-| `DeploymentCommitSignerDown`         | critical | A control pod's [deployment commit signer](deployment-integrations/deployment-commit-signer.md) has not been active for 15 minutes.                     |
-| `AuditRecordsDropped`                | warning  | An agent's write landed without its audit record.                                                                                                       |
-| `ForeignPullRequestRecorded`         | critical | A run recorded a pull request that GitHub says it did not open. Treat that run's credential sidecar as compromised.                                     |
-| `TasksOpenOnClosedEntity`            | warning  | An org has tasks open on a pull request or issue that Triage Factory has closed, which is a bug.                                                        |
-| `SlackDeliveriesRetried`             | warning  | Slack retried deliveries to an app in the last 15 minutes.                                                                                              |
-| `SlackSigningSecretMismatch`         | warning  | Deliveries to the deployment Slack app's Events API endpoint were not signed with `TF_SLACK_SIGNING_SECRET`, and none verified, in the last 15 minutes. |
-| `SlackDeploymentDeliveriesStale`     | warning  | A control pod refused deliveries to the deployment Slack app's Events API endpoint as stale, and verified none, in the last 15 minutes.                 |
-| `SlackDeploymentDeliveriesMalformed` | warning  | Deliveries to the deployment Slack app's Events API endpoint kept being refused as malformed, and none verified, for 15 minutes.                        |
-| `SlackAppRateLimited`                | warning  | Slack dropped an app's event deliveries for its Events API limit in the last 15 minutes.                                                                |
-| `SlackSocketsDownFleetWide`          | critical | More than half of the orgs' own Socket Mode Slack apps have had no open connection to Slack, for 10 minutes.                                            |
-| `SlackDeliveriesRefusedFleetWide`    | critical | More than half of the orgs' own Events API Slack apps are failing the signature check on most deliveries, for 10 minutes.                               |
-| `SlackDeploymentSocketDown`          | critical | The deployment Slack app's Socket Mode connection has not been open for 10 minutes.                                                                     |
-| `SlackDeploymentAppUnusable`         | critical | A control pod has `TF_SLACK_*` set and cannot use the deployment Slack app, for 5 minutes.                                                              |
-| `SlackDeploymentAppInstallRefused`   | warning  | An install of the deployment Slack app failed in the last hour for a reason only you can fix.                                                           |
-| `SlackDeploymentAppThrottled`        | warning  | Slack refused the deployment Slack app's thread reads in the last hour.                                                                                 |
-| `SlackLifecycleEventsDropped`        | warning  | TF dropped Slack status updates, reactions or replies in the last 15 minutes.                                                                           |
-| `JiraDeploymentAppQuotaLow`          | warning  | The deployment's shared Atlassian app has reported its Jira quota near its limit, for 10 minutes.                                                       |
+| Alert                                | Severity | Fires when                                                                                                                                                                   |
+| ------------------------------------ | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `UpstreamFailingFleetWide`           | critical | More than half of the orgs using an upstream are failing against it, for 10 minutes.                                                                                         |
+| `UpstreamDownFleetWide`              | critical | More than half of the orgs' last polls got no answer from GitHub or Jira, for 5 minutes.                                                                                     |
+| `ConversationsDeferred`              | warning  | Runs have waited 30 minutes on an unavailable model provider, or on GitHub during setup.                                                                                     |
+| `GitHubScopeDrift`                   | warning  | An org's teams have tracked repositories outside its GitHub App grant for an hour, so they are not polled.                                                                   |
+| `BackgroundBrainNotRunning`          | critical | No control pod has run polling, routing and scoring for 5 minutes.                                                                                                           |
+| `WorkQueueStopped`                   | critical | A queue has ready work that nothing has claimed for about 10 minutes.                                                                                                        |
+| `WorkQueueBehind`                    | warning  | An org's oldest ready item has waited past the queue's objective, for 5 minutes.                                                                                             |
+| `WorkParked`                         | warning  | An org has work parked for 15 minutes, waiting for an admin under **Parked work** in the org settings.                                                                       |
+| `MergeabilityProbesFailing`          | warning  | Most of an org's mergeability reads have failed for 30 minutes, so its merge conflicts are not being seen.                                                                   |
+| `ClaimsExpiredUnreleased`            | critical | A run's claim has stayed expired with no executor taking it over.                                                                                                            |
+| `WorkspaceCheckpointsStale`          | warning  | A live run has gone 45 minutes without a workspace checkpoint.                                                                                                               |
+| `WorkspaceCheckpointsFailing`        | warning  | A workspace checkpoint failed in the last hour.                                                                                                                              |
+| `SidecarFrameOversized`              | critical | A run's credential sidecar sent a frame over the size limit. Treat that sidecar as compromised.                                                                              |
+| `RunPausedAtMemoryLimit`             | warning  | A run paused in the last hour because its sandbox kept reaching `TF_CLAIM_MEMORY_LIMIT_MB`.                                                                                  |
+| `SandboxesLostToMemoryLimit`         | warning  | The memory limit ended more than nine sandboxes in the last hour.                                                                                                            |
+| `CommitSigningStalled`               | critical | A commit signature request has waited over 5 seconds for a minute.                                                                                                           |
+| `CommitSignaturesUnanswered`         | warning  | Signature requests went unanswered in the last 15 minutes.                                                                                                                   |
+| `CommitSignaturesRefusedForRun`      | warning  | A run asked to sign past its budget, after its engagement ended, or as someone other than the signer.                                                                        |
+| `DeploymentCommitSignerDown`         | critical | A control pod's [deployment commit signer](deployment-integrations/deployment-commit-signer.md) has not been active for 15 minutes.                                          |
+| `AuditRecordsDropped`                | warning  | An agent's write landed without its audit record.                                                                                                                            |
+| `ForeignPullRequestRecorded`         | critical | A run recorded a pull request that GitHub says it did not open. Treat that run's credential sidecar as compromised.                                                          |
+| `TasksOpenOnClosedEntity`            | warning  | An org has tasks open on a pull request or issue that Triage Factory has closed, which is a bug.                                                                             |
+| `SlackDeliveriesRetried`             | warning  | Slack retried deliveries to an app in the last 15 minutes.                                                                                                                   |
+| `SlackSigningSecretMismatch`         | warning  | A control pod refused deliveries to the deployment Slack app's Events API endpoint not signed with its `TF_SLACK_SIGNING_SECRET`, and verified none, in the last 15 minutes. |
+| `SlackDeploymentDeliveriesStale`     | warning  | A control pod refused deliveries to the deployment Slack app's Events API endpoint as stale, and verified none, in the last 15 minutes.                                      |
+| `SlackDeploymentDeliveriesMalformed` | warning  | Deliveries to the deployment Slack app's Events API endpoint kept being refused as malformed, and none verified, for 15 minutes.                                             |
+| `SlackAppRateLimited`                | warning  | Slack dropped an app's event deliveries for its Events API limit in the last 15 minutes.                                                                                     |
+| `SlackSocketsDownFleetWide`          | critical | More than half of the orgs' own Socket Mode Slack apps have had no open connection to Slack, for 10 minutes.                                                                 |
+| `SlackDeliveriesRefusedFleetWide`    | critical | More than half of the orgs' own Events API Slack apps are failing the signature check on most deliveries, for 10 minutes.                                                    |
+| `SlackDeploymentSocketDown`          | critical | The deployment Slack app's Socket Mode connection has not been open for 10 minutes.                                                                                          |
+| `SlackDeploymentAppUnusable`         | critical | A control pod has `TF_SLACK_*` set and cannot use the deployment Slack app, for 5 minutes.                                                                                   |
+| `SlackDeploymentAppInstallRefused`   | warning  | An install of the deployment Slack app failed in the last hour for a reason only you can fix.                                                                                |
+| `SlackDeploymentAppThrottled`        | warning  | Slack refused the deployment Slack app's thread reads in the last hour.                                                                                                      |
+| `SlackLifecycleEventsDropped`        | warning  | TF dropped Slack status updates, reactions or replies in the last 15 minutes.                                                                                                |
+| `JiraDeploymentAppQuotaLow`          | warning  | The deployment's shared Atlassian app has reported its Jira quota near its limit, for 10 minutes.                                                                            |
 
 The two fleet-wide connection alerts need at least two orgs. One org's
 failures are usually its own host, VPN or credential, and show on the
@@ -397,14 +397,15 @@ Web API failing is `UpstreamFailingFleetWide`. `SlackDeliveriesRetried` and
 dropping its events. The rest are about what you own: the
 [deployment Slack app](deployment-integrations/deployment-slack-app.md) and
 TF's own handling of Slack events. `SlackSigningSecretMismatch` and
-`SlackDeploymentDeliveriesStale` count requests anyone can send, so a forged
-request can fire `SlackSigningSecretMismatch` in a window with no deliveries
-from Slack, and `SlackDeploymentDeliveriesStale` in a window with none to the
-control pod it reaches. `SlackDeploymentDeliveriesMalformed` counts the
-requests scanners usually send, so it fires only when refusals keep arriving,
-at least one every five minutes for 15 minutes: a burst of stray requests does
-not fire it, and neither do Slack's deliveries while they come further apart
-than that.
+`SlackDeploymentDeliveriesStale` fire per control pod, because each pod checks
+deliveries against its own `TF_SLACK_SIGNING_SECRET` and its own host's clock,
+and they name the pod. Both count requests anyone can send, so a forged request
+can fire either in a window with no deliveries from Slack to the control pod it
+reaches. `SlackDeploymentDeliveriesMalformed` counts the requests scanners
+usually send, and what is in front of control is usually in front of every pod,
+so it fires per app. It fires only when refusals keep arriving, at least one
+every five minutes for 15 minutes: a burst of stray requests does not fire it,
+and neither do Slack's deliveries while they come further apart than that.
 
 `JiraDeploymentAppQuotaLow` is the only alert on rate-limit readings. On
 Atlassian's default tier, every org that connects Jira through the deployment's

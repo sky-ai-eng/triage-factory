@@ -216,13 +216,16 @@ Each of these is a line in `docker compose logs control`, except where noted.
 - **Wrong signing secret** (Events API) — Triage Factory answers each such
   delivery 401 and counts it in `tf_slack_webhook_signature_mismatches_total`,
   under `names_app="deployment"`, or `"none"` for Slack's request URL check.
-  That counter rising while the app gets no events through means the secret is
-  wrong; a forged request also counts, so a few and then nothing is not this.
-  Each control pod also logs at most one warning a minute: `slack: a delivery
-  to the deployment Slack app's Events API endpoint is not signed with
-  TF_SLACK_SIGNING_SECRET`, with `mismatches` counting the deliveries since
-  its last one. Set `TF_SLACK_SIGNING_SECRET` to the **Signing Secret** on the
-  app's Basic Information page and restart.
+  Each control pod reads its own `TF_SLACK_SIGNING_SECRET` and counts its own,
+  and the alert names the pod. That count rising on a pod with nothing under
+  `signature="verified"` in `tf_slack_webhook_deployment_deliveries_total` on
+  the same pod means that pod's secret is wrong, even while other pods verify;
+  a forged request also counts, so a few and then nothing is not this. The pod
+  also logs at most one warning a minute: `slack: a delivery to the deployment
+  Slack app's Events API endpoint is not signed with TF_SLACK_SIGNING_SECRET`,
+  with `mismatches` counting the deliveries since its last one. Set
+  `TF_SLACK_SIGNING_SECRET` on that pod to the **Signing Secret** on the app's
+  Basic Information page and restart it.
 - **Another app sends to the endpoint** (Events API) — counted under
   `names_app="other"`, and logged as `slack: a delivery naming another Slack
   app reached the deployment Slack app's Events API endpoint`, with that app's

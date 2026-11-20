@@ -37,43 +37,45 @@ groups:
             answers at the public URL quickly. Over Socket Mode, TF acknowledged
             envelopes late. Each retry is also a WARN line in control's log.
 
-      # Deliveries to the deployment app's Events API endpoint that its signing
-      # secret did not sign, and none that it did. A wrong
-      # TF_SLACK_SIGNING_SECRET fails every delivery this way, Slack's request
-      # URL check included (names_app="none"). names_app="other" is another
-      # app still pointed at the endpoint, which is not the secret's fault and
-      # is left out. Anyone can send a request that counts here, which the
-      # verified-delivery condition rules out while Slack is delivering; in a
-      # quiet window a single forged request can still fire it. A warning: the
-      # cause can be outside TF.
-      #
-      # TODO(TFAC-1510): the counts are summed across control pods, so one pod
-      # with a wrong secret is hidden by the other pods' verified deliveries.
+      # A control pod received deliveries to the deployment app's Events API
+      # endpoint that its signing secret did not sign, and none that it did. A
+      # wrong TF_SLACK_SIGNING_SECRET fails every delivery this way, Slack's
+      # request URL check included (names_app="none"). names_app="other" is
+      # another app still pointed at the endpoint, which is not the secret's
+      # fault and is left out. Grouped by pod, because each pod reads the
+      # secret from its own environment: one pod can hold a wrong one, such as
+      # a rotation applied to some pods and not others, while the others keep
+      # verifying, and that pod is what the operator fixes. Anyone can send a
+      # request that counts here, which the verified-delivery condition rules
+      # out while Slack is delivering to the pod; in a quiet window a single
+      # forged request can still fire it. A warning: the cause can be outside
+      # TF.
       - alert: SlackSigningSecretMismatch
         expr: |
           (
-            sum by (app_id) (increase(tf_slack_webhook_signature_mismatches_total{names_app!="other"}[15m])) > 0
+            sum by (instance, app_id) (increase(tf_slack_webhook_signature_mismatches_total{names_app!="other"}[15m])) > 0
             or
-            sum by (app_id) (
+            sum by (instance, app_id) (
               tf_slack_webhook_signature_mismatches_total{names_app!="other"}
               unless last_over_time(tf_slack_webhook_signature_mismatches_total{names_app!="other"}[15m] offset 15m)
             ) > 0
           )
-          unless on (app_id)
-          sum by (app_id) (increase(tf_slack_webhook_deployment_deliveries_total{signature="verified"}[15m])) > 0
+          unless on (instance, app_id)
+          sum by (instance, app_id) (increase(tf_slack_webhook_deployment_deliveries_total{signature="verified"}[15m])) > 0
         labels:
           severity: warning
         annotations:
-          summary: "Deliveries to the deployment Slack app are not signed with TF_SLACK_SIGNING_SECRET"
+          summary: "Deliveries to the deployment Slack app on control pod {{ $labels.instance }} are not signed with its TF_SLACK_SIGNING_SECRET"
           description: >-
             In the last 15 minutes, deliveries for app {{ $labels.app_id }}
-            reached /api/webhooks/slack signed with another secret, and none
-            verified. If TF_SLACK_SIGNING_SECRET is not the Signing Secret on
-            the app's Basic Information page, every delivery fails, and Slack
-            turns the app's event subscriptions off once more than 95% of them
-            fail within an hour. A forged request also counts, so check the
-            secret before changing it. Each control pod logs a WARN line for
-            these, at most one a minute.
+            reached /api/webhooks/slack on control pod {{ $labels.instance }}
+            signed with another secret, and none verified there. If that pod's
+            TF_SLACK_SIGNING_SECRET is not the Signing Secret on the app's
+            Basic Information page, every delivery that reaches the pod fails,
+            and once that is more than 95% of the app's deliveries within an
+            hour, Slack turns the app's event subscriptions off. A forged
+            request also counts, so check the secret before changing it. The
+            pod logs a WARN line for these, at most one a minute.
 
       # A control pod refused deliveries to the deployment app's Events API
       # endpoint because their timestamp is more than five minutes from its
