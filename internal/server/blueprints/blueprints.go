@@ -348,8 +348,8 @@ func (h *Handler) handleBlueprintUpdate(w http.ResponseWriter, r *http.Request) 
 //     watch and keeps making tasks. The prompt head-delete path detaches the
 //     same way.
 //
-// 404 by re-read (Get filters soft-deleted) when the blueprint is missing or
-// already deleted.
+// 404 by re-read (GetForUpdate filters soft-deleted) when the blueprint is
+// missing or already deleted.
 func (h *Handler) handleBlueprintDelete(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
@@ -368,7 +368,10 @@ func (h *Handler) handleBlueprintDelete(w http.ResponseWriter, r *http.Request) 
 
 	var found bool
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		existing, e := tx.Blueprints.Get(r.Context(), orgID, id)
+		// Held until commit, before the detach below reads which handlers
+		// reference the blueprint, so that set cannot gain a handler before
+		// the delete lands (BlueprintStore.GetForUpdate).
+		existing, e := tx.Blueprints.GetForUpdate(r.Context(), orgID, id)
 		if e != nil || existing == nil {
 			return e
 		}
@@ -833,9 +836,9 @@ func (h *Handler) handleBlueprintMerge(w http.ResponseWriter, r *http.Request) {
 		// blueprint. Unreachable from the canvas (you can only connect a tail
 		// into an entry no handler references), but the endpoint is
 		// third-party-callable, so it refuses here, and rolls the merge back.
-		// The check comes after the retire so that it runs under the row lock
-		// the retire's write holds: a handler write holding a reference lock
-		// on the source either committed before that write, and its handler
+		// The check comes after the retire so that it runs while the retire's
+		// write holds the source's row: a handler write holding the source
+		// (GetForShare) either committed before that write, and its handler
 		// is listed here, or waits for this transaction and then reads the
 		// source as absent.
 		triggers, e := tx.EventHandlers.ListForBlueprint(r.Context(), orgID, req.SourceBlueprintID)

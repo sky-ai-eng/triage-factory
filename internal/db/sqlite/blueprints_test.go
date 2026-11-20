@@ -32,7 +32,7 @@ func TestBlueprintStore_SQLite_Conformance(t *testing.T) {
 	})
 }
 
-// TestBlueprintStore_SQLite_LockConformance runs the blueprint lock
+// TestBlueprintStore_SQLite_LockConformance runs the locking reads'
 // conformance suite: the IMMEDIATE write transaction is the lock SQLite takes.
 func TestBlueprintStore_SQLite_LockConformance(t *testing.T) {
 	dbtest.RunBlueprintLockConformance(t, func(t *testing.T) (db.Stores, string, string, string) {

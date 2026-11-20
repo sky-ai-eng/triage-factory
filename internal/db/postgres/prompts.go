@@ -117,6 +117,10 @@ func (s *promptStore) GetSystem(ctx context.Context, orgID string, id string) (*
 	return getPrompt(ctx, s.admin, orgID, id, true)
 }
 
+func (s *promptStore) GetLiveSystem(ctx context.Context, orgID string, id string) (*domain.Prompt, error) {
+	return getPrompt(ctx, s.admin, orgID, id, false)
+}
+
 func getPrompt(ctx context.Context, q queryer, orgID, id string, includeDeleted bool) (*domain.Prompt, error) {
 	query := `
 		SELECT ` + pgPromptColumns + `

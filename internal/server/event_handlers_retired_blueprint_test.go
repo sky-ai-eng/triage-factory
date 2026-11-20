@@ -111,9 +111,8 @@ func TestEventHandlers_BlueprintRetiredAfterTheRouteReadIt(t *testing.T) {
 }
 
 // TestEventHandlers_PatchKeepingARetiredBlueprint: a handler already on a
-// retired blueprint can still have its other fields changed. The PATCH locks
-// the blueprint the row keeps, and a retired one refuses only a body that
-// attaches it.
+// retired blueprint can still have its other fields changed. Only a body that
+// attaches a blueprint that is no longer live is refused.
 func TestEventHandlers_PatchKeepingARetiredBlueprint(t *testing.T) {
 	s := newTestServer(t)
 	configureEventSources(t, s)

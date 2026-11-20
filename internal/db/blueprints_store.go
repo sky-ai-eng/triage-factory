@@ -366,27 +366,31 @@ type BlueprintStore interface {
 	// request-facing paths).
 	Get(ctx context.Context, orgID string, id string) (*domain.Blueprint, error)
 
-	// LockForReference reads the live blueprint id as Get does, and keeps it
-	// live until the caller's transaction ends. A write that makes a row
-	// reference the blueprint, such as an event handler naming it, calls it
-	// right before that write. A transaction that retires the blueprint and
-	// then checks what references it (MergeInto's caller) is then ordered
-	// against the reference: either its retire came first, and this answers
-	// (nil, nil) once it commits, or its retire waits for the referencing
-	// write to commit, and its check sees the reference.
+	// GetForShare and GetForUpdate are Get inside a write transaction, holding
+	// the blueprint until the transaction ends. A write that makes something
+	// reference the blueprint takes GetForShare, and a write that retires it
+	// takes GetForUpdate before it reads or detaches what references it, so
+	// the two run one after the other and the second sees what the first
+	// committed: a reference written first is there for the retire to detach,
+	// and a blueprint retired first reads as absent. A write whose retire is
+	// itself a write to the row, as MergeInto's is, can retire first and read
+	// what references the blueprint after: the retire's write holds the row
+	// as GetForUpdate would.
 	//
-	// The lock belongs to the transaction, so it is called on a write
-	// transaction's stores (db.TxStores from WithTx); both impls refuse
-	// stores outside a transaction. Postgres takes FOR SHARE, which conflicts
-	// with the lock a retire's UPDATE takes and not with another FOR SHARE, so
-	// in Postgres two references do not wait for each other. Under RLS a
-	// locking read also applies the table's UPDATE policy, so a blueprint of a
-	// team the caller cannot write reads as absent; a caller that answers that
-	// case differently reads the blueprint with Get first. SQLite takes
-	// nothing: its write transaction begins IMMEDIATE and already holds the
-	// database's write lock, so a read inside it is enough, and inside a read
-	// transaction it holds nothing at all.
-	LockForReference(ctx context.Context, orgID string, id string) (*domain.Blueprint, error)
+	// Postgres locks the row FOR SHARE or FOR UPDATE, so two writes that only
+	// reference the blueprint do not wait for one another. A lock that waited
+	// on a retire reads the row as it committed, so a retired blueprint answers
+	// (nil, nil). Row-level security applies the blueprints UPDATE policy to a
+	// locking read as well as the SELECT one, so a blueprint of a team the
+	// caller may only read also answers (nil, nil). SQLite takes nothing: its
+	// write transaction begins IMMEDIATE and already holds the database's
+	// write lock.
+	//
+	// Call them on a write transaction's db.TxStores (WithTx). Outside a
+	// transaction, or in a read transaction, both are refused: nothing would
+	// hold the blueprint past the read, or nothing a writer waits for.
+	GetForShare(ctx context.Context, orgID string, id string) (*domain.Blueprint, error)
+	GetForUpdate(ctx context.Context, orgID string, id string) (*domain.Blueprint, error)
 
 	// Create inserts a new blueprint (user or imported source) owned by
 	// teamID. Caller-provided ID. The Postgres impl binds teamID directly
@@ -428,10 +432,15 @@ type BlueprintStore interface {
 	// is not a step in any blueprint.
 	StepPromptOwner(ctx context.Context, orgID string, promptID string) (blueprintID string, ok bool, err error)
 
-	// GetSystem mirrors Get but routes through the admin pool in Postgres.
-	// The delegate spawner resolves a trigger/manual blueprint from a
-	// goroutine that continues past the request lifecycle.
+	// GetSystem is Get on the admin pool in Postgres, except that it also
+	// resolves a soft-deleted blueprint, as a past run's blueprint can be.
 	GetSystem(ctx context.Context, orgID string, id string) (*domain.Blueprint, error)
+
+	// GetLiveSystem is GetSystem filtering deleted_at IS NULL, as Get does: a
+	// soft-deleted blueprint answers (nil, nil). Planning an event-fired run
+	// reads through it, because a handler can be left on a blueprint its team
+	// deleted, and a run of one would execute steps the team deleted.
+	GetLiveSystem(ctx context.Context, orgID string, id string) (*domain.Blueprint, error)
 
 	// IncrementUsage bumps usage_count by 1.
 	// IncrementUsage / IncrementUsageSystem are exempt from the returned-row
@@ -484,10 +493,10 @@ type BlueprintStore interface {
 	//
 	// The caller must reject a triggered source for a clean 422. It checks
 	// after MergeInto, in the same transaction, and rolls back when a handler
-	// names the source: the check then runs under the row lock the retire's
-	// UPDATE holds, so a handler written under LockForReference either
-	// committed before the retire, and the check sees it, or waits for the
-	// merge and reads the source as absent. MergeInto itself does not touch
+	// names the source: the check then runs while the retire's write holds the
+	// source's row, so a handler written under GetForShare either committed
+	// before the retire, and the check sees it, or waits for the merge and
+	// reads the source as absent. MergeInto itself does not touch
 	// event_handlers — the source carrying no trigger is a precondition, not
 	// something this method enforces or repairs.
 	//

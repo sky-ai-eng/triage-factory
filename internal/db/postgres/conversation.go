@@ -1326,7 +1326,7 @@ func (s *conversationStore) SetWorktreePathSystem(ctx context.Context, orgID, co
 // sends, refused once a successor holds the conversation. Fenced-only: nothing
 // without a claim composes a prompt.
 func (s *conversationStore) SetSystemBlocksForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, blocks domain.SystemBlocks) (*domain.Conversation, error) {
-	parts, err := db.MarshalSystemParts(blocks.Parts)
+	args, err := systemBlocksArgs(orgID, conversationID, blocks)
 	if err != nil {
 		return nil, err
 	}
@@ -1335,11 +1335,8 @@ func (s *conversationStore) SetSystemBlocksForClaimSystem(ctx context.Context, o
 		if err := assertClaimActiveForConversationWrite(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
-		r, err := writeConversationReturning(ctx, q, `
-			UPDATE conversations SET system_prompt = $1, system_block = $2, system_parts = $3::jsonb
-			WHERE org_id = $4 AND id = $5
-			RETURNING *
-		`, blocks.Prompt, blocks.Block, parts, orgID, conversationID)
+		r, err := writeConversationReturning(ctx, q, systemBlocksUpdateSQL+`
+		RETURNING *`, args...)
 		if err != nil {
 			return err
 		}
@@ -1350,6 +1347,23 @@ func (s *conversationStore) SetSystemBlocksForClaimSystem(ctx context.Context, o
 		return nil, err
 	}
 	return result, nil
+}
+
+// systemBlocksUpdateSQL saves a conversation's system blocks from
+// systemBlocksArgs. SetSystemBlocksForClaimSystem returns the row it wrote; a
+// compaction that carries blocks has no use for it, so it runs the statement
+// bare rather than paying for the point read's projection, which sums every
+// message of the conversation, inside a transaction holding the row's lock.
+const systemBlocksUpdateSQL = `
+		UPDATE conversations SET system_prompt = $1, system_block = $2, system_parts = $3::jsonb
+		WHERE org_id = $4 AND id = $5`
+
+func systemBlocksArgs(orgID, conversationID string, blocks domain.SystemBlocks) ([]any, error) {
+	parts, err := db.MarshalSystemParts(blocks.Parts)
+	if err != nil {
+		return nil, err
+	}
+	return []any{blocks.Prompt, blocks.Block, parts, orgID, conversationID}, nil
 }
 
 // SystemBlocksSystem reads that stamp back for the engagement picking the
@@ -3176,13 +3190,29 @@ func (s *conversationStore) WithdrawPendingInputSystem(ctx context.Context, orgI
 // greater than the result row's and sorts after every fraction on its own.
 //
 // Exempt from the returned-row rule (bare error stays the return type): this
-// writes up to two inserted rows, a batch flip, and a re-seq of every queued
-// row ahead of the result — no single row a return value could name.
-// replyRow/resultRow's assigned IDs are written back to the caller's own
-// pointers, which stands in for "the row it persisted" here.
-func (s *conversationStore) CompactForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, replyRow, resultRow *domain.Message, inactiveIDs []int) error {
+// writes up to two inserted rows, a batch flip, a re-seq of every queued row
+// ahead of the result, and the conversation's blocks when given them — no
+// single row a return value could name. replyRow/resultRow's assigned IDs are
+// written back to the caller's own pointers, which stands in for "the row it
+// persisted" here.
+func (s *conversationStore) CompactForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, replyRow, resultRow *domain.Message, inactiveIDs []int, blocks *domain.SystemBlocks) error {
+	var blockArgs []any
+	if blocks != nil {
+		var err error
+		if blockArgs, err = systemBlocksArgs(orgID, conversationID, *blocks); err != nil {
+			return err
+		}
+	}
 	return inTx(ctx, s.admin, func(q queryer) error {
-		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
+		// Saving the blocks writes the conversation row, so the fence locks
+		// that row before the claim: holding the claim first, this transaction
+		// could wait on a writer that holds the conversation and waits on the
+		// claim.
+		fence := assertClaimActive
+		if blockArgs != nil {
+			fence = assertClaimActiveForConversationWrite
+		}
+		if err := fence(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
 		if replyRow != nil {
@@ -3232,6 +3262,12 @@ func (s *conversationStore) CompactForClaimSystem(ctx context.Context, orgID, co
 				UPDATE messages SET seq = $1 WHERE org_id = $2 AND conversation_id = $3 AND id = $4
 			`, seq, orgID, conversationID, id); err != nil {
 				return fmt.Errorf("re-seq queued row %d: %w", id, err)
+			}
+		}
+
+		if blockArgs != nil {
+			if _, err := q.ExecContext(ctx, systemBlocksUpdateSQL, blockArgs...); err != nil {
+				return fmt.Errorf("save system blocks: %w", err)
 			}
 		}
 		return nil

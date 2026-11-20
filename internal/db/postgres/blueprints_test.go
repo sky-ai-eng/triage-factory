@@ -41,9 +41,10 @@ func TestBlueprintStore_Postgres_Conformance(t *testing.T) {
 	})
 }
 
-// TestBlueprintStore_Postgres_LockConformance runs the blueprint lock
+// TestBlueprintStore_Postgres_LockConformance runs the locking reads'
 // conformance suite on the production pool split, under the claims of the
-// team's admin, so the locking reads meet the RLS policies a request's do.
+// team's admin, so the row locks are taken through RLS as the routes take
+// them.
 func TestBlueprintStore_Postgres_LockConformance(t *testing.T) {
 	h := pgtest.Shared(t)
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
@@ -52,6 +53,49 @@ func TestBlueprintStore_Postgres_LockConformance(t *testing.T) {
 		orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "blueprint-lock")
 		return stores, orgID, userID, teamID
 	})
+}
+
+// TestBlueprintStore_Postgres_LockingReadHidesAReadOnlyTeamsBlueprint: a
+// locking read takes the blueprints UPDATE policy as well as the SELECT one,
+// so a team viewer, who can Get the team's blueprint, locks nothing and reads
+// it as absent. That is why the handler routes take the lock only on a
+// blueprint of the handler's own team, which the caller can write.
+func TestBlueprintStore_Postgres_LockingReadHidesAReadOnlyTeamsBlueprint(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	ctx := t.Context()
+	orgID, adminID, teamID := pgtest.SeedOrgWithUser(t, h, "blueprint-lock-viewer")
+	viewerID := pgtest.SeedUser(t, h, "viewer")
+	pgtest.AddOrgMember(t, h, viewerID, orgID, teamID, "member", "viewer")
+
+	id := uuid.NewString()
+	if err := stores.Tx.WithTx(ctx, orgID, adminID, func(tx db.TxStores) error {
+		_, err := tx.Blueprints.Create(ctx, orgID, teamID, domain.Blueprint{ID: id, Name: "viewed", Source: "user"})
+		return err
+	}); err != nil {
+		t.Fatalf("seed blueprint: %v", err)
+	}
+
+	if err := stores.Tx.WithTx(ctx, orgID, viewerID, func(tx db.TxStores) error {
+		if b, err := tx.Blueprints.Get(ctx, orgID, id); err != nil || b == nil {
+			t.Fatalf("viewer Get = %+v, %v; want the blueprint", b, err)
+		}
+		for name, read := range map[string]func(context.Context, string, string) (*domain.Blueprint, error){
+			"GetForShare": tx.Blueprints.GetForShare, "GetForUpdate": tx.Blueprints.GetForUpdate,
+		} {
+			b, err := read(ctx, orgID, id)
+			if err != nil {
+				return fmt.Errorf("%s: %w", name, err)
+			}
+			if b != nil {
+				t.Errorf("viewer %s = %+v; want nil", name, b)
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("viewer transaction: %v", err)
+	}
 }
 
 // TestBlueprintStore_Postgres_RunWriteConformance runs the shared returned-row

@@ -3,7 +3,6 @@ package prompts
 import (
 	"database/sql"
 	"errors"
-	"fmt"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -373,9 +372,27 @@ func (h *Handler) handlePromptDelete(w http.ResponseWriter, r *http.Request) {
 			return e
 		}
 		if owned {
+			// Held until commit, before the chain is read, so whether this
+			// retires the owner and which handlers it detaches are decided
+			// from a chain nothing else can change before the delete lands
+			// (BlueprintStore.GetForUpdate). An owner retired, or a prompt
+			// moved off it, while this waited means another write changed
+			// the chain the delete was asked against, so it answers 409
+			// rather than delete from a chain the caller never saw.
+			owner, e := tx.Blueprints.GetForUpdate(r.Context(), orgID, ownerID)
+			if e != nil {
+				return e
+			}
+			if owner == nil {
+				return errOwnerChanged
+			}
 			steps, e := tx.Blueprints.ListSteps(r.Context(), orgID, ownerID)
 			if e != nil {
 				return e
+			}
+			stepIndex := indexOfStep(steps, id)
+			if stepIndex < 0 {
+				return errOwnerChanged
 			}
 			if len(steps) == 1 {
 				// Sole-owner pair-delete (auto-wrap case): retire the wrapper.
@@ -386,12 +403,6 @@ func (h *Handler) handlePromptDelete(w http.ResponseWriter, r *http.Request) {
 					return e
 				}
 			} else {
-				stepIndex := indexOfStep(steps, id)
-				if stepIndex < 0 {
-					// StepPromptOwner said this blueprint owns the prompt, so the
-					// step must be present — a miss is a store inconsistency.
-					return fmt.Errorf("prompt %s not found among steps of owning blueprint %s", id, ownerID)
-				}
 				// Head delete: the handlers ran into the entry prompt that's going
 				// away, so detach them (the downstream wasn't authored as their
 				// target): each stays live without a blueprint, and one that
@@ -431,6 +442,13 @@ func (h *Handler) handlePromptDelete(w http.ResponseWriter, r *http.Request) {
 		status, de = SoftDeleteBySource(r.Context(), tx, orgID, prompt)
 		return de
 	}); err != nil {
+		if errors.Is(err, errOwnerChanged) {
+			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+				Reason:  httpx.ReasonConflict,
+				Message: "the blueprint this prompt belongs to was deleted, merged or split while this delete was made: read the prompt again and retry",
+			})
+			return
+		}
 		httpx.InternalError(w, "prompts", err)
 		return
 	}
@@ -440,6 +458,11 @@ func (h *Handler) handlePromptDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"status": status, "orphaned_blueprint": orphaned})
 }
+
+// errOwnerChanged is a prompt delete whose owning blueprint was retired, or
+// no longer holds the prompt, once the delete held it: another write changed
+// the chain while the delete waited.
+var errOwnerChanged = errors.New("the prompt's blueprint changed during the delete")
 
 // indexOfStep returns the position of the step whose prompt is promptID, or -1.
 func indexOfStep(steps []domain.BlueprintStep, promptID string) int {
