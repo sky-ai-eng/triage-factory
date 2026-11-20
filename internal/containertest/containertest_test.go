@@ -15,8 +15,9 @@ func TestSkipReason(t *testing.T) {
 		want string
 	}{
 		{name: "linux daemon runs", osType: "linux"},
+		{name: "linux in another case runs", osType: "Linux"},
+		{name: "daemon with no OS type runs", osType: ""},
 		{name: "windows-container daemon skips", osType: "windows", want: `runs "windows" containers`},
-		{name: "daemon with no OS type skips", osType: "", want: `runs "" containers`},
 		{name: "unreachable daemon skips", probeErr: errors.New("dial unix /var/run/docker.sock: connect: no such file or directory"), want: "Docker is not reachable"},
 		{name: "probe error outranks a reported OS type", osType: "linux", probeErr: errors.New("boom"), want: "Docker is not reachable"},
 	}
