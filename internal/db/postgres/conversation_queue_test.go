@@ -1003,6 +1003,16 @@ func TestClaimPredicate_Postgres(t *testing.T) {
 				pgtest.MustExec(t, h.AdminDB,
 					`UPDATE conversations SET parent_conversation_id = $2 WHERE id = $1`, convID, parentConvID)
 			},
+			Age: func(t *testing.T, convID string, d time.Duration) {
+				t.Helper()
+				pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET queued_at = queued_at - $2 * interval '1 microsecond' WHERE id = $1`,
+					convID, d.Microseconds())
+				pgtest.MustExec(t, h.AdminDB, `
+					UPDATE claims SET
+						claimed_at  = claimed_at  - $2 * interval '1 microsecond',
+						released_at = released_at - $2 * interval '1 microsecond'
+					WHERE conversation_id = $1`, convID, d.Microseconds())
+			},
 			CollapseClaimTimestamps: func(t *testing.T, convID string) {
 				t.Helper()
 				pgtest.MustExec(t, h.AdminDB, `

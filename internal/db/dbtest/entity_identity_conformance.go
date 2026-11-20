@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -178,6 +179,11 @@ type EntityIdentitySeeder struct {
 	// the duplicate merge exists to fold. Raw SQL because no write may produce
 	// it; the backend restores the requirement when the test ends.
 	ForgetExternalID func(t *testing.T, entityID string)
+
+	// SetCreatedAt rewrites an entity's created_at, in the layout the
+	// dialect stores it in. The duplicate merge keeps the older row, and
+	// two rows a subtest creates back to back can share an instant.
+	SetCreatedAt func(t *testing.T, entityID string, at time.Time)
 
 	// Conversation inserts a conversation, on a task and entity of its own,
 	// and returns its id, for memory links to name.
@@ -573,6 +579,7 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 			t.Fatalf("create older: %v", err)
 		}
 		seed.ForgetExternalID(t, older.ID)
+		seed.SetCreatedAt(t, older.ID, time.Now().Add(-time.Hour))
 		older, _ = s.Entities.GetSystem(ctx, orgID, older.ID)
 		olderTask := seed.Task(t, older.ID, "dup")
 		if _, err := s.Entities.MarkClosed(ctx, orgID, older.ID); err != nil {
@@ -696,6 +703,7 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 			t.Fatalf("create older: %v", err)
 		}
 		seed.ForgetExternalID(t, older.ID)
+		seed.SetCreatedAt(t, older.ID, time.Now().Add(-time.Hour))
 		older, _ = s.Entities.GetSystem(ctx, orgID, older.ID)
 		newer, _, err := s.Entities.FindOrCreateJiraSystem(ctx, orgID, jiraScope, "NEW-2", "10002", TestJiraProject, "Newer", jiraScope+"/browse/NEW-2")
 		if err != nil {

@@ -267,6 +267,11 @@ func TestCommitSignatureQueue_Postgres_Conformance(t *testing.T) {
 				conversationID := seedPgSnapshotConversation(t, h.AdminDB, orgID, userID, seedPgTask(t, h, orgID, userID))
 				return conversationID, seedPgSnapshotClaim(t, h.AdminDB, orgID, conversationID, claimedAt, released)
 			},
+			AgeRequest: func(t *testing.T, signatureID string, d time.Duration) {
+				t.Helper()
+				pgtest.MustExec(t, h.AdminDB, `UPDATE commit_signatures SET created_at = created_at - $3 * interval '1 microsecond' WHERE org_id = $1 AND id = $2`,
+					orgID, signatureID, d.Microseconds())
+			},
 		}
 	})
 }

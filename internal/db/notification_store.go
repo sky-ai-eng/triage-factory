@@ -194,14 +194,16 @@ type NotificationUpsert struct {
 }
 
 // NotificationUpsertOf derives what an upsert did from the row it returned:
-// an insert has seen_count 1, and an escalating bump stamps escalated_at and
-// last_seen_at with the same instant.
+// an insert has seen_count 1, and an escalating bump sets
+// escalated_seen_count to the seen_count it wrote. The counts decide it, not
+// the stamps, because a bump can land in the same clock tick as the
+// escalation before it.
 func NotificationUpsertOf(n domain.Notification) NotificationUpsert {
 	opened := n.SeenCount == 1
 	return NotificationUpsert{
 		Notification: n,
 		Opened:       opened,
-		Escalated:    !opened && n.EscalatedAt.Equal(n.LastSeenAt),
+		Escalated:    !opened && n.EscalatedSeenCount == n.SeenCount,
 	}
 }
 
@@ -571,7 +573,7 @@ func NotificationAudiencesJSON(audiences []domain.NotificationAudience) (string,
 	return string(b), nil
 }
 
-// notificationRow holds the 26-column projection both dialects emit, with
+// notificationRow holds the 27-column projection both dialects emit, with
 // nullable text COALESCEd to the empty string, while it is scanned.
 type notificationRow struct {
 	n                   domain.Notification
@@ -584,7 +586,7 @@ func (r *notificationRow) dest() []any {
 	return []any{&n.ID, &n.OrgID, &n.Origin, &n.Lifecycle, &n.Kind, &n.Key,
 		&n.Audience.Scope, &n.Audience.Role, &n.Audience.TeamID, &n.Audience.UserID,
 		&n.Source, &n.Priority, &n.Dismissible, &n.Title, &n.Body, &r.actions, &r.params,
-		&n.FirstSeenAt, &n.LastSeenAt, &n.SeenCount, &n.EscalatedAt,
+		&n.FirstSeenAt, &n.LastSeenAt, &n.SeenCount, &n.EscalatedAt, &n.EscalatedSeenCount,
 		&r.resolvedAt, &n.ResolvedReason, &n.Resolution, &r.expires, &n.EntityID}
 }
 

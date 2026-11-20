@@ -417,6 +417,38 @@ func RunFactoryReadStoreConformance(t *testing.T, mk FactoryStoreFactory) {
 		return ent
 	}
 
+	// One poll cycle records several events on an entity, and on a coarse
+	// clock they share a created_at. The belt's current event is the last
+	// one recorded.
+	t.Run("Entities_LatestEventBreaksATieByInsertion", func(t *testing.T) {
+		store, orgID, seed := mk(t)
+		ctx := context.Background()
+		at := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+		ent := seed.Entity(t, "latest-tie")
+		recorded := []string{"github:pr:opened", "github:pr:ci_check_failed", "github:pr:ci_check_passed", "github:pr:ready_for_review"}
+		for _, eventType := range recorded {
+			seed.Event(t, ent, eventType, "", at, time.Time{})
+		}
+
+		rows, err := store.Entities(ctx, orgID, 100, nil)
+		if err != nil {
+			t.Fatalf("Entities: %v", err)
+		}
+		for _, r := range rows {
+			if r.Entity.ID != ent {
+				continue
+			}
+			if want := recorded[len(recorded)-1]; r.LatestEventType != want {
+				t.Errorf("LatestEventType = %q, want %q, the last of %d events sharing a created_at", r.LatestEventType, want, len(recorded))
+			}
+			if r.LatestEventAt == nil || !r.LatestEventAt.Equal(at) {
+				t.Errorf("LatestEventAt = %v, want %v", r.LatestEventAt, at)
+			}
+			return
+		}
+		t.Fatalf("entity %s missing from the belt", ent)
+	})
+
 	t.Run("Entities_ActiveAndClosedGraceWindow", func(t *testing.T) {
 		store, orgID, seed := mk(t)
 		ctx := context.Background()

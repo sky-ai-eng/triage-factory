@@ -3,6 +3,7 @@ package postgres_test
 import (
 	"database/sql"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -132,6 +133,10 @@ func TestEntityIdentity_Postgres(t *testing.T) {
 				if _, err := h.AdminDB.Exec(`UPDATE entities SET external_id = NULL WHERE id = $1`, entityID); err != nil {
 					t.Fatalf("forget external id: %v", err)
 				}
+			},
+			SetCreatedAt: func(t *testing.T, entityID string, at time.Time) {
+				t.Helper()
+				pgtest.MustExec(t, h.AdminDB, `UPDATE entities SET created_at = $1 WHERE org_id = $2 AND id = $3`, at.UTC(), orgID, entityID)
 			},
 			Conversation: func(t *testing.T, suffix string) string {
 				t.Helper()

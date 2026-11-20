@@ -92,6 +92,16 @@ func TestCommitSignatureQueue_SQLite_Conformance(t *testing.T) {
 				dbtest.SeedConversation(t, conn, domain.Conversation{ID: conversationID, TaskID: taskID})
 				return conversationID, seedSQLiteClaimForSnapshot(t, conn, conversationID, claimedAt, released)
 			},
+			AgeRequest: func(t *testing.T, signatureID string, d time.Duration) {
+				t.Helper()
+				var created time.Time
+				if err := conn.QueryRow(`SELECT created_at FROM commit_signatures WHERE id = ?`, signatureID).Scan(&created); err != nil {
+					t.Fatalf("read created_at: %v", err)
+				}
+				if _, err := conn.Exec(`UPDATE commit_signatures SET created_at = ? WHERE id = ?`, created.Add(-d).UTC(), signatureID); err != nil {
+					t.Fatalf("age the request: %v", err)
+				}
+			},
 		}
 	})
 }

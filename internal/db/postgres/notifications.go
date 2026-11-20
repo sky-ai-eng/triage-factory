@@ -30,7 +30,7 @@ var _ db.NotificationStore = (*notificationStore)(nil)
 const pgNotificationColsTmpl = `{p}id::text, {p}org_id::text, {p}origin, {p}lifecycle, {p}kind, {p}key,
 	{p}audience_scope, COALESCE({p}audience_role, ''), COALESCE({p}team_id::text, ''), COALESCE({p}user_id::text, ''),
 	COALESCE({p}source, ''), {p}priority, {p}dismissible, {p}title, {p}body, {p}actions, {p}params,
-	{p}first_seen_at, {p}last_seen_at, {p}seen_count, {p}escalated_at,
+	{p}first_seen_at, {p}last_seen_at, {p}seen_count, {p}escalated_at, {p}escalated_seen_count,
 	{p}resolved_at, COALESCE({p}resolved_reason, ''), COALESCE({p}resolution, ''), {p}expires_at,
 	COALESCE({p}entity_id::text, '')`
 
@@ -46,6 +46,10 @@ var (
 const pgNotificationMarksCols = `notification_id::text, user_id::text, org_id::text, read_at, dismissed_at`
 
 const pgNotificationNotExpired = `(n.expires_at IS NULL OR n.expires_at > now())`
+
+// pgNotificationEscalates is the bump's escalation test; $19 is Resurface.
+var pgNotificationEscalates = db.NotificationPriorityRankSQL("EXCLUDED.priority") + ` > ` +
+	db.NotificationPriorityRankSQL("n.priority") + ` OR $19::boolean`
 
 func (s *notificationStore) UpsertOpenSystem(ctx context.Context, o db.NotificationOccurrence) (db.NotificationUpsert, error) {
 	o, err := db.ValidateNotificationOccurrence(o)
@@ -82,10 +86,10 @@ func (s *notificationStore) UpsertOpenSystem(ctx context.Context, o db.Notificat
 			org_id, origin, lifecycle, kind, key,
 			audience_scope, audience_role, team_id, user_id,
 			source, priority, dismissible, title, body, actions, params,
-			first_seen_at, last_seen_at, seen_count, escalated_at, expires_at, entity_id)
+			first_seen_at, last_seen_at, seen_count, escalated_at, escalated_seen_count, expires_at, entity_id)
 		SELECT $1::uuid, $2::text, $3::text, $4::text, $5::text, $6::text, $7::text, $8::uuid, $9::uuid,
 			$10::text, $11::text, $12::boolean, $13::text, $14::text, $15::jsonb, $16::jsonb,
-			clock.at, clock.at, 1, clock.at, $17::timestamptz, $18::uuid
+			clock.at, clock.at, 1, clock.at, 1, $17::timestamptz, $18::uuid
 		FROM clock
 		ON CONFLICT (org_id, origin, kind, key, audience_scope,
 			COALESCE(audience_role, ''),
@@ -95,8 +99,8 @@ func (s *notificationStore) UpsertOpenSystem(ctx context.Context, o db.Notificat
 		DO UPDATE SET
 			last_seen_at = EXCLUDED.last_seen_at,
 			seen_count   = n.seen_count + 1,
-			escalated_at = CASE WHEN `+db.NotificationPriorityRankSQL("EXCLUDED.priority")+` > `+db.NotificationPriorityRankSQL("n.priority")+` OR $19::boolean
-			                    THEN EXCLUDED.last_seen_at ELSE n.escalated_at END,
+			escalated_at = CASE WHEN `+pgNotificationEscalates+` THEN EXCLUDED.last_seen_at ELSE n.escalated_at END,
+			escalated_seen_count = CASE WHEN `+pgNotificationEscalates+` THEN n.seen_count + 1 ELSE n.escalated_seen_count END,
 			priority     = EXCLUDED.priority,
 			dismissible  = EXCLUDED.dismissible,
 			source       = EXCLUDED.source,

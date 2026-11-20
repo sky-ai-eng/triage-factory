@@ -3,6 +3,7 @@ package sqlite_test
 import (
 	"database/sql"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -65,6 +66,12 @@ func TestEntityIdentity_SQLite(t *testing.T) {
 			ForgetExternalID: func(t *testing.T, entityID string) {
 				t.Helper()
 				dbseed.ForgetIssueID(t, conn, entityID)
+			},
+			SetCreatedAt: func(t *testing.T, entityID string, at time.Time) {
+				t.Helper()
+				if _, err := conn.Exec(`UPDATE entities SET created_at = ? WHERE id = ?`, at.UTC(), entityID); err != nil {
+					t.Fatalf("set created_at: %v", err)
+				}
 			},
 			Conversation: func(t *testing.T, suffix string) string {
 				t.Helper()

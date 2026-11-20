@@ -5,6 +5,7 @@ import (
 	"errors"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
@@ -26,6 +27,22 @@ func seedNotificationFixture(t *testing.T, claims bool) dbtest.NotificationFixtu
 	pgtest.MustExec(t, h.AdminDB, `INSERT INTO org_memberships (user_id, org_id, role) VALUES ($1, $2, 'member')`, other, orgID)
 
 	f := dbtest.NotificationFixture{OrgID: orgID, Viewer: viewer, Other: other, Team: team, ArchivedTeam: archived}
+	f.Age = func(t *testing.T, id string, d time.Duration) {
+		t.Helper()
+		by := d.Microseconds()
+		pgtest.MustExec(t, h.AdminDB, `
+			UPDATE notifications SET
+				first_seen_at = first_seen_at - $2 * interval '1 microsecond',
+				last_seen_at  = last_seen_at  - $2 * interval '1 microsecond',
+				escalated_at  = escalated_at  - $2 * interval '1 microsecond',
+				resolved_at   = resolved_at   - $2 * interval '1 microsecond'
+			WHERE id = $1`, id, by)
+		pgtest.MustExec(t, h.AdminDB, `
+			UPDATE notification_marks SET
+				read_at      = read_at      - $2 * interval '1 microsecond',
+				dismissed_at = dismissed_at - $2 * interval '1 microsecond'
+			WHERE notification_id = $1`, id, by)
+	}
 	if !claims {
 		f.Stores = pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 		f.As = func(t *testing.T, _ string, fn func(db.NotificationStore)) { fn(f.Stores.Notifications) }

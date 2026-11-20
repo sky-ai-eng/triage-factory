@@ -1118,6 +1118,10 @@ type CommitSignatureQueueFixture struct {
 	// claimed at claimedAt with a five-minute lease, released or not, and
 	// returns both ids.
 	Claim func(t *testing.T, claimedAt time.Time, released bool) (conversationID, claimID string)
+
+	// AgeRequest moves a signature row's created_at d earlier, so requests
+	// made back to back have an order that cannot tie.
+	AgeRequest func(t *testing.T, signatureID string, d time.Duration)
 }
 
 // CommitSignatureQueueFactory hands the queue suite a fixture over storage no
@@ -1329,6 +1333,10 @@ func RunCommitSignatureQueueConformance(t *testing.T, mk CommitSignatureQueueFac
 		first := request(t, f, conversationID, claimID)
 		claimed := request(t, f, conversationID, claimID)
 		third := request(t, f, conversationID, claimID)
+		// Made back to back, the requests could share a created_at, which
+		// the sweep's order leaves to the id.
+		f.AgeRequest(t, first.ID, 2*time.Second)
+		f.AgeRequest(t, claimed.ID, time.Second)
 		if _, err := f.Signatures.ClaimRequestSystem(ctx, f.OrgID, claimed.ID, "pod-a"); err != nil {
 			t.Fatalf("ClaimRequestSystem: %v", err)
 		}

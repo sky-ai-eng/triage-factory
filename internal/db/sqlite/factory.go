@@ -297,15 +297,17 @@ func (s *factoryReadStore) RecentEventsByEntity(ctx context.Context, orgID strin
 // active and closed-grace queries in Entities. Mirrors the pre-D2
 // const of the same shape; the second subquery reads created_at as
 // a typed DATETIME (no COALESCE) so the driver scans directly into
-// sql.NullTime — no parseDBDatetime detour for this column.
+// sql.NullTime — no parseDBDatetime detour for this column. A created_at
+// tie goes to the later insert: one poll cycle records several events on an
+// entity, and on a coarse clock they share an instant.
 const sqliteFactoryEntitySelectColumns = `
 	e.id, e.source, e.source_id, e.kind,
 	COALESCE(e.title, ''), COALESCE(e.url, ''),
 	COALESCE(e.snapshot_json, ''), COALESCE(e.description, ''),
 	e.state, e.created_at, e.last_polled_at, e.closed_at,
 	COALESCE(e.repository_id, ''),
-	(SELECT event_type FROM events WHERE entity_id = e.id ORDER BY created_at DESC LIMIT 1),
-	(SELECT created_at FROM events WHERE entity_id = e.id ORDER BY created_at DESC LIMIT 1)
+	(SELECT event_type FROM events WHERE entity_id = e.id ORDER BY created_at DESC, rowid DESC LIMIT 1),
+	(SELECT created_at FROM events WHERE entity_id = e.id ORDER BY created_at DESC, rowid DESC LIMIT 1)
 `
 
 func (s *factoryReadStore) Entities(ctx context.Context, orgID string, limit int, _ []string) ([]domain.FactoryEntityRow, error) {
