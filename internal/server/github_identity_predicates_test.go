@@ -104,7 +104,7 @@ func TestEventHandlerGitHubIdentities_PatchChecksOnlyAddedEntries(t *testing.T) 
 	mapLocalGitHubTeam(t, s, "11", "acme", "backend")
 	code, created := createIdentityRule(t, s, domain.EventGitHubPRReviewRequested, map[string]any{"requested_team_id_in": []string{"11"}})
 	if code != http.StatusCreated {
-		t.Fatalf("seed rule: %d: %v", code, created)
+		t.Fatalf("seed handler: %d: %v", code, created)
 	}
 	id := created["id"].(string)
 	mapLocalGitHubTeam(t, s, "12", "acme", "frontend")

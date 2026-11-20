@@ -137,7 +137,7 @@ func TestEventHandlerJiraProjectIn_PatchChecksOnlyAddedProjects(t *testing.T) {
 	r.track(t, r.sky)
 	code, created := r.createRule(t, domain.EventJiraIssueCommented, map[string]any{"jira_project_id_in": []string{r.sky}})
 	if code != http.StatusCreated {
-		t.Fatalf("seed rule: %d: %v", code, created)
+		t.Fatalf("seed handler: %d: %v", code, created)
 	}
 	id := created["id"].(string)
 	r.track(t, r.ops)

@@ -71,7 +71,7 @@ func TestEventHandlerLinearCatalog_AsksLinearOnlyAboutAddedIDs(t *testing.T) {
 	trackLinearTeams(t, s, linearTeamEng)
 	code, created := createLinearRule(t, s, domain.EventLinearIssueAssigned, map[string]any{"status_id_in": []string{linearStateTodo}})
 	if code != http.StatusCreated {
-		t.Fatalf("seed rule: %d: %v", code, created)
+		t.Fatalf("seed handler: %d: %v", code, created)
 	}
 	id := created["id"].(string)
 

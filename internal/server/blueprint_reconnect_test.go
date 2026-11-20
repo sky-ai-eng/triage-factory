@@ -9,10 +9,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
-// Reconnection mutations, the canvas gesture of dragging an arrow's head onto
-// a new target: the sequence-edge re-target (atomic split + merge, leaving an
-// orphaned downstream) and the trigger-edge re-target (in-place blueprint_id
-// move).
+// Reconnection, the canvas gesture of dragging a sequence arrow's head onto a
+// new target: an atomic split + merge, leaving an orphaned downstream.
 
 type reconnectView struct {
 	Host              blueprintWithStepsView `json:"host"`
@@ -128,4 +126,3 @@ func TestBlueprintReconnect_MissingIndexRejected(t *testing.T) {
 		t.Fatalf("reconnect without at_step_index: expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
-

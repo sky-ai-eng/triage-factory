@@ -113,7 +113,7 @@ func TestEventHandlerLinearTeamIn_PatchChecksOnlyAddedTeams(t *testing.T) {
 	s := newLinearTeamInServer(t, linearTeamEng)
 	code, created := createLinearRule(t, s, domain.EventLinearIssueCommented, map[string]any{"linear_team_id_in": []string{linearTeamEng}})
 	if code != http.StatusCreated {
-		t.Fatalf("seed rule: %d: %v", code, created)
+		t.Fatalf("seed handler: %d: %v", code, created)
 	}
 	id := created["id"].(string)
 	trackLinearTeams(t, s, linearTeamOps)

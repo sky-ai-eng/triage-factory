@@ -108,7 +108,7 @@ func TestEventHandlerRepoIn_PatchChecksOnlyAddedRepos(t *testing.T) {
 	webID := seedConfiguredRepo(t, s, "acme", "web")
 	code, created := createRepoRule(t, s, apiID)
 	if code != http.StatusCreated {
-		t.Fatalf("seed rule: %d: %v", code, created)
+		t.Fatalf("seed handler: %d: %v", code, created)
 	}
 	id := created["id"].(string)
 	untrackAllBut(t, s, domain.TeamGitHubRepo{Owner: "acme", Repo: "web"})

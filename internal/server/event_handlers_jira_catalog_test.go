@@ -135,7 +135,7 @@ func TestEventHandlerJiraCatalog_AsksJiraOnlyAboutAddedIDs(t *testing.T) {
 	r := newJiraCatalogRig(t)
 	code, created := r.createRule(t, domain.EventJiraIssueAssigned, map[string]any{"status_id_in": []string{statusToDoID}})
 	if code != http.StatusCreated {
-		t.Fatalf("seed rule: %d: %v", code, created)
+		t.Fatalf("seed handler: %d: %v", code, created)
 	}
 	id := created["id"].(string)
 	kept := fmt.Sprintf(`{"status_id_in":[%q]}`, statusToDoID)
@@ -210,7 +210,7 @@ func TestEventHandlerJiraCatalog_UnconnectedJira(t *testing.T) {
 	r := newJiraCatalogRig(t)
 	code, created := r.createRule(t, domain.EventJiraIssueAssigned, nil)
 	if code != http.StatusCreated {
-		t.Fatalf("seed rule: %d: %v", code, created)
+		t.Fatalf("seed handler: %d: %v", code, created)
 	}
 	unconfigureEventSources(t)
 	code, got := r.patch(t, created["id"].(string), map[string]any{"scope_predicate": map[string]any{"priority_id_in": []string{"2"}}})
@@ -226,7 +226,7 @@ func TestEventHandlerJiraCatalog_AnsweredWithTheBodysFaults(t *testing.T) {
 	r := newJiraCatalogRig(t)
 	code, created := r.createRule(t, domain.EventJiraIssueAssigned, nil)
 	if code != http.StatusCreated {
-		t.Fatalf("seed rule: %d: %v", code, created)
+		t.Fatalf("seed handler: %d: %v", code, created)
 	}
 	id := created["id"].(string)
 	fields := func(got map[string]any) []string {
@@ -257,7 +257,7 @@ func TestEventHandlerJiraCatalog_AnsweredWithTheBodysFaults(t *testing.T) {
 	}
 }
 
-// A rule for a source an admin turned off is refused on its event_type
+// A handler for a source an admin turned off is refused on its event_type
 // without asking Jira about its predicate's ids.
 func TestEventHandlerJiraCatalog_TurnedOffSourceIsNotAsked(t *testing.T) {
 	r := newJiraCatalogRig(t)
@@ -274,4 +274,3 @@ func TestEventHandlerJiraCatalog_TurnedOffSourceIsNotAsked(t *testing.T) {
 		t.Errorf("reached Jira %d times, want none", n-calls)
 	}
 }
-
