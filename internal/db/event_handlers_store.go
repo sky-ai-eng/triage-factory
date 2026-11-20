@@ -16,6 +16,14 @@ import (
 // Only the writes return it: Get keeps answering a miss with (nil, nil).
 var ErrNoSuchEventHandler = errors.New("no live event handler with that id")
 
+// ErrEventHandlerBlueprintChanged means an Update was refused because the
+// handler's blueprint moved while the write was made: the row no longer holds
+// the blueprint it held when Update read it, or the write would attach a
+// blueprint that is deleted. A blueprint delete detaches its handlers in its
+// own transaction, so a write composed from a read taken before it would
+// otherwise attach the deleted blueprint again.
+var ErrEventHandlerBlueprintChanged = errors.New("the event handler's blueprint changed during the write")
+
 // EventHandlerStore reads and writes event_handlers: one row per handler,
 // each a team's answer to one event type, carrying a mode (off, notify, watch
 // or automate) and the same columns in every mode.
@@ -144,6 +152,12 @@ type EventHandlerStore interface {
 	// another mode, so that exclusion is load-bearing rather than an edge
 	// case: changing a shipped handler's mode must not mark it user-modified
 	// and take it out of content sync.
+	//
+	// Refuses with ErrEventHandlerBlueprintChanged when h names a blueprint
+	// the row does not hold and that blueprint is deleted, or when the row's
+	// blueprint changes between Update's read of it and its write. A blueprint
+	// the row already holds is kept even when it is deleted, so a handler left
+	// pointing at one can still be edited and moved off it.
 	//
 	// Returns the updated row, or ErrNoSuchEventHandler. The stamping decision
 	// above is exactly why the row and not h is the answer: whether

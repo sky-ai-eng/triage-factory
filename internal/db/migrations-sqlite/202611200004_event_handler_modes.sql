@@ -12,16 +12,18 @@
 --     the new slug (eh_slugs below). With both live and equal predicates, the
 --     trigger survives, because runs and queued firings reference its id: it
 --     takes the rule's name, priority and sort order, its mode is automate if
---     it was enabled, else watch if the rule was, else off, it is
---     user_modified if either was, and the rule is deleted. With both live and
---     different predicates, both survive: the rule takes the slug, the trigger
---     loses its slug, and both are user_modified. With one live, it takes the
---     slug (a trigger also takes the rule's name, priority and sort order), a
+--     it was enabled, else watch if the rule was, else off, it reaches unowned
+--     entities if a row that was enabled did (the rule's flag when neither
+--     was), it is user_modified if either was, and the rule is deleted. With
+--     both live and different predicates, both survive: the rule takes the
+--     slug, the trigger loses its slug, and both are user_modified. With one
+--     live, it takes the slug (a trigger also takes the rule's name, priority
+--     and sort order, and a rule whose trigger was deleted is user_modified), a
 --     rule left over is deleted and a trigger left over keeps deleted_at and
 --     loses its slug. With neither live, the trigger takes the slug and keeps
 --     deleted_at, so the sync does not bring back a handler the team deleted,
---     and the rule is deleted; a team with no trigger keeps the rule under
---     the slug for the same reason.
+--     and the rule is deleted; a team with no trigger keeps the rule under the
+--     slug for the same reason.
 --  2. The four unpaired shipped rows take their new slugs.
 --  3. Every other row takes a mode from its kind: a rule watch, a trigger
 --     automate and a notify rule notify if it was enabled, and off if not. A
@@ -135,6 +137,11 @@ UPDATE eh_stage SET
     default_priority = r.default_priority,
     sort_order       = r.sort_order,
     mode             = CASE WHEN eh_stage.enabled THEN 'automate' WHEN r.enabled THEN 'watch' ELSE 'off' END,
+    applies_to_unowned = CASE
+        WHEN eh_stage.enabled AND r.enabled THEN (eh_stage.applies_to_unowned OR r.applies_to_unowned)
+        WHEN eh_stage.enabled THEN eh_stage.applies_to_unowned
+        ELSE r.applies_to_unowned
+    END,
     user_modified    = (eh_stage.user_modified OR r.user_modified)
 FROM eh_pairs p
 JOIN event_handlers r ON r.id = p.r_id
@@ -152,8 +159,11 @@ UPDATE eh_stage SET system_slug = NULL, user_modified = 1
 FROM eh_pairs p
 WHERE eh_stage.id = p.t_id AND p.r_live AND p.t_live AND NOT p.same_pred;
 
--- Only the rule live.
-UPDATE eh_stage SET system_slug = p.new_slug
+-- Only the rule live. A team that deleted the trigger is user_modified, so
+-- the sync does not attach the shipped blueprint the trigger carried.
+UPDATE eh_stage SET
+    system_slug   = p.new_slug,
+    user_modified = (eh_stage.user_modified OR p.t_id IS NOT NULL)
 FROM eh_pairs p
 WHERE eh_stage.id = p.r_id AND p.r_live AND NOT p.t_live;
 

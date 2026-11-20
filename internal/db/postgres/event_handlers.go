@@ -218,11 +218,20 @@ func (s *eventHandlerStore) Update(ctx context.Context, orgID string, h domain.E
 	if err := db.ValidateEventHandler(h); err != nil {
 		return domain.EventHandler{}, err
 	}
-	contentChanged, err := s.contentChanged(ctx, orgID, h)
+	cur, found, err := s.current(ctx, orgID, h.ID)
 	if err != nil {
 		return domain.EventHandler{}, err
 	}
-	return scanUpdatedEventHandlerPG(s.app.QueryRowContext(ctx, `
+	if !found {
+		return domain.EventHandler{}, db.ErrNoSuchEventHandler
+	}
+	// The write is guarded on the blueprint read here, and attaches a
+	// different one only while it is live. The guard on blueprint_id is what
+	// holds under READ COMMITTED: an UPDATE that waited on a concurrent
+	// detach re-checks its WHERE against the detached row, while the EXISTS
+	// still reads the snapshot the statement began with.
+	attaches := h.BlueprintID != "" && h.BlueprintID != cur.BlueprintID
+	updated, err := scanUpdatedEventHandlerPG(s.app.QueryRowContext(ctx, `
 		UPDATE event_handlers
 		SET mode = $1, scope_predicate_json = $2::jsonb, applies_to_unowned = $3,
 		    name = $4, default_priority = $5, sort_order = $6,
@@ -230,12 +239,23 @@ func (s *eventHandlerStore) Update(ctx context.Context, orgID string, h domain.E
 		    user_modified = user_modified OR $10,
 		    updated_at = now()
 		WHERE org_id = $11 AND id = $12 AND deleted_at IS NULL
+		  AND blueprint_id IS NOT DISTINCT FROM $13::text
+		  AND (NOT $14::boolean OR EXISTS (SELECT 1 FROM blueprints b WHERE b.id = $7 AND b.deleted_at IS NULL))
 		RETURNING `+pgEventHandlerColumns,
 		h.Mode, predicateArgPG(h.ScopePredicateJSON), h.AppliesToUnowned,
 		h.Name, h.DefaultPriority, h.SortOrder,
 		nullIfEmpty(h.BlueprintID), h.BreakerThreshold, h.MinAutonomySuitability,
-		contentChanged,
-		orgID, h.ID))
+		db.HandlerContentChanged(cur, h),
+		orgID, h.ID,
+		nullIfEmpty(cur.BlueprintID), attaches))
+	if errors.Is(err, db.ErrNoSuchEventHandler) {
+		if _, still, e := s.current(ctx, orgID, h.ID); e != nil {
+			return domain.EventHandler{}, e
+		} else if still {
+			return domain.EventHandler{}, db.ErrEventHandlerBlueprintChanged
+		}
+	}
+	return updated, err
 }
 
 // predicateArgPG binds a nil predicate as NULL.
@@ -257,25 +277,24 @@ func scanUpdatedEventHandlerPG(row *sql.Row) (domain.EventHandler, error) {
 	return h, err
 }
 
-// contentChanged reports whether h's content fields differ from the row's
-// current values — the user_modified stamping signal for Update. mode and
-// sort_order are deliberately excluded (never content). A missing/deleted row
-// reports false; the caller's UPDATE affects 0 rows either way.
-func (s *eventHandlerStore) contentChanged(ctx context.Context, orgID string, h domain.EventHandler) (bool, error) {
+// current reads the content fields of the live handler id — what Update
+// compares h against to decide the user_modified stamp, and the blueprint its
+// write is guarded on — and whether there is one.
+func (s *eventHandlerStore) current(ctx context.Context, orgID, id string) (db.TeamHandlerRow, bool, error) {
 	var cur db.TeamHandlerRow
 	var pred, blueprintID sql.NullString
 	err := s.app.QueryRowContext(ctx, `
 		SELECT scope_predicate_json::text, name, default_priority, blueprint_id, breaker_threshold, min_autonomy_suitability
 		FROM event_handlers WHERE org_id = $1 AND id = $2 AND deleted_at IS NULL
-	`, orgID, h.ID).Scan(&pred, &cur.Name, &cur.DefaultPriority, &blueprintID, &cur.BreakerThreshold, &cur.MinAutonomySuitability)
+	`, orgID, id).Scan(&pred, &cur.Name, &cur.DefaultPriority, &blueprintID, &cur.BreakerThreshold, &cur.MinAutonomySuitability)
 	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
+		return db.TeamHandlerRow{}, false, nil
 	}
 	if err != nil {
-		return false, err
+		return db.TeamHandlerRow{}, false, err
 	}
 	cur.Predicate, cur.BlueprintID = pred.String, blueprintID.String
-	return db.HandlerContentChanged(cur, h), nil
+	return cur, true, nil
 }
 
 // Delete soft-deletes a handler by stamping deleted_at.

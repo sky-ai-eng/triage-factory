@@ -70,6 +70,35 @@ func TestMigrate_EventHandlerModes_ShippedPairs(t *testing.T) {
 			},
 		},
 		{
+			// A team that reached unowned entities through its rule keeps
+			// that reach, from whichever rows were on.
+			name:    "both_live_only_rule_enabled_reaches_unowned",
+			rule:    &oldHandler{enabled: true, name: "CI failed", priority: 0.75, sortOrder: 2, appliesToUnowned: true},
+			trigger: &oldHandler{breaker: 3, autonomy: 0.25},
+			wantTrigger: &newHandler{
+				mode: domain.EventHandlerModeWatch, slug: ciHandlerSlug,
+				name: "CI failed", priority: 0.75, sortOrder: 2, breaker: 3, autonomy: 0.25, appliesToUnowned: true,
+			},
+		},
+		{
+			name:    "both_live_both_enabled_rule_reaches_unowned",
+			rule:    &oldHandler{enabled: true, name: "CI failed", priority: 0.75, sortOrder: 2, appliesToUnowned: true},
+			trigger: &oldHandler{enabled: true, breaker: 3, autonomy: 0.25},
+			wantTrigger: &newHandler{
+				mode: domain.EventHandlerModeAutomate, slug: ciHandlerSlug,
+				name: "CI failed", priority: 0.75, sortOrder: 2, breaker: 3, autonomy: 0.25, appliesToUnowned: true,
+			},
+		},
+		{
+			name:    "both_live_only_trigger_enabled_disabled_rule_reaches_unowned",
+			rule:    &oldHandler{name: "CI failed", priority: 0.75, sortOrder: 2, appliesToUnowned: true},
+			trigger: &oldHandler{enabled: true, breaker: 3, autonomy: 0.25},
+			wantTrigger: &newHandler{
+				mode: domain.EventHandlerModeAutomate, slug: ciHandlerSlug,
+				name: "CI failed", priority: 0.75, sortOrder: 2, breaker: 3, autonomy: 0.25,
+			},
+		},
+		{
 			name:    "both_live_different_predicates",
 			rule:    &oldHandler{enabled: true, predicate: `{"author_id_in":[]}`, name: "CI failed", priority: 0.75, sortOrder: 2},
 			trigger: &oldHandler{enabled: true, predicate: `{"author_id_in":["octocat"]}`, breaker: 3, autonomy: 0.25},
@@ -101,9 +130,11 @@ func TestMigrate_EventHandlerModes_ShippedPairs(t *testing.T) {
 			name:    "only_the_rule_live",
 			rule:    &oldHandler{enabled: true, name: "CI failed", priority: 0.75, sortOrder: 2},
 			trigger: &oldHandler{breaker: 3, autonomy: 0.25, deleted: true},
+			// user_modified, so the sync does not attach the blueprint of
+			// the trigger the team deleted.
 			wantRule: &newHandler{
 				mode: domain.EventHandlerModeWatch, slug: ciHandlerSlug,
-				name: "CI failed", priority: 0.75, sortOrder: 2, breaker: 4,
+				name: "CI failed", priority: 0.75, sortOrder: 2, breaker: 4, userModified: true,
 			},
 			wantTrigger: &newHandler{
 				mode: domain.EventHandlerModeOff, name: blueprintName("only_the_rule_live"), priority: 0.5, sortOrder: 3,
@@ -441,6 +472,7 @@ type oldHandler struct {
 	breaker   int
 	autonomy  float64
 
+	appliesToUnowned      bool
 	userModified, deleted bool
 	createdAt             string // "" is a fixed default
 }
@@ -474,11 +506,11 @@ func insertOldHandler(t *testing.T, database *sql.DB, h oldHandler) {
 		INSERT INTO event_handlers
 			(id, org_id, team_id, creator_user_id, kind, event_type, scope_predicate_json, enabled, source, system_slug,
 			 name, default_priority, sort_order, blueprint_id, breaker_threshold, min_autonomy_suitability,
-			 created_at, updated_at, user_modified, deleted_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 created_at, updated_at, applies_to_unowned, user_modified, deleted_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		h.id, runmode.LocalDefaultOrgID, h.team, creator, h.kind, h.eventType, nullable(h.predicate), h.enabled, source, slug,
 		name, priority, sortOrder, blueprint, breaker, autonomy,
-		createdAt, createdAt, h.userModified, deletedAt,
+		createdAt, createdAt, h.appliesToUnowned, h.userModified, deletedAt,
 	); err != nil {
 		t.Fatalf("seed %s %s: %v", h.kind, h.id, err)
 	}
@@ -487,17 +519,18 @@ func insertOldHandler(t *testing.T, database *sql.DB, h oldHandler) {
 // newHandler is one event_handlers row after the migration, as the columns
 // the migration writes.
 type newHandler struct {
-	mode         string
-	slug         string // "" is NULL
-	predicate    string // "" is NULL
-	name         string
-	priority     float64
-	sortOrder    int
-	blueprint    string // "" is NULL
-	breaker      int
-	autonomy     float64
-	userModified bool
-	deleted      bool
+	mode             string
+	slug             string // "" is NULL
+	predicate        string // "" is NULL
+	name             string
+	priority         float64
+	sortOrder        int
+	blueprint        string // "" is NULL
+	breaker          int
+	autonomy         float64
+	appliesToUnowned bool
+	userModified     bool
+	deleted          bool
 }
 
 // readNewHandler reads one handler after the migration, and whether it is
@@ -508,11 +541,11 @@ func readNewHandler(t *testing.T, database *sql.DB, id string) (newHandler, bool
 	err := database.QueryRow(`
 		SELECT mode, COALESCE(system_slug, ''), COALESCE(scope_predicate_json, ''), name, default_priority,
 		       sort_order, COALESCE(blueprint_id, ''), breaker_threshold, min_autonomy_suitability,
-		       user_modified, deleted_at IS NOT NULL
+		       applies_to_unowned, user_modified, deleted_at IS NOT NULL
 		FROM event_handlers WHERE id = ?`, id,
 	).Scan(&h.mode, &h.slug, &h.predicate, &h.name, &h.priority,
 		&h.sortOrder, &h.blueprint, &h.breaker, &h.autonomy,
-		&h.userModified, &h.deleted)
+		&h.appliesToUnowned, &h.userModified, &h.deleted)
 	if errors.Is(err, sql.ErrNoRows) {
 		return newHandler{}, false
 	}

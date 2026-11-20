@@ -85,6 +85,12 @@ func TestTriggerDelete_Postgres(t *testing.T) {
 				}
 				return id
 			},
+			DeleteBlueprint: func(t *testing.T, id string) {
+				t.Helper()
+				if err := stores.Blueprints.Delete(t.Context(), orgID, id); err != nil {
+					t.Fatalf("delete blueprint %s: %v", id, err)
+				}
+			},
 			Run: func(t *testing.T, triggerID string) string {
 				t.Helper()
 				id := uuid.New().String()

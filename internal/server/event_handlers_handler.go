@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"slices"
 	"strings"
@@ -548,7 +549,11 @@ func applyHandlerFields(bad, unproc *httpx.Validation, f eventHandlerFields, h *
 		refuseNull(bad, state, "default_priority")
 	}
 	if sortOrder, state := httpx.PatchInt(bad, f.SortOrder, "sort_order"); state == httpx.PatchSet {
-		h.SortOrder = sortOrder
+		if sortOrder < math.MinInt32 || sortOrder > math.MaxInt32 {
+			unproc.OutOfRange("sort_order", fmt.Sprintf("sort_order must be between %d and %d", math.MinInt32, math.MaxInt32))
+		} else {
+			h.SortOrder = sortOrder
+		}
 	} else {
 		refuseNull(bad, state, "sort_order")
 	}
@@ -565,8 +570,8 @@ func applyHandlerFields(bad, unproc *httpx.Validation, f eventHandlerFields, h *
 		h.BlueprintID = ""
 	}
 	if threshold, state := httpx.PatchInt(bad, f.BreakerThreshold, "breaker_threshold"); state == httpx.PatchSet {
-		if threshold <= 0 {
-			unproc.OutOfRange("breaker_threshold", "breaker_threshold must be positive")
+		if threshold <= 0 || threshold > math.MaxInt32 {
+			unproc.OutOfRange("breaker_threshold", fmt.Sprintf("breaker_threshold must be between 1 and %d", math.MaxInt32))
 		} else {
 			h.BreakerThreshold = threshold
 		}
@@ -897,6 +902,15 @@ func (eh *eventHandlersHandler) handleEventHandlerUpdate(w http.ResponseWriter, 
 		// in between. 404 rather than a 200 over a write that touched nothing.
 		if errors.Is(err, db.ErrNoSuchEventHandler) {
 			notFound(w, "event handler")
+			return
+		}
+		// The body was applied to a read of the row taken before its
+		// blueprint moved, most likely a blueprint delete detaching it.
+		if errors.Is(err, db.ErrEventHandlerBlueprintChanged) {
+			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+				Reason:  httpx.ReasonConflict,
+				Message: "the event handler's blueprint changed or was deleted while this update was made: read the handler again and retry",
+			})
 			return
 		}
 		internalError(w, "event_handlers", err)

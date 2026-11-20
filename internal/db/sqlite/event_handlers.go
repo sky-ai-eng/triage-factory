@@ -213,11 +213,17 @@ func (s *eventHandlerStore) Update(ctx context.Context, orgID string, h domain.E
 	if err := db.ValidateEventHandler(h); err != nil {
 		return domain.EventHandler{}, err
 	}
-	contentChanged, err := s.contentChanged(ctx, orgID, h)
+	cur, found, err := s.current(ctx, orgID, h.ID)
 	if err != nil {
 		return domain.EventHandler{}, err
 	}
-	return scanUpdatedEventHandlerSQLite(s.q.QueryRowContext(ctx, `
+	if !found {
+		return domain.EventHandler{}, db.ErrNoSuchEventHandler
+	}
+	// The write is guarded on the blueprint read here, and attaches a
+	// different one only while it is live.
+	attaches := h.BlueprintID != "" && h.BlueprintID != cur.BlueprintID
+	updated, err := scanUpdatedEventHandlerSQLite(s.q.QueryRowContext(ctx, `
 		UPDATE event_handlers
 		SET mode = ?, scope_predicate_json = ?, applies_to_unowned = ?,
 		    name = ?, default_priority = ?, sort_order = ?,
@@ -225,12 +231,24 @@ func (s *eventHandlerStore) Update(ctx context.Context, orgID string, h domain.E
 		    user_modified = user_modified OR ?,
 		    updated_at = ?
 		WHERE org_id = ? AND id = ? AND deleted_at IS NULL
+		  AND blueprint_id IS ?
+		  AND (NOT ? OR EXISTS (SELECT 1 FROM blueprints b WHERE b.id = ? AND b.deleted_at IS NULL))
 		RETURNING `+sqliteEventHandlerColumns,
 		h.Mode, predicateArg(h.ScopePredicateJSON), h.AppliesToUnowned,
 		h.Name, h.DefaultPriority, h.SortOrder,
 		nullIfEmpty(h.BlueprintID), h.BreakerThreshold, h.MinAutonomySuitability,
-		contentChanged,
-		time.Now().UTC(), orgID, h.ID))
+		db.HandlerContentChanged(cur, h),
+		time.Now().UTC(), orgID, h.ID,
+		nullIfEmpty(cur.BlueprintID),
+		attaches, h.BlueprintID))
+	if errors.Is(err, db.ErrNoSuchEventHandler) {
+		if _, still, e := s.current(ctx, orgID, h.ID); e != nil {
+			return domain.EventHandler{}, e
+		} else if still {
+			return domain.EventHandler{}, db.ErrEventHandlerBlueprintChanged
+		}
+	}
+	return updated, err
 }
 
 // predicateArg binds a nil predicate as NULL.
@@ -252,25 +270,24 @@ func scanUpdatedEventHandlerSQLite(row *sql.Row) (domain.EventHandler, error) {
 	return h, err
 }
 
-// contentChanged reports whether h's content fields differ from the row's
-// current values — the user_modified stamping signal for Update. mode and
-// sort_order are deliberately excluded (never content). A missing/deleted row
-// reports false; the caller's UPDATE affects 0 rows either way.
-func (s *eventHandlerStore) contentChanged(ctx context.Context, orgID string, h domain.EventHandler) (bool, error) {
+// current reads the content fields of the live handler id — what Update
+// compares h against to decide the user_modified stamp, and the blueprint its
+// write is guarded on — and whether there is one.
+func (s *eventHandlerStore) current(ctx context.Context, orgID, id string) (db.TeamHandlerRow, bool, error) {
 	var cur db.TeamHandlerRow
 	var pred, blueprintID sql.NullString
 	err := s.q.QueryRowContext(ctx, `
 		SELECT scope_predicate_json, name, default_priority, blueprint_id, breaker_threshold, min_autonomy_suitability
 		FROM event_handlers WHERE org_id = ? AND id = ? AND deleted_at IS NULL
-	`, orgID, h.ID).Scan(&pred, &cur.Name, &cur.DefaultPriority, &blueprintID, &cur.BreakerThreshold, &cur.MinAutonomySuitability)
+	`, orgID, id).Scan(&pred, &cur.Name, &cur.DefaultPriority, &blueprintID, &cur.BreakerThreshold, &cur.MinAutonomySuitability)
 	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
+		return db.TeamHandlerRow{}, false, nil
 	}
 	if err != nil {
-		return false, err
+		return db.TeamHandlerRow{}, false, err
 	}
 	cur.Predicate, cur.BlueprintID = pred.String, blueprintID.String
-	return db.HandlerContentChanged(cur, h), nil
+	return cur, true, nil
 }
 
 // Delete soft-deletes a handler by stamping deleted_at.

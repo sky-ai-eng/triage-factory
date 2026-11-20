@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"math"
 	"net/http"
 	"slices"
 	"strings"
@@ -189,6 +190,45 @@ func TestHandleEventHandlerCreate_AutomateNeedsBlueprint(t *testing.T) {
 	}
 	if n := len(listEventHandlers(t, s)); n != 0 {
 		t.Errorf("a refused create left %d handlers", n)
+	}
+}
+
+// TestEventHandlerWrites_RefuseIntegersPastTheColumns: sort_order and
+// breaker_threshold are 32-bit columns, so a value past them is a 422 naming
+// the field rather than a driver error, on create and PATCH alike.
+func TestEventHandlerWrites_RefuseIntegersPastTheColumns(t *testing.T) {
+	s := newTestServer(t)
+	configureEventSources(t, s)
+	id := createWatchHandler(t, s)
+	before := getEventHandler(t, s, id)
+	tooBig := map[string]any{"sort_order": int64(math.MaxInt32) + 1, "breaker_threshold": int64(math.MaxInt32) + 1}
+
+	for _, c := range []struct {
+		method, path string
+		body         map[string]any
+	}{
+		{http.MethodPost, "/api/event-handlers", map[string]any{"event_type": domain.EventGitHubPRCICheckFailed}},
+		{http.MethodPatch, "/api/event-handlers/" + id, map[string]any{}},
+	} {
+		maps.Copy(c.body, tooBig)
+		rec := doJSON(t, s, c.method, c.path, c.body)
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Errorf("%s: status = %d, want 422: %s", c.method, rec.Code, rec.Body.String())
+			continue
+		}
+		got := map[string]string{}
+		for _, item := range decodeErrorItems(t, rec) {
+			got[item.Field] = item.Reason
+		}
+		if len(got) != 2 || got["sort_order"] != "OUT_OF_RANGE" || got["breaker_threshold"] != "OUT_OF_RANGE" {
+			t.Errorf("%s: faults = %v, want OUT_OF_RANGE on sort_order and breaker_threshold", c.method, got)
+		}
+	}
+	if n := len(listEventHandlers(t, s)); n != 1 {
+		t.Errorf("a refused create left %d handlers, want the 1 seeded", n)
+	}
+	if after := getEventHandler(t, s, id); !maps.Equal(after, before) {
+		t.Errorf("after the refused PATCH = %v, want the handler unchanged: %v", after, before)
 	}
 }
 

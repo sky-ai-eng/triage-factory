@@ -920,12 +920,12 @@ func (r *Router) jiraAssigneeUsers(ctx context.Context, orgID string, evt domain
 //     applies_to_unowned=true}. A flag-off handler gates creation + the owner's
 //     automation but never grants visibility on its own; a team widens
 //     visibility beyond ownership only by opting in with the explicit
-//     applies_to_unowned flag (TFAC-517 — the deliberate watch);
+//     applies_to_unowned flag;
 //   - ownerTeam is "" when the identity maps to multiple teams (or to none with
 //     a watching handler): the owner is unresolved, stored as NULL — resolving on the
 //     fire or the first human claim;
-//   - firing order has three cases, all preserving the TFAC-514 no-steal
-//     invariant — a non-member watcher NEVER beats a member team to ownership:
+//   - firing order has three cases, all preserving the no-steal invariant —
+//     a non-member watcher NEVER beats a member team to ownership:
 //     1. resolved owner → orderedTeams = {owner}. Watchers see the card only.
 //     2. ambiguous MEMBER ownership (identity on multiple member teams) →
 //     orderedTeams = ownerSet ranked. Watchers are NOT candidates while any
@@ -933,12 +933,11 @@ func (r *Router) jiraAssigneeUsers(ctx context.Context, orgID string, evt domain
 //     consolidates the NULL owner onto itself.
 //     3. no member owns it (ownerSet empty — a truly external author:
 //     dependabot, renovate, an outside-fork contributor) → orderedTeams =
-//     the opted-in watcher teams ranked (TFAC-517). A watcher that set
+//     the opted-in watcher teams ranked. A watcher that set
 //     applies_to_unowned on a handler in automate may fire the orphan PR and
-//     consolidate ownership onto itself — the deliberate, eyes-open behavior
-//     that supersedes the TFAC-514 blanket "external never fires." A watcher
-//     whose handler is in watch surfaces the card NULL-owned and nothing
-//     fires.
+//     consolidate ownership onto itself, because it opted in to exactly
+//     that. A watcher whose handler is in watch surfaces the card NULL-owned
+//     and nothing fires.
 //
 // ok=false means the visibility set is empty (external identity, no watching
 // handler) → no task; the caller returns without creating one.
@@ -972,7 +971,7 @@ func ownerLadderRouting(owner string, ownerSet []string, taskMakers []domain.Eve
 		// (non-member, in vis via an applies_to_unowned handler but not in
 		// ownerSet) is NEVER an ownership candidate while a member team exists —
 		// otherwise a pure watcher could win the claim and consolidate itself as
-		// owner of a PR a member owns (the TFAC-514 no-steal invariant). Order
+		// owner of a PR a member owns (the no-steal invariant). Order
 		// ownerSet by the same signal the handler-team path uses — max matched-handler
 		// DefaultPriority desc, then lowest team id — so the first member to win
 		// the exclusive claim is deterministic and the fire consolidates the NULL
@@ -982,10 +981,9 @@ func ownerLadderRouting(owner string, ownerSet []string, taskMakers []domain.Eve
 		// No member owns it (ownerSet empty — a truly external author:
 		// dependabot, renovate, an outside-fork contributor). The orphan task's
 		// only claimants are the teams that explicitly opted into reaching
-		// unowned entities (an applies_to_unowned handler) — they may now fire
+		// unowned entities (an applies_to_unowned handler) — they may fire
 		// their configured auto-delegations and the first to claim consolidates
-		// ownership onto itself (TFAC-517, superseding the TFAC-514 blanket
-		// "external never fires"). This runs ONLY when no member team is a
+		// ownership onto itself. This runs ONLY when no member team is a
 		// candidate, so the member-over-watcher invariant holds. Firing still
 		// requires a matched handler in automate + auto_delegate enabled
 		// downstream: a watcher whose handler automates fires it; a watcher
@@ -1085,15 +1083,14 @@ func (r *Router) latestActiveOwnedTaskTeam(ctx context.Context, orgID, entityID 
 // widen an owner-ladder task's visibility beyond the entity owner. A flag-off
 // handler gates creation and the owner's automation but never grants visibility
 // on its own, so the scoping stays the owner unless a team deliberately opts in
-// with this explicit per-handler flag (TFAC-517 — replacing the prior
-// source==user heuristic).
+// with this explicit per-handler flag.
 //
 // It is a per-HANDLER flag on every handler that makes a task, watch and
 // automate alike: an automating handler that opts in lets a team configure
 // orphan reach and auto-delegation in one handler. A watcher always gets
 // visibility; it gains firing rights only in ownerLadderRouting's external
 // branch (ownerSet empty, no member owner), never while any member team is an
-// ownership candidate (the TFAC-514 no-steal invariant).
+// ownership candidate (the no-steal invariant).
 func explicitWatchTeams(taskMakers []domain.EventHandler) map[string]struct{} {
 	out := map[string]struct{}{}
 	for _, h := range taskMakers {
