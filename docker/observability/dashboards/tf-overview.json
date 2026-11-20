@@ -6184,7 +6184,7 @@
         "type": "prometheus",
         "uid": "tf-prometheus"
       },
-      "description": "Deliveries to /api/webhooks/slack that TF_SLACK_SIGNING_SECRET did not sign (tf_slack_webhook_signature_mismatches_total), by the app the unverified body names. deployment or none (Slack's request URL check) with nothing verifying is a wrong signing secret, which SlackSigningSecretMismatch alerts on. other is another app whose request URL points at this endpoint. A forged request also counts.",
+      "description": "Deliveries to /api/webhooks/slack that TF_SLACK_SIGNING_SECRET did not sign (tf_slack_webhook_signature_mismatches_total), by the app the unverified body names. deployment or none (Slack's request URL check) on a control pod with nothing verifying on that pod is a wrong signing secret there, which SlackSigningSecretMismatch alerts on per pod; this panel adds the pods up, so other pods verifying can hide one. other is another app whose request URL points at this endpoint. A forged request also counts.",
       "fieldConfig": {
         "defaults": {
           "color": {
