@@ -4,17 +4,17 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"runtime/debug"
 	"sort"
+	"sync"
 
 	"github.com/maximhq/bifrost/core/schemas"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// metaToolsFingerprint is the metadata key under which an assistant row
-// records the fingerprint of the tools its request carried. Stored rows carry
-// this key, so it cannot be renamed.
-const metaToolsFingerprint = "tools_fingerprint"
+// bifrostModule is the module that renders a request's tools onto the wire.
+const bifrostModule = "github.com/maximhq/bifrost/core"
 
 // canonicalTools renders a tool list the way the Anthropic API binds a
 // thinking block to it: as a set keyed by name, so the order the tools are
@@ -39,13 +39,45 @@ func canonicalTools(tools []schemas.ChatTool) ([]byte, error) {
 // It returns "" for a list it cannot render. No row is recorded under "", and
 // no recorded fingerprint equals it.
 func toolsFingerprint(tools []schemas.ChatTool) string {
+	return fingerprintTools(tools, bifrostVersion())
+}
+
+// fingerprintTools is toolsFingerprint for tools that renderer puts on the
+// wire. The API compares the tools as they arrive, and the list here is the
+// one handed to bifrost, so the fingerprint covers the bifrost version too: a
+// version that renders the same list differently is a different set of tools
+// to the API. A version that renders it the same costs a conversation its
+// earlier reasoning once, which is the cheaper mistake.
+func fingerprintTools(tools []schemas.ChatTool, renderer string) string {
 	b, err := canonicalTools(tools)
 	if err != nil {
 		return ""
 	}
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
+	h := sha256.New()
+	h.Write([]byte(renderer))
+	h.Write([]byte{0})
+	h.Write(b)
+	return hex.EncodeToString(h.Sum(nil))
 }
+
+// bifrostVersion is the version of bifrost this binary was built with, or ""
+// when the binary carries no build information.
+var bifrostVersion = sync.OnceValue(func() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return ""
+	}
+	for _, dep := range info.Deps {
+		if dep.Path != bifrostModule {
+			continue
+		}
+		if dep.Replace != nil {
+			return dep.Replace.Path + "@" + dep.Replace.Version
+		}
+		return dep.Version
+	}
+	return ""
+})
 
 // recordToolsFingerprint stamps an assistant row with the fingerprint of the
 // tools its request carried, which is what a later request compares its own
@@ -57,11 +89,11 @@ func recordToolsFingerprint(row *domain.Message, fingerprint string) {
 	if row.Metadata == nil {
 		row.Metadata = map[string]any{}
 	}
-	row.Metadata[metaToolsFingerprint] = fingerprint
+	row.Metadata[domain.MessageMetadataToolsFingerprint] = fingerprint
 }
 
 func recordedToolsFingerprint(row domain.Message) string {
-	fingerprint, _ := row.Metadata[metaToolsFingerprint].(string)
+	fingerprint, _ := row.Metadata[domain.MessageMetadataToolsFingerprint].(string)
 	return fingerprint
 }
 
@@ -109,6 +141,10 @@ func reasoningBoundTo(rows []domain.Message, fingerprint string) []domain.Messag
 	if !found {
 		return rows
 	}
+	// TODO(TFAC-1502): confirm against the live API that it accepts an
+	// assistant turn that holds a tool call and no reasoning when that turn's
+	// tool round is the last thing in the request. A conversation resumed in
+	// the middle of a tool round under changed tools sends one.
 	out := make([]domain.Message, len(rows))
 	copy(out, rows)
 	for i := range out {

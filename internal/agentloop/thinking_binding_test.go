@@ -466,7 +466,7 @@ func (t *memTranscript) forgetToolsFingerprints() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	for i := range t.rows {
-		delete(t.rows[i].Metadata, metaToolsFingerprint)
+		delete(t.rows[i].Metadata, domain.MessageMetadataToolsFingerprint)
 	}
 }
 
@@ -487,6 +487,13 @@ func TestToolsFingerprint(t *testing.T) {
 	}
 	if got := toolsFingerprint([]schemas.ChatTool{tool("read", "read a file", "path"), tool("bash", "run a command", "command")}); got != base {
 		t.Error("the same tools in another order have another fingerprint; the API binds them as a set")
+	}
+	if bifrostVersion() == "" {
+		t.Error("the binary reports no bifrost version, so the fingerprint cannot tell one from another")
+	}
+	tools := []schemas.ChatTool{tool("bash", "run a command", "command")}
+	if fingerprintTools(tools, "v1.0.0") == fingerprintTools(tools, "v1.0.1") {
+		t.Error("the same tools under another bifrost version have the same fingerprint")
 	}
 	for name, changed := range map[string][]schemas.ChatTool{
 		"a description":   {tool("bash", "run one command", "command"), tool("read", "read a file", "path")},

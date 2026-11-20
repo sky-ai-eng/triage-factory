@@ -886,6 +886,31 @@ type MessageDTO struct {
 	ContentBlocks []ContentBlock    `json:"content_blocks,omitempty"`
 }
 
+// MessageMetadataToolsFingerprint is the Message.Metadata key under which an
+// assistant row records a fingerprint of the tools its request carried. The
+// native loop compares it with a later request's tools before it replays the
+// row's reasoning. Stored rows carry this key, so it cannot be renamed.
+const MessageMetadataToolsFingerprint = "tools_fingerprint"
+
+// wireMetadata is a row's metadata as a client receives it, which leaves out
+// the tools fingerprint: only the native loop reads it. It copies before it
+// removes, because the row and its DTO otherwise share one map.
+func wireMetadata(metadata map[string]any) map[string]any {
+	if _, ok := metadata[MessageMetadataToolsFingerprint]; !ok {
+		return metadata
+	}
+	if len(metadata) == 1 {
+		return nil
+	}
+	out := make(map[string]any, len(metadata)-1)
+	for k, v := range metadata {
+		if k != MessageMetadataToolsFingerprint {
+			out[k] = v
+		}
+	}
+	return out
+}
+
 // ToDTO projects a transcript row onto the shared snake_case wire shape.
 func (m Message) ToDTO() MessageDTO {
 	return MessageDTO{
@@ -897,7 +922,7 @@ func (m Message) ToDTO() MessageDTO {
 		ToolCalls:           m.ToolCalls,
 		ToolCallID:          m.ToolCallID,
 		IsError:             m.IsError,
-		Metadata:            m.Metadata,
+		Metadata:            wireMetadata(m.Metadata),
 		Model:               m.Model,
 		InputTokens:         m.InputTokens,
 		OutputTokens:        m.OutputTokens,
