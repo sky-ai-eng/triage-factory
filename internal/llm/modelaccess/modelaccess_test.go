@@ -122,11 +122,11 @@ func TestCheck_UnofferedModelPasses(t *testing.T) {
 
 // Role mode stores no Bedrock secret; the ref is the record that it is bound.
 func TestOrgProviders_RefsAreTheRecord(t *testing.T) {
-	got := boundProviders(domain.OrgSettings{BedrockCredentialsRef: "aws_role_arn"})
+	got := BoundProviders(domain.OrgSettings{BedrockCredentialsRef: "aws_role_arn"})
 	if !got[modelcatalog.ProviderBedrock] || got[modelcatalog.ProviderAnthropic] {
 		t.Errorf("OrgProviders = %v, want Bedrock only", got)
 	}
-	if len(boundProviders(domain.OrgSettings{})) != 0 {
+	if len(BoundProviders(domain.OrgSettings{})) != 0 {
 		t.Error("an org with no refs reports a connected provider")
 	}
 }

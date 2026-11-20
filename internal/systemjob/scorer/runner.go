@@ -63,7 +63,7 @@ type Runner struct {
 	scores     db.ScoreStore
 	entities   db.EntityStore          // scorer bulk-loads entity descriptions for prompt context
 	orgID      string                  // scoring context org — runmode.LocalDefaultOrgID in local mode
-	secrets    agentproc.SecretsReader // per-org LLM-credential reader (nil in local → ambient subscription; system-door reader in multi).
+	secrets    agentproc.SecretsReader // per-org LLM-credential reader (system-door reader; in local, narrowed to the providers the org's settings bound).
 	llmResolve llmResolveFunc          // brain-side role-aware LLM resolver (nil in local/tests → Run's built-in resolution).
 	recorder   *systemllm.Recorder     // captures per-batch LLM cost + tokens into system_llm_runs (TFAC-451)
 	limiter    *syslimit.Limiter       // shared system-job sandbox cap (nil → unlimited); captured by scoreFn.

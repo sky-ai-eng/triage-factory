@@ -367,9 +367,9 @@ func (a *App) buildExecution() error {
 	}
 	a.spawner.SetRunCredentialResolvers(a.ghResolver, a.runSecrets, a.modelFor)
 	// Role-mode Bedrock minting for delegated runs on the all/local path
-	// (TFAC-616). nil in local mode (ambient); on the executor role the
-	// bundle path resolves LLM material, so this is only exercised at
-	// TF_ROLE=all where a run resolves in-process.
+	// (TFAC-616). nil in local mode, which cannot bind role mode; on the
+	// executor role the bundle path resolves LLM material, so this is only
+	// exercised at TF_ROLE=all where a run resolves in-process.
 	if a.llmResolver != nil {
 		a.spawner.SetLLMResolver(a.llmResolver)
 	}

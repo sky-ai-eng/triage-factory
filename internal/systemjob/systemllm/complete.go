@@ -59,8 +59,8 @@ type CompleteOptions struct {
 	// this call rather than reading a key that doesn't exist (TFAC-616). The
 	// direct (multi) path signs the Bedrock request with the returned session
 	// triple; the local path forwards it to agentproc.Run. nil keeps the
-	// built-in raw-secret resolution (bearer/access_keys/Anthropic, local
-	// ambient) — byte-for-byte unchanged.
+	// built-in raw-secret resolution (bearer/access_keys/Anthropic, or nothing
+	// for a local org on the host's credentials).
 	//
 	// The model argument selects the provider, so the org's background-jobs
 	// model is what decides which credential a system job resolves.
