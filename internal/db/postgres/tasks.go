@@ -1435,7 +1435,7 @@ func (s *taskStore) LatestEventIDSystem(ctx context.Context, orgID, taskID strin
 		WHERE te.org_id = $1
 		  AND te.task_id = $2
 		  AND te.kind IN ('spawned', 'bumped', 'injected')
-		ORDER BY ev.created_at DESC, ev.id DESC
+		ORDER BY ev.created_at DESC, ev.seq DESC
 		LIMIT 1
 	`, orgID, taskID).Scan(&eventID)
 	if err == sql.ErrNoRows {
@@ -1447,10 +1447,8 @@ func (s *taskStore) LatestEventIDSystem(ctx context.Context, orgID, taskID strin
 	return eventID, nil
 }
 
-// LatestEventAfterSystem compares created_at strictly. events records no
-// insertion order and its id is a random UUID, so nothing says which of two
-// events sharing a created_at came second; the id in the ORDER BY only makes
-// the pick among later events deterministic.
+// LatestEventAfterSystem orders by (created_at, seq), seq being insertion
+// order, so on a created_at tie the later insert is the newer event.
 func (s *taskStore) LatestEventAfterSystem(ctx context.Context, orgID, taskID, eventID string) (string, error) {
 	var latestID string
 	err := s.admin.QueryRowContext(ctx, `
@@ -1461,8 +1459,8 @@ func (s *taskStore) LatestEventAfterSystem(ctx context.Context, orgID, taskID, e
 		WHERE te.org_id = $1
 		  AND te.task_id = $2
 		  AND te.kind IN ('spawned', 'bumped', 'injected')
-		  AND ev.created_at > since.created_at
-		ORDER BY ev.created_at DESC, ev.id DESC
+		  AND (ev.created_at, ev.seq) > (since.created_at, since.seq)
+		ORDER BY ev.created_at DESC, ev.seq DESC
 		LIMIT 1
 	`, orgID, taskID, eventID).Scan(&latestID)
 	if errors.Is(err, sql.ErrNoRows) {

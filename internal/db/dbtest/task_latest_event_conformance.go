@@ -17,11 +17,6 @@ type TaskLatestEventFixture struct {
 	OrgID  string
 	TeamID string
 
-	// InsertionOrdered is true for the dialect that records the order events
-	// were inserted in, and so orders two events sharing a created_at
-	// (SQLite, by rowid). Postgres records none.
-	InsertionOrdered bool
-
 	// SetCreatedAt rewrites an event's created_at, in the layout the dialect
 	// stores it in.
 	SetCreatedAt func(t *testing.T, eventID string, at time.Time)
@@ -34,9 +29,9 @@ type TaskLatestEventFactory func(t *testing.T) TaskLatestEventFixture
 // spawning event before any bump, the bumping event after one (and still
 // after that bump is folded into a live conversation), and "" for a task with
 // no task_events row. primary_event_id names the spawning event throughout.
-// It pins LatestEventAfterSystem beside it: ordered by created_at, not
-// insertion; an event missing from the timeline still compared; and a
-// created_at tie ordered by insertion only in the dialect that records it.
+// It pins LatestEventAfterSystem beside it: ordered by created_at, then
+// insertion, and an event missing from the timeline still compared. Both
+// reads give a created_at tie to the later insert.
 func RunTaskLatestEventConformance(t *testing.T, mk TaskLatestEventFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -227,25 +222,17 @@ func RunTaskLatestEventConformance(t *testing.T, mk TaskLatestEventFactory) {
 		}
 	})
 
-	// Two events share a created_at. Only an insertion-ordered dialect can
-	// say the bump, recorded second, is the newer; neither may hand back the
-	// spawning event as newer than the bump.
+	// Two events share a created_at. The bump, recorded second, is the newer.
 	t.Run("at_a_created_at_tie", func(t *testing.T) {
 		f, task, bumpID := spawnedAndBumped(t, "tie", at, at)
+		if got := after(t, f, task.ID, task.PrimaryEventID); got != bumpID {
+			t.Errorf("LatestEventAfterSystem(spawn) = %q, want the bump %q, recorded second", got, bumpID)
+		}
 		if got := after(t, f, task.ID, bumpID); got != "" {
 			t.Errorf("LatestEventAfterSystem(bump) = %q, want \"\": the spawning event was recorded first", got)
 		}
-		wantAfterSpawn := ""
-		if f.InsertionOrdered {
-			wantAfterSpawn = bumpID
-		}
-		if got := after(t, f, task.ID, task.PrimaryEventID); got != wantAfterSpawn {
-			t.Errorf("LatestEventAfterSystem(spawn) = %q, want %q (insertion ordered: %v)", got, wantAfterSpawn, f.InsertionOrdered)
-		}
-		if f.InsertionOrdered {
-			if got := latest(t, f.Stores, f.OrgID, task.ID); got != bumpID {
-				t.Errorf("LatestEventIDSystem = %q, want the bump %q, recorded second", got, bumpID)
-			}
+		if got := latest(t, f.Stores, f.OrgID, task.ID); got != bumpID {
+			t.Errorf("LatestEventIDSystem = %q, want the bump %q, recorded second", got, bumpID)
 		}
 	})
 }

@@ -1086,19 +1086,16 @@ type TaskStore interface {
 	// bumped the task: its newest task_events row of kind 'spawned', 'bumped'
 	// or 'injected' (a bump folded into a live conversation, whose row
 	// MarkEventInjectedSystem rewrote), ordered by the event's created_at,
-	// newest first. Two events can share a created_at: SQLite breaks the tie
-	// by insertion order (rowid), and Postgres, which records no insertion
-	// order for events, by event id, a random UUID. "" when the task has no
-	// such row. primary_event_id stays the spawning event; this is what a
-	// delegated run is briefed with. Admin pool, org_id bound by argument.
+	// newest first. Two events can share a created_at, and a tie goes to the
+	// later insert (SQLite's rowid, Postgres's events.seq). "" when the task
+	// has no such row. primary_event_id stays the spawning event; this is what
+	// a delegated run is briefed with. Admin pool, org_id bound by argument.
 	LatestEventIDSystem(ctx context.Context, orgID, taskID string) (string, error)
 
 	// LatestEventAfterSystem returns the id of the newest of those events
-	// that is newer than eventID, or "" when none is. eventID need not be on
-	// the task's timeline. Newer is a later created_at, or on a tie a later
-	// insertion where the dialect records one: SQLite does, so it orders a
-	// tie; Postgres does not, so there an event sharing eventID's created_at
-	// is not newer. Admin pool, org_id bound by argument.
+	// that is newer than eventID, in LatestEventIDSystem's order, or "" when
+	// none is. eventID need not be on the task's timeline. Admin pool, org_id
+	// bound by argument.
 	LatestEventAfterSystem(ctx context.Context, orgID, taskID, eventID string) (string, error)
 
 	// MarkEventInjectedSystem flips the (task_id, event_id) timeline row's

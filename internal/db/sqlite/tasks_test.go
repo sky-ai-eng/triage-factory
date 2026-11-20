@@ -755,10 +755,9 @@ func TestTaskLatestEvent_SQLite(t *testing.T) {
 		t.Helper()
 		conn := openSQLiteForTest(t)
 		return dbtest.TaskLatestEventFixture{
-			Stores:           sqlitestore.New(conn),
-			OrgID:            runmode.LocalDefaultOrgID,
-			TeamID:           runmode.LocalDefaultTeamID,
-			InsertionOrdered: true,
+			Stores: sqlitestore.New(conn),
+			OrgID:  runmode.LocalDefaultOrgID,
+			TeamID: runmode.LocalDefaultTeamID,
 			SetCreatedAt: func(t *testing.T, eventID string, at time.Time) {
 				t.Helper()
 				res, err := conn.Exec(`UPDATE events SET created_at = ? WHERE id = ?`, at.UTC(), eventID)

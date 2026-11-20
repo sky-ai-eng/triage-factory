@@ -166,9 +166,9 @@ func closedByRunFinish(task *domain.Task) bool {
 // newest event when it is newer than the one f was queued for, else f's own.
 // Asking for an event newer than f's, rather than for the newest, is what
 // keeps a task whose timeline is missing f's event from being rerouted with
-// an older one. The store decides what newer means, because only it knows
-// whether it can order two events that share a created_at. Nil when f's event
-// row is gone.
+// an older one. The store compares, because it breaks a created_at tie by
+// insertion order, which an Event does not carry. Nil when f's event row is
+// gone.
 func (r *Router) newestEventSince(ctx context.Context, f domain.PendingFiring) (*domain.Event, error) {
 	ev, err := r.events.GetSystem(ctx, f.OrgID, f.TriggeringEventID)
 	if err != nil || ev == nil {
