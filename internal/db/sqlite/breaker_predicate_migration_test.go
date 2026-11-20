@@ -28,7 +28,7 @@ func TestMigrate_BlueprintRunsRecordPredicate_SQLite(t *testing.T) {
 	conn.SetMaxOpenConns(1)
 	conn.SetMaxIdleConns(1)
 	// The migration before the one under test.
-	const prior = 202611200004
+	const prior = 202611200005
 	if err := db.BootstrapSchemaAtForTest(conn, prior); err != nil {
 		t.Fatalf("schema at %d: %v", prior, err)
 	}
