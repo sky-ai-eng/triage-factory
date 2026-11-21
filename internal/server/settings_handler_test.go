@@ -468,8 +468,8 @@ func TestJiraConnect_DoesNotWriteUserIdentity(t *testing.T) {
 		t.Fatalf("seed identity: %v", err)
 	}
 
-	rec := doJSON(t, s, "PUT", jiraCredentialRoute(),
-		map[string]any{"deployment": "data_center", "url": jiraStub.URL, "pat": "org_pat"})
+	rec := doJSON(t, s, "PUT", jiraDataCenterCredentialRoute(),
+		map[string]any{"url": jiraStub.URL, "pat": "org_pat"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s, want 200", rec.Code, rec.Body.String())
 	}
@@ -484,19 +484,19 @@ func TestJiraConnect_DoesNotWriteUserIdentity(t *testing.T) {
 }
 
 // TestJiraConnect_Cloud_RequiresBothHalves pins that a half-filled Cloud form
-// (email without token) is a 400 and stores nothing, rather than silently
-// falling through to the Data Center path.
+// (email without token) is a 400 naming the missing half and stores nothing.
 func TestJiraConnect_Cloud_RequiresBothHalves(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
 	s := newTestServer(t)
 	ctx := t.Context()
 
-	rec := doJSON(t, s, "PUT", jiraCredentialRoute(),
+	rec := doJSON(t, s, "PUT", jiraCloudCredentialRoute(),
 		map[string]any{"url": "https://acme.atlassian.net", "email": "bot@acme.com"})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d body=%s, want 400", rec.Code, rec.Body.String())
 	}
+	httpxtest.AssertFirstError(t, rec, httpx.ReasonMissingField, "token")
 	creds, err := integrations.Load(ctx, s.secrets, runmode.LocalDefaultOrgID)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -521,8 +521,8 @@ func TestJiraConnect_Cloud_MismatchHint(t *testing.T) {
 	}))
 	t.Cleanup(jiraStub.Close)
 
-	rec := doJSON(t, s, "PUT", jiraCredentialRoute(),
-		map[string]any{"deployment": "cloud", "url": jiraStub.URL, "email": "bot@acme.com", "token": "tok"})
+	rec := doJSON(t, s, "PUT", jiraCloudCredentialRoute(),
+		map[string]any{"url": jiraStub.URL, "email": "bot@acme.com", "token": "tok"})
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status=%d body=%s, want 422", rec.Code, rec.Body.String())
 	}
@@ -551,8 +551,8 @@ func TestJiraConnect_SchemeSwitch_ClearsStaleCredential(t *testing.T) {
 	t.Cleanup(jiraStub.Close)
 
 	// 1) Connect as Data Center (PAT).
-	rec := doJSON(t, s, "PUT", jiraCredentialRoute(),
-		map[string]any{"deployment": "data_center", "url": jiraStub.URL, "pat": "dc_pat"})
+	rec := doJSON(t, s, "PUT", jiraDataCenterCredentialRoute(),
+		map[string]any{"url": jiraStub.URL, "pat": "dc_pat"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("DC connect status=%d body=%s, want 200", rec.Code, rec.Body.String())
 	}
@@ -562,8 +562,8 @@ func TestJiraConnect_SchemeSwitch_ClearsStaleCredential(t *testing.T) {
 	}
 
 	// 2) Reconnect the same org as Cloud (email + API token).
-	rec = doJSON(t, s, "PUT", jiraCredentialRoute(),
-		map[string]any{"deployment": "cloud", "url": jiraStub.URL, "email": "bot@acme.com", "token": "cloud_tok"})
+	rec = doJSON(t, s, "PUT", jiraCloudCredentialRoute(),
+		map[string]any{"url": jiraStub.URL, "email": "bot@acme.com", "token": "cloud_tok"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("Cloud connect status=%d body=%s, want 200", rec.Code, rec.Body.String())
 	}
@@ -586,8 +586,8 @@ func TestJiraConnect_SchemeSwitch_ClearsStaleCredential(t *testing.T) {
 
 	// 3) Switch back to Data Center — the Cloud pair must now be gone, leaving
 	//    exactly the DC scheme.
-	rec = doJSON(t, s, "PUT", jiraCredentialRoute(),
-		map[string]any{"deployment": "data_center", "url": jiraStub.URL, "pat": "dc_pat_2"})
+	rec = doJSON(t, s, "PUT", jiraDataCenterCredentialRoute(),
+		map[string]any{"url": jiraStub.URL, "pat": "dc_pat_2"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("DC reconnect status=%d body=%s, want 200", rec.Code, rec.Body.String())
 	}
@@ -955,10 +955,16 @@ func TestTeamSettingsPatch_GraceOutOfBandRejected(t *testing.T) {
 }
 
 // jiraCredentialRoute is the org's Jira service-credential resource in local
-// mode.
+// mode, which the unbind deletes.
 func jiraCredentialRoute() string {
 	return "/api/orgs/" + runmode.LocalDefaultOrgID + "/jira/access/credential"
 }
+
+// jiraCloudCredentialRoute and jiraDataCenterCredentialRoute bind the org's
+// Jira credential for each deployment.
+func jiraCloudCredentialRoute() string { return jiraCredentialRoute() + "/cloud" }
+
+func jiraDataCenterCredentialRoute() string { return jiraCredentialRoute() + "/data-center" }
 
 // --- review posting posture ------------------------------------------------
 

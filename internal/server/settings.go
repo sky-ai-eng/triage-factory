@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -340,112 +339,142 @@ func jiraProjectIDsFromConfigs(projects []domain.JiraProjectStatusRules) []strin
 	return ids
 }
 
-// The org's Jira service credential body, one struct per deployment. The
-// deployment is an EXPLICIT discriminator rather than something inferred from
-// which fields came back non-empty: inference made a half-filled Cloud form and
-// a Data Center bind indistinguishable at the point where it mattered, and it
-// meant the other flavor's fields were accepted and dropped. Two structs behind
-// a strict decode make sending `pat` to a Cloud bind a 400 that names the
-// field.
-//
-// The values are jira.Deployment's, so the discriminator a client sends is the
-// same string the status read hands back in jira_deployment — one spelling for
-// one concept across the surface.
-type jiraCredentialDeployment struct {
-	Deployment string `json:"deployment"`
-}
+// The org's Jira service credential is bound by one route per deployment, so a
+// route's required fields are fixed and strict decoding makes sending the other
+// deployment's field a 400 that names it.
 
-// jiraCloudCredential is deployment "cloud": an Atlassian API token (email +
-// token → Basic auth, REST v3).
+// jiraCloudCredential is the body of PUT …/jira/access/credential/cloud: an
+// Atlassian API token (email + token → Basic auth, REST v3).
 type jiraCloudCredential struct {
-	Deployment string `json:"deployment"`
-	URL        string `json:"url"`
-	Email      string `json:"email"`
-	Token      string `json:"token"`
+	URL   string `json:"url" doc:"The Atlassian Cloud site's URL, such as https://acme.atlassian.net, which becomes the organization's Jira site."`
+	Email string `json:"email" doc:"The email address of the Atlassian account the API token belongs to."`
+	Token string `json:"token" doc:"An Atlassian API token for that account."`
 }
 
-// jiraDataCenterCredential is deployment "data_center": a personal access
-// token (Bearer, REST v2).
+// jiraDataCenterCredential is the body of PUT
+// …/jira/access/credential/data-center: a personal access token (Bearer, REST
+// v2).
 type jiraDataCenterCredential struct {
-	Deployment string `json:"deployment"`
-	URL        string `json:"url"`
-	PAT        string `json:"pat"`
+	URL string `json:"url" doc:"The Jira Server or Data Center site's URL, which becomes the organization's Jira site."`
+	PAT string `json:"pat" doc:"A personal access token issued by that site."`
 }
 
-// handleJiraConnect binds (or rotates) the org's Jira service credential. It is
-// the Jira half of the credential-resource pair — see org_credentials.go for
-// why credentials are their own routes rather than fields on the bulk settings
-// save; handleJiraCredentialDelete is the unbind.
-//
-// The caller names its deployment and supplies exactly that deployment's
-// fields. The chosen scheme is recorded as an auth-method marker so the system
-// resolver (jira.Resolver.ForSystem) rebuilds the matching client, and it is
-// what the credential is validated under — so what the user filled in, what we
-// checked against Jira, and what the resolver will later do all agree.
+// jiraCredentialResponse is what both Jira credential binds answer.
+type jiraCredentialResponse struct {
+	Status      string `json:"status" doc:"Always connected."`
+	DisplayName string `json:"display_name" doc:"The display name of the Jira account the credential signs in as."`
+}
+
+// jiraBinding is what one deployment's PUT hands the shared bind: the client
+// configuration it validated, the canonical site, and the secrets it stores.
+// The secrets the deployment does not use are empty, and the bind deletes
+// them.
+type jiraBinding struct {
+	cfg               jira.Config
+	url               string
+	cloud             bool
+	pat, email, token string
+}
+
+var opJiraCloudCredentialPut = httpx.NewJSONOp[jiraCloudCredential, jiraCredentialResponse](httpx.OpSpec{
+	Pattern:     "PUT /api/orgs/{org_id}/jira/access/credential/cloud",
+	ID:          "replace_jira_cloud_credential",
+	Summary:     "Connect the organization to Atlassian Cloud Jira",
+	Description: "Checks an Atlassian account's email and API token against the Jira Cloud site, then stores them as the organization's Jira credential, replacing any stored one, sets the organization's Jira site to url, and starts a Jira poll. A credential connected to a different site must be removed with DELETE /api/orgs/{org_id}/jira/access/credential first.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
+
+var opJiraDataCenterCredentialPut = httpx.NewJSONOp[jiraDataCenterCredential, jiraCredentialResponse](httpx.OpSpec{
+	Pattern:     "PUT /api/orgs/{org_id}/jira/access/credential/data-center",
+	ID:          "replace_jira_data_center_credential",
+	Summary:     "Connect the organization to Jira Data Center",
+	Description: "Checks a personal access token against the Jira Server or Data Center site, then stores it as the organization's Jira credential, replacing any stored one, sets the organization's Jira site to url, and starts a Jira poll. A credential connected to a different site must be removed with DELETE /api/orgs/{org_id}/jira/access/credential first.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
+
+// handleJiraCloudCredentialPut binds (or rotates) the org's Jira service
+// credential as an Atlassian Cloud API token. It is the Cloud half of the Jira
+// credential resource — see org_credentials.go for why credentials are their
+// own routes rather than fields on the bulk settings save;
+// handleJiraCredentialDelete is the unbind.
 //
 // Org-admin gated at the handler, from the {org_id} path segment. The DB layer
 // enforces it too (org_settings_update RLS), but an explicit 403 beats an
 // opaque rolled-back transaction.
 //
-// PUT /api/orgs/{org_id}/jira/access/credential
-func (se *settingsHandler) handleJiraConnect(w http.ResponseWriter, r *http.Request) {
+// PUT /api/orgs/{org_id}/jira/access/credential/cloud
+func (se *settingsHandler) handleJiraCloudCredentialPut(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := se.az.RequireOrgAdmin(w, r)
 	if !ok {
 		return
 	}
-	body, ok := httpx.BodyBytes(w, r)
+	req, ok := opJiraCloudCredentialPut.Decode(w, r)
 	if !ok {
 		return
 	}
-	deployment, ok := decodeJiraDeployment(w, body)
+	var v httpx.Validation
+	url := validateJiraSite(&v, req.URL)
+	if req.Email == "" {
+		v.Missing("email")
+	}
+	if req.Token == "" {
+		v.Missing("token")
+	}
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+	resp, ok := se.bindJiraCredential(w, r, orgID, userID, jiraBinding{
+		cfg: jira.CloudAPIToken(url, req.Email, req.Token), url: url, cloud: true,
+		email: req.Email, token: req.Token,
+	})
 	if !ok {
 		return
 	}
+	opJiraCloudCredentialPut.Write(w, resp)
+}
 
-	var (
-		cfg   jira.Config
-		url   string
-		cloud = deployment == jira.DeploymentCloud
-		pat   string
-		email string
-		token string
-	)
-	if cloud {
-		var req jiraCloudCredential
-		if !httpx.DecodeJSONStrictBytes(w, body, &req) {
-			return
-		}
-		url, email, token = req.URL, req.Email, req.Token
-		var v httpx.Validation
-		url = validateJiraSite(&v, url)
-		if email == "" {
-			v.Missing("email")
-		}
-		if token == "" {
-			v.Missing("token")
-		}
-		if v.Flush(w, http.StatusBadRequest) {
-			return
-		}
-		cfg = jira.CloudAPIToken(url, email, token)
-	} else {
-		var req jiraDataCenterCredential
-		if !httpx.DecodeJSONStrictBytes(w, body, &req) {
-			return
-		}
-		url, pat = req.URL, req.PAT
-		var v httpx.Validation
-		url = validateJiraSite(&v, url)
-		if pat == "" {
-			v.Invalid("pat", "a personal access token is required for Jira Data Center")
-		}
-		if v.Flush(w, http.StatusBadRequest) {
-			return
-		}
-		cfg = jira.DataCenterPAT(url, pat)
+// handleJiraDataCenterCredentialPut binds (or rotates) the org's Jira service
+// credential as a Jira Server / Data Center personal access token, under the
+// same gate as the Cloud bind.
+//
+// PUT /api/orgs/{org_id}/jira/access/credential/data-center
+func (se *settingsHandler) handleJiraDataCenterCredentialPut(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := se.az.RequireOrgAdmin(w, r)
+	if !ok {
+		return
 	}
+	req, ok := opJiraDataCenterCredentialPut.Decode(w, r)
+	if !ok {
+		return
+	}
+	var v httpx.Validation
+	url := validateJiraSite(&v, req.URL)
+	if req.PAT == "" {
+		v.Invalid("pat", "a personal access token is required for Jira Data Center")
+	}
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+	resp, ok := se.bindJiraCredential(w, r, orgID, userID, jiraBinding{
+		cfg: jira.DataCenterPAT(url, req.PAT), url: url, pat: req.PAT,
+	})
+	if !ok {
+		return
+	}
+	opJiraDataCenterCredentialPut.Write(w, resp)
+}
 
-	jiraUser, err := auth.ValidateJira(r.Context(), cfg)
+// bindJiraCredential performs what both deployments' binds share: it checks
+// the credential against Jira, stores it with the auth-method marker the
+// system resolver (jira.Resolver.ForSystem) rebuilds the matching client from,
+// sets the org's Jira site, audits the bind, and re-dues Jira polling — so what
+// the user filled in, what we checked against Jira, and what the resolver will
+// later do all agree. On a failure the response is already written and ok is
+// false.
+func (se *settingsHandler) bindJiraCredential(w http.ResponseWriter, r *http.Request, orgID, userID string, b jiraBinding) (resp jiraCredentialResponse, ok bool) {
+	jiraUser, err := auth.ValidateJira(r.Context(), b.cfg)
 	if err != nil {
 		// A mismatched scheme (Cloud creds against a DC host, or vice versa)
 		// fails validation here rather than being stored — so we never persist a
@@ -455,20 +484,20 @@ func (se *settingsHandler) handleJiraConnect(w http.ResponseWriter, r *http.Requ
 		// the validation above is the real authority (custom domains exist), so
 		// this never blocks a combo that actually authenticates.
 		msg := err.Error()
-		switch hostDeployment := jira.DeploymentForHost(url); {
-		case cloud && hostDeployment == jira.DeploymentDataCenter:
+		switch hostDeployment := jira.DeploymentForHost(b.url); {
+		case b.cloud && hostDeployment == jira.DeploymentDataCenter:
 			msg += " — this looks like a Data Center URL, which uses a personal access token rather than an email + API token. Double-check your Jira deployment."
-		case !cloud && hostDeployment == jira.DeploymentCloud:
+		case !b.cloud && hostDeployment == jira.DeploymentCloud:
 			msg += " — this looks like an Atlassian Cloud URL, which uses an email + API token rather than a personal access token. Double-check your Jira deployment."
 		}
 		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
 			Reason: httpx.ReasonUpstreamRejected, Message: msg,
 		})
-		return
+		return jiraCredentialResponse{}, false
 	}
 
 	method := jira.AuthMethodDCPAT
-	if cloud {
+	if b.cloud {
 		method = jira.AuthMethodCloudAPIToken
 	}
 
@@ -479,7 +508,7 @@ func (se *settingsHandler) handleJiraConnect(w http.ResponseWriter, r *http.Requ
 	restore, unlock, err := se.guardJiraWrite(r.Context(), orgID)
 	if err != nil {
 		internalError(w, "settings", err)
-		return
+		return jiraCredentialResponse{}, false
 	}
 	defer unlock()
 
@@ -502,7 +531,7 @@ func (se *settingsHandler) handleJiraConnect(w http.ResponseWriter, r *http.Requ
 		if err != nil {
 			return fmt.Errorf("load org settings: %w", err)
 		}
-		if cur.JiraBaseURL != url {
+		if cur.JiraBaseURL != b.url {
 			prior, err := integrations.Load(r.Context(), tx.Secrets, orgID)
 			if err != nil {
 				return fmt.Errorf("load jira credential: %w", err)
@@ -517,9 +546,9 @@ func (se *settingsHandler) handleJiraConnect(w http.ResponseWriter, r *http.Requ
 		// leaves no stale secret for a later read to mistake for the org's
 		// auth.
 		for _, kv := range [][2]string{
-			{integrations.KeyJiraPAT, pat},
-			{integrations.KeyJiraEmail, email},
-			{integrations.KeyJiraAPIToken, token},
+			{integrations.KeyJiraPAT, b.pat},
+			{integrations.KeyJiraEmail, b.email},
+			{integrations.KeyJiraAPIToken, b.token},
 			{integrations.KeyJiraAuthMethod, string(method)},
 		} {
 			if kv[1] == "" {
@@ -532,7 +561,7 @@ func (se *settingsHandler) handleJiraConnect(w http.ResponseWriter, r *http.Requ
 				return fmt.Errorf("store %s: %w", kv[0], err)
 			}
 		}
-		if _, err := tx.Orgs.SetSourceBaseURL(r.Context(), orgID, eventsource.KindJira, url); err != nil {
+		if _, err := tx.Orgs.SetSourceBaseURL(r.Context(), orgID, eventsource.KindJira, b.url); err != nil {
 			return fmt.Errorf("save jira base url: %w", err)
 		}
 		// Audit the org Jira credential bind/rotate in the same tx,
@@ -540,7 +569,7 @@ func (se *settingsHandler) handleJiraConnect(w http.ResponseWriter, r *http.Requ
 		if err := tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
 			ActorUserID: userID,
 			Action:      domain.AccessActionCredentialSet,
-			DetailJSON:  accessDetailCredential(domain.CredentialKindJiraOrg, auditJiraHost(url)),
+			DetailJSON:  accessDetailCredential(domain.CredentialKindJiraOrg, auditJiraHost(b.url)),
 		}); err != nil {
 			return fmt.Errorf("audit credential set: %w", err)
 		}
@@ -553,25 +582,20 @@ func (se *settingsHandler) handleJiraConnect(w http.ResponseWriter, r *http.Requ
 			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
 				Reason: httpx.ReasonConflict, Message: err.Error(), Field: "url",
 			})
-			return
+			return jiraCredentialResponse{}, false
 		}
 		// Log the underlying wrap-chain (SQL / vault / FK errors) for
 		// operator debugging, but return a stable user-facing message
 		// so we don't leak Postgres internals to API clients.
 		internalError(w, "settings", fmt.Errorf("persist jira connection: %w", err))
-		return
+		return jiraCredentialResponse{}, false
 	}
 
-	// Re-due Jira polling under the new credential. The unbind has always done
-	// this; the bind used to get it second-hand from the fused setup route, so
-	// without it an org that just connected Jira would poll nothing until its
-	// next scheduled cycle.
+	// Re-due Jira polling under the new credential, so an org that just
+	// connected Jira does not poll nothing until its next scheduled cycle.
 	se.kickJira(r, orgID)
 
-	writeJSON(w, http.StatusOK, map[string]string{
-		"status":       "connected",
-		"display_name": jiraUser.DisplayName,
-	})
+	return jiraCredentialResponse{Status: "connected", DisplayName: jiraUser.DisplayName}, true
 }
 
 // errJiraSiteHasCredential refuses moving an org's Jira site while its Jira
@@ -595,40 +619,21 @@ func validateJiraSite(v *httpx.Validation, raw string) string {
 	return site
 }
 
-// decodeJiraDeployment takes the lenient first look at a Jira credential body:
-// just the discriminator, so the caller can then decode STRICTLY into that
-// deployment's own struct and have the other one's fields come back as
-// UNKNOWN_FIELD. It is the only place on this surface that reads a body without
-// strictness, and it reads exactly one field.
-//
-// An absent or unrecognized value is a 400 rather than a fallback to either
-// backend: guessing is what this discriminator replaced.
-func decodeJiraDeployment(w http.ResponseWriter, body []byte) (jira.Deployment, bool) {
-	var probe jiraCredentialDeployment
-	if err := json.Unmarshal(body, &probe); err != nil {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-			Reason: httpx.ReasonInvalidBody, Message: "invalid request body",
-		})
-		return "", false
-	}
-	switch jira.Deployment(probe.Deployment) {
-	case jira.DeploymentCloud:
-		return jira.DeploymentCloud, true
-	case jira.DeploymentDataCenter:
-		return jira.DeploymentDataCenter, true
-	}
-	reason := httpx.ReasonInvalidField
-	if probe.Deployment == "" {
-		reason = httpx.ReasonMissingField
-	}
-	httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-		Reason: reason,
-		Message: fmt.Sprintf("deployment must be %q (an Atlassian Cloud site) or %q (self-hosted Jira Server / Data Center)",
-			jira.DeploymentCloud, jira.DeploymentDataCenter),
-		Field: "deployment",
-	})
-	return "", false
+// sshPreflightResponse is the verdict of an SSH preflight. Stderr is set on a
+// failed probe only.
+type sshPreflightResponse struct {
+	OK     bool   `json:"ok" doc:"Whether this machine signed in to GitHub over SSH."`
+	Stderr string `json:"stderr,omitempty" doc:"The ssh command's output with a hint about the likely cause, present only when ok is false."`
+	Host   string `json:"host" doc:"The SSH host that was tried, derived from the organization's GitHub URL."`
 }
+
+var opGitHubPreflightSSH = httpx.NewJSONOp[httpx.NoBody, sshPreflightResponse](httpx.OpSpec{
+	Pattern:     "POST /api/github/preflight-ssh",
+	ID:          "preflight_github_ssh",
+	Summary:     "Test this machine's SSH access to GitHub",
+	Description: "Runs ssh against the organization's GitHub host and reports whether the machine's SSH key signed in, adding the host's key to known_hosts if it is not there yet. A probe that fails is reported with ok false rather than as an error. Local mode only.",
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintNo, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // handleGitHubPreflightSSH probes whether the user's machine can
 // authenticate to GitHub over SSH (key + agent + known_hosts all
@@ -679,15 +684,11 @@ func (se *settingsHandler) handleGitHubPreflightSSH(w http.ResponseWriter, r *ht
 
 	if err := worktree.PreflightSSH(ctx, sshHost); err != nil {
 		settingsLog.Warn("ssh preflight failed", "ssh_host", sshHost, "error", err)
-		writeJSON(w, http.StatusOK, map[string]any{
-			"ok":     false,
-			"stderr": err.Error(),
-			"host":   sshHost,
-		})
+		opGitHubPreflightSSH.Write(w, sshPreflightResponse{OK: false, Stderr: err.Error(), Host: sshHost})
 		return
 	}
 	settingsLog.Info("ssh preflight ok", "ssh_host", sshHost)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "host": sshHost})
+	opGitHubPreflightSSH.Write(w, sshPreflightResponse{OK: true, Host: sshHost})
 }
 
 func (s *Server) registerSettingsHandlerRoutes() {
@@ -700,13 +701,13 @@ func (s *Server) registerSettingsHandlerRoutes() {
 		guardBedrockWrite:   s.guardLocalBedrockWrite,
 		kickMemoryBacklog:   func(orgID string) { s.kickMemoryOwed(orgID, "") },
 	}
-	s.apiMutating("POST /api/github/preflight-ssh", se.handleGitHubPreflightSSH)
+	s.op(opGitHubPreflightSSH, se.handleGitHubPreflightSSH)
 	// Bedrock role-mode setup: returns the control service's caller ARN + the
 	// TF-generated External ID so the UI can render a filled trust-policy
 	// snippet. POST (not GET) because first entry generates + persists the
 	// External ID — a state change that needs CSRF protection, per the
 	// mutating-verb convention (route_auth_test enforces GET ≠ apiMutating).
-	s.apiMutating("POST /api/bedrock/role-setup", se.handleBedrockRoleSetup)
+	s.op(opBedrockRoleSetup, se.handleBedrockRoleSetup)
 
 	// The org's LLM provider credential — one resource per credential SHAPE,
 	// so a route's required fields are fixed and a blank secret never selects
@@ -714,16 +715,18 @@ func (s *Server) registerSettingsHandlerRoutes() {
 	// DELETE. An org may hold both providers at once: a bind replaces only
 	// material of its own provider, and says so in the response. See
 	// llm_credentials.go.
-	s.apiMutating("PUT /api/orgs/{org_id}/llm/anthropic", se.handleAnthropicPut)
-	s.apiMutating("DELETE /api/orgs/{org_id}/llm/anthropic", se.handleAnthropicDelete)
-	s.apiMutating("PUT /api/orgs/{org_id}/llm/bedrock/access-keys", se.handleBedrockAccessKeysPut)
-	s.apiMutating("PUT /api/orgs/{org_id}/llm/bedrock/bearer", se.handleBedrockBearerPut)
-	s.apiMutating("PUT /api/orgs/{org_id}/llm/bedrock/role", se.handleBedrockRolePut)
-	s.apiMutating("DELETE /api/orgs/{org_id}/llm/bedrock", se.handleBedrockDelete)
+	s.op(opAnthropicPut, se.handleAnthropicPut)
+	s.op(opAnthropicDelete, se.handleAnthropicDelete)
+	s.op(opBedrockAccessKeysPut, se.handleBedrockAccessKeysPut)
+	s.op(opBedrockBearerPut, se.handleBedrockBearerPut)
+	s.op(opBedrockRolePut, se.handleBedrockRolePut)
+	s.op(opBedrockDelete, se.handleBedrockDelete)
 
 	// The org's Jira credential — the Jira half of the addressable-resource
 	// pair whose rationale sits with the GitHub PAT routes in
-	// registerGitHubRoutes.
-	s.apiMutating("PUT /api/orgs/{org_id}/jira/access/credential", se.handleJiraConnect)
-	s.apiMutating("DELETE /api/orgs/{org_id}/jira/access/credential", s.handleJiraCredentialDelete)
+	// registerGitHubRoutes. A bind is one route per deployment; the unbind is
+	// one route for both.
+	s.op(opJiraCloudCredentialPut, se.handleJiraCloudCredentialPut)
+	s.op(opJiraDataCenterCredentialPut, se.handleJiraDataCenterCredentialPut)
+	s.op(opJiraCredentialDelete, s.handleJiraCredentialDelete)
 }

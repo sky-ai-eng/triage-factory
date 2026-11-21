@@ -2,14 +2,14 @@
 // way the GitHub PAT flow drives its save: the caller's Continue (setup
 // wizard) / Save (Settings) performs the connect, rather than a field group
 // owning a separate Connect button. PUT
-// /api/orgs/{org}/jira/access/credential validates the credential server-side
-// (reachability + auth) and persists it, so a successful result IS the
-// validation — there's no separate probe.
+// /api/orgs/{org}/jira/access/credential/cloud and its data-center sibling
+// validate the credential server-side (reachability + auth) and persist it, so
+// a successful result IS the validation — there's no separate probe.
 //
-// The unbind is the DELETE on the same resource (disconnectJira in
-// orgCredentials.ts, alongside the GitHub pair), driven from JiraAccessGroup:
-// it's an inline action on the already-connected state, with no Continue/Save
-// to fold into.
+// The unbind is the DELETE on /api/orgs/{org}/jira/access/credential, for
+// either deployment (disconnectJira in orgCredentials.ts, alongside the GitHub
+// pair), driven from JiraAccessGroup: it's an inline action on the
+// already-connected state, with no Continue/Save to fold into.
 
 // JiraDeployment is the backend a Jira org connects to. It mirrors the
 // jira.Deployment enum (Go side) and is the explicit choice made in the
@@ -69,31 +69,33 @@ export interface JiraConnectCreds {
   jira_api_token: string
 }
 
-// connectJira binds the org-level Jira service credential. The deployment is
-// sent EXPLICITLY and selects which credential shape rides with it — Cloud
-// sends {url, email, token}; Data Center sends {url, pat}. The server decodes
-// against that deployment's struct alone, so the other one's fields are a 400
-// rather than something quietly dropped; sending only the chosen pair is
-// therefore a requirement, not a tidiness. Returns a discriminated result
-// mirroring patchOrgSettings — the caller surfaces the error inline (wizard error
-// line) or as a toast (Settings).
+// connectJira binds the org-level Jira service credential. The deployment
+// picks the route and the credential shape that rides with it — Cloud sends
+// {url, email, token} to .../credential/cloud; Data Center sends {url, pat} to
+// .../credential/data-center. Each route decodes its own shape alone, so the
+// other one's fields are a 400 rather than something quietly dropped; sending
+// only the chosen pair is therefore a requirement, not a tidiness. Returns a
+// discriminated result mirroring patchOrgSettings — the caller surfaces the
+// error inline (wizard error line) or as a toast (Settings).
 export async function connectJira(
   orgId: string,
   url: string,
   deployment: JiraDeployment,
   creds: JiraConnectCreds,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  const body =
+  const [route, body] =
     deployment === 'cloud'
-      ? {
-          deployment,
-          url: url.trim(),
-          email: creds.jira_email.trim(),
-          token: creds.jira_api_token.trim(),
-        }
-      : { deployment, url: url.trim(), pat: creds.jira_pat.trim() }
+      ? [
+          'cloud',
+          {
+            url: url.trim(),
+            email: creds.jira_email.trim(),
+            token: creds.jira_api_token.trim(),
+          },
+        ]
+      : ['data-center', { url: url.trim(), pat: creds.jira_pat.trim() }]
   try {
-    await apiFetch(`/api/orgs/${orgId}/jira/access/credential`, {
+    await apiFetch(`/api/orgs/${orgId}/jira/access/credential/${route}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),

@@ -359,8 +359,8 @@ func TestSetupWizardSequence_KicksThePoller(t *testing.T) {
 	<-ghDone
 
 	jiraStub := jiraMyselfStub(t, `{"accountId":"org-bot","displayName":"Org Bot"}`, nil)
-	if rec := doJSON(t, s, http.MethodPut, jiraCredentialRoute(), map[string]any{
-		"deployment": "data_center", "url": jiraStub.URL, "pat": "jira_test",
+	if rec := doJSON(t, s, http.MethodPut, jiraDataCenterCredentialRoute(), map[string]any{
+		"url": jiraStub.URL, "pat": "jira_test",
 	}); rec.Code != http.StatusOK {
 		t.Fatalf("jira credential bind = %d, body=%s", rec.Code, rec.Body.String())
 	}
@@ -403,8 +403,8 @@ func TestJiraIdentityPAT_RejectsWrongDeploymentFields(t *testing.T) {
 
 	jiraStub := jiraMyselfStub(t, `{"accountId":"acct","displayName":"Bot"}`, nil)
 	// Bind the org as Data Center, so the org's deployment marker is DC.
-	if rec := doJSON(t, s, http.MethodPut, jiraCredentialRoute(), map[string]any{
-		"deployment": "data_center", "url": jiraStub.URL, "pat": "org_pat",
+	if rec := doJSON(t, s, http.MethodPut, jiraDataCenterCredentialRoute(), map[string]any{
+		"url": jiraStub.URL, "pat": "org_pat",
 	}); rec.Code != http.StatusOK {
 		t.Fatalf("org jira bind = %d, body=%s", rec.Code, rec.Body.String())
 	}
@@ -426,9 +426,10 @@ func TestJiraIdentityPAT_RejectsWrongDeploymentFields(t *testing.T) {
 	}
 }
 
-// TestJiraCredentialPut_RejectsCrossFlavorFields: the deployment is an explicit
-// discriminator, and each flavor decodes against its own struct — so the other
-// flavor's field is a 400 naming it rather than a value silently dropped.
+// TestJiraCredentialPut_RejectsCrossFlavorFields: each deployment's bind is its
+// own route with its own body, so the other deployment's field, or a
+// deployment field at all, is a 400 naming it rather than a value silently
+// dropped.
 func TestJiraCredentialPut_RejectsCrossFlavorFields(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -436,20 +437,25 @@ func TestJiraCredentialPut_RejectsCrossFlavorFields(t *testing.T) {
 
 	for _, c := range []struct {
 		name  string
+		route string
 		body  map[string]any
 		field string
 	}{
-		{"pat on cloud", map[string]any{
-			"deployment": "cloud", "url": "https://acme.atlassian.net",
-			"email": "a@b.c", "token": "t", "pat": "nope",
+		{"pat on cloud", jiraCloudCredentialRoute(), map[string]any{
+			"url": "https://acme.atlassian.net", "email": "a@b.c", "token": "t", "pat": "nope",
 		}, "pat"},
-		{"email on data center", map[string]any{
-			"deployment": "data_center", "url": "https://jira.example.com",
-			"pat": "p", "email": "a@b.c",
+		{"email on data center", jiraDataCenterCredentialRoute(), map[string]any{
+			"url": "https://jira.example.com", "pat": "p", "email": "a@b.c",
 		}, "email"},
+		{"deployment on cloud", jiraCloudCredentialRoute(), map[string]any{
+			"deployment": "cloud", "url": "https://acme.atlassian.net", "email": "a@b.c", "token": "t",
+		}, "deployment"},
+		{"deployment on data center", jiraDataCenterCredentialRoute(), map[string]any{
+			"deployment": "data_center", "url": "https://jira.example.com", "pat": "p",
+		}, "deployment"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			rec := doJSON(t, s, http.MethodPut, jiraCredentialRoute(), c.body)
+			rec := doJSON(t, s, http.MethodPut, c.route, c.body)
 			if rec.Code != http.StatusBadRequest {
 				t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
 			}
@@ -457,16 +463,6 @@ func TestJiraCredentialPut_RejectsCrossFlavorFields(t *testing.T) {
 		})
 	}
 
-	// An absent or unrecognized discriminator is refused rather than guessed.
-	for _, body := range []map[string]any{
-		{"url": "https://jira.example.com", "pat": "p"},
-		{"deployment": "server", "url": "https://jira.example.com", "pat": "p"},
-	} {
-		rec := doJSON(t, s, http.MethodPut, jiraCredentialRoute(), body)
-		if rec.Code != http.StatusBadRequest {
-			t.Errorf("deployment=%v → %d, want 400; body=%s", body["deployment"], rec.Code, rec.Body.String())
-		}
-	}
 }
 
 // --- helpers ---------------------------------------------------------------

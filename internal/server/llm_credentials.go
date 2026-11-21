@@ -48,8 +48,14 @@ import (
 // empty. The other provider is never in it: binding one no longer disturbs the
 // other.
 type llmCredentialResponse struct {
-	Status  string   `json:"status"`
-	Cleared []string `json:"cleared"`
+	Status  string   `json:"status" doc:"Always connected."`
+	Cleared []string `json:"cleared" doc:"The organization's stored Bedrock credential of another kind that this write removed, as bedrock:role, bedrock:bearer, or bedrock:access_keys; empty when it removed none, and always empty for the Anthropic key."`
+}
+
+// credentialDisconnectedResponse is what an LLM or Jira credential unbind
+// answers.
+type credentialDisconnectedResponse struct {
+	Status string `json:"status" doc:"Always disconnected."`
 }
 
 // The `cleared` vocabulary. "anthropic" is the org's Anthropic API key;
@@ -98,6 +104,20 @@ func storedLLMCredentials(o domain.OrgSettings) (anthropic string, bedrock strin
 // Anthropic
 // --------------------------------------------------------------------
 
+// anthropicCredentialRequest is the body of PUT …/llm/anthropic.
+type anthropicCredentialRequest struct {
+	APIKey string `json:"api_key" doc:"The Anthropic API key, which must not be empty; surrounding whitespace is trimmed."`
+}
+
+var opAnthropicPut = httpx.NewJSONOp[anthropicCredentialRequest, llmCredentialResponse](httpx.OpSpec{
+	Pattern:     "PUT /api/orgs/{org_id}/llm/anthropic",
+	ID:          "replace_anthropic_credential",
+	Summary:     "Set the organization's Anthropic API key",
+	Description: "Checks the key with Anthropic, then stores it as the organization's Anthropic API key, replacing any stored one, and moves the organization off the host's Claude credentials. The organization's Bedrock credential is left as it is." + llmRetrySentence,
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
+
 // handleAnthropicPut validates and stores the org's Anthropic API key — the
 // single validated write path for the anthropic_api_key vault secret (the org
 // settings PATCH accepts none of these fields), so a key reaching the vault has
@@ -109,10 +129,8 @@ func (se *settingsHandler) handleAnthropicPut(w http.ResponseWriter, r *http.Req
 	if !ok {
 		return
 	}
-	var req struct {
-		APIKey string `json:"api_key"`
-	}
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opAnthropicPut.Decode(w, r)
+	if !ok {
 		return
 	}
 	key := strings.TrimSpace(req.APIKey)
@@ -171,8 +189,17 @@ func (se *settingsHandler) handleAnthropicPut(w http.ResponseWriter, r *http.Req
 	}
 
 	se.kickMemoryBacklog(orgID)
-	writeJSON(w, http.StatusOK, llmCredentialResponse{Status: "connected", Cleared: []string{}})
+	opAnthropicPut.Write(w, llmCredentialResponse{Status: "connected", Cleared: []string{}})
 }
+
+var opAnthropicDelete = httpx.NewJSONOp[httpx.NoBody, credentialDisconnectedResponse](httpx.OpSpec{
+	Pattern:     "DELETE /api/orgs/{org_id}/llm/anthropic",
+	ID:          "delete_anthropic_credential",
+	Summary:     "Remove the organization's Anthropic API key",
+	Description: "Deletes the organization's Anthropic API key, and succeeds when none is stored. The organization's Bedrock credential is left as it is, and the organization does not move onto the host's Claude credentials, so runs on Anthropic models are refused until a key is set again.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleAnthropicDelete removes the org's Anthropic API key. Idempotent — a
 // delete with nothing stored is a 200 and no audit row, because a removal that
@@ -234,7 +261,7 @@ func (se *settingsHandler) handleAnthropicDelete(w http.ResponseWriter, r *http.
 		internalError(w, "llm-credentials", fmt.Errorf("clear anthropic credentials: %w", err))
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "disconnected"})
+	opAnthropicDelete.Write(w, credentialDisconnectedResponse{Status: "disconnected"})
 }
 
 // --------------------------------------------------------------------
@@ -251,25 +278,27 @@ func (se *settingsHandler) handleAnthropicDelete(w http.ResponseWriter, r *http.
 // omits is unset, not kept. That is a replacement, not a blank-means-something
 // sentinel — there is no arm here that reads "" as "leave the stored value".
 type bedrockConfig struct {
-	Region  string `json:"region"`
-	ModelID string `json:"model_id"`
-	BaseURL string `json:"base_url"`
+	Region  string `json:"region" doc:"The AWS region Bedrock is called in, such as us-east-1."`
+	ModelID string `json:"model_id" doc:"A Bedrock model id or inference profile ARN for runs whose own model is not a Bedrock model; absent or empty stores none."`
+	BaseURL string `json:"base_url" doc:"An https URL with a host and no path that replaces the region's Bedrock endpoint, for a VPC endpoint or another partition; absent or empty uses the region's endpoint."`
 }
 
 // bedrockAccessKeysRequest is PUT …/llm/bedrock/access-keys: the IAM
 // access-key pair the SigV4 re-signing proxy serves at run time, plus an
 // optional session token for temporary credentials.
 type bedrockAccessKeysRequest struct {
-	AccessKeyID     string `json:"access_key_id"`
-	SecretAccessKey string `json:"secret_access_key"`
-	SessionToken    string `json:"session_token"`
+	AccessKeyID     string `json:"access_key_id" doc:"The IAM access key id."`
+	SecretAccessKey string `json:"secret_access_key" doc:"The IAM secret access key."`
+	// An empty token deletes a stored one, the same as an absent token: the
+	// PUT replaces the whole credential.
+	SessionToken string `json:"session_token" doc:"The session token of temporary credentials; absent or empty stores none and deletes a stored one."`
 	bedrockConfig
 }
 
 // bedrockBearerRequest is PUT …/llm/bedrock/bearer: a Bedrock API key
 // (AWS_BEARER_TOKEN_BEDROCK).
 type bedrockBearerRequest struct {
-	BearerToken string `json:"bearer_token"`
+	BearerToken string `json:"bearer_token" doc:"The Bedrock API key."`
 	bedrockConfig
 }
 
@@ -279,9 +308,43 @@ type bedrockBearerRequest struct {
 // — see handleBedrockRoleSetup, which hands the admin the trust policy that
 // pins it.
 type bedrockRoleRequest struct {
-	RoleARN string `json:"role_arn"`
+	RoleARN string `json:"role_arn" doc:"The ARN of the IAM role to assume, such as arn:aws:iam::123456789012:role/tf-bedrock."`
 	bedrockConfig
 }
+
+// bedrockReplaceSentence and llmRetrySentence are the sentences the LLM
+// credential binds' descriptions share.
+const (
+	bedrockReplaceSentence = " It replaces any Bedrock credential the organization holds, of any kind, and lists a different kind it removed in cleared; the organization's Anthropic key is left as it is."
+	llmRetrySentence       = " It also retries the memory generations still owed in the organization, which call the model provider."
+)
+
+var opBedrockAccessKeysPut = httpx.NewJSONOp[bedrockAccessKeysRequest, llmCredentialResponse](httpx.OpSpec{
+	Pattern:     "PUT /api/orgs/{org_id}/llm/bedrock/access-keys",
+	ID:          "replace_bedrock_access_keys",
+	Summary:     "Connect the organization to Bedrock with IAM access keys",
+	Description: "Stores an IAM access key pair as the organization's Bedrock credential, after checking only its shape." + bedrockReplaceSentence + llmRetrySentence,
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
+
+var opBedrockBearerPut = httpx.NewJSONOp[bedrockBearerRequest, llmCredentialResponse](httpx.OpSpec{
+	Pattern:     "PUT /api/orgs/{org_id}/llm/bedrock/bearer",
+	ID:          "replace_bedrock_bearer_token",
+	Summary:     "Connect the organization to Bedrock with an API key",
+	Description: "Stores a Bedrock API key as the organization's Bedrock credential, after checking only its shape." + bedrockReplaceSentence + llmRetrySentence,
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
+
+var opBedrockRolePut = httpx.NewJSONOp[bedrockRoleRequest, llmCredentialResponse](httpx.OpSpec{
+	Pattern:     "PUT /api/orgs/{org_id}/llm/bedrock/role",
+	ID:          "replace_bedrock_role",
+	Summary:     "Connect the organization to Bedrock with an IAM role",
+	Description: "Checks the IAM role by assuming it with the organization's External ID and stores it as the organization's Bedrock credential, from which each run gets short-lived credentials; the route works in multi mode only." + bedrockReplaceSentence + llmRetrySentence,
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // handleBedrockAccessKeysPut binds the IAM access-key pair.
 //
@@ -291,8 +354,8 @@ func (se *settingsHandler) handleBedrockAccessKeysPut(w http.ResponseWriter, r *
 	if !ok {
 		return
 	}
-	var req bedrockAccessKeysRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opBedrockAccessKeysPut.Decode(w, r)
+	if !ok {
 		return
 	}
 	req.AccessKeyID = strings.TrimSpace(req.AccessKeyID)
@@ -316,7 +379,7 @@ func (se *settingsHandler) handleBedrockAccessKeysPut(w http.ResponseWriter, r *
 	// real money and presumes model access, and a VPC-endpoint org's Bedrock may
 	// not be reachable from the TF server at all. Validation is shape-only; a
 	// bad credential surfaces on the first run with the AWS error attached.
-	se.bindBedrock(w, r, orgID, userID, bedrockBinding{
+	resp, ok := se.bindBedrock(w, r, orgID, userID, bedrockBinding{
 		ref:    integrations.KeyAWSAccessKeyID,
 		config: req.bedrockConfig,
 		secrets: []bedrockSecret{
@@ -327,6 +390,10 @@ func (se *settingsHandler) handleBedrockAccessKeysPut(w http.ResponseWriter, r *
 			{integrations.KeyAWSSessionToken, req.SessionToken, "Org's AWS session token"},
 		},
 	})
+	if !ok {
+		return
+	}
+	opBedrockAccessKeysPut.Write(w, resp)
 }
 
 // handleBedrockBearerPut binds a Bedrock API key.
@@ -337,8 +404,8 @@ func (se *settingsHandler) handleBedrockBearerPut(w http.ResponseWriter, r *http
 	if !ok {
 		return
 	}
-	var req bedrockBearerRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opBedrockBearerPut.Decode(w, r)
+	if !ok {
 		return
 	}
 	req.BearerToken = strings.TrimSpace(req.BearerToken)
@@ -351,13 +418,17 @@ func (se *settingsHandler) handleBedrockBearerPut(w http.ResponseWriter, r *http
 		return
 	}
 
-	se.bindBedrock(w, r, orgID, userID, bedrockBinding{
+	resp, ok := se.bindBedrock(w, r, orgID, userID, bedrockBinding{
 		ref:    integrations.KeyAWSBearerTokenBedrock,
 		config: req.bedrockConfig,
 		secrets: []bedrockSecret{
 			{integrations.KeyAWSBearerTokenBedrock, req.BearerToken, "Org's Bedrock API key"},
 		},
 	})
+	if !ok {
+		return
+	}
+	opBedrockBearerPut.Write(w, resp)
 }
 
 // handleBedrockRolePut binds role mode (TFAC-616) — the only Bedrock shape with
@@ -371,8 +442,8 @@ func (se *settingsHandler) handleBedrockRolePut(w http.ResponseWriter, r *http.R
 	if !ok {
 		return
 	}
-	var req bedrockRoleRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opBedrockRolePut.Decode(w, r)
+	if !ok {
 		return
 	}
 	req.RoleARN = strings.TrimSpace(req.RoleARN)
@@ -410,14 +481,27 @@ func (se *settingsHandler) handleBedrockRolePut(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	se.bindBedrock(w, r, orgID, userID, bedrockBinding{
+	resp, ok := se.bindBedrock(w, r, orgID, userID, bedrockBinding{
 		ref:    integrations.KeyAWSRoleARN,
 		config: req.bedrockConfig,
 		secrets: []bedrockSecret{
 			{integrations.KeyAWSRoleARN, req.RoleARN, "Org's Bedrock IAM role ARN"},
 		},
 	})
+	if !ok {
+		return
+	}
+	opBedrockRolePut.Write(w, resp)
 }
+
+var opBedrockDelete = httpx.NewJSONOp[httpx.NoBody, credentialDisconnectedResponse](httpx.OpSpec{
+	Pattern:     "DELETE /api/orgs/{org_id}/llm/bedrock",
+	ID:          "delete_bedrock_credential",
+	Summary:     "Remove the organization's Bedrock credential",
+	Description: "Deletes the organization's Bedrock credential of whatever kind, with its region, model id, endpoint, and the role's External ID, and succeeds when none is stored. The organization's Anthropic key is left as it is.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleBedrockDelete removes every piece of Bedrock material the org holds —
 // credential, non-secret config, role ARN and External ID alike. Idempotent.
@@ -465,7 +549,7 @@ func (se *settingsHandler) handleBedrockDelete(w http.ResponseWriter, r *http.Re
 		internalError(w, "llm-credentials", fmt.Errorf("clear bedrock credentials: %w", err))
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "disconnected"})
+	opBedrockDelete.Write(w, credentialDisconnectedResponse{Status: "disconnected"})
 }
 
 // bedrockBinding is what one flavor's PUT contributes to the shared write: the
@@ -485,7 +569,10 @@ type bedrockSecret struct{ key, value, desc string }
 // writes, the non-secret config, the sweep of the Bedrock material this bind
 // replaces, the settings ref, and the audit row — all in one transaction, so a
 // half-bound org is not a state that exists.
-func (se *settingsHandler) bindBedrock(w http.ResponseWriter, r *http.Request, orgID, userID string, b bedrockBinding) {
+//
+// On a failure the response is already written and ok is false; on success the
+// caller writes resp through its own operation.
+func (se *settingsHandler) bindBedrock(w http.ResponseWriter, r *http.Request, orgID, userID string, b bedrockBinding) (resp llmCredentialResponse, ok bool) {
 	set := map[string]bedrockSecret{}
 	for _, sec := range append(b.secrets,
 		bedrockSecret{integrations.KeyAWSRegion, b.config.Region, "Org's Bedrock region"},
@@ -501,7 +588,7 @@ func (se *settingsHandler) bindBedrock(w http.ResponseWriter, r *http.Request, o
 	restore, unlock, err := se.guardBedrockWrite(r.Context(), orgID)
 	if err != nil {
 		internalError(w, "llm-credentials", err)
-		return
+		return llmCredentialResponse{}, false
 	}
 	defer unlock()
 
@@ -562,7 +649,7 @@ func (se *settingsHandler) bindBedrock(w http.ResponseWriter, r *http.Request, o
 			restore()
 		}
 		internalError(w, "llm-credentials", fmt.Errorf("persist bedrock credentials: %w", err))
-		return
+		return llmCredentialResponse{}, false
 	}
 
 	// The org-wide memory doorbell, for all three Bedrock shapes at once —
@@ -571,7 +658,7 @@ func (se *settingsHandler) bindBedrock(w http.ResponseWriter, r *http.Request, o
 	// transaction then rolled back would re-run a backlog against the same
 	// missing credential.
 	se.kickMemoryBacklog(orgID)
-	writeJSON(w, http.StatusOK, llmCredentialResponse{Status: "connected", Cleared: nonNil(cleared)})
+	return llmCredentialResponse{Status: "connected", Cleared: nonNil(cleared)}, true
 }
 
 // validateBedrockConfig trims and checks the shared non-secret config, seeding

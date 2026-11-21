@@ -36,6 +36,22 @@ var bedrockRoleARNRe = regexp.MustCompile(`^arn:aws[a-z-]*:iam::\d{12}:role/.+`)
 // AWS identity.
 const operatorRemediationMsg = "the control service has no AWS identity; set AWS_* on the control service or attach an instance role — see docs/users/self-hosting/bedrock-role-mode.md"
 
+// bedrockRoleSetupResponse is what an admin needs to create the IAM role
+// Bedrock role mode assumes.
+type bedrockRoleSetupResponse struct {
+	CallerIdentityARN string `json:"caller_identity_arn" doc:"The ARN of the AWS identity Triage Factory assumes the role as."`
+	ExternalID        string `json:"external_id" doc:"The External ID Triage Factory presents when it assumes the role, the same on every call."`
+	TrustPolicy       string `json:"trust_policy" doc:"An IAM trust policy, as indented JSON text, that lets that identity assume the role only with that External ID."`
+}
+
+var opBedrockRoleSetup = httpx.NewJSONOp[httpx.NoBody, bedrockRoleSetupResponse](httpx.OpSpec{
+	Pattern:     "POST /api/bedrock/role-setup",
+	ID:          "setup_bedrock_role",
+	Summary:     "Get the trust policy for a Bedrock IAM role",
+	Description: "Returns the AWS identity Triage Factory assumes an IAM role as, the organization's External ID, and a trust policy that pins both, for setting up Bedrock role mode. The first call generates and stores the External ID. Multi mode only.",
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintNo, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
+
 // handleBedrockRoleSetup returns the control service's caller identity ARN
 // (sts:GetCallerIdentity) and the org's TF-generated External ID, so the UI
 // can render a filled, copyable trust-policy JSON — the setup documentation
@@ -76,10 +92,10 @@ func (se *settingsHandler) handleBedrockRoleSetup(w http.ResponseWriter, r *http
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"caller_identity_arn": callerARN,
-		"external_id":         externalID,
-		"trust_policy":        bedrockTrustPolicyJSON(callerARN, externalID),
+	opBedrockRoleSetup.Write(w, bedrockRoleSetupResponse{
+		CallerIdentityARN: callerARN,
+		ExternalID:        externalID,
+		TrustPolicy:       bedrockTrustPolicyJSON(callerARN, externalID),
 	})
 }
 
