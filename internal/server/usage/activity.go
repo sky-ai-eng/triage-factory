@@ -456,7 +456,7 @@ func facetValues(in []db.Facet) []string {
 var opUsageTeamArtifactFacets = httpx.NewJSONOp[artifactActivityFacetsRequest, artifactActivityFacetsJSON](httpx.OpSpec{
 	Pattern:     "POST /api/teams/{team_id}/usage/artifacts/facets",
 	ID:          "get_team_usage_artifact_facets",
-	Summary:     "Get the facets of a team's changed objects",
+	Summary:     "Count the objects a team's runs changed",
 	Description: "Returns how many objects the team's runs changed under the request's filters, as the team's one entry in by_team. It needs an Enterprise licence.",
 	PathParams:  map[string]string{"team_id": "The team's id, or default for the one team in local mode."},
 	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
@@ -491,7 +491,7 @@ func (h *Handler) handleUsageTeamArtifactFacets(w http.ResponseWriter, r *http.R
 var opUsageOrgArtifactFacets = httpx.NewJSONOp[orgArtifactActivityFacetsRequest, artifactActivityFacetsJSON](httpx.OpSpec{
 	Pattern:     "POST /api/orgs/{org_id}/usage/artifacts/facets",
 	ID:          "get_org_usage_artifact_facets",
-	Summary:     "Get the facets of an organization's changed objects",
+	Summary:     "Count the objects an organization's runs changed",
 	Description: "Returns the teams the organization's changed-objects list can be narrowed to, each with how many objects its runs changed under the request's other filters. It needs an Enterprise licence.",
 	PathParams:  map[string]string{"org_id": "The organization's id."},
 	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
@@ -548,7 +548,7 @@ func (h *Handler) writeArtifactFacets(w http.ResponseWriter, r *http.Request, or
 var opUsageTeamActionFacets = httpx.NewJSONOp[actionActivityFacetsRequest, actionActivityFacetsJSON](httpx.OpSpec{
 	Pattern:     "POST /api/teams/{team_id}/usage/actions/facets",
 	ID:          "get_team_usage_action_facets",
-	Summary:     "Get the facets of a team's actions",
+	Summary:     "Count a team's actions in external systems",
 	Description: "Returns the people the team's action list can be narrowed to, and the team itself, each with how many actions match the request's other filters. It needs an Enterprise licence.",
 	PathParams:  map[string]string{"team_id": "The team's id, or default for the one team in local mode."},
 	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
@@ -583,7 +583,7 @@ func (h *Handler) handleUsageTeamActionFacets(w http.ResponseWriter, r *http.Req
 var opUsageOrgActionFacets = httpx.NewJSONOp[orgActionActivityFacetsRequest, actionActivityFacetsJSON](httpx.OpSpec{
 	Pattern:     "POST /api/orgs/{org_id}/usage/actions/facets",
 	ID:          "get_org_usage_action_facets",
-	Summary:     "Get the facets of an organization's actions",
+	Summary:     "Count an organization's actions in external systems",
 	Description: "Returns the people and teams the organization's action list can be narrowed to, each with how many actions match the request's other filters. It needs an Enterprise licence.",
 	PathParams:  map[string]string{"org_id": "The organization's id."},
 	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},

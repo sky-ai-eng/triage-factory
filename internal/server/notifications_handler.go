@@ -354,7 +354,7 @@ type notificationFacetsRead = func(db.NotificationStore, context.Context, string
 var opNotificationList = httpx.NewListOp[notificationListRequest, notificationJSON](httpx.OpSpec{
 	Pattern:     "POST /api/me/notifications/list",
 	ID:          "list_my_notifications",
-	Summary:     "List the caller's notifications",
+	Summary:     "List your notifications",
 	Description: "Lists one page of the notifications the caller is sent in the organization their credential names, each with the caller's read and dismissed marks and the actions the caller may use.",
 	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
 })
@@ -488,7 +488,7 @@ type notificationFacetsOp = httpx.JSONOp[notificationFacetsRequest, notification
 var opNotificationFacets = httpx.NewJSONOp[notificationFacetsRequest, notificationFacetsResponse](httpx.OpSpec{
 	Pattern:     "POST /api/me/notifications/facets",
 	ID:          "get_my_notification_facets",
-	Summary:     "Count the caller's notifications",
+	Summary:     "Count your notifications",
 	Description: "Counts the notifications in the caller's inbox that the filters match, by priority and by audience, under the inbox list's filters. Each cut is counted without its own filters.",
 	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
 })
@@ -643,7 +643,7 @@ const notDismissibleMessage = "this notification can't be dismissed: it stays un
 var opNotificationMarksPatch = httpx.NewJSONOp[notificationMarksPatchRequest, notificationJSON](httpx.OpSpec{
 	Pattern:     "PATCH /api/me/notifications/{id}",
 	ID:          "update_notification",
-	Summary:     "Update the caller's marks on a notification",
+	Summary:     "Update your marks on a notification",
 	Description: "Sets or clears the caller's read and dismissed marks on a notification the caller may read, and returns the notification as the caller now sees it. The marks are the caller's own and change nothing for anyone else.",
 	PathParams:  map[string]string{"id": "The notification's id."},
 	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
