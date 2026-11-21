@@ -762,6 +762,10 @@ func (s *Server) handleGitHubIdentityPAT(w http.ResponseWriter, r *http.Request)
 		internalError(w, "github-identity", err)
 		return
 	}
+	if ghbase.CanonicalBaseURL(orgSet.GitHubBaseURL) == "" {
+		writeNotConfigured(w, "Your organization has no GitHub URL yet. Ask your admin to set it in organization settings.")
+		return
+	}
 	ghWeb, okHost := resolveGitHubHost(orgSet.GitHubBaseURL)
 	if !okHost {
 		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonNotConfigured, Message: "Your organization's GitHub URL looks misconfigured. Ask your admin to fix it in organization settings."})

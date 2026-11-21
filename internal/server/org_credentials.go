@@ -73,7 +73,7 @@ var opGitHubPATPut = httpx.NewJSONOp[githubPATRequest, githubPATBindResponse](ht
 	Pattern:     "PUT /api/orgs/{org_id}/github/pat",
 	ID:          "replace_github_pat",
 	Summary:     "Set the organization's GitHub token",
-	Description: "Checks the personal access token with the organization's GitHub host and stores it as the organization's GitHub credential, replacing any token it had, then restarts GitHub polling under it. An organization with a GitHub App is refused; it switches through the App's switch route. Local mode only.",
+	Description: "Checks the personal access token with the organization's GitHub host and stores it as the organization's GitHub credential, replacing any token it had, then restarts GitHub polling under it. An organization with a GitHub App is refused; it moves to a token through the switch route, POST /api/orgs/{org_id}/github/pat/switch-to. Local mode only.",
 	PathParams:  map[string]string{"org_id": "The organization's id."},
 	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
 })
@@ -159,7 +159,7 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 	if _, err := s.githubCredentialClass(ctx, orgID); err != nil {
 		if errors.Is(err, ErrUnknownGitHubCredentialClass) {
 			settingsOrgLog.Error("unknown github credential class; refusing to bind a pat", "org", orgID)
-			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this organization's GitHub credential is managed in a way this version doesn't recognize — don't bind a token here", Field: "pat"})
+			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this organization's GitHub credential is managed in a way this version doesn't recognize — don't bind a token here"})
 			return
 		}
 		internalError(w, "github-access", err)
@@ -180,7 +180,7 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if app != nil {
-		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this organization uses a GitHub App — use the switch flow", Field: "pat"})
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this organization uses a GitHub App — use the switch flow"})
 		return
 	}
 
@@ -224,7 +224,7 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 	if _, err := s.githubCredentialClass(ctx, orgID); err != nil {
 		if errors.Is(err, ErrUnknownGitHubCredentialClass) {
 			settingsOrgLog.Error("unknown github credential class; refusing to bind a pat", "org", orgID)
-			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this organization's GitHub credential is managed in a way this version doesn't recognize — don't bind a token here", Field: "pat"})
+			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this organization's GitHub credential is managed in a way this version doesn't recognize — don't bind a token here"})
 			return
 		}
 		internalError(w, "github-access", err)
@@ -234,7 +234,7 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "github-access", err)
 		return
 	} else if app != nil {
-		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this organization uses a GitHub App — use the switch flow", Field: "pat"})
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this organization uses a GitHub App — use the switch flow"})
 		return
 	}
 
@@ -299,7 +299,7 @@ var opGitHubPATDelete = httpx.NewJSONOp[httpx.NoBody, githubPATUnbindResponse](h
 	Pattern:     "DELETE /api/orgs/{org_id}/github/pat",
 	ID:          "delete_github_pat",
 	Summary:     "Remove the organization's GitHub token",
-	Description: "Deletes the organization's GitHub personal access token, and clears its GitHub host unless a GitHub App or a commit signer is on it. An organization with no token gets the same answer.",
+	Description: "Deletes the organization's GitHub personal access token, and clears its GitHub host when no other GitHub credential is on it: its own GitHub App, staged or live, an installation of the deployment's GitHub App, or a commit signer. An organization with no token gets the same answer.",
 	PathParams:  map[string]string{"org_id": "The organization's id."},
 	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
 })
@@ -308,16 +308,15 @@ var opGitHubPATDelete = httpx.NewJSONOp[httpx.NoBody, githubPATUnbindResponse](h
 // Idempotent: disconnecting an org that has nothing bound is a 200 with no
 // audit row (a removal that removed nothing isn't an access change).
 //
-// The base URL goes with it ONLY when no App registration remains. Host and
-// credential are the two halves of "this org is connected to GitHub", so
-// a plain disconnect clears both — leaving a host behind would render a
-// connected-looking, credential-less GitHub card. But an App registration keeps
-// using that host: a staged App coexists with a live PAT during a PAT→App
-// switch, and an App works only on the GitHub it was registered on, so the
-// host stays while a registration does. With an App present the disconnect
-// touches the credential only, and the App's own teardown (discard /
-// switch-to-pat) owns the host from there. A commit signer keeps it too: its
-// account is on that GitHub, and the host stays until the signer is removed.
+// The base URL goes with it ONLY when no other GitHub credential remains on
+// it. Host and credential are the two halves of "this org is connected to
+// GitHub", so a plain disconnect clears both — leaving a host behind would
+// render a connected-looking, credential-less GitHub card. But every other
+// credential keeps using that host: a staged App coexists with a live PAT
+// during a PAT→App switch, an App or a deployment-App installation works only
+// on the GitHub it is on, and a commit signer's account is on that GitHub. With
+// one present the disconnect touches the token only, and the host stays until
+// the last of them is removed.
 //
 // Per-user GitHub identity (PAT_2) is deliberately untouched: it's owned by its
 // own surface, and disconnecting the org's access doesn't unmake the fact that
@@ -344,21 +343,6 @@ func (s *Server) handleGitHubPATDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	defer release()
 
-	// Staged OR active — either way a registration is still pointing at the
-	// host. A read failure must not be mistaken for "no App", which would clear
-	// the host, so it aborts rather than defaulting.
-	app, err := s.githubApps.GetForOrgSystem(ctx, orgID)
-	if err != nil {
-		internalError(w, "github-access", err)
-		return
-	}
-	signer, err := s.allStores.OrgCommitSigners.GetSystem(ctx, orgID)
-	if err != nil {
-		internalError(w, "github-access", err)
-		return
-	}
-	keepHost := app != nil || signer != nil
-
 	// In local mode the keychain sits outside the transaction, so a failure
 	// after the clear puts the credential back: the request reports the
 	// disconnect failed, so the org must still be connected. The guard takes
@@ -374,11 +358,16 @@ func (s *Server) handleGitHubPATDelete(w http.ResponseWriter, r *http.Request) {
 	// The credential class is deliberately untouched by this handler. It names
 	// which credential SYSTEM the org is in, not whether that system currently
 	// holds a token: an org that unbinds its PAT is still a PAT org with nothing
-	// bound, and an org keeping a registration (keepHost) is still a BYO-App org.
-	// Neither disconnect moves the org between systems.
+	// bound, and an org keeping a registration is still a BYO-App org. Neither
+	// disconnect moves the org between systems.
 	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		creds, _ := integrations.Load(ctx, tx.Secrets, orgID)
-		had := creds.GitHubPAT != ""
+		// A read failure must not pass for "no token": the audit row below
+		// is how the removal of one is recorded.
+		stored, err := tx.Secrets.Get(ctx, orgID, integrations.KeyGitHubPAT)
+		if err != nil {
+			return fmt.Errorf("read credential: %w", err)
+		}
+		had := stored != ""
 		orgSet, err := tx.Orgs.GetSettings(ctx, orgID)
 		if err != nil {
 			return fmt.Errorf("load org settings: %w", err)
@@ -387,10 +376,8 @@ func (s *Server) handleGitHubPATDelete(w http.ResponseWriter, r *http.Request) {
 		if err := integrations.ClearGitHub(ctx, tx.Secrets, orgID); err != nil {
 			return fmt.Errorf("clear credential: %w", err)
 		}
-		if !keepHost {
-			if _, err := tx.Orgs.SetSourceBaseURL(ctx, orgID, eventsource.KindGitHub, ""); err != nil {
-				return fmt.Errorf("clear github base url: %w", err)
-			}
+		if err := clearGitHubHostIfUnheld(ctx, tx, orgID); err != nil {
+			return err
 		}
 		if !had {
 			return nil

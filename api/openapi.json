@@ -492,7 +492,7 @@
       "GithubAppImportResponse": {
         "properties": {
           "app": {
-            "description": "The organization's own GitHub App, or null when it has none: an organization on a personal access token, on the deployment's GitHub App, or with no GitHub access.",
+            "description": "The organization's own GitHub App, staged or live, or null when it has none, as for an organization on the deployment's GitHub App or on a personal access token with no App staged beside it.",
             "oneOf": [
               {
                 "$ref": "#/components/schemas/GithubAppInfo"
@@ -543,7 +543,7 @@
             "type": "boolean"
           },
           "webhook_health": {
-            "description": "Whether GitHub delivers the App's webhooks to this deployment, as last checked, or null when that is not known: the organization has no App of its own, GitHub no longer accepts the App, or no check has answered yet.",
+            "description": "Whether GitHub delivers the App's webhooks to this deployment, as last checked, or null when that is not known: the organization has no App of its own, GitHub no longer accepts the App, the server has no public URL configured to compare the webhook's with, or no check has answered yet.",
             "oneOf": [
               {
                 "$ref": "#/components/schemas/GithubAppWebhookHealth"
@@ -718,7 +718,7 @@
       "GithubAppStatusResponse": {
         "properties": {
           "app": {
-            "description": "The organization's own GitHub App, or null when it has none: an organization on a personal access token, on the deployment's GitHub App, or with no GitHub access.",
+            "description": "The organization's own GitHub App, staged or live, or null when it has none, as for an organization on the deployment's GitHub App or on a personal access token with no App staged beside it.",
             "oneOf": [
               {
                 "$ref": "#/components/schemas/GithubAppInfo"
@@ -751,7 +751,7 @@
             "type": "boolean"
           },
           "webhook_health": {
-            "description": "Whether GitHub delivers the App's webhooks to this deployment, as last checked, or null when that is not known: the organization has no App of its own, GitHub no longer accepts the App, or no check has answered yet.",
+            "description": "Whether GitHub delivers the App's webhooks to this deployment, as last checked, or null when that is not known: the organization has no App of its own, GitHub no longer accepts the App, the server has no public URL configured to compare the webhook's with, or no check has answered yet.",
             "oneOf": [
               {
                 "$ref": "#/components/schemas/GithubAppWebhookHealth"
@@ -3524,7 +3524,7 @@
     },
     "/api/orgs/{org_id}/github/pat": {
       "delete": {
-        "description": "Deletes the organization's GitHub personal access token, and clears its GitHub host unless a GitHub App or a commit signer is on it. An organization with no token gets the same answer.",
+        "description": "Deletes the organization's GitHub personal access token, and clears its GitHub host when no other GitHub credential is on it: its own GitHub App, staged or live, an installation of the deployment's GitHub App, or a commit signer. An organization with no token gets the same answer.",
         "operationId": "delete_github_pat",
         "parameters": [
           {
@@ -3569,7 +3569,7 @@
         }
       },
       "put": {
-        "description": "Checks the personal access token with the organization's GitHub host and stores it as the organization's GitHub credential, replacing any token it had, then restarts GitHub polling under it. An organization with a GitHub App is refused; it switches through the App's switch route. Local mode only.",
+        "description": "Checks the personal access token with the organization's GitHub host and stores it as the organization's GitHub credential, replacing any token it had, then restarts GitHub polling under it. An organization with a GitHub App is refused; it moves to a token through the switch route, POST /api/orgs/{org_id}/github/pat/switch-to. Local mode only.",
         "operationId": "replace_github_pat",
         "parameters": [
           {

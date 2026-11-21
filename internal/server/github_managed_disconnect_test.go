@@ -19,6 +19,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // Leaving the managed class against the bind rig: the disconnect verbs and the
@@ -322,8 +323,8 @@ func TestManagedDisconnect_PerInstallation(t *testing.T) {
 	}
 	if rec := rig.disconnect(t, "not-a-number"); rec.Code != http.StatusBadRequest {
 		t.Errorf("unbind with a malformed id status=%d, want 400", rec.Code)
-	} else if got := errorItems(t, rec)[0]; got.Reason != httpx.ReasonInvalidID || got.Field != "installation_id" {
-		t.Errorf("unbind with a malformed id error = %+v, want INVALID_ID on installation_id", got)
+	} else {
+		httpxtest.AssertFirstError(t, rec, httpx.ReasonInvalidID, "installation_id")
 	}
 	if live := rig.liveInstallations(t); fmt.Sprint(live) != "[4242]" {
 		t.Errorf("refused unbinds touched the rows: %v", live)
@@ -400,6 +401,16 @@ func TestManagedDisconnect_RequiresOrgAdmin(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("disconnect by a non-admin member status=%d, want 403", rec.Code)
 	}
+	// The id is not read before the admin gate, so a malformed one earns the
+	// member the same 403 rather than a 400 about its spelling.
+	req = httptest.NewRequest("POST", "/api/orgs/"+rig.orgID.String()+"/github/managed/installations/not-a-number/disconnect", nil)
+	req.AddCookie(&http.Cookie{Name: rig.srv.sidCookieName(), Value: rig.sidFromResp(resp)})
+	req.Header.Set("Origin", rig.srv.deployCfg.publicURL)
+	rec = httptest.NewRecorder()
+	rig.srv.mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("per-installation disconnect of a malformed id by a non-admin member status=%d, want 403", rec.Code)
+	}
 	if live := rig.liveInstallations(t); fmt.Sprint(live) != "[4242]" {
 		t.Errorf("a refused disconnect touched the rows: %v", live)
 	}
@@ -418,6 +429,7 @@ func TestManagedDisconnect_LocalModeIs404(t *testing.T) {
 	for _, path := range []string{
 		"/api/orgs/" + runmode.LocalDefaultOrgID + "/github/managed/disconnect",
 		"/api/orgs/" + runmode.LocalDefaultOrgID + "/github/managed/installations/4242/disconnect",
+		"/api/orgs/" + runmode.LocalDefaultOrgID + "/github/managed/installations/not-a-number/disconnect",
 	} {
 		rec := doJSON(t, s, "POST", path, nil)
 		if rec.Code != http.StatusNotFound {

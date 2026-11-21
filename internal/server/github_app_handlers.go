@@ -21,7 +21,7 @@ import (
 // `using_deployment_default` marks so the panel never offers it a second
 // credential it cannot hold.
 type githubAppStatusResponse struct {
-	App                    *githubAppInfo          `json:"app" doc:"The organization's own GitHub App, or null when it has none: an organization on a personal access token, on the deployment's GitHub App, or with no GitHub access."`
+	App                    *githubAppInfo          `json:"app" doc:"The organization's own GitHub App, staged or live, or null when it has none, as for an organization on the deployment's GitHub App or on a personal access token with no App staged beside it."`
 	Installations          []githubAppInstallation `json:"installations" doc:"The GitHub accounts the organization's App is installed on, or for an organization on the deployment's GitHub App the accounts it connected through it, on the organization's current GitHub host."`
 	UsingDeploymentDefault bool                    `json:"using_deployment_default" doc:"Whether the organization's GitHub access is the deployment's GitHub App, in which case app is null."`
 	// DeploymentAppAvailable is whether this deployment offers a deployment
@@ -45,7 +45,7 @@ type githubAppStatusResponse struct {
 	// absence is "not known", never "fine": a registered App that receives
 	// nothing is the case this exists to make visible. See
 	// github_webhook_health.go.
-	WebhookHealth *githubAppWebhookHealth `json:"webhook_health" doc:"Whether GitHub delivers the App's webhooks to this deployment, as last checked, or null when that is not known: the organization has no App of its own, GitHub no longer accepts the App, or no check has answered yet."`
+	WebhookHealth *githubAppWebhookHealth `json:"webhook_health" doc:"Whether GitHub delivers the App's webhooks to this deployment, as last checked, or null when that is not known: the organization has no App of its own, GitHub no longer accepts the App, the server has no public URL configured to compare the webhook's with, or no check has answered yet."`
 }
 
 type githubAppInfo struct {
@@ -260,9 +260,10 @@ var opGitHubAppStatus = httpx.NewJSONOp[httpx.NoBody, githubAppStatusResponse](h
 
 // handleGitHubAppStatus returns the org's GitHub App registration +
 // installation state. Read-only; any org member (or local-mode user). It
-// reads the mirror and nothing else: opening the panel must never ask GitHub
-// anything or kick a refresh — the refresh POST beside it is the deliberate
-// gesture for that.
+// answers from the mirror and never waits on GitHub or reconciles the
+// installations — the refresh POST beside it is the deliberate gesture for
+// that. The one call it starts is the webhook-health probe, in the background
+// and only when the cached answer is due (webhookHealthDTO).
 //
 // GET /api/orgs/{org_id}/github/app
 func (s *Server) handleGitHubAppStatus(w http.ResponseWriter, r *http.Request) {

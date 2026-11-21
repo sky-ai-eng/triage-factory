@@ -22,6 +22,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // --- test fixtures -------------------------------------------------------
@@ -1206,9 +1207,7 @@ func TestGitHubTokenRoutes_RefuseABlankToken(t *testing.T) {
 			if rec.Code != http.StatusBadRequest {
 				t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
 			}
-			if got := errorItems(t, rec)[0]; got.Reason != httpx.ReasonMissingField || got.Field != "pat" {
-				t.Errorf("error = %+v, want MISSING_FIELD on pat", got)
-			}
+			httpxtest.AssertFirstError(t, rec, httpx.ReasonMissingField, "pat")
 		})
 	}
 }

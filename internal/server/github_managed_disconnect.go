@@ -144,7 +144,7 @@ var opGitHubManagedDisconnect = httpx.NewNoContentOp[httpx.NoBody](httpx.OpSpec{
 //
 // POST /api/orgs/{org_id}/github/managed/disconnect
 func (s *Server) handleGitHubManagedDisconnect(w http.ResponseWriter, r *http.Request) {
-	s.serveManagedDisconnect(w, r, opGitHubManagedDisconnect, "")
+	s.serveManagedDisconnect(w, r, opGitHubManagedDisconnect, false)
 }
 
 var opGitHubManagedInstallationDisconnect = httpx.NewNoContentOp[httpx.NoBody](httpx.OpSpec{
@@ -172,19 +172,12 @@ var opGitHubManagedInstallationDisconnect = httpx.NewNoContentOp[httpx.NoBody](h
 //
 // POST /api/orgs/{org_id}/github/managed/installations/{installation_id}/disconnect
 func (s *Server) handleGitHubManagedInstallationDisconnect(w http.ResponseWriter, r *http.Request) {
-	raw := strings.TrimSpace(r.PathValue("installation_id"))
-	id, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil || id <= 0 {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidID,
-			Message: "installation_id must be a positive integer", Field: "installation_id"})
-		return
-	}
-	s.serveManagedDisconnect(w, r, opGitHubManagedInstallationDisconnect, strconv.FormatInt(id, 10))
+	s.serveManagedDisconnect(w, r, opGitHubManagedInstallationDisconnect, true)
 }
 
-// serveManagedDisconnect is both verbs, answering through op: the whole org
-// when only is "", one installation otherwise.
-func (s *Server) serveManagedDisconnect(w http.ResponseWriter, r *http.Request, op *httpx.NoContentOp[httpx.NoBody], only string) {
+// serveManagedDisconnect is both verbs, answering through op: the whole org,
+// or with oneInstallation the installation the path names.
+func (s *Server) serveManagedDisconnect(w http.ResponseWriter, r *http.Request, op *httpx.NoContentOp[httpx.NoBody], oneInstallation bool) {
 	if s.deployCfg == nil || runmode.Current() != runmode.ModeMulti {
 		// Same door as the Connect click: the deployment App is a multi-mode
 		// credential, so in local mode the class is unreachable and the verb
@@ -195,6 +188,18 @@ func (s *Server) serveManagedDisconnect(w http.ResponseWriter, r *http.Request, 
 	orgID, userID, ok := s.az.RequireOrgAdmin(w, r)
 	if !ok {
 		return
+	}
+	// The id is read after both gates, so a caller the route does not exist
+	// for, or who may not use it, learns nothing from how the id is spelled.
+	only := ""
+	if oneInstallation {
+		id, err := strconv.ParseInt(strings.TrimSpace(r.PathValue("installation_id")), 10, 64)
+		if err != nil || id <= 0 {
+			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidID,
+				Message: "installation_id must be a positive integer", Field: "installation_id"})
+			return
+		}
+		only = strconv.FormatInt(id, 10)
 	}
 	ctx := r.Context()
 

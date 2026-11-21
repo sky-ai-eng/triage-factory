@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/rsa"
 	"errors"
 	"fmt"
 	"net/http"
@@ -37,11 +38,11 @@ import (
 // with GitHub to link their accounts, and every multi org's App is held to
 // being able to (local can skip it and capture identity from a token instead).
 // webhook_secret and accept_partial are optional: the webhook secret is
-// multi-mode only (local is hookless/backfill); accept_partial acknowledges
-// soft permission gaps. The secrets are pointers so an absent one and a blank
-// one stay apart: absent stores none, and blank is refused rather than read as
-// absent, since a secret pasted as whitespace would otherwise import an App
-// that silently has none.
+// stored in either mode, though only multi mode receives webhooks (local is
+// backfill); accept_partial acknowledges soft permission gaps. The secrets are
+// pointers so an absent one and a blank one stay apart: absent stores none,
+// and blank is refused rather than read as absent, since a secret pasted as
+// whitespace would otherwise import an App that silently has none.
 type githubAppImportRequest struct {
 	AppID         string  `json:"app_id" doc:"The App's numeric id on GitHub, not its client id."`
 	PEM           string  `json:"pem" doc:"The full contents of a private key file generated for the App, including the BEGIN and END lines."`
@@ -307,13 +308,25 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// Every check on the body's own values runs here, before any read of the
+	// org or of GitHub, so one 400 names every field at fault.
 	appIDStr := strings.TrimSpace(req.AppID)
 	var v httpx.Validation
+	var appID int64
 	if appIDStr == "" {
 		v.Add(httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "An App ID is required.", Field: "app_id"})
+	} else if n, err := strconv.ParseInt(appIDStr, 10, 64); err != nil || n <= 0 {
+		v.Add(httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: "App ID must be a positive number (the numeric App ID, not the client ID).", Field: "app_id"})
+	} else {
+		appID = n
 	}
+	var key *rsa.PrivateKey
 	if strings.TrimSpace(req.PEM) == "" {
 		v.Add(httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "The App's private key (PEM) is required.", Field: "pem"})
+	} else if k, err := githubapp.ParsePrivateKey([]byte(req.PEM)); err != nil {
+		v.Add(httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: "That private key (PEM) couldn't be parsed. Paste the full contents of the App's .pem file, including the BEGIN/END lines.", Field: "pem"})
+	} else {
+		key = k
 	}
 	// Every org App in multi mode can run OAuth, so every member of a
 	// setup-complete org has a way to link their GitHub account. The
@@ -338,11 +351,11 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 
 	// One-slot rule, checked unlocked here as a fast bail-out for the common
 	// case (resubmitting against an org that's already registered) before
-	// spending a PEM parse and several GitHub API round-trips on a request
-	// that's going to be rejected anyway. Non-authoritative — a concurrent
-	// registration racing this read is still caught below. A staged app
-	// occupies the slot too — the discard endpoint frees it. System read:
-	// the admin gate already authorized orgID.
+	// spending several GitHub API round-trips on a request that's going to be
+	// rejected anyway. Non-authoritative — a concurrent registration racing
+	// this read is still caught below. A staged app occupies the slot too — the
+	// discard endpoint frees it. System read: the admin gate already
+	// authorized orgID.
 	existing, err := s.githubApps.GetForOrgSystem(ctx, orgID)
 	if err != nil {
 		internalError(w, "github-app", err)
@@ -373,19 +386,6 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	apiBase := ghbase.APIBase(base)
-
-	// Parse the PEM (garbage → 422).
-	key, err := githubapp.ParsePrivateKey([]byte(req.PEM))
-	if err != nil {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: "That private key (PEM) couldn't be parsed. Paste the full contents of the App's .pem file, including the BEGIN/END lines.", Field: "pem"})
-		return
-	}
-
-	appID, err := strconv.ParseInt(appIDStr, 10, 64)
-	if err != nil || appID <= 0 {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: "App ID must be a positive number (the numeric App ID, not the client ID).", Field: "app_id"})
-		return
-	}
 
 	// Mint an app JWT (off the submitted key, iss=appID) and GET /app. GitHub 401s
 	// a JWT whose iss doesn't match the signing key, so a successful fetch proves

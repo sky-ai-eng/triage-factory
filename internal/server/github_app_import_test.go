@@ -449,6 +449,33 @@ func TestGitHubAppImport_BlankSecretRefused(t *testing.T) {
 	})
 }
 
+// TestGitHubAppImport_ReportsEveryBadFieldAtOnce: an unparseable App ID and
+// key are refused in the same 400 as a blank secret, before the org or GitHub
+// is read, so a caller fixes them in one pass.
+func TestGitHubAppImport_ReportsEveryBadFieldAtOnce(t *testing.T) {
+	keyring.MockInit()
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	stub := newImportStub(t, importStubCfg{appID: 12, slug: "b", clientID: "Iv1.x"})
+	setOrgGitHubBase(t, s, stub.URL)
+
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/import",
+		importBody("abc", "not a key", map[string]any{"client_secret": " ", "webhook_secret": ""}))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("import = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	var fields []string
+	for _, it := range errorItems(t, rec) {
+		if it.Reason != httpx.ReasonInvalidField {
+			t.Errorf("reason = %q for %q, want INVALID_FIELD", it.Reason, it.Field)
+		}
+		fields = append(fields, it.Field)
+	}
+	if got := strings.Join(fields, ","); got != "app_id,pem,client_secret,webhook_secret" {
+		t.Errorf("fields = %s, want app_id,pem,client_secret,webhook_secret", got)
+	}
+}
+
 // TestGitHubAppImport_ClientSecretUnknown_StoresUnvalidated: a check-token
 // status that is neither 401 (bad) nor 404 (valid) stores the secret anyway
 // and reports client_secret_validated=false.
