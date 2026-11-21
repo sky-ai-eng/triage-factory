@@ -143,22 +143,25 @@ func insertListingEventsPG(ctx context.Context, q queryer, orgID, listingID stri
 }
 
 func (s *marketplaceStore) Delist(ctx context.Context, orgID, listingID string) (domain.MarketplaceListing, error) {
-	return setListingStatusPG(ctx, s.q, orgID, listingID, domain.ListingStatusDelisted, `delisted_at = now()`)
+	return setListingStatusPG(ctx, s.q, orgID, listingID, domain.ListingStatusDelisted, `now()`)
 }
 
 func (s *marketplaceStore) Relist(ctx context.Context, orgID, listingID string) (domain.MarketplaceListing, error) {
-	return setListingStatusPG(ctx, s.q, orgID, listingID, domain.ListingStatusPublished, `delisted_at = NULL`)
+	return setListingStatusPG(ctx, s.q, orgID, listingID, domain.ListingStatusPublished, `NULL`)
 }
 
-// setListingStatusPG is Delist/Relist's shared shape: flip status + the
-// delisted_at pair on one listing row, RETURNING the updated row. Neither
-// caller state-guards the flip (a repeat Delist/Relist just re-stamps
-// updated_at) — the only miss is (orgID, listingID) matching no row, which
-// is db.ErrNoSuchListing rather than the silent zero-row no-op the
-// rows-affected Exec used to leave undetected.
-func setListingStatusPG(ctx context.Context, q queryer, orgID, listingID, status, delistedAtClause string) (domain.MarketplaceListing, error) {
+// setListingStatusPG is Delist/Relist's shared shape: set status and
+// delisted_at on one listing row, RETURNING the row. A listing already in
+// status keeps its delisted_at and updated_at, so a repeat leaves the row as
+// it was: delisted_at stays the time it was delisted, and a repeat publish
+// does not move it up the recent sort. The only miss is (orgID, listingID)
+// matching no row, which is db.ErrNoSuchListing.
+func setListingStatusPG(ctx context.Context, q queryer, orgID, listingID, status, delistedAt string) (domain.MarketplaceListing, error) {
 	l, err := scanListingRowPG(q.QueryRowContext(ctx, `
-		UPDATE marketplace_listings SET status = $1, `+delistedAtClause+`, updated_at = now()
+		UPDATE marketplace_listings SET
+			delisted_at = CASE WHEN status = $1 THEN delisted_at ELSE `+delistedAt+` END,
+			updated_at = CASE WHEN status = $1 THEN updated_at ELSE now() END,
+			status = $1
 		WHERE org_id = $2 AND id = $3::uuid
 		RETURNING `+listingColumnsPG, status, orgID, listingID).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -571,9 +574,13 @@ func (s *marketplaceStore) Vote(ctx context.Context, orgID, listingID, userID st
 	return summary, err
 }
 
-func (s *marketplaceStore) Unvote(ctx context.Context, orgID, listingID, userID string) error {
-	_, err := s.q.ExecContext(ctx, `DELETE FROM marketplace_votes WHERE org_id = $1 AND listing_id = $2::uuid AND user_id = $3::uuid`, orgID, listingID, userID)
-	return err
+func (s *marketplaceStore) Unvote(ctx context.Context, orgID, listingID, userID string) (bool, error) {
+	res, err := s.q.ExecContext(ctx, `DELETE FROM marketplace_votes WHERE org_id = $1 AND listing_id = $2::uuid AND user_id = $3::uuid`, orgID, listingID, userID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
 }
 
 // MaterializeListing deep-copies snap into teamID and records the install,

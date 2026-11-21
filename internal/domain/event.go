@@ -10,11 +10,11 @@ import (
 // specs/tracked-events.md). Per-rule scheduling/priority lives on
 // `event_handlers` rows now; EventType is purely the catalog entry.
 type EventType struct {
-	ID          string `json:"id"`       // e.g. "github:pr:review_requested"
-	Source      string `json:"source"`   // "github", "jira", "linear", "slack", "system"
-	Category    string `json:"category"` // "pr", "issue", "scoring", "delegation"
-	Label       string `json:"label"`    // Human-readable: "Review Requested"
-	Description string `json:"description"`
+	ID          string `json:"id" doc:"The event type's id, such as github:pr:review_requested."`                      // e.g. "github:pr:review_requested"
+	Source      string `json:"source" doc:"The service the event comes from, such as github, jira, linear, or slack."` // "github", "jira", "linear", "slack", "system"
+	Category    string `json:"category" doc:"What the event is about within its source, such as pr or issue."`         // "pr", "issue", "scoring", "delegation"
+	Label       string `json:"label" doc:"The event type's display name."`                                             // Human-readable: "Review Requested"
+	Description string `json:"description" doc:"What the event means."`
 }
 
 // Event is a single occurrence of an EventType. The persisted columns

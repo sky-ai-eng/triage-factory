@@ -13,6 +13,534 @@
       }
     },
     "schemas": {
+      "Blueprint": {
+        "properties": {
+          "created_at": {
+            "description": "When the blueprint was created, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "description": "The blueprint's id.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The blueprint's name.",
+            "type": "string"
+          },
+          "source": {
+            "description": "Where the blueprint came from: system for one shipped with Triage Factory, user for one a person created, imported, or marketplace for one installed from a marketplace listing.",
+            "type": "string"
+          },
+          "system_slug": {
+            "description": "The stable name of a shipped blueprint, absent for any other.",
+            "type": "string"
+          },
+          "team_id": {
+            "description": "The id of the team that owns the blueprint.",
+            "type": "string"
+          },
+          "updated_at": {
+            "description": "When the blueprint was last changed, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "usage_count": {
+            "description": "How many blueprint runs the blueprint has started.",
+            "type": "integer"
+          },
+          "user_modified": {
+            "description": "Whether the blueprint's name or steps have been changed since it was created; a shipped blueprint that has been changed is no longer updated to match the version Triage Factory ships.",
+            "type": "boolean"
+          },
+          "version": {
+            "description": "A number that starts at 1 and rises with every change to the blueprint's name or steps, which a steps replace names.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "source",
+          "team_id",
+          "usage_count",
+          "user_modified",
+          "created_at",
+          "updated_at",
+          "version"
+        ],
+        "type": "object"
+      },
+      "BlueprintCreateResponse": {
+        "properties": {
+          "created_at": {
+            "description": "When the blueprint was created, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "first_prompt_id": {
+            "description": "The id of the prompt created from first_prompt, absent when the body had none.",
+            "type": "string"
+          },
+          "id": {
+            "description": "The blueprint's id.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The blueprint's name.",
+            "type": "string"
+          },
+          "source": {
+            "description": "Where the blueprint came from: system for one shipped with Triage Factory, user for one a person created, imported, or marketplace for one installed from a marketplace listing.",
+            "type": "string"
+          },
+          "system_slug": {
+            "description": "The stable name of a shipped blueprint, absent for any other.",
+            "type": "string"
+          },
+          "team_id": {
+            "description": "The id of the team that owns the blueprint.",
+            "type": "string"
+          },
+          "updated_at": {
+            "description": "When the blueprint was last changed, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "usage_count": {
+            "description": "How many blueprint runs the blueprint has started.",
+            "type": "integer"
+          },
+          "user_modified": {
+            "description": "Whether the blueprint's name or steps have been changed since it was created; a shipped blueprint that has been changed is no longer updated to match the version Triage Factory ships.",
+            "type": "boolean"
+          },
+          "version": {
+            "description": "A number that starts at 1 and rises with every change to the blueprint's name or steps, which a steps replace names.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "BlueprintDeleteResponse": {
+        "properties": {
+          "status": {
+            "description": "Always deleted.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
+      "BlueprintListRequest": {
+        "properties": {
+          "page_size": {
+            "description": "How many rows to return, 50 when absent; 0 returns no rows and only total_count, and a value above the list's maximum, 200 unless the route says otherwise, is refused.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "page_token": {
+            "description": "The next_page_token of the previous page, which reads the page after it; it is refused for a request with different filters.",
+            "type": "string"
+          },
+          "search": {
+            "description": "Narrows to blueprints whose name contains this text, compared case-insensitively and literally; trimmed, at most 200 characters, and empty is absent.",
+            "type": "string"
+          },
+          "team_id": {
+            "description": "Narrows to the blueprints of this team; absent is every team the caller can see.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "BlueprintReconnectResponse": {
+        "properties": {
+          "host": {
+            "$ref": "#/components/schemas/BlueprintWithSteps",
+            "description": "The path's blueprint, holding its steps before at_step_index followed by the target's steps."
+          },
+          "orphan_blueprint_id": {
+            "description": "The id of the new blueprint, with no event handler, that holds the path's steps from at_step_index on.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "host",
+          "orphan_blueprint_id"
+        ],
+        "type": "object"
+      },
+      "BlueprintRun": {
+        "properties": {
+          "abort_reason": {
+            "description": "Why a step stopped the run, absent unless the run was aborted.",
+            "type": "string"
+          },
+          "aborted_at_step": {
+            "description": "The 0-based index of the step that stopped the run, absent unless the run was aborted.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "actor_agent_id": {
+            "description": "The id of the agent that runs the run's steps, absent when none is recorded.",
+            "type": "string"
+          },
+          "blueprint_id": {
+            "description": "The id of the blueprint the run runs.",
+            "type": "string"
+          },
+          "cancel_requested": {
+            "description": "Whether someone has asked for the run to be cancelled, absent when no one has.",
+            "type": "boolean"
+          },
+          "completed_at": {
+            "description": "When the run finished, as an RFC 3339 timestamp, absent while it is running.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "current_step_index": {
+            "description": "The 0-based index of the step the run is on.",
+            "type": "integer"
+          },
+          "id": {
+            "description": "The blueprint run's id.",
+            "type": "string"
+          },
+          "started_at": {
+            "description": "When the run started, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "status": {
+            "description": "The run's state: running, completed, aborted, failed, or cancelled.",
+            "type": "string"
+          },
+          "task_id": {
+            "description": "The id of the task the run works on.",
+            "type": "string"
+          },
+          "team_id": {
+            "description": "The id of the team the run belongs to, absent only for a local run older than the field.",
+            "type": "string"
+          },
+          "trigger_id": {
+            "description": "The id of the event handler that started the run, absent for a manual run.",
+            "type": "string"
+          },
+          "trigger_type": {
+            "description": "How the run started: manual when a person delegated the task, or event when an event handler started it.",
+            "type": "string"
+          },
+          "triggering_event_id": {
+            "description": "The id of the event that started the run, absent for a manual run.",
+            "type": "string"
+          },
+          "worktree_path": {
+            "description": "The path of the run's working directory on the executor that runs it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "blueprint_id",
+          "task_id",
+          "trigger_type",
+          "status",
+          "current_step_index",
+          "worktree_path",
+          "started_at"
+        ],
+        "type": "object"
+      },
+      "BlueprintRunListRequest": {
+        "properties": {
+          "blueprint_id": {
+            "description": "Narrows to the runs of this blueprint; absent is every blueprint.",
+            "type": "string"
+          },
+          "page_size": {
+            "description": "How many rows to return, 50 when absent; 0 returns no rows and only total_count, and a value above the list's maximum, 200 unless the route says otherwise, is refused.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "page_token": {
+            "description": "The next_page_token of the previous page, which reads the page after it; it is refused for a request with different filters.",
+            "type": "string"
+          },
+          "statuses": {
+            "description": "Narrows to runs in one of these statuses, running, completed, aborted, failed, or cancelled; absent or empty is every status.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "BlueprintRunResponse": {
+        "properties": {
+          "blueprint_run": {
+            "description": "The blueprint run, as the list returns it.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/BlueprintRun"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "steps": {
+            "description": "The run's steps in order, as the blueprint stood when the run started, or as it stands now for a run that recorded no step plan.",
+            "items": {
+              "$ref": "#/components/schemas/BlueprintRunStepView"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "blueprint_run",
+          "steps"
+        ],
+        "type": "object"
+      },
+      "BlueprintRunStepView": {
+        "properties": {
+          "run": {
+            "description": "The agent conversation that ran or is running the step, absent before the step starts.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Conversation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "step": {
+            "$ref": "#/components/schemas/BlueprintStepView",
+            "description": "The step."
+          }
+        },
+        "required": [
+          "step"
+        ],
+        "type": "object"
+      },
+      "BlueprintSplitResponse": {
+        "properties": {
+          "downstream": {
+            "$ref": "#/components/schemas/BlueprintWithSteps",
+            "description": "The new blueprint with the steps from at_step_index on, named after its first step's prompt."
+          },
+          "upstream": {
+            "$ref": "#/components/schemas/BlueprintWithSteps",
+            "description": "The path's blueprint with the steps before at_step_index."
+          }
+        },
+        "required": [
+          "upstream",
+          "downstream"
+        ],
+        "type": "object"
+      },
+      "BlueprintStep": {
+        "properties": {
+          "blueprint_id": {
+            "description": "The id of the step's blueprint.",
+            "type": "string"
+          },
+          "blueprint_version": {
+            "description": "The blueprint's version as of the read that returned the step, which a steps replace names; absent where the answer carries no version.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "brief": {
+            "description": "Instructions for this step that are added to its prompt, or empty for none.",
+            "type": "string"
+          },
+          "created_at": {
+            "description": "When the step was added to its blueprint, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "step_index": {
+            "description": "The step's 0-based position in its blueprint.",
+            "type": "integer"
+          },
+          "step_prompt_id": {
+            "description": "The id of the prompt the step runs.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "blueprint_id",
+          "step_index",
+          "step_prompt_id",
+          "brief",
+          "created_at"
+        ],
+        "type": "object"
+      },
+      "BlueprintStepInput": {
+        "properties": {
+          "brief": {
+            "description": "Instructions for this step that are added to its prompt, or empty for none.",
+            "type": "string"
+          },
+          "step_prompt_id": {
+            "description": "The id of the prompt the step runs, a prompt of the blueprint's team that belongs to no other blueprint; required.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "BlueprintStepListRequest": {
+        "properties": {
+          "blueprint_ids": {
+            "description": "Narrows to the steps of these blueprints, at most 200 ids; absent or empty is every blueprint.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "page_size": {
+            "description": "How many rows to return, 50 when absent; 0 returns no rows and only total_count, and a value above the list's maximum, 200 unless the route says otherwise, is refused.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "page_token": {
+            "description": "The next_page_token of the previous page, which reads the page after it; it is refused for a request with different filters.",
+            "type": "string"
+          },
+          "search": {
+            "description": "Narrows to steps whose prompt's name contains this text, compared case-insensitively and literally; trimmed, at most 200 characters, and empty is absent.",
+            "type": "string"
+          },
+          "team_id": {
+            "description": "Narrows to the steps of this team's blueprints; absent is every team the caller can see.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "BlueprintStepView": {
+        "properties": {
+          "blueprint_id": {
+            "description": "The id of the run's blueprint.",
+            "type": "string"
+          },
+          "brief": {
+            "description": "Instructions for this step that were added to its prompt, or empty for none.",
+            "type": "string"
+          },
+          "created_at": {
+            "description": "When the step was added to its blueprint, as an RFC 3339 timestamp, present only for a run that recorded no step plan.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "description": "The step prompt's name when the run started, absent for a run that recorded no step plan.",
+            "type": "string"
+          },
+          "step_index": {
+            "description": "The step's 0-based position in the run.",
+            "type": "integer"
+          },
+          "step_prompt_id": {
+            "description": "The id of the prompt the step runs.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "blueprint_id",
+          "step_index",
+          "step_prompt_id",
+          "brief"
+        ],
+        "type": "object"
+      },
+      "BlueprintStepsPutRequest": {
+        "properties": {
+          "steps": {
+            "description": "The blueprint's steps in their new order, at most 50, naming every step the blueprint holds and each prompt once; a step whose prompt the blueprint does not hold yet is added.",
+            "items": {
+              "$ref": "#/components/schemas/BlueprintStepInput"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "version": {
+            "description": "The blueprint_version of the steps the list was decided against, or the blueprint's version when it has no steps; required, and refused when the blueprint has changed since.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "BlueprintWithSteps": {
+        "properties": {
+          "blueprint": {
+            "description": "The blueprint.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Blueprint"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "steps": {
+            "description": "The blueprint's steps in order, each carrying the blueprint's version.",
+            "items": {
+              "$ref": "#/components/schemas/BlueprintStep"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "blueprint",
+          "steps"
+        ],
+        "type": "object"
+      },
       "ConnectionsListRequest": {
         "properties": {
           "page_size": {
@@ -27,6 +555,415 @@
             "type": "string"
           }
         },
+        "type": "object"
+      },
+      "Conversation": {
+        "properties": {
+          "actor_agent_id": {
+            "description": "The id of the agent the conversation runs as, or empty when none is recorded.",
+            "type": "string"
+          },
+          "actor_agent_name": {
+            "description": "The display name of the agent the conversation runs as, or empty when none is recorded.",
+            "type": "string"
+          },
+          "archived_at": {
+            "description": "When the conversation was archived, as an RFC 3339 timestamp, absent while it is not.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "attempts": {
+            "description": "How many engagements the conversation has had, absent when it has had none or the read does not say.",
+            "type": "integer"
+          },
+          "blueprint_run_id": {
+            "description": "The id of the blueprint run the conversation is a step of, absent when it is not one.",
+            "type": "string"
+          },
+          "blueprint_step_index": {
+            "description": "The 0-based index of the blueprint step the conversation runs, absent when it is not a step.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "cache_creation_tokens": {
+            "description": "How many input tokens the conversation's model calls wrote to the provider's prompt cache.",
+            "type": "integer"
+          },
+          "cache_read_tokens": {
+            "description": "How many input tokens the conversation's model calls read from the provider's prompt cache.",
+            "type": "integer"
+          },
+          "claim_current_op": {
+            "description": "The operation the running engagement had in progress at claim_last_activity_at, absent when no engagement is running the conversation.",
+            "type": "string"
+          },
+          "claim_last_activity_at": {
+            "description": "When the engagement running the conversation last did any work, as an RFC 3339 timestamp, absent when no engagement is running it.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "claimed_at": {
+            "description": "When an executor last took the conversation from the queue, as an RFC 3339 timestamp, or null before one has.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "completed_at": {
+            "description": "When the conversation recorded its step's verdict or failed, as an RFC 3339 timestamp, or null before then.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "creator_user_id": {
+            "description": "The id of the person who asked for the work, or empty when an event handler started it.",
+            "type": "string"
+          },
+          "duration_ms": {
+            "description": "How long the conversation's engagements have spent working, in milliseconds, or null before any is recorded.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "ended_at": {
+            "description": "When the conversation stopped being its task's current conversation, as an RFC 3339 timestamp, absent while it still is.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ended_reason": {
+            "description": "Why the conversation stopped being its task's current conversation, such as requeued, delegated, or step_advanced, absent while it still is.",
+            "type": "string"
+          },
+          "failure_kind": {
+            "description": "Why a failed conversation failed, such as memory_limit, crash, or executor_lost, or empty when it has not failed or nothing classified the failure.",
+            "type": "string"
+          },
+          "has_run": {
+            "description": "Whether an engagement has produced an assistant turn in the conversation.",
+            "type": "boolean"
+          },
+          "id": {
+            "description": "The conversation's id.",
+            "type": "string"
+          },
+          "input_tokens": {
+            "description": "How many input tokens the conversation's model calls have used.",
+            "type": "integer"
+          },
+          "memory_missing": {
+            "description": "Whether the agent has not written its own memory of the conversation.",
+            "type": "boolean"
+          },
+          "model": {
+            "description": "The model the conversation runs on.",
+            "type": "string"
+          },
+          "next_attempt_at": {
+            "description": "The earliest time the conversation may be taken from the queue again after a service it needs was unavailable, as an RFC 3339 timestamp, absent when nothing is holding it back.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "num_turns": {
+            "description": "How many turns the conversation's engagements have taken, or null before any is recorded.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "outcome": {
+            "description": "The verdict the conversation's step recorded, continue, finish, or abort, or empty before it records one.",
+            "type": "string"
+          },
+          "outcome_reason": {
+            "description": "Why the agent stopped and what a person needs to do, as the agent wrote it, or empty when it gave no reason.",
+            "type": "string"
+          },
+          "output_tokens": {
+            "description": "How many output tokens the conversation's model calls have produced.",
+            "type": "integer"
+          },
+          "parent_conversation_id": {
+            "description": "The id of the conversation that started this one, absent for a conversation no other started.",
+            "type": "string"
+          },
+          "park_reason": {
+            "description": "Why the conversation last stopped, such as user_cancelled, stalled, or turn_incomplete, or empty when it has not stopped since it last resumed.",
+            "type": "string"
+          },
+          "prompt_id": {
+            "description": "The id of the prompt the conversation runs.",
+            "type": "string"
+          },
+          "queue_position": {
+            "description": "The conversation's 1-based place among the organization's queued conversations, absent when it is not queued or the read does not say.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "queued_at": {
+            "description": "When the conversation last entered the queue, as an RFC 3339 timestamp, or null when that was not recorded.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "result_summary": {
+            "description": "The agent's account of what it did, or empty before it gives one.",
+            "type": "string"
+          },
+          "runtime": {
+            "description": "The engine that runs the conversation, sdk or native, which never changes once set; absent where the read does not say.",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "The agent runtime's session id, which resumes the conversation's transcript, or empty before it has one.",
+            "type": "string"
+          },
+          "started_at": {
+            "description": "When the conversation was created, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "status": {
+            "description": "The conversation's state: queued, fetching, cloning, agent_starting, awaiting_credentials, or running while it is waiting or working, open once a turn has ended, or failed when the infrastructure under the agent failed.",
+            "type": "string"
+          },
+          "stop_requested_at": {
+            "description": "When someone asked for the conversation to stop, as an RFC 3339 timestamp, absent when no stop is pending.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "task_id": {
+            "description": "The id of the task the conversation works on.",
+            "type": "string"
+          },
+          "team_id": {
+            "description": "The id of the team that owns the conversation, or empty where the read does not say.",
+            "type": "string"
+          },
+          "total_cost_usd": {
+            "description": "The conversation's model spend so far, in USD, or null before any is recorded.",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "trigger_id": {
+            "description": "The id of the event handler that started the conversation's work, or empty for manual work.",
+            "type": "string"
+          },
+          "trigger_type": {
+            "description": "How the conversation started: manual when a person asked for the work, or event when an event handler started it.",
+            "type": "string"
+          },
+          "triggering_event_id": {
+            "description": "The id of the event that started the conversation, or empty when no event did or the read does not say.",
+            "type": "string"
+          },
+          "type": {
+            "description": "What kind of conversation this is: delegation for an agent's work on a task, or interactive for one a person works a task in; absent where the read does not say.",
+            "type": "string"
+          },
+          "visibility": {
+            "description": "Who may read the conversation: private, team, or org; absent where the read does not say.",
+            "type": "string"
+          },
+          "worktree_path": {
+            "description": "The path of the conversation's working directory on the executor that runs it, or empty before it has one.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "task_id",
+          "prompt_id",
+          "status",
+          "model",
+          "started_at",
+          "queued_at",
+          "claimed_at",
+          "completed_at",
+          "total_cost_usd",
+          "duration_ms",
+          "num_turns",
+          "input_tokens",
+          "output_tokens",
+          "cache_read_tokens",
+          "cache_creation_tokens",
+          "park_reason",
+          "worktree_path",
+          "result_summary",
+          "outcome",
+          "outcome_reason",
+          "failure_kind",
+          "session_id",
+          "memory_missing",
+          "has_run",
+          "trigger_type",
+          "trigger_id",
+          "triggering_event_id",
+          "actor_agent_id",
+          "actor_agent_name",
+          "creator_user_id",
+          "team_id"
+        ],
+        "type": "object"
+      },
+      "CreateBlueprintRequest": {
+        "properties": {
+          "first_prompt": {
+            "description": "A prompt to create with the blueprint as its one step; absent or null creates a blueprint with no steps.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/FirstPromptInput"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "description": "The blueprint's name, which may not be empty or only whitespace; with first_prompt, an absent, empty, or whitespace-only name takes the prompt's name.",
+            "type": "string"
+          },
+          "team_id": {
+            "description": "The id of the team to create the blueprint under, required when the caller writes to more than one team; absent is the caller's one team.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "CreateEventHandlerRequest": {
+        "properties": {
+          "applies_to_unowned": {
+            "description": "Whether the handler also reaches entities no member of its team owns; true is refused for an event type whose supports_watch is false in GET /api/event-types. Absent on a create is false, absent on an update keeps the stored value, and null is refused.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "blueprint_id": {
+            "description": "The id of a blueprint of the handler's team for the handler to run in automate, or null for none. Absent on a create is none, and absent on an update keeps the stored blueprint; a handler in automate must have one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "breaker_threshold": {
+            "description": "How many of the handler's runs on one entity may fail in a row before the handler stops starting runs there, at least 1. Absent on a create is 4, absent on an update keeps the stored value, and null is refused.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "default_priority": {
+            "description": "The priority, from 0 to 1, that a task the handler creates starts at. Absent on a create is 0.5, absent on an update keeps the stored value, and null is refused.",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "event_type": {
+            "description": "The event type the handler matches, an id from GET /api/event-types; required, and it cannot be changed after the handler is created.",
+            "type": "string"
+          },
+          "min_autonomy_suitability": {
+            "description": "The lowest autonomy suitability score, from 0 to 1, a task must have for the handler in automate to run its blueprint on it. Absent on a create is 0, absent on an update keeps the stored value, and null is refused.",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "mode": {
+            "description": "What a matching event does: off, notify, watch, or automate. Absent on a create is watch, absent on an update keeps the stored mode, and null is refused.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "description": "The handler's display name, trimmed, which may not be empty. Absent on a create is the blueprint's name when blueprint_id is given and otherwise the event type's label, absent on an update keeps the stored name, and null is refused.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "scope_predicate": {
+            "description": "The predicate an event must match, a JSON object of the fields GET /api/event-schemas/{event_type} lists for the handler's event type. Null or an empty object matches every event of the type; absent on a create matches every event, and absent on an update keeps the stored predicate."
+          },
+          "sort_order": {
+            "description": "The handler's position among the organization's handlers, lowest first, a 32-bit signed integer. Absent on a create is 0, absent on an update keeps the stored value, and null is refused.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "team_id": {
+            "description": "The id of the team to create the handler under, required when the caller writes to more than one team; absent is the caller's one team.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "CreateRequest": {
+        "properties": {
+          "body": {
+            "description": "The prompt's text, what an agent running it is asked to do; required.",
+            "type": "string"
+          },
+          "model": {
+            "description": "The model key the prompt runs on, one the deployment offers, or empty to use the team's default model.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The prompt's name; required, and not only whitespace.",
+            "type": "string"
+          },
+          "team_id": {
+            "description": "The id of the team to create the prompt under, required when the caller writes to more than one team; absent is the caller's one team.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "DayCount": {
+        "properties": {
+          "count": {
+            "description": "How many conversations started on the prompt that day.",
+            "type": "integer"
+          },
+          "date": {
+            "description": "The day, as YYYY-MM-DD.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "date",
+          "count"
+        ],
         "type": "object"
       },
       "DependabotAlertJSON": {
@@ -81,6 +1018,25 @@
         ],
         "type": "object"
       },
+      "DuplicateBlueprintsRequest": {
+        "properties": {
+          "prompt_ids": {
+            "description": "The ids of the step prompts to copy, from one or more blueprints of the team; each unbroken run of steps of one blueprint becomes one new blueprint. Required.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "team_id": {
+            "description": "The id of the team whose prompts are copied and which owns the copies, required when the caller writes to more than one team; absent is the caller's one team.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "ErrorEnvelope": {
         "properties": {
           "errors": {
@@ -120,6 +1076,321 @@
         ],
         "type": "object"
       },
+      "EventHandlerDeleteResponse": {
+        "properties": {
+          "status": {
+            "description": "Always deleted.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
+      "EventHandlerFields": {
+        "properties": {
+          "applies_to_unowned": {
+            "description": "Whether the handler also reaches entities no member of its team owns; true is refused for an event type whose supports_watch is false in GET /api/event-types. Absent on a create is false, absent on an update keeps the stored value, and null is refused.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "blueprint_id": {
+            "description": "The id of a blueprint of the handler's team for the handler to run in automate, or null for none. Absent on a create is none, and absent on an update keeps the stored blueprint; a handler in automate must have one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "breaker_threshold": {
+            "description": "How many of the handler's runs on one entity may fail in a row before the handler stops starting runs there, at least 1. Absent on a create is 4, absent on an update keeps the stored value, and null is refused.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "default_priority": {
+            "description": "The priority, from 0 to 1, that a task the handler creates starts at. Absent on a create is 0.5, absent on an update keeps the stored value, and null is refused.",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "min_autonomy_suitability": {
+            "description": "The lowest autonomy suitability score, from 0 to 1, a task must have for the handler in automate to run its blueprint on it. Absent on a create is 0, absent on an update keeps the stored value, and null is refused.",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "mode": {
+            "description": "What a matching event does: off, notify, watch, or automate. Absent on a create is watch, absent on an update keeps the stored mode, and null is refused.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "description": "The handler's display name, trimmed, which may not be empty. Absent on a create is the blueprint's name when blueprint_id is given and otherwise the event type's label, absent on an update keeps the stored name, and null is refused.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "scope_predicate": {
+            "description": "The predicate an event must match, a JSON object of the fields GET /api/event-schemas/{event_type} lists for the handler's event type. Null or an empty object matches every event of the type; absent on a create matches every event, and absent on an update keeps the stored predicate."
+          },
+          "sort_order": {
+            "description": "The handler's position among the organization's handlers, lowest first, a 32-bit signed integer. Absent on a create is 0, absent on an update keeps the stored value, and null is refused.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "EventHandlerListRequest": {
+        "properties": {
+          "event_type": {
+            "description": "Narrows to handlers of this event type, an id from GET /api/event-types; absent is every event type.",
+            "type": "string"
+          },
+          "has_blueprint": {
+            "description": "Narrows to handlers that have a blueprint when true, or none when false; absent or null is both.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "modes": {
+            "description": "Narrows to handlers in one of these modes, off, notify, watch, or automate; absent or empty is every mode.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "page_size": {
+            "description": "How many rows to return, 50 when absent; 0 returns no rows and only total_count, and a value above the list's maximum, 200 unless the route says otherwise, is refused.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "page_token": {
+            "description": "The next_page_token of the previous page, which reads the page after it; it is refused for a request with different filters.",
+            "type": "string"
+          },
+          "team_id": {
+            "description": "Narrows to the handlers of this team; absent is every team the caller can see.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "EventHandlerReorderResponse": {
+        "properties": {
+          "status": {
+            "description": "Always reordered.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
+      "EventHandlerWire": {
+        "properties": {
+          "applies_to_unowned": {
+            "description": "Whether the handler also reaches entities no member of its team owns, such as a pull request from an external author.",
+            "type": "boolean"
+          },
+          "blueprint_id": {
+            "description": "The id of the blueprint the handler runs in automate, or null when it has none.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "breaker_threshold": {
+            "description": "How many of the handler's runs on one entity may fail in a row before the handler stops starting runs there.",
+            "type": "integer"
+          },
+          "created_at": {
+            "description": "When the handler was created, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "creator_user_id": {
+            "description": "The id of the user who created the handler, absent for a shipped handler.",
+            "type": "string"
+          },
+          "default_priority": {
+            "description": "The priority, from 0 to 1, that a task the handler creates starts at.",
+            "type": "number"
+          },
+          "event_type": {
+            "description": "The event type the handler matches, an id from GET /api/event-types.",
+            "type": "string"
+          },
+          "id": {
+            "description": "The event handler's id.",
+            "type": "string"
+          },
+          "min_autonomy_suitability": {
+            "description": "The lowest autonomy suitability score, from 0 to 1, a task must have for the handler in automate to run its blueprint on it; 0 runs it on every task.",
+            "type": "number"
+          },
+          "mode": {
+            "description": "What a matching event does: off does nothing, notify tells the team's members, watch creates or updates a task, and automate also runs the handler's blueprint on that task.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The handler's display name.",
+            "type": "string"
+          },
+          "scope_predicate_json": {
+            "description": "The predicate an event must match, as JSON text holding an object of the event type's predicate fields, or null when the handler matches every event of its type.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sort_order": {
+            "description": "The handler's position among the organization's handlers, lowest first.",
+            "type": "integer"
+          },
+          "source": {
+            "description": "Where the handler came from: system for one shipped with Triage Factory, or user for one a person created.",
+            "type": "string"
+          },
+          "source_available": {
+            "description": "Whether the handler's event source can produce events for this organization; present on a read, and absent from the handler a create or update returns.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "team_id": {
+            "description": "The id of the team that owns the handler.",
+            "type": "string"
+          },
+          "updated_at": {
+            "description": "When the handler was last changed, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "team_id",
+          "event_type",
+          "mode",
+          "name",
+          "scope_predicate_json",
+          "default_priority",
+          "sort_order",
+          "blueprint_id",
+          "breaker_threshold",
+          "min_autonomy_suitability",
+          "applies_to_unowned",
+          "source",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "EventTypeResponse": {
+        "properties": {
+          "category": {
+            "description": "What the event is about within its source, such as pr or issue.",
+            "type": "string"
+          },
+          "description": {
+            "description": "What the event means.",
+            "type": "string"
+          },
+          "id": {
+            "description": "The event type's id, such as github:pr:review_requested.",
+            "type": "string"
+          },
+          "label": {
+            "description": "The event type's display name.",
+            "type": "string"
+          },
+          "source": {
+            "description": "The service the event comes from, such as github, jira, linear, or slack.",
+            "type": "string"
+          },
+          "supports_watch": {
+            "description": "Whether an event handler for this event type may set applies_to_unowned, which reaches entities no member of the handler's team owns.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "source",
+          "category",
+          "label",
+          "description",
+          "supports_watch"
+        ],
+        "type": "object"
+      },
+      "FieldSchema": {
+        "properties": {
+          "description": {
+            "description": "What the field matches, absent when it has no description.",
+            "type": "string"
+          },
+          "enum_values": {
+            "description": "The values the field may take, absent when it takes any value of its type.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "name": {
+            "description": "The field's key in a predicate object.",
+            "type": "string"
+          },
+          "type": {
+            "description": "The field's value type: bool, string, int, or string_list.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "type"
+        ],
+        "type": "object"
+      },
+      "FirstPromptInput": {
+        "properties": {
+          "body": {
+            "description": "The prompt's text, what the step's agent is asked to do; required.",
+            "type": "string"
+          },
+          "model": {
+            "description": "The model key the step runs on, one the deployment offers, or empty to use the team's default model.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The prompt's name; required, and not only whitespace.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "HealthResponse": {
         "properties": {
           "status": {
@@ -129,6 +1400,617 @@
         },
         "required": [
           "status"
+        ],
+        "type": "object"
+      },
+      "ImportFailure": {
+        "properties": {
+          "message": {
+            "description": "Why the file could not be imported.",
+            "type": "string"
+          },
+          "path": {
+            "description": "The file's path on the server's disk.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "message"
+        ],
+        "type": "object"
+      },
+      "ImportResult": {
+        "properties": {
+          "errors": {
+            "description": "Problems with the scan that belong to no one file, such as a directory it could not read, absent when there were none.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "failed": {
+            "description": "The files that could not be imported, and why.",
+            "items": {
+              "$ref": "#/components/schemas/ImportFailure"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "imported": {
+            "description": "How many files were imported as new prompts or updated an imported prompt that had changed.",
+            "type": "integer"
+          },
+          "scanned": {
+            "description": "How many SKILL.md files the scan found, the sum of imported, skipped, and the length of failed.",
+            "type": "integer"
+          },
+          "skipped": {
+            "description": "How many files changed nothing, because the file was already imported as it is, has the same content as another imported prompt, or was found twice.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "scanned",
+          "imported",
+          "skipped",
+          "failed"
+        ],
+        "type": "object"
+      },
+      "InstallListingRequest": {
+        "properties": {
+          "team_id": {
+            "description": "The id of the team to install the copy into, required when the caller writes to more than one team; absent is the caller's one team.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "InstallListingResponse": {
+        "properties": {
+          "id": {
+            "description": "The id of the new blueprint, or of the new prompt for a prompt listing.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "What was installed: prompt or blueprint.",
+            "type": "string"
+          },
+          "prompt_ids": {
+            "description": "The ids of every prompt the install created: the blueprint's step prompts, or the one prompt.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "id",
+          "prompt_ids"
+        ],
+        "type": "object"
+      },
+      "ListingDetail": {
+        "properties": {
+          "created_at": {
+            "description": "When the listing was published, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "creator_user_id": {
+            "description": "The id of the person who published the listing, absent when that person's account has been deleted.",
+            "type": "string"
+          },
+          "current_snapshot": {
+            "$ref": "#/components/schemas/ListingSnapshot",
+            "description": "The prompt or blueprint the listing's current version holds."
+          },
+          "current_version": {
+            "description": "The number of the listing's latest version, starting at 1.",
+            "type": "integer"
+          },
+          "delisted_at": {
+            "description": "When the listing was delisted, as an RFC 3339 timestamp, absent while it is published.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "description": {
+            "description": "The listing's description, or empty when it has none.",
+            "type": "string"
+          },
+          "event_types": {
+            "description": "The event types the listing is suited to.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "id": {
+            "description": "The listing's id.",
+            "type": "string"
+          },
+          "install_count": {
+            "description": "How many times the listing has been installed.",
+            "type": "integer"
+          },
+          "kind": {
+            "description": "What the listing publishes: prompt or blueprint.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The listing's name.",
+            "type": "string"
+          },
+          "org_id": {
+            "description": "The id of the organization the listing is published in.",
+            "type": "string"
+          },
+          "publisher_team_id": {
+            "description": "The id of the team that published the listing, absent when that team has been deleted.",
+            "type": "string"
+          },
+          "publisher_team_name": {
+            "description": "The name of the team that published the listing, absent when that team has been deleted.",
+            "type": "string"
+          },
+          "scope": {
+            "description": "Who may see the listing; always org, every member of the organization.",
+            "type": "string"
+          },
+          "source_id": {
+            "description": "The id of the prompt or blueprint the listing was published from, absent when none is recorded.",
+            "type": "string"
+          },
+          "stats": {
+            "description": "How the copies installed from the listing have been used, absent until they are first counted.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ListingStats"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "description": "published when every member may browse and install the listing, or delisted when only members who may write its publishing team see it.",
+            "type": "string"
+          },
+          "updated_at": {
+            "description": "When the listing was last changed, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "versions": {
+            "description": "Every version of the listing.",
+            "items": {
+              "$ref": "#/components/schemas/ListingVersion"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "viewer_voted": {
+            "description": "Whether the caller has voted for the listing.",
+            "type": "boolean"
+          },
+          "vote_count": {
+            "description": "How many members have voted for the listing.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "org_id",
+          "scope",
+          "kind",
+          "status",
+          "name",
+          "description",
+          "current_version",
+          "created_at",
+          "updated_at",
+          "event_types",
+          "vote_count",
+          "install_count",
+          "viewer_voted",
+          "current_snapshot",
+          "versions"
+        ],
+        "type": "object"
+      },
+      "ListingSnapshot": {
+        "properties": {
+          "description": {
+            "description": "The listing's description when the version was published.",
+            "type": "string"
+          },
+          "event_types": {
+            "description": "The event types the listing was suited to when the version was published.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "kind": {
+            "description": "What the version holds: prompt or blueprint.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The listing's name when the version was published.",
+            "type": "string"
+          },
+          "schema_version": {
+            "description": "The version of this document's format, always 1.",
+            "type": "integer"
+          },
+          "steps": {
+            "description": "The copied steps in order: one for a prompt, and one for each step of a blueprint.",
+            "items": {
+              "$ref": "#/components/schemas/SnapshotStep"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "schema_version",
+          "kind",
+          "name",
+          "description",
+          "event_types",
+          "steps"
+        ],
+        "type": "object"
+      },
+      "ListingStats": {
+        "properties": {
+          "computed_at": {
+            "description": "When these figures were counted, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "last_run_at": {
+            "description": "When the latest of those runs finished, as an RFC 3339 timestamp, absent when there are none.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "success_rate": {
+            "description": "The share of those runs that succeeded, from 0 to 1, absent when total_runs is 0.",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "teams_using": {
+            "description": "How many teams hold a copy installed from the listing that has not been deleted.",
+            "type": "integer"
+          },
+          "total_runs": {
+            "description": "How many runs of the installed copies have finished, deleted copies included.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "teams_using",
+          "total_runs",
+          "computed_at"
+        ],
+        "type": "object"
+      },
+      "ListingSummary": {
+        "properties": {
+          "created_at": {
+            "description": "When the listing was published, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "creator_user_id": {
+            "description": "The id of the person who published the listing, absent when that person's account has been deleted.",
+            "type": "string"
+          },
+          "current_version": {
+            "description": "The number of the listing's latest version, starting at 1.",
+            "type": "integer"
+          },
+          "delisted_at": {
+            "description": "When the listing was delisted, as an RFC 3339 timestamp, absent while it is published.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "description": {
+            "description": "The listing's description, or empty when it has none.",
+            "type": "string"
+          },
+          "event_types": {
+            "description": "The event types the listing is suited to.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "id": {
+            "description": "The listing's id.",
+            "type": "string"
+          },
+          "install_count": {
+            "description": "How many times the listing has been installed.",
+            "type": "integer"
+          },
+          "kind": {
+            "description": "What the listing publishes: prompt or blueprint.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The listing's name.",
+            "type": "string"
+          },
+          "org_id": {
+            "description": "The id of the organization the listing is published in.",
+            "type": "string"
+          },
+          "publisher_team_id": {
+            "description": "The id of the team that published the listing, absent when that team has been deleted.",
+            "type": "string"
+          },
+          "publisher_team_name": {
+            "description": "The name of the team that published the listing, absent when that team has been deleted.",
+            "type": "string"
+          },
+          "scope": {
+            "description": "Who may see the listing; always org, every member of the organization.",
+            "type": "string"
+          },
+          "source_id": {
+            "description": "The id of the prompt or blueprint the listing was published from, absent when none is recorded.",
+            "type": "string"
+          },
+          "stats": {
+            "description": "How the copies installed from the listing have been used, absent until they are first counted.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ListingStats"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "description": "published when every member may browse and install the listing, or delisted when only members who may write its publishing team see it.",
+            "type": "string"
+          },
+          "updated_at": {
+            "description": "When the listing was last changed, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "viewer_voted": {
+            "description": "Whether the caller has voted for the listing.",
+            "type": "boolean"
+          },
+          "vote_count": {
+            "description": "How many members have voted for the listing.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "org_id",
+          "scope",
+          "kind",
+          "status",
+          "name",
+          "description",
+          "current_version",
+          "created_at",
+          "updated_at",
+          "event_types",
+          "vote_count",
+          "install_count",
+          "viewer_voted"
+        ],
+        "type": "object"
+      },
+      "ListingUpdateRequest": {
+        "properties": {
+          "status": {
+            "description": "published to let every member of the organization browse and install the listing, or delisted to hide it from everyone who may not write its publishing team; null is refused.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "ListingVersion": {
+        "properties": {
+          "created_at": {
+            "description": "When the version was published, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "creator_user_id": {
+            "description": "The id of the person who published the version, absent when none is recorded.",
+            "type": "string"
+          },
+          "listing_id": {
+            "description": "The id of the listing.",
+            "type": "string"
+          },
+          "snapshot": {
+            "$ref": "#/components/schemas/ListingSnapshot",
+            "description": "The prompt or blueprint the version holds, as it stood when the version was published."
+          },
+          "version": {
+            "description": "The version's number, starting at 1.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "listing_id",
+          "version",
+          "snapshot",
+          "created_at"
+        ],
+        "type": "object"
+      },
+      "MarketplaceListRequest": {
+        "properties": {
+          "event_type": {
+            "description": "Narrows to listings suited to this event type, an id from GET /api/event-types; absent or empty is every listing.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "Narrows to listings of this kind, prompt or blueprint; absent or empty is both.",
+            "type": "string"
+          },
+          "page_size": {
+            "description": "How many rows to return, 50 when absent; 0 returns no rows and only total_count, and a value above the list's maximum, 200 unless the route says otherwise, is refused.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "page_token": {
+            "description": "The next_page_token of the previous page, which reads the page after it; it is refused for a request with different filters.",
+            "type": "string"
+          },
+          "search": {
+            "description": "Narrows to listings whose name or description contains this text, compared case-insensitively and literally; trimmed, at most 200 characters, and empty is absent.",
+            "type": "string"
+          },
+          "sort_dir": {
+            "description": "asc or desc, desc when absent; refused without sort_key.",
+            "type": "string"
+          },
+          "sort_key": {
+            "description": "The order of the list: installs, votes, recent for the most recently updated, or used for the most runs; absent is installs.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "MarketplaceListing": {
+        "properties": {
+          "created_at": {
+            "description": "When the listing was published, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "creator_user_id": {
+            "description": "The id of the person who published the listing, absent when that person's account has been deleted.",
+            "type": "string"
+          },
+          "current_version": {
+            "description": "The number of the listing's latest version, starting at 1.",
+            "type": "integer"
+          },
+          "delisted_at": {
+            "description": "When the listing was delisted, as an RFC 3339 timestamp, absent while it is published.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "description": {
+            "description": "The listing's description, or empty when it has none.",
+            "type": "string"
+          },
+          "id": {
+            "description": "The listing's id.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "What the listing publishes: prompt or blueprint.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The listing's name.",
+            "type": "string"
+          },
+          "org_id": {
+            "description": "The id of the organization the listing is published in.",
+            "type": "string"
+          },
+          "publisher_team_id": {
+            "description": "The id of the team that published the listing, absent when that team has been deleted.",
+            "type": "string"
+          },
+          "scope": {
+            "description": "Who may see the listing; always org, every member of the organization.",
+            "type": "string"
+          },
+          "source_id": {
+            "description": "The id of the prompt or blueprint the listing was published from, absent when none is recorded.",
+            "type": "string"
+          },
+          "status": {
+            "description": "published when every member may browse and install the listing, or delisted when only members who may write its publishing team see it.",
+            "type": "string"
+          },
+          "updated_at": {
+            "description": "When the listing was last changed, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "org_id",
+          "scope",
+          "kind",
+          "status",
+          "name",
+          "description",
+          "current_version",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "MarketplacePublishResponse": {
+        "properties": {
+          "id": {
+            "description": "The new listing's id.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
         ],
         "type": "object"
       },
@@ -154,6 +2036,291 @@
         "required": [
           "started_at"
         ],
+        "type": "object"
+      },
+      "MergeBlueprintRequest": {
+        "properties": {
+          "source_blueprint_id": {
+            "description": "The id of the blueprint whose steps are appended to the path's blueprint and which is then deleted; it must be of the same team, have no event handler, and leave the result at most 50 steps.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "Prompt": {
+        "properties": {
+          "allowed_tools": {
+            "description": "Tools beyond the defaults an agent running the prompt may use, comma-separated, as a SKILL.md file's frontmatter names them, or empty for none.",
+            "type": "string"
+          },
+          "body": {
+            "description": "The prompt's text, what an agent running it is asked to do.",
+            "type": "string"
+          },
+          "created_at": {
+            "description": "When the prompt was created, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "description": "The prompt's id.",
+            "type": "string"
+          },
+          "model": {
+            "description": "The model key the prompt runs on, or empty to use the team's default model.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The prompt's name.",
+            "type": "string"
+          },
+          "source": {
+            "description": "Where the prompt came from: system for one shipped with Triage Factory, user for one a person created, imported for one imported from a SKILL.md file, or marketplace for one installed from a marketplace listing.",
+            "type": "string"
+          },
+          "system_slug": {
+            "description": "The stable name of a shipped prompt, absent for any other.",
+            "type": "string"
+          },
+          "team_id": {
+            "description": "The id of the team that owns the prompt.",
+            "type": "string"
+          },
+          "updated_at": {
+            "description": "When the prompt was last changed, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "usage_count": {
+            "description": "How many agent conversations have run the prompt.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "body",
+          "source",
+          "allowed_tools",
+          "model",
+          "usage_count",
+          "team_id",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "PromptDeleteResponse": {
+        "properties": {
+          "orphaned_blueprint": {
+            "description": "Whether the delete left the steps after the prompt in a new blueprint with no event handler.",
+            "type": "boolean"
+          },
+          "status": {
+            "description": "hidden for a shipped or imported prompt, which is hidden from the library, or deleted for any other.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "orphaned_blueprint"
+        ],
+        "type": "object"
+      },
+      "PromptListRequest": {
+        "properties": {
+          "page_size": {
+            "description": "How many rows to return, 50 when absent; 0 returns no rows and only total_count, and a value above the list's maximum, 200 unless the route says otherwise, is refused.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "page_token": {
+            "description": "The next_page_token of the previous page, which reads the page after it; it is refused for a request with different filters.",
+            "type": "string"
+          },
+          "search": {
+            "description": "Narrows to prompts whose name contains this text, compared case-insensitively and literally; trimmed, at most 200 characters, and empty is absent.",
+            "type": "string"
+          },
+          "team_id": {
+            "description": "Narrows to the prompts of this team; absent is every team the caller can see.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "PromptStats": {
+        "properties": {
+          "avg_cost_usd": {
+            "description": "The average model spend of a conversation that ran the prompt, in USD.",
+            "type": "number"
+          },
+          "avg_duration_ms": {
+            "description": "The average working time of a conversation that ran the prompt, in milliseconds.",
+            "type": "integer"
+          },
+          "completed_runs": {
+            "description": "How many of those conversations recorded their step's verdict, or belong to a blueprint run that completed.",
+            "type": "integer"
+          },
+          "failed_runs": {
+            "description": "How many of those conversations failed because the infrastructure under the agent did.",
+            "type": "integer"
+          },
+          "last_used_at": {
+            "description": "When the latest conversation on the prompt started, as an RFC 3339 timestamp, or null when none has.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "runs_per_day": {
+            "description": "How many conversations started on the prompt on each of the last 30 days in UTC, today included, oldest first.",
+            "items": {
+              "$ref": "#/components/schemas/DayCount"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "success_rate": {
+            "description": "completed_runs as a share of total_runs, from 0 to 1, or 0 when the prompt has not run.",
+            "type": "number"
+          },
+          "total_cost_usd": {
+            "description": "The model spend of every conversation that ran the prompt, in USD.",
+            "type": "number"
+          },
+          "total_runs": {
+            "description": "How many agent conversations have run the prompt.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total_runs",
+          "completed_runs",
+          "failed_runs",
+          "success_rate",
+          "avg_cost_usd",
+          "avg_duration_ms",
+          "total_cost_usd",
+          "last_used_at",
+          "runs_per_day"
+        ],
+        "type": "object"
+      },
+      "PromptUploadRequest": {
+        "properties": {
+          "content": {
+            "description": "The SKILL.md file's text, frontmatter included, at most 256 KiB once trimmed; required.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The prompt's name; absent or empty is the frontmatter's name, and one of the two is required.",
+            "type": "string"
+          },
+          "team_id": {
+            "description": "The id of the team to create the prompt under, required when the caller writes to more than one team; absent is the caller's one team.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "PublishListingRequest": {
+        "properties": {
+          "description": {
+            "description": "The listing's description, or empty for none.",
+            "type": "string"
+          },
+          "event_types": {
+            "description": "The event types the listing is suited to, ids from GET /api/event-types, each at most once, which browsing can filter on.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "kind": {
+            "description": "What the listing publishes: prompt or blueprint.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The listing's name, which may not be blank.",
+            "type": "string"
+          },
+          "source_id": {
+            "description": "The id of the prompt or blueprint to publish, which must have no listing yet; required.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "PublishVersionRequest": {
+        "properties": {
+          "description": {
+            "description": "The listing's description, or empty for none.",
+            "type": "string"
+          },
+          "event_types": {
+            "description": "The event types the listing is suited to, ids from GET /api/event-types, each at most once, which replace the listing's current ones.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "name": {
+            "description": "The listing's name, which may not be blank.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ReconnectBlueprintRequest": {
+        "properties": {
+          "at_step_index": {
+            "description": "The 0-based index of the first step to move off the path's blueprint to a new one, which must leave at least one step on each side; required.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "target_blueprint_id": {
+            "description": "The id of the blueprint whose steps follow the steps the path's blueprint keeps, and which is then deleted; it must be of the same team, have no event handler, and leave the result at most 50 steps. Required.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "RenameBlueprintRequest": {
+        "properties": {
+          "name": {
+            "description": "The blueprint's new name, trimmed, which may not be empty.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ReorderEventHandlersRequest": {
+        "properties": {
+          "ids": {
+            "description": "The id of every event handler the caller can see, each once, in their new order.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
         "type": "object"
       },
       "RepoJSON": {
@@ -256,6 +2423,78 @@
             "description": "The branch agents base their work on in this repository, or null to clear it so they use the repository's default branch.",
             "type": [
               "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "SchemaPayload": {
+        "properties": {
+          "event_type": {
+            "description": "The event type's id.",
+            "type": "string"
+          },
+          "fields": {
+            "description": "The fields a predicate for this event type may name, ordered by name.",
+            "items": {
+              "$ref": "#/components/schemas/FieldSchema"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "event_type",
+          "fields"
+        ],
+        "type": "object"
+      },
+      "SnapshotStep": {
+        "properties": {
+          "allowed_tools": {
+            "description": "Tools beyond the defaults an agent running the step may use, comma-separated, or empty for none.",
+            "type": "string"
+          },
+          "body": {
+            "description": "The step prompt's text.",
+            "type": "string"
+          },
+          "brief": {
+            "description": "Instructions for this step that are added to its prompt, empty for a prompt listing.",
+            "type": "string"
+          },
+          "model": {
+            "description": "The model key the step runs on, or empty to use the installing team's default model.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The step prompt's name.",
+            "type": "string"
+          },
+          "step_index": {
+            "description": "The step's 0-based position.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "step_index",
+          "name",
+          "body",
+          "allowed_tools",
+          "model",
+          "brief"
+        ],
+        "type": "object"
+      },
+      "SplitBlueprintRequest": {
+        "properties": {
+          "at_step_index": {
+            "description": "The 0-based index of the first step to move to the new blueprint, which must leave at least one step on each side; required.",
+            "type": [
+              "integer",
               "null"
             ]
           }
@@ -557,6 +2796,23 @@
               "array",
               "null"
             ]
+          }
+        },
+        "type": "object"
+      },
+      "UpdateRequest": {
+        "properties": {
+          "body": {
+            "description": "The prompt's text, what an agent running it is asked to do; required.",
+            "type": "string"
+          },
+          "model": {
+            "description": "The model key the prompt runs on, one the deployment offers, or empty to use the team's default model; absent is empty.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The prompt's name; required, and not only whitespace.",
+            "type": "string"
           }
         },
         "type": "object"
@@ -1241,6 +3497,1156 @@
         }
       }
     },
+    "/api/blueprint-runs/list": {
+      "post": {
+        "description": "Returns one page of the blueprint runs the caller can see, narrowed by the body's filters and most recently started first. Each item is the run itself; GET /api/blueprint-runs/{id} adds its steps.",
+        "operationId": "list_blueprint_runs",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BlueprintRunListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "items": {
+                      "description": "The rows of this page, as an empty array when it has none.",
+                      "items": {
+                        "$ref": "#/components/schemas/BlueprintRun"
+                      },
+                      "type": "array"
+                    },
+                    "next_page_token": {
+                      "description": "The page_token that reads the next page, absent on the last page.",
+                      "type": "string"
+                    },
+                    "total_count": {
+                      "description": "How many rows match the request's filters across every page, or null for a list whose upstream cannot count them.",
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "total_count"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List blueprint runs",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/blueprint-runs/{id}": {
+      "get": {
+        "description": "Returns one blueprint run with its steps, each with the agent conversation that ran it. The steps are the ones the blueprint had when the run started, whatever has changed in the blueprint since.",
+        "operationId": "get_blueprint_run",
+        "parameters": [
+          {
+            "description": "The blueprint run's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BlueprintRunResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get a blueprint run",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/blueprint-steps/list": {
+      "post": {
+        "description": "Returns one page of the steps of the blueprints the caller can see, narrowed by the body's filters and ordered by blueprint id and then step index. Each step carries the version of its blueprint at the time of the read, which a steps replace names.",
+        "operationId": "list_blueprint_steps",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BlueprintStepListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "items": {
+                      "description": "The rows of this page, as an empty array when it has none.",
+                      "items": {
+                        "$ref": "#/components/schemas/BlueprintStep"
+                      },
+                      "type": "array"
+                    },
+                    "next_page_token": {
+                      "description": "The page_token that reads the next page, absent on the last page.",
+                      "type": "string"
+                    },
+                    "total_count": {
+                      "description": "How many rows match the request's filters across every page, or null for a list whose upstream cannot count them.",
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "total_count"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List blueprint steps",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/blueprints": {
+      "post": {
+        "description": "Creates a blueprint on the caller's team and returns it. With first_prompt, it also creates that prompt and makes it the blueprint's one step, and the prompt's name and body are required in place of the blueprint's name.",
+        "operationId": "create_blueprint",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateBlueprintRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BlueprintCreateResponse"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Create a blueprint",
+        "x-hints": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/blueprints/duplicate": {
+      "post": {
+        "description": "Copies the named step prompts into new blueprints with no event handler, one for each unbroken run of steps of one blueprint, and leaves the originals as they are. Returns every new blueprint with its steps, as an array.",
+        "operationId": "duplicate_blueprints",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DuplicateBlueprintsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/BlueprintWithSteps"
+                  },
+                  "type": [
+                    "array",
+                    "null"
+                  ]
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Copy blueprint steps into new blueprints",
+        "x-hints": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/blueprints/list": {
+      "post": {
+        "description": "Returns one page of the blueprints the caller can see, narrowed by the body's filters and most recently updated first. A blueprint whose every event handler is for an event type the organization is not licensed for is left out.",
+        "operationId": "list_blueprints",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BlueprintListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "items": {
+                      "description": "The rows of this page, as an empty array when it has none.",
+                      "items": {
+                        "$ref": "#/components/schemas/Blueprint"
+                      },
+                      "type": "array"
+                    },
+                    "next_page_token": {
+                      "description": "The page_token that reads the next page, absent on the last page.",
+                      "type": "string"
+                    },
+                    "total_count": {
+                      "description": "How many rows match the request's filters across every page, or null for a list whose upstream cannot count them.",
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "total_count"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List blueprints",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/blueprints/{id}": {
+      "delete": {
+        "description": "Deletes a blueprint and the prompts of its steps. Each event handler that ran the blueprint loses it and stays in place, and one in automate moves to watch.",
+        "operationId": "delete_blueprint",
+        "parameters": [
+          {
+            "description": "The blueprint's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BlueprintDeleteResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Delete a blueprint",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      },
+      "get": {
+        "description": "Returns one blueprint, in the list's row shape, including one the list leaves out because of the organization's licence.",
+        "operationId": "get_blueprint",
+        "parameters": [
+          {
+            "description": "The blueprint's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Blueprint"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get a blueprint",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      },
+      "put": {
+        "description": "Sets a blueprint's name and returns the blueprint. Its steps and its prompts' names are left as they are.",
+        "operationId": "replace_blueprint",
+        "parameters": [
+          {
+            "description": "The blueprint's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RenameBlueprintRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Blueprint"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Rename a blueprint",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/blueprints/{id}/merge": {
+      "post": {
+        "description": "Appends the source blueprint's steps to the path's blueprint and deletes the source, in one write. The path's blueprint keeps its id, name, and event handlers, and is returned with its steps.",
+        "operationId": "merge_blueprint",
+        "parameters": [
+          {
+            "description": "The id of the blueprint that receives the source's steps.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MergeBlueprintRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BlueprintWithSteps"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Merge a blueprint into another",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/blueprints/{id}/reconnect": {
+      "post": {
+        "description": "Moves the path's steps from at_step_index on to a new blueprint, then appends the target blueprint's steps to the path's blueprint and deletes the target, in one write. The path's blueprint keeps its id, name, and event handlers, and is returned with its steps and the new blueprint's id.",
+        "operationId": "reconnect_blueprint",
+        "parameters": [
+          {
+            "description": "The id of the blueprint whose steps are reconnected.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReconnectBlueprintRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BlueprintReconnectResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Reconnect a blueprint to another's steps",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/blueprints/{id}/split": {
+      "post": {
+        "description": "Moves the steps from at_step_index on to a new blueprint with no event handler, in one write, and returns both blueprints with their steps. The path's blueprint keeps its id, name, and event handlers.",
+        "operationId": "split_blueprint",
+        "parameters": [
+          {
+            "description": "The id of the blueprint to split.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SplitBlueprintRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BlueprintSplitResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Split a blueprint in two",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/blueprints/{id}/steps": {
+      "put": {
+        "description": "Sets the order of a blueprint's steps and their briefs, and adds the steps the list names that the blueprint does not hold yet. Returns the blueprint and its steps. The list must name every step the blueprint holds, so removing a step is a prompt delete, and a version the blueprint has moved past is refused.",
+        "operationId": "replace_blueprint_steps",
+        "parameters": [
+          {
+            "description": "The blueprint's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BlueprintStepsPutRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BlueprintWithSteps"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Replace a blueprint's steps",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/event-handlers": {
+      "post": {
+        "description": "Creates an event handler for one event type on the caller's team and returns the stored handler. The Jira and Linear ids a predicate names, such as a status or a priority, are checked against that service, and an event type whose source cannot produce events for the organization is refused.",
+        "operationId": "create_event_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateEventHandlerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventHandlerWire"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Create an event handler",
+        "x-hints": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/event-handlers/list": {
+      "post": {
+        "description": "Returns one page of the event handlers the caller can see, narrowed by the body's filters and ordered by sort_order and then name. Handlers of an event type the organization is not licensed for are left out, and each handler says whether its event source can produce events for the organization.",
+        "operationId": "list_event_handlers",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EventHandlerListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "items": {
+                      "description": "The rows of this page, as an empty array when it has none.",
+                      "items": {
+                        "$ref": "#/components/schemas/EventHandlerWire"
+                      },
+                      "type": "array"
+                    },
+                    "next_page_token": {
+                      "description": "The page_token that reads the next page, absent on the last page.",
+                      "type": "string"
+                    },
+                    "total_count": {
+                      "description": "How many rows match the request's filters across every page, or null for a list whose upstream cannot count them.",
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "total_count"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List event handlers",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/event-handlers/reorder": {
+      "put": {
+        "description": "Rewrites every visible event handler's sort_order to follow the order of ids. The body must name every event handler the caller can see, in every mode, and nothing else.",
+        "operationId": "reorder_event_handlers",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReorderEventHandlersRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventHandlerReorderResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Reorder event handlers",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/event-handlers/{id}": {
+      "delete": {
+        "description": "Deletes an event handler, so that no further event matches it. The runs and tasks it already started are left as they are.",
+        "operationId": "delete_event_handler",
+        "parameters": [
+          {
+            "description": "The event handler's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventHandlerDeleteResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Delete an event handler",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      },
+      "get": {
+        "description": "Returns one event handler, in the list's row shape, including one of an event type the organization is not licensed for.",
+        "operationId": "get_event_handler",
+        "parameters": [
+          {
+            "description": "The event handler's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventHandlerWire"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get an event handler",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      },
+      "patch": {
+        "description": "Sets the fields the body names on an event handler, leaving the rest as they are, and returns the stored handler. The team and the event type cannot be changed, and the Jira and Linear ids a new predicate names, such as a status or a priority, are checked against that service.",
+        "operationId": "update_event_handler",
+        "parameters": [
+          {
+            "description": "The event handler's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EventHandlerFields"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventHandlerWire"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Update an event handler",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/event-schemas": {
+      "get": {
+        "description": "Returns the predicate fields of every event type the organization is licensed for, as an object keyed by event type. The whole set is returned at once, with no pagination.",
+        "operationId": "list_event_schemas",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "$ref": "#/components/schemas/SchemaPayload"
+                  },
+                  "type": [
+                    "object",
+                    "null"
+                  ]
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List event predicate schemas",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/event-schemas/{event_type}": {
+      "get": {
+        "description": "Returns the predicate fields of one event type, the fields an event handler's scope_predicate may name. An event type the organization is not licensed for is answered as unknown.",
+        "operationId": "get_event_schema",
+        "parameters": [
+          {
+            "description": "The event type's id, from GET /api/event-types.",
+            "in": "path",
+            "name": "event_type",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SchemaPayload"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get an event predicate schema",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/event-types": {
+      "get": {
+        "description": "Returns every event type the organization is licensed for, as an array with no pagination. The set is fixed by the deployment's build.",
+        "operationId": "list_event_types",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/EventTypeResponse"
+                  },
+                  "type": [
+                    "array",
+                    "null"
+                  ]
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List event types",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
     "/api/health": {
       "get": {
         "description": "Reports status ok once the server accepts requests. It needs no credential and checks no database or integration, so it says only that the process is serving.",
@@ -1265,6 +4671,457 @@
         "x-hints": {
           "openWorldHint": false,
           "readOnlyHint": true
+        }
+      }
+    },
+    "/api/marketplace/listings": {
+      "post": {
+        "description": "Publishes a copy of one of the caller's team's prompts or blueprints, as it stands now, as a listing every member of the organization can browse, and returns the listing's id. A source that already has a listing, published or delisted, is refused. Works only in multi mode, and answers 404 in local mode.",
+        "operationId": "create_marketplace_listing",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PublishListingRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MarketplacePublishResponse"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Publish a prompt or blueprint to the marketplace",
+        "x-hints": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/marketplace/listings/by-source/{source_id}": {
+      "get": {
+        "description": "Returns the listing published from a prompt or blueprint, whether it is published or delisted. A delisted listing is visible only to members who may write its publishing team. Works only in multi mode, and answers 404 in local mode.",
+        "operationId": "get_marketplace_listing_by_source",
+        "parameters": [
+          {
+            "description": "The id of the prompt or blueprint the listing was published from.",
+            "in": "path",
+            "name": "source_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListingSummary"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get the marketplace listing of a prompt or blueprint",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/marketplace/listings/list": {
+      "post": {
+        "description": "Returns one page of the organization's published marketplace listings, narrowed by the body's filters and ordered by sort_key, the most installed first by default. Works only in multi mode, and answers 404 in local mode.",
+        "operationId": "list_marketplace_listings",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MarketplaceListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "items": {
+                      "description": "The rows of this page, as an empty array when it has none.",
+                      "items": {
+                        "$ref": "#/components/schemas/ListingSummary"
+                      },
+                      "type": "array"
+                    },
+                    "next_page_token": {
+                      "description": "The page_token that reads the next page, absent on the last page.",
+                      "type": "string"
+                    },
+                    "total_count": {
+                      "description": "How many rows match the request's filters across every page, or null for a list whose upstream cannot count them.",
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "total_count"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List marketplace listings",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/marketplace/listings/{id}": {
+      "get": {
+        "description": "Returns one listing with its counts, the full content of its current version, and its version history. A delisted listing is visible only to members who may write its publishing team. Works only in multi mode, and answers 404 in local mode.",
+        "operationId": "get_marketplace_listing",
+        "parameters": [
+          {
+            "description": "The listing's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListingDetail"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get a marketplace listing",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      },
+      "patch": {
+        "description": "Publishes or delists a listing and returns it. A delisted listing drops out of browsing and can no longer be installed, and copies already installed from it are left as they are. Works only in multi mode, and answers 404 in local mode.",
+        "operationId": "update_marketplace_listing",
+        "parameters": [
+          {
+            "description": "The listing's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ListingUpdateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MarketplaceListing"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Update a marketplace listing",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/marketplace/listings/{id}/install": {
+      "post": {
+        "description": "Copies the current version of a listing into the caller's team as a new prompt or blueprint, and returns the ids of what it created. The copy does not change when the listing is republished, and each install makes a new copy; a delisted listing is refused. Works only in multi mode, and answers 404 in local mode.",
+        "operationId": "install_marketplace_listing",
+        "parameters": [
+          {
+            "description": "The listing's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InstallListingRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstallListingResponse"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Install a marketplace listing into a team",
+        "x-hints": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/marketplace/listings/{id}/versions": {
+      "post": {
+        "description": "Adds a version holding a copy of the listing's source prompt or blueprint as it stands now, sets the listing's name, description, and event types, and returns the listing. Earlier versions are left as they are, and a listing whose source has been deleted is refused. Works only in multi mode, and answers 404 in local mode.",
+        "operationId": "create_marketplace_listing_version",
+        "parameters": [
+          {
+            "description": "The listing's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PublishVersionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MarketplaceListing"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Publish a new version of a marketplace listing",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/marketplace/listings/{id}/vote": {
+      "delete": {
+        "description": "Removes the caller's vote for a listing, and answers 204 when the caller has no vote there. A vote can be removed from a listing delisted since it was cast. Works only in multi mode, and answers 404 in local mode.",
+        "operationId": "delete_marketplace_listing_vote",
+        "parameters": [
+          {
+            "description": "The listing's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Remove a vote for a marketplace listing",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      },
+      "put": {
+        "description": "Records the caller's vote recommending a listing. A vote the caller has already cast is left as it is. Works only in multi mode, and answers 404 in local mode.",
+        "operationId": "replace_marketplace_listing_vote",
+        "parameters": [
+          {
+            "description": "The listing's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Vote for a marketplace listing",
+        "x-hints": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
         }
       }
     },
@@ -1458,6 +5315,392 @@
           }
         ],
         "summary": "Get an organization's LLM spend",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/prompts": {
+      "post": {
+        "description": "Creates a prompt on the caller's team and returns it. The prompt is part of no blueprint until a blueprint's steps name it.",
+        "operationId": "create_prompt",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Prompt"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Create a prompt",
+        "x-hints": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/prompts/from-disk": {
+      "post": {
+        "description": "Imports each SKILL.md under ~/.claude/skills and .claude/skills on the server's own disk as a prompt, updates a prompt imported from a file that has changed since, and returns how many files it scanned, imported, skipped, and could not import. A scan that fails still answers 200, with the failures in failed and errors. Works only in local mode, and answers 404 in multi mode.",
+        "operationId": "create_prompts_from_disk",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportResult"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Import prompts from the server's skill files",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/prompts/list": {
+      "post": {
+        "description": "Returns one page of the prompts the caller can see, narrowed by the body's filters and most recently updated first.",
+        "operationId": "list_prompts",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PromptListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "items": {
+                      "description": "The rows of this page, as an empty array when it has none.",
+                      "items": {
+                        "$ref": "#/components/schemas/Prompt"
+                      },
+                      "type": "array"
+                    },
+                    "next_page_token": {
+                      "description": "The page_token that reads the next page, absent on the last page.",
+                      "type": "string"
+                    },
+                    "total_count": {
+                      "description": "How many rows match the request's filters across every page, or null for a list whose upstream cannot count them.",
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "total_count"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List prompts",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/prompts/upload": {
+      "post": {
+        "description": "Creates a prompt on the caller's team from a SKILL.md file's text, taking its body and allowed tools from the file, and returns the prompt. The prompt's source is imported.",
+        "operationId": "upload_prompt",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PromptUploadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Prompt"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Import a prompt from a SKILL.md file",
+        "x-hints": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/prompts/{id}": {
+      "delete": {
+        "description": "Deletes a prompt and takes it out of its blueprint. A one-step blueprint is deleted with it. In a longer blueprint, the steps after the prompt move to a new blueprint with no event handler, and when the prompt was the first step the blueprint is deleted; a deleted blueprint's event handlers lose their blueprint, and one in automate moves to watch.",
+        "operationId": "delete_prompt",
+        "parameters": [
+          {
+            "description": "The prompt's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PromptDeleteResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Delete a prompt",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      },
+      "get": {
+        "description": "Returns one prompt, in the list's row shape.",
+        "operationId": "get_prompt",
+        "parameters": [
+          {
+            "description": "The prompt's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Prompt"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get a prompt",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      },
+      "put": {
+        "description": "Sets a prompt's name, body, and model, all three of which the body must carry, and returns the prompt.",
+        "operationId": "replace_prompt",
+        "parameters": [
+          {
+            "description": "The prompt's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Prompt"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Update a prompt",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/prompts/{id}/stats": {
+      "get": {
+        "description": "Returns counts, cost, and duration over every agent conversation that ran the prompt, and a daily count of those conversations for the last 30 days.",
+        "operationId": "get_prompt_stats",
+        "parameters": [
+          {
+            "description": "The prompt's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PromptStats"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get a prompt's run statistics",
         "x-hints": {
           "openWorldHint": false,
           "readOnlyHint": true

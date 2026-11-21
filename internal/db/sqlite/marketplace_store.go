@@ -52,8 +52,8 @@ func (s *marketplaceStore) Vote(context.Context, string, string, string) (domain
 	return domain.ListingSummary{}, db.ErrNotApplicableInLocal
 }
 
-func (s *marketplaceStore) Unvote(context.Context, string, string, string) error {
-	return db.ErrNotApplicableInLocal
+func (s *marketplaceStore) Unvote(context.Context, string, string, string) (bool, error) {
+	return false, db.ErrNotApplicableInLocal
 }
 
 func (s *marketplaceStore) MaterializeListing(context.Context, string, string, domain.ListingSnapshot, string, int, string) (string, []string, error) {

@@ -30,6 +30,14 @@ type promptImportHandler struct {
 	az      *authz.Checker
 }
 
+var opPromptImportFromDisk = httpx.NewJSONOp[httpx.NoBody, skills.ImportResult](httpx.OpSpec{
+	Pattern:     "POST /api/prompts/from-disk",
+	ID:          "create_prompts_from_disk",
+	Summary:     "Import prompts from the server's skill files",
+	Description: "Imports each SKILL.md under ~/.claude/skills and .claude/skills on the server's own disk as a prompt, updates a prompt imported from a file that has changed since, and returns how many files it scanned, imported, skipped, and could not import. A scan that fails still answers 200, with the failures in failed and errors. Works only in local mode, and answers 404 in multi mode.",
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
+
 // handlePromptImportFromDisk scans the TF process's own ~/.claude/skills and
 // imports each SKILL.md it finds as a prompt. Local-mode only, and the path
 // says why: what it reads is a directory on this machine's disk, which only
@@ -53,21 +61,33 @@ func (sk *promptImportHandler) handlePromptImportFromDisk(w http.ResponseWriter,
 		return
 	}
 	result := skills.ImportAll(r.Context(), sk.db, sk.prompts)
-	writeJSON(w, http.StatusOK, result)
+	opPromptImportFromDisk.Write(w, result)
 }
 
 // promptUploadRequest is the paste/upload wire shape: the raw SKILL.md
 // markdown (frontmatter + body), an optional display-name override, and
 // the multi-team caller's acting-team pick.
 type promptUploadRequest struct {
-	Content string `json:"content"`
-	Name    string `json:"name,omitempty"`
-	TeamID  string `json:"team_id,omitempty"`
+	Content string `json:"content" doc:"The SKILL.md file's text, frontmatter included, at most 256 KiB once trimmed; required."`
+	Name    string `json:"name,omitempty" doc:"The prompt's name; absent or empty is the frontmatter's name, and one of the two is required."`
+	TeamID  string `json:"team_id,omitempty" doc:"The id of the team to create the prompt under, required when the caller writes to more than one team; absent is the caller's one team."`
 }
 
 // maxPromptUploadBytes bounds a pasted SKILL.md. Real ones are a few KB;
 // 256KiB is generous without letting a paste balloon a prompt row.
 const maxPromptUploadBytes = 256 << 10
+
+var opPromptUpload = httpx.NewJSONOp[promptUploadRequest, domain.Prompt](httpx.OpSpec{
+	Pattern:     "POST /api/prompts/upload",
+	ID:          "upload_prompt",
+	Summary:     "Import a prompt from a SKILL.md file",
+	Description: "Creates a prompt on the caller's team from a SKILL.md file's text, taking its body and allowed tools from the file, and returns the prompt. The prompt's source is imported.",
+	Status:      http.StatusCreated,
+	// The content cap is checked after the decode, so the body cap leaves
+	// room for JSON string escaping and the other fields.
+	BodyLimit: int64(maxPromptUploadBytes) * 4,
+	Hints:     httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintNo, Idempotent: httpx.HintNo, OpenWorld: httpx.HintNo},
+})
 
 // handlePromptUpload imports one prompt from pasted/uploaded SKILL.md
 // content — the counterpart of the filesystem scan. Mode-agnostic on
@@ -85,42 +105,42 @@ func (sk *promptImportHandler) handlePromptUpload(w http.ResponseWriter, r *http
 	}
 	// Bound the body BEFORE decoding — the content cap below is checked
 	// post-decode, so without this an oversized upload would still be
-	// allocated in full by the JSON decoder before rejection. 4x the
-	// content cap leaves room for JSON string escaping (worst-case
-	// \uXXXX inflation) plus the envelope fields.
-	var req promptUploadRequest
-	if !httpx.DecodeJSONStrictLimit(w, r, &req, int64(maxPromptUploadBytes)*4) {
+	// allocated in full by the JSON decoder before rejection. The op's
+	// BodyLimit is 4x the content cap, which leaves room for JSON string
+	// escaping (worst-case \uXXXX inflation) plus the envelope fields.
+	req, ok := opPromptUpload.Decode(w, r)
+	if !ok {
 		return
 	}
+	var v httpx.Validation
 	content := strings.TrimSpace(req.Content)
-	if content == "" {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+	switch {
+	case content == "":
+		v.Add(httpx.ErrorItem{
 			Reason: httpx.ReasonMissingField, Message: "content is required (the SKILL.md markdown)", Field: "content",
 		})
-		return
-	}
-	if len(content) > maxPromptUploadBytes {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-			Reason: httpx.ReasonOutOfRange, Message: "skill content exceeds the 256KiB limit", Field: "content",
-		})
-		return
+	case len(content) > maxPromptUploadBytes:
+		v.OutOfRange("content", "skill content exceeds the 256KiB limit")
 	}
 
 	// ParseSkillMeta's path argument only seeds the default name (the
 	// skill's directory on disk); a paste has no directory, so the
 	// fallback chain is: explicit request name → frontmatter name: →
-	// 400.
+	// 400. Empty content parses to no name, so a body with neither is
+	// refused on both fields.
 	meta := skills.ParseSkillMeta(content, "")
 	name := strings.TrimSpace(req.Name)
 	if name == "" && meta.Name != "" && meta.Name != "." {
 		name = meta.Name
 	}
 	if name == "" || name == "." {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+		v.Add(httpx.ErrorItem{
 			Reason:  httpx.ReasonMissingField,
 			Message: "skill needs a name — set frontmatter `name:` or pass name explicitly",
 			Field:   "name",
 		})
+	}
+	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
 
@@ -168,7 +188,7 @@ func (sk *promptImportHandler) handlePromptUpload(w http.ResponseWriter, r *http
 		internalError(w, "prompts/import", err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, created)
+	opPromptUpload.Write(w, created)
 }
 
 func (s *Server) registerPromptImportRoutes() {
@@ -176,6 +196,6 @@ func (s *Server) registerPromptImportRoutes() {
 	// take different bodies (a paste vs. nothing) and only one of them can
 	// exist in multi mode, where the process has no per-tenant disk to scan.
 	pi := &promptImportHandler{db: s.db, prompts: s.prompts, tx: s.tx, az: s.az}
-	s.apiMutating("POST /api/prompts/from-disk", pi.handlePromptImportFromDisk)
-	s.apiMutating("POST /api/prompts/upload", pi.handlePromptUpload)
+	s.op(opPromptImportFromDisk, pi.handlePromptImportFromDisk)
+	s.op(opPromptUpload, pi.handlePromptUpload)
 }

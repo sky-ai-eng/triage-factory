@@ -69,9 +69,9 @@ type MarketplaceStore interface {
 	// Delist flips status to 'delisted' and stamps delisted_at. The listing
 	// row, its versions, votes, and install history all survive — delisting
 	// only removes it from other members' browse (RLS: the publisher team
-	// still sees it to relist/manage). Not state-guarded: re-delisting an
-	// already-delisted listing just re-stamps delisted_at/updated_at rather
-	// than refusing — Relist is the mirror.
+	// still sees it to relist/manage). Delisting a listing that is already
+	// delisted succeeds and leaves the row as it was, keeping delisted_at and
+	// updated_at — Relist is the mirror.
 	//
 	// Returns the updated row, or ErrNoSuchListing when (orgID, listingID)
 	// matches no row — including one an RLS-narrowed caller can no longer
@@ -80,7 +80,8 @@ type MarketplaceStore interface {
 	Delist(ctx context.Context, orgID, listingID string) (domain.MarketplaceListing, error)
 
 	// Relist flips a delisted listing back to 'published' and clears
-	// delisted_at. Not state-guarded — mirrors Delist.
+	// delisted_at. A listing already published is left as it was — mirrors
+	// Delist.
 	//
 	// Returns the updated row, or ErrNoSuchListing. See Delist.
 	Relist(ctx context.Context, orgID, listingID string) (domain.MarketplaceListing, error)
@@ -138,11 +139,13 @@ type MarketplaceStore interface {
 	// returned in its place, rather than a raw, unmapped sql.ErrNoRows.
 	Vote(ctx context.Context, orgID, listingID, userID string) (domain.ListingSummary, error)
 
-	// Unvote removes userID's vote on listingID, if any. Removing a vote
-	// that doesn't exist is a no-op, not an error.
+	// Unvote removes userID's vote on listingID, if any, and reports whether
+	// there was one. Removing a vote that doesn't exist is a no-op, not an
+	// error. It removes the vote whether or not userID can still see the
+	// listing, so a vote on a listing delisted since can be withdrawn.
 	//
 	// Exempt from the returned-row rule: it is a delete.
-	Unvote(ctx context.Context, orgID, listingID, userID string) error
+	Unvote(ctx context.Context, orgID, listingID, userID string) (bool, error)
 
 	// MaterializeListing is the "copy to my team" install (TFAC-538): it
 	// deep-copies snap into teamID as brand-new, team-owned prompt(s) —

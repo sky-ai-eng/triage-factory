@@ -1,8 +1,8 @@
 // Package prompts serves the prompts API — prompt list, read, create, update,
 // delete and stats — and the event-types catalog read. It also holds the
 // prompt primitives the blueprint editor (whose steps are prompts) shares with
-// it: the model-override allow-list, the create/update request shapes, and the
-// source-aware soft delete.
+// it: the model-override allow-list, the create/update request shapes and
+// their field checks, and the source-aware soft delete.
 package prompts
 
 import (
@@ -12,26 +12,28 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/llm/modelcatalog"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/models"
 )
 
 // CreateRequest is the body of a prompt create.
 type CreateRequest struct {
-	Name  string `json:"name"`
-	Body  string `json:"body"`
-	Model string `json:"model"`
+	Name  string `json:"name" doc:"The prompt's name; required, and not only whitespace."`
+	Body  string `json:"body" doc:"The prompt's text, what an agent running it is asked to do; required."`
+	Model string `json:"model" doc:"The model key the prompt runs on, one the deployment offers, or empty to use the team's default model."`
 	// TeamID is the acting team the write picker supplied. Required in the UI
 	// whenever the caller belongs to ≥2 teams; empty for a solo caller (the
 	// picker is hidden), where the resolver falls back to the sole team. See
 	// teamscope.ResolveActing.
-	TeamID string `json:"team_id"`
+	TeamID string `json:"team_id" doc:"The id of the team to create the prompt under, required when the caller writes to more than one team; absent is the caller's one team."`
 }
 
 // UpdateRequest is the body of a prompt update. The owning team is fixed at
 // create time, so unlike CreateRequest it carries no team_id.
 type UpdateRequest struct {
-	Name  string `json:"name"`
-	Body  string `json:"body"`
-	Model string `json:"model"`
+	Name  string `json:"name" doc:"The prompt's name; required, and not only whitespace."`
+	Body  string `json:"body" doc:"The prompt's text, what an agent running it is asked to do; required."`
+	Model string `json:"model" doc:"The model key the prompt runs on, one the deployment offers, or empty to use the team's default model; absent is empty."`
 }
 
 // ValidModel reports whether model is an acceptable prompts.model value — ""
@@ -58,6 +60,25 @@ func ValidModel(u modelcatalog.Universe, model string) bool {
 // caller's next move is picking one of them.
 func InvalidModelError(u modelcatalog.Universe) string {
 	return `model must be "" (inherit the team default) or one of: ` + strings.Join(u.Keys(), ", ")
+}
+
+// ValidateFields records on v every fault in a prompt's name, body, and
+// model, each field named with prefix ("" for a prompt body, "first_prompt."
+// for one nested in a blueprint create). A name of only whitespace is
+// missing, because the library would list the prompt with no name.
+func ValidateFields(v *httpx.Validation, prefix, name, body, model string) {
+	if strings.TrimSpace(name) == "" {
+		v.Missing(prefix + "name")
+	}
+	// A prompt is the step content unit — it always carries a body (the
+	// mission). Ordering prompts into a multi-step composition is the
+	// blueprint's job, not a prompt-kind discriminator.
+	if body == "" {
+		v.Missing(prefix + "body")
+	}
+	if universe := models.DeploymentUniverse(); !ValidModel(universe, model) {
+		v.Invalid(prefix+"model", InvalidModelError(universe))
+	}
 }
 
 // SoftDeleteBySource soft-deletes a prompt according to its source and

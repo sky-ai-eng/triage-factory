@@ -19,7 +19,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
-	"github.com/sky-ai-eng/triage-factory/internal/server/models"
 	"github.com/sky-ai-eng/triage-factory/internal/server/prompts"
 	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
 )
@@ -69,11 +68,19 @@ func (h *Handler) gateBlueprintWrite(w http.ResponseWriter, r *http.Request, org
 // everything visible. Search narrows to blueprints whose name carries it,
 // case-insensitively and literally (httpx.Search).
 type blueprintListRequest struct {
-	TeamID string `json:"team_id"`
-	Search string `json:"search"`
+	TeamID string `json:"team_id" doc:"Narrows to the blueprints of this team; absent is every team the caller can see."`
+	Search string `json:"search" doc:"Narrows to blueprints whose name contains this text, compared case-insensitively and literally; trimmed, at most 200 characters, and empty is absent."`
 
 	httpx.PageRequest
 }
+
+var opBlueprintList = httpx.NewListOp[blueprintListRequest, domain.Blueprint](httpx.OpSpec{
+	Pattern:     "POST /api/blueprints/list",
+	ID:          "list_blueprints",
+	Summary:     "List blueprints",
+	Description: "Returns one page of the blueprints the caller can see, narrowed by the body's filters and most recently updated first. A blueprint whose every event handler is for an event type the organization is not licensed for is left out.",
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 type blueprintListFilterKey struct {
 	TeamID string `json:"team_id"`
@@ -88,8 +95,8 @@ func (h *Handler) handleBlueprintsList(w http.ResponseWriter, r *http.Request) {
 	}
 	userID := httpx.ClaimsFrom(r.Context()).Subject
 
-	var req blueprintListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opBlueprintList.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -121,8 +128,17 @@ func (h *Handler) handleBlueprintsList(w http.ResponseWriter, r *http.Request) {
 		httpx.InternalError(w, "blueprints", err)
 		return
 	}
-	httpx.WriteList(w, page, blueprints, total)
+	opBlueprintList.Write(w, page, blueprints, total)
 }
+
+var opBlueprintGet = httpx.NewJSONOp[httpx.NoBody, domain.Blueprint](httpx.OpSpec{
+	Pattern:     "GET /api/blueprints/{id}",
+	ID:          "get_blueprint",
+	Summary:     "Get a blueprint",
+	Description: "Returns one blueprint, in the list's row shape, including one the list leaves out because of the organization's licence.",
+	PathParams:  map[string]string{"id": "The blueprint's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleBlueprintGet is the canonical single read: one blueprint, in the
 // list's row shape. It is deliberately NOT entitlement-gated the way the list
@@ -155,7 +171,7 @@ func (h *Handler) handleBlueprintGet(w http.ResponseWriter, r *http.Request) {
 		httpx.NotFound(w, "blueprint")
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, blueprint)
+	opBlueprintGet.Write(w, *blueprint)
 }
 
 // firstPromptInput is the optional inline prompt the canvas's "New Prompt"
@@ -164,34 +180,43 @@ func (h *Handler) handleBlueprintGet(w http.ResponseWriter, r *http.Request) {
 // un-wrapped prompt can't be a canvas node or a trigger target). Absent ⇒ a
 // bare blueprint, as before.
 type firstPromptInput struct {
-	Name  string `json:"name"`
-	Body  string `json:"body"`
-	Model string `json:"model"`
+	Name  string `json:"name" doc:"The prompt's name; required, and not only whitespace."`
+	Body  string `json:"body" doc:"The prompt's text, what the step's agent is asked to do; required."`
+	Model string `json:"model" doc:"The model key the step runs on, one the deployment offers, or empty to use the team's default model."`
 }
 
 type createBlueprintRequest struct {
-	Name string `json:"name"`
+	Name string `json:"name" doc:"The blueprint's name, which may not be empty or only whitespace; with first_prompt, an absent, empty, or whitespace-only name takes the prompt's name."`
 	// TeamID is the acting team the write picker supplied (see teamscope.ResolveActing).
-	TeamID string `json:"team_id"`
+	TeamID string `json:"team_id" doc:"The id of the team to create the blueprint under, required when the caller writes to more than one team; absent is the caller's one team."`
 	// FirstPrompt, when set, auto-wraps a new prompt as this blueprint's sole
 	// step in one transaction. Optional — bare-blueprint callers omit it.
-	FirstPrompt *firstPromptInput `json:"first_prompt"`
+	FirstPrompt *firstPromptInput `json:"first_prompt" doc:"A prompt to create with the blueprint as its one step; absent or null creates a blueprint with no steps."`
 }
 
 // blueprintCreateResponse returns the created blueprint plus the id of the
 // auto-wrapped first prompt (empty when no first_prompt was supplied).
 type blueprintCreateResponse struct {
 	*domain.Blueprint
-	FirstPromptID string `json:"first_prompt_id,omitempty"`
+	FirstPromptID string `json:"first_prompt_id,omitempty" doc:"The id of the prompt created from first_prompt, absent when the body had none."`
 }
+
+var opBlueprintCreate = httpx.NewJSONOp[createBlueprintRequest, blueprintCreateResponse](httpx.OpSpec{
+	Pattern:     "POST /api/blueprints",
+	ID:          "create_blueprint",
+	Summary:     "Create a blueprint",
+	Description: "Creates a blueprint on the caller's team and returns it. With first_prompt, it also creates that prompt and makes it the blueprint's one step, and the prompt's name and body are required in place of the blueprint's name.",
+	Status:      http.StatusCreated,
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintNo, Idempotent: httpx.HintNo, OpenWorld: httpx.HintNo},
+})
 
 func (h *Handler) handleBlueprintCreate(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
 		return
 	}
-	var req createBlueprintRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opBlueprintCreate.Decode(w, r)
+	if !ok {
 		return
 	}
 
@@ -199,24 +224,16 @@ func (h *Handler) handleBlueprintCreate(w http.ResponseWriter, r *http.Request) 
 	// prompt itself must carry a name + body (it's the step's mission).
 	// Name defaulting happens here (before teamscope.ResolveActing inside the tx)
 	// because it is a pure string assignment independent of team resolution.
+	var v httpx.Validation
 	if req.FirstPrompt != nil {
-		if req.FirstPrompt.Name == "" {
-			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "first_prompt.name is required", Field: "first_prompt.name"})
-			return
-		}
-		if req.FirstPrompt.Body == "" {
-			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "first_prompt.body is required", Field: "first_prompt.body"})
-			return
-		}
-		if universe := models.DeploymentUniverse(); !prompts.ValidModel(universe, req.FirstPrompt.Model) {
-			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: prompts.InvalidModelError(universe), Field: "first_prompt.model"})
-			return
-		}
-		if req.Name == "" {
+		prompts.ValidateFields(&v, "first_prompt.", req.FirstPrompt.Name, req.FirstPrompt.Body, req.FirstPrompt.Model)
+		if strings.TrimSpace(req.Name) == "" {
 			req.Name = req.FirstPrompt.Name
 		}
-	} else if req.Name == "" {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "name is required", Field: "name"})
+	} else if strings.TrimSpace(req.Name) == "" {
+		v.Missing("name")
+	}
+	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
 
@@ -276,12 +293,21 @@ func (h *Handler) handleBlueprintCreate(w http.ResponseWriter, r *http.Request) 
 		httpx.InternalError(w, "blueprints", err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusCreated, blueprintCreateResponse{Blueprint: created, FirstPromptID: firstPromptID})
+	opBlueprintCreate.Write(w, blueprintCreateResponse{Blueprint: created, FirstPromptID: firstPromptID})
 }
 
 type renameBlueprintRequest struct {
-	Name string `json:"name"`
+	Name string `json:"name" doc:"The blueprint's new name, trimmed, which may not be empty."`
 }
+
+var opBlueprintRename = httpx.NewJSONOp[renameBlueprintRequest, domain.Blueprint](httpx.OpSpec{
+	Pattern:     "PUT /api/blueprints/{id}",
+	ID:          "replace_blueprint",
+	Summary:     "Rename a blueprint",
+	Description: "Sets a blueprint's name and returns the blueprint. Its steps and its prompts' names are left as they are.",
+	PathParams:  map[string]string{"id": "The blueprint's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleBlueprintUpdate renames a blueprint header. A blueprint's name is
 // independent of its entry prompt's (auto-wrap defaults them equal, but the box
@@ -297,8 +323,8 @@ func (h *Handler) handleBlueprintUpdate(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	var req renameBlueprintRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opBlueprintRename.Decode(w, r)
+	if !ok {
 		return
 	}
 	name := strings.TrimSpace(req.Name)
@@ -327,8 +353,22 @@ func (h *Handler) handleBlueprintUpdate(w http.ResponseWriter, r *http.Request) 
 		httpx.InternalError(w, "blueprints", err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, updated)
+	opBlueprintRename.Write(w, updated)
 }
+
+// blueprintDeleteResponse is the answer to DELETE /api/blueprints/{id}.
+type blueprintDeleteResponse struct {
+	Status string `json:"status" doc:"Always deleted."`
+}
+
+var opBlueprintDelete = httpx.NewJSONOp[httpx.NoBody, blueprintDeleteResponse](httpx.OpSpec{
+	Pattern:     "DELETE /api/blueprints/{id}",
+	ID:          "delete_blueprint",
+	Summary:     "Delete a blueprint",
+	Description: "Deletes a blueprint and the prompts of its steps. Each event handler that ran the blueprint loses it and stays in place, and one in automate moves to watch.",
+	PathParams:  map[string]string{"id": "The blueprint's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleBlueprintDelete soft-deletes a whole blueprint and cascades, in one
 // tx (team-scoped, mutating, RLS under the acting team). The cascade is
@@ -416,7 +456,7 @@ func (h *Handler) handleBlueprintDelete(w http.ResponseWriter, r *http.Request) 
 		httpx.NotFound(w, "blueprint")
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+	opBlueprintDelete.Write(w, blueprintDeleteResponse{Status: "deleted"})
 }
 
 // --- Blueprint steps -----------------------------------------------------
@@ -429,16 +469,24 @@ func (h *Handler) handleBlueprintDelete(w http.ResponseWriter, r *http.Request) 
 // envelopes, and two places to remember the ordering contract.
 type blueprintStepListRequest struct {
 	// TeamID narrows to one team's blueprints, like the blueprint list's.
-	TeamID string `json:"team_id"`
+	TeamID string `json:"team_id" doc:"Narrows to the steps of this team's blueprints; absent is every team the caller can see."`
 	// BlueprintIDs narrows to specific blueprints. Empty is the canvas's
 	// bulk read; a single id is the old per-blueprint read.
-	BlueprintIDs []string `json:"blueprint_ids"`
+	BlueprintIDs []string `json:"blueprint_ids" doc:"Narrows to the steps of these blueprints, at most 200 ids; absent or empty is every blueprint."`
 	// Search narrows to steps whose name carries it, case-insensitively and
 	// literally (httpx.Search). A step is named by the prompt it runs.
-	Search string `json:"search"`
+	Search string `json:"search" doc:"Narrows to steps whose prompt's name contains this text, compared case-insensitively and literally; trimmed, at most 200 characters, and empty is absent."`
 
 	httpx.PageRequest
 }
+
+var opBlueprintStepList = httpx.NewListOp[blueprintStepListRequest, domain.BlueprintStep](httpx.OpSpec{
+	Pattern:     "POST /api/blueprint-steps/list",
+	ID:          "list_blueprint_steps",
+	Summary:     "List blueprint steps",
+	Description: "Returns one page of the steps of the blueprints the caller can see, narrowed by the body's filters and ordered by blueprint id and then step index. Each step carries the version of its blueprint at the time of the read, which a steps replace names.",
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 type blueprintStepListFilterKey struct {
 	TeamID       string   `json:"team_id"`
@@ -464,8 +512,8 @@ func (h *Handler) handleBlueprintStepsAll(w http.ResponseWriter, r *http.Request
 	}
 	userID := httpx.ClaimsFrom(r.Context()).Subject
 
-	var req blueprintStepListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opBlueprintStepList.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -501,18 +549,26 @@ func (h *Handler) handleBlueprintStepsAll(w http.ResponseWriter, r *http.Request
 		httpx.InternalError(w, "blueprints", err)
 		return
 	}
-	httpx.WriteList(w, page, steps, total)
+	opBlueprintStepList.Write(w, page, steps, total)
 }
 
 // blueprintRunListRequest is the body of POST /api/blueprint-runs/list. Before
 // this route the collection was unenumerable — a run could only be read by an
 // id the caller already held.
 type blueprintRunListRequest struct {
-	BlueprintID string   `json:"blueprint_id"`
-	Statuses    []string `json:"statuses"`
+	BlueprintID string   `json:"blueprint_id" doc:"Narrows to the runs of this blueprint; absent is every blueprint."`
+	Statuses    []string `json:"statuses" doc:"Narrows to runs in one of these statuses, running, completed, aborted, failed, or cancelled; absent or empty is every status."`
 
 	httpx.PageRequest
 }
+
+var opBlueprintRunList = httpx.NewListOp[blueprintRunListRequest, domain.BlueprintRun](httpx.OpSpec{
+	Pattern:     "POST /api/blueprint-runs/list",
+	ID:          "list_blueprint_runs",
+	Summary:     "List blueprint runs",
+	Description: "Returns one page of the blueprint runs the caller can see, narrowed by the body's filters and most recently started first. Each item is the run itself; GET /api/blueprint-runs/{id} adds its steps.",
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 type blueprintRunListFilterKey struct {
 	BlueprintID string   `json:"blueprint_id"`
@@ -527,8 +583,8 @@ func (h *Handler) handleBlueprintRunsList(w http.ResponseWriter, r *http.Request
 	}
 	userID := httpx.ClaimsFrom(r.Context()).Subject
 
-	var req blueprintRunListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opBlueprintRunList.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -569,16 +625,16 @@ func (h *Handler) handleBlueprintRunsList(w http.ResponseWriter, r *http.Request
 	// read carries under its "blueprint_run" key. The single read adds the
 	// per-step views, which are a composite of the run and its conversations
 	// and belong to opening one run, not to enumerating many.
-	httpx.WriteList(w, page, runs, total)
+	opBlueprintRunList.Write(w, page, runs, total)
 }
 
 type blueprintStepInput struct {
-	StepPromptID string `json:"step_prompt_id"`
-	Brief        string `json:"brief"`
+	StepPromptID string `json:"step_prompt_id" doc:"The id of the prompt the step runs, a prompt of the blueprint's team that belongs to no other blueprint; required."`
+	Brief        string `json:"brief" doc:"Instructions for this step that are added to its prompt, or empty for none."`
 }
 
 type blueprintStepsPutRequest struct {
-	Steps []blueprintStepInput `json:"steps"`
+	Steps []blueprintStepInput `json:"steps" doc:"The blueprint's steps in their new order, at most 50, naming every step the blueprint holds and each prompt once; a step whose prompt the blueprint does not hold yet is added."`
 	// Version is the blueprint version the list was decided against: the
 	// blueprint_version the caller's read of the steps returned, or the
 	// blueprint's own version when it has no steps to carry one. Reading the
@@ -586,8 +642,17 @@ type blueprintStepsPutRequest struct {
 	// blueprint's steps adds some, and a list that leaves them out is refused
 	// whatever version it names. Not part of the list: it cannot be cleared,
 	// and it says which steps the list replaces.
-	Version *int64 `json:"version"`
+	Version *int64 `json:"version" doc:"The blueprint_version of the steps the list was decided against, or the blueprint's version when it has no steps; required, and refused when the blueprint has changed since."`
 }
+
+var opBlueprintStepsReplace = httpx.NewJSONOp[blueprintStepsPutRequest, blueprintWithSteps](httpx.OpSpec{
+	Pattern:     "PUT /api/blueprints/{id}/steps",
+	ID:          "replace_blueprint_steps",
+	Summary:     "Replace a blueprint's steps",
+	Description: "Sets the order of a blueprint's steps and their briefs, and adds the steps the list names that the blueprint does not hold yet. Returns the blueprint and its steps. The list must name every step the blueprint holds, so removing a step is a prompt delete, and a version the blueprint has moved past is refused.",
+	PathParams:  map[string]string{"id": "The blueprint's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleBlueprintStepsPut replaces the blueprint's step list: the order of its
 // steps, their briefs, and the prompts it adds. It answers the blueprint and
@@ -635,8 +700,8 @@ func (h *Handler) handleBlueprintStepsPut(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	var req blueprintStepsPutRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opBlueprintStepsReplace.Decode(w, r)
+	if !ok {
 		return
 	}
 
@@ -785,7 +850,7 @@ func (h *Handler) handleBlueprintStepsPut(w http.ResponseWriter, r *http.Request
 	if fault.write(w) {
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, written)
+	opBlueprintStepsReplace.Write(w, written)
 }
 
 // blueprintFault is a validation refusal raised inside a WithTx closure and
@@ -832,8 +897,8 @@ func (f *blueprintFault) write(w http.ResponseWriter) bool {
 // blueprintWithSteps bundles a blueprint header with its full ordered step
 // list — the shape both gestures return so the canvas can refresh in one read.
 type blueprintWithSteps struct {
-	Blueprint *domain.Blueprint      `json:"blueprint"`
-	Steps     []domain.BlueprintStep `json:"steps"`
+	Blueprint *domain.Blueprint      `json:"blueprint" doc:"The blueprint."`
+	Steps     []domain.BlueprintStep `json:"steps" doc:"The blueprint's steps in order, each carrying the blueprint's version."`
 }
 
 // withSteps builds a blueprintWithSteps whose steps carry the blueprint's
@@ -852,8 +917,17 @@ func withSteps(b *domain.Blueprint, steps []domain.BlueprintStep) blueprintWithS
 
 type mergeBlueprintRequest struct {
 	// SourceBlueprintID (B) is absorbed at {id}'s (the host's) tail and retired.
-	SourceBlueprintID string `json:"source_blueprint_id"`
+	SourceBlueprintID string `json:"source_blueprint_id" doc:"The id of the blueprint whose steps are appended to the path's blueprint and which is then deleted; it must be of the same team, have no event handler, and leave the result at most 50 steps."`
 }
+
+var opBlueprintMerge = httpx.NewJSONOp[mergeBlueprintRequest, blueprintWithSteps](httpx.OpSpec{
+	Pattern:     "POST /api/blueprints/{id}/merge",
+	ID:          "merge_blueprint",
+	Summary:     "Merge a blueprint into another",
+	Description: "Appends the source blueprint's steps to the path's blueprint and deletes the source, in one write. The path's blueprint keeps its id, name, and event handlers, and is returned with its steps.",
+	PathParams:  map[string]string{"id": "The id of the blueprint that receives the source's steps."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleBlueprintMerge absorbs a trigger-less source blueprint onto the tail of
 // the host ({id}) and retires the source, atomically. The host keeps its
@@ -866,8 +940,8 @@ func (h *Handler) handleBlueprintMerge(w http.ResponseWriter, r *http.Request) {
 	userID := httpx.ClaimsFrom(r.Context()).Subject
 	hostID := r.PathValue("id")
 
-	var req mergeBlueprintRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opBlueprintMerge.Decode(w, r)
+	if !ok {
 		return
 	}
 	if req.SourceBlueprintID == "" {
@@ -980,22 +1054,31 @@ func (h *Handler) handleBlueprintMerge(w http.ResponseWriter, r *http.Request) {
 	if fault.write(w) {
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, withSteps(merged, steps))
+	opBlueprintMerge.Write(w, withSteps(merged, steps))
 }
 
 type splitBlueprintRequest struct {
 	// AtStepIndex k splits the boundary before step k: steps [0,k) stay on
 	// {id}, steps [k,N) move to a new trigger-less blueprint. Pointer so a
 	// missing field 400s ("required") instead of silently defaulting to 0.
-	AtStepIndex *int `json:"at_step_index"`
+	AtStepIndex *int `json:"at_step_index" doc:"The 0-based index of the first step to move to the new blueprint, which must leave at least one step on each side; required."`
 }
 
 // blueprintSplitResponse returns both halves of a split: the upstream blueprint
 // (trigger retained) and the new trigger-less downstream blueprint.
 type blueprintSplitResponse struct {
-	Upstream   blueprintWithSteps `json:"upstream"`
-	Downstream blueprintWithSteps `json:"downstream"`
+	Upstream   blueprintWithSteps `json:"upstream" doc:"The path's blueprint with the steps before at_step_index."`
+	Downstream blueprintWithSteps `json:"downstream" doc:"The new blueprint with the steps from at_step_index on, named after its first step's prompt."`
 }
+
+var opBlueprintSplit = httpx.NewJSONOp[splitBlueprintRequest, blueprintSplitResponse](httpx.OpSpec{
+	Pattern:     "POST /api/blueprints/{id}/split",
+	ID:          "split_blueprint",
+	Summary:     "Split a blueprint in two",
+	Description: "Moves the steps from at_step_index on to a new blueprint with no event handler, in one write, and returns both blueprints with their steps. The path's blueprint keeps its id, name, and event handlers.",
+	PathParams:  map[string]string{"id": "The id of the blueprint to split."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleBlueprintSplit partitions a blueprint at an index into the upstream
 // (trigger-retained) half and a new trigger-less downstream blueprint,
@@ -1011,8 +1094,8 @@ func (h *Handler) handleBlueprintSplit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req splitBlueprintRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opBlueprintSplit.Decode(w, r)
+	if !ok {
 		return
 	}
 	// *int so a missing field is distinguishable from an explicit 0 (which is a
@@ -1095,7 +1178,7 @@ func (h *Handler) handleBlueprintSplit(w http.ResponseWriter, r *http.Request) {
 	if fault.write(w) {
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, blueprintSplitResponse{
+	opBlueprintSplit.Write(w, blueprintSplitResponse{
 		Upstream:   withSteps(upstream, upSteps),
 		Downstream: withSteps(downstream, downSteps),
 	})
@@ -1106,19 +1189,28 @@ type reconnectBlueprintRequest struct {
 	// {id} and continue into the target's chain; steps [k,N) peel off as a new
 	// orphaned trigger-less blueprint. Pointer so a missing field 400s
 	// ("required") instead of silently defaulting to 0.
-	AtStepIndex *int `json:"at_step_index"`
+	AtStepIndex *int `json:"at_step_index" doc:"The 0-based index of the first step to move off the path's blueprint to a new one, which must leave at least one step on each side; required."`
 	// TargetBlueprintID (C) is the trigger-less blueprint whose entry the
 	// upstream half now connects to; its steps are absorbed onto {id}'s tail.
-	TargetBlueprintID string `json:"target_blueprint_id"`
+	TargetBlueprintID string `json:"target_blueprint_id" doc:"The id of the blueprint whose steps follow the steps the path's blueprint keeps, and which is then deleted; it must be of the same team, have no event handler, and leave the result at most 50 steps. Required."`
 }
 
 // blueprintReconnectResponse returns the updated host (the upstream half with
 // the target's steps absorbed onto its tail) plus the id of the peeled-off
 // orphan downstream blueprint, so the caller can refresh + surface a toast.
 type blueprintReconnectResponse struct {
-	Host              blueprintWithSteps `json:"host"`
-	OrphanBlueprintID string             `json:"orphan_blueprint_id"`
+	Host              blueprintWithSteps `json:"host" doc:"The path's blueprint, holding its steps before at_step_index followed by the target's steps."`
+	OrphanBlueprintID string             `json:"orphan_blueprint_id" doc:"The id of the new blueprint, with no event handler, that holds the path's steps from at_step_index on."`
 }
+
+var opBlueprintReconnect = httpx.NewJSONOp[reconnectBlueprintRequest, blueprintReconnectResponse](httpx.OpSpec{
+	Pattern:     "POST /api/blueprints/{id}/reconnect",
+	ID:          "reconnect_blueprint",
+	Summary:     "Reconnect a blueprint to another's steps",
+	Description: "Moves the path's steps from at_step_index on to a new blueprint, then appends the target blueprint's steps to the path's blueprint and deletes the target, in one write. The path's blueprint keeps its id, name, and event handlers, and is returned with its steps and the new blueprint's id.",
+	PathParams:  map[string]string{"id": "The id of the blueprint whose steps are reconnected."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleBlueprintReconnect re-points a sequence edge's head onto another
 // blueprint's entry — the canvas "drag a step arrow's head to a new prompt"
@@ -1138,16 +1230,18 @@ func (h *Handler) handleBlueprintReconnect(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	var req reconnectBlueprintRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opBlueprintReconnect.Decode(w, r)
+	if !ok {
 		return
 	}
+	var v httpx.Validation
 	if req.AtStepIndex == nil {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "at_step_index is required", Field: "at_step_index"})
-		return
+		v.Missing("at_step_index")
 	}
 	if req.TargetBlueprintID == "" {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "target_blueprint_id is required", Field: "target_blueprint_id"})
+		v.Missing("target_blueprint_id")
+	}
+	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
 
@@ -1275,7 +1369,7 @@ func (h *Handler) handleBlueprintReconnect(w http.ResponseWriter, r *http.Reques
 	if fault.write(w) {
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, blueprintReconnectResponse{
+	opBlueprintReconnect.Write(w, blueprintReconnectResponse{
 		Host:              withSteps(hostOut, hostSteps),
 		OrphanBlueprintID: orphanID,
 	})
@@ -1287,12 +1381,21 @@ type duplicateBlueprintsRequest struct {
 	// PromptIDs is a flat set; the endpoint derives the output structure (the
 	// induced contiguous runs) from each prompt's resolved (blueprint, index).
 	// Callers never pass blueprint ids or ranges.
-	PromptIDs []string `json:"prompt_ids"`
+	PromptIDs []string `json:"prompt_ids" doc:"The ids of the step prompts to copy, from one or more blueprints of the team; each unbroken run of steps of one blueprint becomes one new blueprint. Required."`
 	// TeamID is the acting team the write picker supplied (see teamscope.ResolveActing);
 	// optional, defaulted by resolution. The store rejects a prompt set that
 	// resolves outside it.
-	TeamID string `json:"team_id"`
+	TeamID string `json:"team_id" doc:"The id of the team whose prompts are copied and which owns the copies, required when the caller writes to more than one team; absent is the caller's one team."`
 }
+
+var opBlueprintDuplicate = httpx.NewJSONOp[duplicateBlueprintsRequest, []blueprintWithSteps](httpx.OpSpec{
+	Pattern:     "POST /api/blueprints/duplicate",
+	ID:          "duplicate_blueprints",
+	Summary:     "Copy blueprint steps into new blueprints",
+	Description: "Copies the named step prompts into new blueprints with no event handler, one for each unbroken run of steps of one blueprint, and leaves the originals as they are. Returns every new blueprint with its steps, as an array.",
+	Status:      http.StatusCreated,
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintNo, Idempotent: httpx.HintNo, OpenWorld: httpx.HintNo},
+})
 
 // handleBlueprintDuplicate deep-copies a flat set of prompt ids into new
 // trigger-less blueprint(s) following the induced-contiguous-runs rule, in one
@@ -1305,8 +1408,8 @@ func (h *Handler) handleBlueprintDuplicate(w http.ResponseWriter, r *http.Reques
 	}
 	userID := httpx.ClaimsFrom(r.Context()).Subject
 
-	var req duplicateBlueprintsRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opBlueprintDuplicate.Decode(w, r)
+	if !ok {
 		return
 	}
 	if len(req.PromptIDs) == 0 {
@@ -1374,7 +1477,7 @@ func (h *Handler) handleBlueprintDuplicate(w http.ResponseWriter, r *http.Reques
 	if fault.write(w) {
 		return
 	}
-	httpx.WriteJSON(w, http.StatusCreated, out)
+	opBlueprintDuplicate.Write(w, out)
 }
 
 // --- Blueprint runs (multi-step instances) -------------------------------
@@ -1384,13 +1487,13 @@ func (h *Handler) handleBlueprintDuplicate(w http.ResponseWriter, r *http.Reques
 // Each step run carries its terminal conversations.outcome inline
 // (Run.Outcome); there is no separate verdict channel.
 type blueprintRunResponse struct {
-	BlueprintRun *domain.BlueprintRun   `json:"blueprint_run"`
-	Steps        []blueprintRunStepView `json:"steps"`
+	BlueprintRun *domain.BlueprintRun   `json:"blueprint_run" doc:"The blueprint run, as the list returns it."`
+	Steps        []blueprintRunStepView `json:"steps" doc:"The run's steps in order, as the blueprint stood when the run started, or as it stands now for a run that recorded no step plan."`
 }
 
 type blueprintRunStepView struct {
-	Step blueprintStepView    `json:"step"`
-	Run  *domain.Conversation `json:"run,omitempty"`
+	Step blueprintStepView    `json:"step" doc:"The step."`
+	Run  *domain.Conversation `json:"run,omitempty" doc:"The agent conversation that ran or is running the step, absent before the step starts."`
 }
 
 // blueprintStepView is the step shape in a blueprint-run projection. It mirrors
@@ -1406,12 +1509,12 @@ type blueprintRunStepView struct {
 // blueprint_steps row behind domain.BlueprintStep holds a prompt id and no
 // name — so it is omitted on the fallback path.
 type blueprintStepView struct {
-	BlueprintID  string     `json:"blueprint_id"`
-	StepIndex    int        `json:"step_index"`
-	StepPromptID string     `json:"step_prompt_id"`
-	Name         string     `json:"name,omitempty"`
-	Brief        string     `json:"brief"`
-	CreatedAt    *time.Time `json:"created_at,omitempty"`
+	BlueprintID  string     `json:"blueprint_id" doc:"The id of the run's blueprint."`
+	StepIndex    int        `json:"step_index" doc:"The step's 0-based position in the run."`
+	StepPromptID string     `json:"step_prompt_id" doc:"The id of the prompt the step runs."`
+	Name         string     `json:"name,omitempty" doc:"The step prompt's name when the run started, absent for a run that recorded no step plan."`
+	Brief        string     `json:"brief" doc:"Instructions for this step that were added to its prompt, or empty for none."`
+	CreatedAt    *time.Time `json:"created_at,omitempty" doc:"When the step was added to its blueprint, as an RFC 3339 timestamp, present only for a run that recorded no step plan."`
 }
 
 // newBlueprintStepView adapts a domain step into the API view, dropping a zero
@@ -1444,6 +1547,15 @@ func newBlueprintStepViewFromPlan(ps domain.BlueprintPlanStep, blueprintID strin
 		Brief:        ps.Brief,
 	}
 }
+
+var opBlueprintRunGet = httpx.NewJSONOp[httpx.NoBody, blueprintRunResponse](httpx.OpSpec{
+	Pattern:     "GET /api/blueprint-runs/{id}",
+	ID:          "get_blueprint_run",
+	Summary:     "Get a blueprint run",
+	Description: "Returns one blueprint run with its steps, each with the agent conversation that ran it. The steps are the ones the blueprint had when the run started, whatever has changed in the blueprint since.",
+	PathParams:  map[string]string{"id": "The blueprint run's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleBlueprintRunGet returns a blueprint run with its per-step views. The
 // step list is projected from the plan frozen onto the run at mint
@@ -1528,24 +1640,24 @@ func (h *Handler) handleBlueprintRunGet(w http.ResponseWriter, r *http.Request) 
 		views = append(views, view)
 	}
 
-	httpx.WriteJSON(w, http.StatusOK, blueprintRunResponse{BlueprintRun: br, Steps: views})
+	opBlueprintRunGet.Write(w, blueprintRunResponse{BlueprintRun: br, Steps: views})
 }
 
 // Register mounts the blueprint and blueprint-run routes.
 func (h *Handler) Register(m httpx.Mounts) {
-	m.APIMutating("POST /api/blueprints/list", h.handleBlueprintsList)
-	m.API("GET /api/blueprints/{id}", h.handleBlueprintGet)
-	m.APIMutating("POST /api/blueprints", h.handleBlueprintCreate)
-	m.APIMutating("PUT /api/blueprints/{id}", h.handleBlueprintUpdate)
-	m.APIMutating("DELETE /api/blueprints/{id}", h.handleBlueprintDelete)
+	m.Op(opBlueprintList, h.handleBlueprintsList)
+	m.Op(opBlueprintGet, h.handleBlueprintGet)
+	m.Op(opBlueprintCreate, h.handleBlueprintCreate)
+	m.Op(opBlueprintRename, h.handleBlueprintUpdate)
+	m.Op(opBlueprintDelete, h.handleBlueprintDelete)
 	// One route for the canvas's bulk read and the per-blueprint read: they
 	// differ only by a filter, and a filter is what a list body is for.
-	m.APIMutating("POST /api/blueprint-steps/list", h.handleBlueprintStepsAll)
-	m.APIMutating("PUT /api/blueprints/{id}/steps", h.handleBlueprintStepsPut)
-	m.APIMutating("POST /api/blueprints/{id}/merge", h.handleBlueprintMerge)
-	m.APIMutating("POST /api/blueprints/{id}/split", h.handleBlueprintSplit)
-	m.APIMutating("POST /api/blueprints/{id}/reconnect", h.handleBlueprintReconnect)
-	m.APIMutating("POST /api/blueprints/duplicate", h.handleBlueprintDuplicate)
-	m.APIMutating("POST /api/blueprint-runs/list", h.handleBlueprintRunsList)
-	m.API("GET /api/blueprint-runs/{id}", h.handleBlueprintRunGet)
+	m.Op(opBlueprintStepList, h.handleBlueprintStepsAll)
+	m.Op(opBlueprintStepsReplace, h.handleBlueprintStepsPut)
+	m.Op(opBlueprintMerge, h.handleBlueprintMerge)
+	m.Op(opBlueprintSplit, h.handleBlueprintSplit)
+	m.Op(opBlueprintReconnect, h.handleBlueprintReconnect)
+	m.Op(opBlueprintDuplicate, h.handleBlueprintDuplicate)
+	m.Op(opBlueprintRunList, h.handleBlueprintRunsList)
+	m.Op(opBlueprintRunGet, h.handleBlueprintRunGet)
 }

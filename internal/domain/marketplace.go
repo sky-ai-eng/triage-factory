@@ -49,37 +49,37 @@ const ListingSnapshotSchemaVersion = 1
 // FKs back to a listing — deliberate cross-org insurance so a future global
 // marketplace can feed the same installer with the same snapshot documents.
 type MarketplaceListing struct {
-	ID    string `json:"id"`
-	OrgID string `json:"org_id"`
+	ID    string `json:"id" doc:"The listing's id."`
+	OrgID string `json:"org_id" doc:"The id of the organization the listing is published in."`
 	// Scope is ListingScopeOrg today; ListingScope* documents the reserved
 	// 'global' value for the cross-org phase.
-	Scope string `json:"scope"`
+	Scope string `json:"scope" doc:"Who may see the listing; always org, every member of the organization."`
 	// Kind is ListingKind* — the listing unit is either a standalone prompt
 	// (a building block consumers compose into their own blueprints) or a
 	// full blueprint (its step prompts are inlined into the snapshot).
-	Kind string `json:"kind"`
+	Kind string `json:"kind" doc:"What the listing publishes: prompt or blueprint."`
 	// Status is ListingStatus*. Delisted listings stay resolvable to their
 	// publisher (relist / manage) but drop out of every other member's browse.
-	Status      string `json:"status"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
+	Status      string `json:"status" doc:"published when every member may browse and install the listing, or delisted when only members who may write its publishing team see it."`
+	Name        string `json:"name" doc:"The listing's name."`
+	Description string `json:"description" doc:"The listing's description, or empty when it has none."`
 	// PublisherTeamID is nullable: a listing outlives the team that
 	// published it (ON DELETE SET NULL). An orphaned listing (NULL here)
 	// becomes unwritable — tf.user_can_write_team(NULL) is always false —
 	// which is the accepted tradeoff; no ticket reassigns orphaned listings.
-	PublisherTeamID string `json:"publisher_team_id,omitempty"`
+	PublisherTeamID string `json:"publisher_team_id,omitempty" doc:"The id of the team that published the listing, absent when that team has been deleted."`
 	// CreatorUserID is nullable: a listing outlives its creator (ON DELETE
 	// SET NULL). Attribution only; RLS write checks key on PublisherTeamID.
-	CreatorUserID string `json:"creator_user_id,omitempty"`
+	CreatorUserID string `json:"creator_user_id,omitempty" doc:"The id of the person who published the listing, absent when that person's account has been deleted."`
 	// SourceID is the team-side blueprint/prompt id this listing was
 	// published from — plain text, NO FK, so the listing survives source
 	// deletion. It is how a publish or relist finds the listing a source
 	// already has instead of minting a duplicate.
-	SourceID       string     `json:"source_id,omitempty"`
-	CurrentVersion int        `json:"current_version"`
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
-	DelistedAt     *time.Time `json:"delisted_at,omitempty"`
+	SourceID       string     `json:"source_id,omitempty" doc:"The id of the prompt or blueprint the listing was published from, absent when none is recorded."`
+	CurrentVersion int        `json:"current_version" doc:"The number of the listing's latest version, starting at 1."`
+	CreatedAt      time.Time  `json:"created_at" doc:"When the listing was published, as an RFC 3339 timestamp."`
+	UpdatedAt      time.Time  `json:"updated_at" doc:"When the listing was last changed, as an RFC 3339 timestamp."`
+	DelistedAt     *time.Time `json:"delisted_at,omitempty" doc:"When the listing was delisted, as an RFC 3339 timestamp, absent while it is published."`
 }
 
 // ListingSnapshot is the immutable, self-contained document a listing
@@ -90,12 +90,12 @@ type MarketplaceListing struct {
 // once the cross-org marketplace (phase 2) lands. The installer consumes
 // this document, never source rows.
 type ListingSnapshot struct {
-	SchemaVersion int            `json:"schema_version"` // ListingSnapshotSchemaVersion
-	Kind          string         `json:"kind"`           // ListingKind*
-	Name          string         `json:"name"`
-	Description   string         `json:"description"`
-	EventTypes    []string       `json:"event_types"`
-	Steps         []SnapshotStep `json:"steps"` // exactly 1 for kind=prompt
+	SchemaVersion int            `json:"schema_version" doc:"The version of this document's format, always 1."` // ListingSnapshotSchemaVersion
+	Kind          string         `json:"kind" doc:"What the version holds: prompt or blueprint."`               // ListingKind*
+	Name          string         `json:"name" doc:"The listing's name when the version was published."`
+	Description   string         `json:"description" doc:"The listing's description when the version was published."`
+	EventTypes    []string       `json:"event_types" doc:"The event types the listing was suited to when the version was published."`
+	Steps         []SnapshotStep `json:"steps" doc:"The copied steps in order: one for a prompt, and one for each step of a blueprint."` // exactly 1 for kind=prompt
 }
 
 // SnapshotStep is one step of a ListingSnapshot. Modeled on
@@ -104,22 +104,22 @@ type ListingSnapshot struct {
 // kind=prompt (a standalone prompt listing has exactly one step and no
 // wrapper brief).
 type SnapshotStep struct {
-	StepIndex    int    `json:"step_index"`
-	Name         string `json:"name"` // prompt name
-	Body         string `json:"body"`
-	AllowedTools string `json:"allowed_tools"`
-	Model        string `json:"model"`
-	Brief        string `json:"brief"` // "" for kind=prompt
+	StepIndex    int    `json:"step_index" doc:"The step's 0-based position."`
+	Name         string `json:"name" doc:"The step prompt's name."` // prompt name
+	Body         string `json:"body" doc:"The step prompt's text."`
+	AllowedTools string `json:"allowed_tools" doc:"Tools beyond the defaults an agent running the step may use, comma-separated, or empty for none."`
+	Model        string `json:"model" doc:"The model key the step runs on, or empty to use the installing team's default model."`
+	Brief        string `json:"brief" doc:"Instructions for this step that are added to its prompt, empty for a prompt listing."` // "" for kind=prompt
 }
 
 // ListingVersion is one immutable, already-written snapshot revision of a
 // listing — the marketplace_listing_versions row shape.
 type ListingVersion struct {
-	ListingID     string          `json:"listing_id"`
-	Version       int             `json:"version"`
-	Snapshot      ListingSnapshot `json:"snapshot"`
-	CreatorUserID string          `json:"creator_user_id,omitempty"`
-	CreatedAt     time.Time       `json:"created_at"`
+	ListingID     string          `json:"listing_id" doc:"The id of the listing."`
+	Version       int             `json:"version" doc:"The version's number, starting at 1."`
+	Snapshot      ListingSnapshot `json:"snapshot" doc:"The prompt or blueprint the version holds, as it stood when the version was published."`
+	CreatorUserID string          `json:"creator_user_id,omitempty" doc:"The id of the person who published the version, absent when none is recorded."`
+	CreatedAt     time.Time       `json:"created_at" doc:"When the version was published, as an RFC 3339 timestamp."`
 }
 
 // ListingFilter bounds a MarketplaceStore.List browse read. Every field is
@@ -145,24 +145,24 @@ type ListingFilter struct {
 // second round trip.
 type ListingSummary struct {
 	MarketplaceListing
-	EventTypes   []string `json:"event_types"`
-	VoteCount    int      `json:"vote_count"`
-	InstallCount int      `json:"install_count"`
-	ViewerVoted  bool     `json:"viewer_voted"`
+	EventTypes   []string `json:"event_types" doc:"The event types the listing is suited to."`
+	VoteCount    int      `json:"vote_count" doc:"How many members have voted for the listing."`
+	InstallCount int      `json:"install_count" doc:"How many times the listing has been installed."`
+	ViewerVoted  bool     `json:"viewer_voted" doc:"Whether the caller has voted for the listing."`
 	// PublisherTeamName is a joined display label for MarketplaceListing's
 	// PublisherTeamID — the browse card and detail view show "who published
 	// this" and the org-wide teams RLS policy (org_id + user_has_org_access,
 	// no per-team membership check) lets any org member resolve any team's
 	// name, unlike the caller-scoped /api/teams list. Empty when
 	// PublisherTeamID is "" (the publishing team was later deleted).
-	PublisherTeamName string `json:"publisher_team_name,omitempty"`
+	PublisherTeamName string `json:"publisher_team_name,omitempty" doc:"The name of the team that published the listing, absent when that team has been deleted."`
 	// Stats is the TFAC-540 run-derived aggregate, nil until
 	// MarketplaceStore.RecomputeStatsSystem has computed it at least once for
 	// this listing (a freshly published listing has no row yet). Per the
 	// no-wrong-fallbacks rule, callers must not synthesize a zero-value
 	// block when this is nil — a listing with no stats yet shows nothing,
 	// not "0 teams · 0 runs".
-	Stats *ListingStats `json:"stats,omitempty"`
+	Stats *ListingStats `json:"stats,omitempty" doc:"How the copies installed from the listing have been used, absent until they are first counted."`
 }
 
 // ListingStats is the marketplace_listing_stats row for one listing —
@@ -178,13 +178,13 @@ type ListingSummary struct {
 // so a listing's lifetime usage never drops just because a consumer cleaned
 // up their copy — but it's still only *resolved* lifetime usage.
 type ListingStats struct {
-	TeamsUsing int `json:"teams_using"`
+	TeamsUsing int `json:"teams_using" doc:"How many teams hold a copy installed from the listing that has not been deleted."`
 	// TotalRuns counts only runs that reached a terminal outcome.
-	TotalRuns int `json:"total_runs"`
+	TotalRuns int `json:"total_runs" doc:"How many runs of the installed copies have finished, deleted copies included."`
 	// SuccessRate is nil when TotalRuns is 0 — never a fake 0%.
-	SuccessRate *float64   `json:"success_rate,omitempty"`
-	LastRunAt   *time.Time `json:"last_run_at,omitempty"`
-	ComputedAt  time.Time  `json:"computed_at"`
+	SuccessRate *float64   `json:"success_rate,omitempty" doc:"The share of those runs that succeeded, from 0 to 1, absent when total_runs is 0."`
+	LastRunAt   *time.Time `json:"last_run_at,omitempty" doc:"When the latest of those runs finished, as an RFC 3339 timestamp, absent when there are none."`
+	ComputedAt  time.Time  `json:"computed_at" doc:"When these figures were counted, as an RFC 3339 timestamp."`
 }
 
 // ListingDetail is the full single-listing view: the summary (header +
@@ -192,6 +192,6 @@ type ListingStats struct {
 // the listing detail page and the install flow both read.
 type ListingDetail struct {
 	ListingSummary
-	CurrentSnapshot ListingSnapshot  `json:"current_snapshot"`
-	Versions        []ListingVersion `json:"versions"`
+	CurrentSnapshot ListingSnapshot  `json:"current_snapshot" doc:"The prompt or blueprint the listing's current version holds."`
+	Versions        []ListingVersion `json:"versions" doc:"Every version of the listing."`
 }

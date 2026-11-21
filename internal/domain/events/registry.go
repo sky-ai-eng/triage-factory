@@ -43,10 +43,10 @@ type EventSchema struct {
 
 // FieldSchema describes one predicate field for the frontend editor.
 type FieldSchema struct {
-	Name        string   `json:"name"`                  // JSON key
-	Type        string   `json:"type"`                  // "bool" | "string" | "int" | "string_list"
-	EnumValues  []string `json:"enum_values,omitempty"` // optional, from `enum:"a,b,c"` tag
-	Description string   `json:"description,omitempty"` // from `doc:"..."` tag
+	Name        string   `json:"name" doc:"The field's key in a predicate object."`                                                      // JSON key
+	Type        string   `json:"type" doc:"The field's value type: bool, string, int, or string_list."`                                  // "bool" | "string" | "int" | "string_list"
+	EnumValues  []string `json:"enum_values,omitempty" doc:"The values the field may take, absent when it takes any value of its type."` // optional, from `enum:"a,b,c"` tag
+	Description string   `json:"description,omitempty" doc:"What the field matches, absent when it has no description."`                 // from `doc:"..."` tag
 	// index is the field's position in the predicate struct, which the
 	// validator decodes the key into.
 	index int
