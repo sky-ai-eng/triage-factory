@@ -216,11 +216,11 @@ type ReachableReposStore interface {
 	// the description and the language, so a surface never needs the whole set
 	// in memory to search it. An empty search matches everything.
 	//
-	// The order is the folded slug and nothing else, which is a total order (the
-	// per-class unique index proves no two rows tie on it) — so offset paging
-	// cannot drop or repeat a row. It is deliberately not "most recently pushed",
-	// which is what the PAT proxy inherited from GET /user/repos: that order ties
-	// freely, needs a tiebreaker anyway, and is the wrong affordance for a list
+	// The order is the folded slug, then the installation the row was observed
+	// through. The unique indexes key the App tier on (installation, slug) and
+	// the PAT tier on (host, slug), so that is a total order and offset paging
+	// cannot drop or repeat a row. It is deliberately not "most recently
+	// pushed": that order ties freely and is the wrong affordance for a list
 	// with a search box over it.
 	ListReachableSystem(ctx context.Context, orgID, host string, class domain.GitHubCredentialClass, search string, opts ListOpts) ([]domain.ReachableRepository, int, error)
 

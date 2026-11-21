@@ -896,8 +896,8 @@ export default function Repos() {
             icon={<RotateCw size={12} />}
             label={saving ? 'Working…' : 'Re-profile'}
             onClick={handleReprofile}
-            // The pass profiles the repositories the cards list, so with
-            // none there is nothing to profile.
+            // With no repository listed, the caller has nothing here whose
+            // profile they would see change.
             disabled={saving || profiles.length === 0}
           />
           <ActionButton

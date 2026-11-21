@@ -508,6 +508,13 @@ func TestRepoProfiling_SaveAsksForATTLPassAndTheVerbForcesOne(t *testing.T) {
 	seedPATOrg(t, srv, gh.URL)
 	wireReachRefresh(t, srv).refresh(t, runmode.LocalDefaultOrgID, true)
 
+	// With no profiler wired the verb cannot ask for a pass, so it must not
+	// answer that it did.
+	rec := doJSON(t, srv, http.MethodPost, "/api/repos/profile", map[string]any{})
+	if rec.Code != http.StatusServiceUnavailable || firstErrorReason(t, rec) != httpx.ReasonNotConfigured {
+		t.Fatalf("profile with no profiler = %d, want 503 %s; body=%s", rec.Code, httpx.ReasonNotConfigured, rec.Body.String())
+	}
+
 	var forced []bool
 	srv.SetProfilerTrigger(func(orgID string, force bool) {
 		if orgID != runmode.LocalDefaultOrgID {
@@ -526,7 +533,7 @@ func TestRepoProfiling_SaveAsksForATTLPassAndTheVerbForcesOne(t *testing.T) {
 		t.Fatalf("saves triggered force=%v, want %v", forced, want)
 	}
 
-	rec := doJSON(t, srv, http.MethodPost, "/api/repos/profile", map[string]any{})
+	rec = doJSON(t, srv, http.MethodPost, "/api/repos/profile", map[string]any{})
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("profile = %d, want 202; body=%s", rec.Code, rec.Body.String())
 	}

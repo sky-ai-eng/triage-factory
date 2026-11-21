@@ -284,10 +284,9 @@ type Server struct {
 	onGitHubRefreshMarked func(orgID string)
 	scorerTrigger         func(orgID string) // invoked after non-poll task creation (e.g. carry-over) to kick the per-org scorer immediately
 	// profilerTrigger kicks the per-org repo-profiling manager now rather
-	// than at the next poll cycle. force=true bypasses the 3-day TTL, which
-	// only the explicit re-profile route asks for; a repo-set change asks for
-	// a TTL-gated pass, which profiles the repos it newly tracks. Nil until
-	// SetProfilerTrigger runs.
+	// than at the next poll cycle. force=true bypasses the 3-day TTL, so a
+	// forced pass re-profiles fresh rows too. Nil until SetProfilerTrigger
+	// runs.
 	profilerTrigger func(orgID string, force bool)
 	// reachTrigger kicks the per-org reachable-repo refresh manager.
 	// force=true bypasses its TTL — the picker's refresh control and every
@@ -1202,9 +1201,8 @@ func (s *Server) SetScorerTrigger(fn func(orgID string)) {
 }
 
 // SetProfilerTrigger registers the per-org repo-profiling trigger (the
-// Manager's Trigger). force=true bypasses the 3-day TTL. Used by the
-// tracked-set save, so newly tracked repos are profiled without waiting for
-// the next poll cycle, and by the re-profile route, which forces.
+// Manager's Trigger), so a request can start a pass without waiting for the
+// next poll cycle. force=true bypasses the 3-day TTL.
 func (s *Server) SetProfilerTrigger(fn func(orgID string, force bool)) {
 	s.profilerTrigger = fn
 }

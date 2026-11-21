@@ -23,17 +23,15 @@ import (
 // POST /api/github/repos/list — the repository picker's option list, and
 // POST /api/github/repos/refresh — its explicit refresh.
 //
-// The picker used to proxy GitHub live on every read, from a different endpoint
-// per credential class, which is why it was the one list on this surface that
-// could not report a total. It now reads reachable_repositories — one mirror
-// both tiers populate — so it is an ordinary store-backed list: a real
-// total_count, a server-side filter, offset paging, and a schema identical
-// whether the org authenticates with a PAT or its own App.
+// The picker reads reachable_repositories, one mirror both credential tiers
+// populate, so it is an ordinary store-backed list: a real total_count, a
+// server-side filter, offset paging, and one schema whether the org
+// authenticates with a PAT or its own App.
 //
 // Nothing here calls GitHub. A stale or empty mirror kicks an out-of-band
-// refresh (internal/github/reachcache) and answers from what is on hand; on a large PAT
-// account the enumeration this replaces is ~30 upstream pages, which is a
-// multi-second request nobody should be waiting through.
+// refresh (internal/github/reachcache) and answers from what is on hand; on a
+// large PAT account the enumeration is ~30 upstream pages, a multi-second
+// request nobody should be waiting through.
 // --------------------------------------------------------------------
 
 // githubRepoListRequest is the body of POST /api/github/repos/list: the
@@ -99,12 +97,10 @@ type githubRepoJSON struct {
 type githubRepoListResponse struct {
 	Items         []githubRepoJSON `json:"items" doc:"The repositories of this page, as an empty array when it has none."`
 	NextPageToken string           `json:"next_page_token,omitempty" doc:"The page_token that reads the next page, absent on the last page."`
-	// TotalCount is what the filter matches across every page — a real number
-	// on both credential classes, which is the whole point of sourcing this
-	// locally. It is never null here; a proxy list's "this resource cannot count
-	// itself" no longer applies.
+	// TotalCount is what the filter matches across every page: a real number on
+	// both credential classes, and never null, because the rows are local.
 	TotalCount int    `json:"total_count" doc:"How many repositories match search across every page, 0 while status is discovering."`
-	Status     string `json:"status" doc:"ready when the page comes from the recorded list of reachable repositories, even an empty one, or discovering when nothing has been recorded for the organization yet and a refresh from GitHub has started."`
+	Status     string `json:"status" doc:"ready when the page comes from the recorded list of reachable repositories, even an empty one, or discovering when nothing has been recorded for the organization yet and a refresh from GitHub has been asked for."`
 }
 
 var opGitHubRepoList = httpx.NewJSONOp[githubRepoListRequest, githubRepoListResponse](httpx.OpSpec{
@@ -116,7 +112,10 @@ var opGitHubRepoList = httpx.NewJSONOp[githubRepoListRequest, githubRepoListResp
 })
 
 func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
-	orgID := OrgIDFrom(r.Context())
+	orgID, ok := s.requireOrg(w, r)
+	if !ok {
+		return
+	}
 	userID := ClaimsFrom(r.Context()).Subject
 
 	req, ok := opGitHubRepoList.Decode(w, r)
@@ -248,7 +247,10 @@ func (s *Server) handleGitHubReposRefresh(w http.ResponseWriter, r *http.Request
 	// No body is decoded: the refresh takes no arguments, exactly like the
 	// sibling verb routes (archive, restore, revoke), so there is no payload
 	// schema for a caller to get wrong.
-	orgID := OrgIDFrom(r.Context())
+	orgID, ok := s.requireOrg(w, r)
+	if !ok {
+		return
+	}
 	// An org with no GitHub URL has nothing to refresh, so asking for a
 	// refresh is answered as the other writes that need a host answer it.
 	if _, ok := s.requireOrgGitHubHost(r.Context(), w, orgID, "repos"); !ok {
@@ -300,21 +302,8 @@ func (s *Server) handleRepoProfile(w http.ResponseWriter, r *http.Request) {
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 
-	isAdmin, err := s.isOrgAdmin(r.Context(), orgID, userID)
-	if err != nil {
-		internalError(w, "repos", err)
+	if _, ok := s.requireRepoTracker(w, r, orgID, userID, "profiling repositories"); !ok {
 		return
-	}
-	if !isAdmin {
-		teamAdmin, err := s.az.UserAdministersATeam(r.Context(), userID, orgID)
-		if err != nil {
-			internalError(w, "repos", err)
-			return
-		}
-		if !teamAdmin {
-			forbidden(w, "profiling repositories requires an org admin or the admin of a team")
-			return
-		}
 	}
 	// An org with no GitHub URL tracks nothing to profile, so asking is
 	// answered as the other writes that need a host answer it.
@@ -621,7 +610,7 @@ func optRFC3339(t *time.Time) *string {
 // repositories, the set a team's event-handler repo_in filter picks from.
 type repoListRequest struct {
 	httpx.PageRequest
-	TeamID string `json:"team_id" doc:"The id of a team whose tracked repositories to list; empty lists every repository the caller can see."`
+	TeamID string `json:"team_id" doc:"The id of a team whose tracked repositories to list; empty lists every tracked repository the caller can see."`
 }
 
 type repoListFilterKey struct {
@@ -906,21 +895,9 @@ func (s *Server) handleRepoRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	isAdmin, err := s.isOrgAdmin(r.Context(), orgID, userID)
-	if err != nil {
-		internalError(w, "repos", err)
+	isAdmin, ok := s.requireRepoTracker(w, r, orgID, userID, "registering a repository")
+	if !ok {
 		return
-	}
-	if !isAdmin {
-		teamAdmin, err := s.az.UserAdministersATeam(r.Context(), userID, orgID)
-		if err != nil {
-			internalError(w, "repos", err)
-			return
-		}
-		if !teamAdmin {
-			forbidden(w, "registering a repository requires an org admin or the admin of a team")
-			return
-		}
 	}
 
 	host, ok := s.requireOrgGitHubHost(r.Context(), w, orgID, "repos")
@@ -965,6 +942,33 @@ func (s *Server) handleRepoRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	opRepoRegister.Write(w, repoToJSON(row, canEdit))
+}
+
+// requireRepoTracker is the gate of a write on the org's repositories that no
+// one team's tracked set decides, such as registering a repository before a
+// team tracks it or profiling every tracked one: the right to track anything
+// at all, which an org admin has, and so does the admin of any team. action
+// names the write in the 403. It reports whether the caller is an org
+// admin, and writes the response on every false return.
+func (s *Server) requireRepoTracker(w http.ResponseWriter, r *http.Request, orgID, userID, action string) (isAdmin, ok bool) {
+	isAdmin, err := s.isOrgAdmin(r.Context(), orgID, userID)
+	if err != nil {
+		internalError(w, "repos", err)
+		return false, false
+	}
+	if isAdmin {
+		return true, true
+	}
+	teamAdmin, err := s.az.UserAdministersATeam(r.Context(), userID, orgID)
+	if err != nil {
+		internalError(w, "repos", err)
+		return false, false
+	}
+	if !teamAdmin {
+		forbidden(w, action+" requires an org admin or the admin of a team")
+		return false, false
+	}
+	return false, true
 }
 
 // registerRepository registers ref by its GitHub id under the caller's claims

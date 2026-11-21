@@ -30,7 +30,7 @@ type PRSummaryRow struct {
 	Title     string   `json:"title" doc:"The pull request's title."`
 	Repo      string   `json:"repo" doc:"The pull request's repository, as owner/name."`
 	Author    string   `json:"author" doc:"The GitHub login of the pull request's author."`
-	State     string   `json:"state" doc:"open, merged, or closed, where closed means closed without being merged."`
+	State     string   `json:"state" doc:"open, merged, or closed, where closed means closed without being merged; any other state is passed through as GitHub reported it."`
 	Draft     bool     `json:"draft" doc:"Whether the pull request is a draft."`
 	Labels    []string `json:"labels" doc:"The names of the pull request's labels."`
 	CreatedAt string   `json:"created_at" doc:"When the pull request was opened, as an RFC 3339 timestamp."`

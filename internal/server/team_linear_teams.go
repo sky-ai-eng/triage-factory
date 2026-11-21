@@ -68,10 +68,10 @@ type linearStateRuleWrite struct {
 // stored rule, an explicit empty clears it.
 type linearTeamWrite struct {
 	ID         string                 `json:"id" doc:"Linear's id for the team, a lowercase UUID."`
-	Pickup     *linearPickupRuleWrite `json:"pickup" doc:"The workflow states in which unassigned issues are picked up; absent or null keeps the stored rule."`
-	InProgress *linearStateRuleWrite  `json:"in_progress" doc:"The workflow states that count as being worked on, and the one a claimed issue is moved to; absent or null keeps the stored rule."`
-	InReview   *linearStateRuleWrite  `json:"in_review" doc:"The optional workflow states that mean the work awaits human review; absent or null keeps the stored rule."`
-	Done       *linearStateRuleWrite  `json:"done" doc:"The workflow states that count as complete, and the one a finished issue is moved to; absent or null keeps the stored rule."`
+	Pickup     *linearPickupRuleWrite `json:"pickup" doc:"The workflow states in which unassigned issues are picked up; absent or null keeps the stored rule, and leaves a team being added unmapped."`
+	InProgress *linearStateRuleWrite  `json:"in_progress" doc:"The workflow states that count as being worked on, and the one a claimed issue is moved to; absent or null keeps the stored rule, and leaves a team being added unmapped."`
+	InReview   *linearStateRuleWrite  `json:"in_review" doc:"The optional workflow states that mean the work awaits human review; absent or null keeps the stored rule, and leaves a team being added unmapped."`
+	Done       *linearStateRuleWrite  `json:"done" doc:"The workflow states that count as complete, and the one a finished issue is moved to; absent or null keeps the stored rule, and leaves a team being added unmapped."`
 }
 
 // teamLinearTeamsRequest is the desired set, in display order. The field is

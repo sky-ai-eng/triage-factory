@@ -93,10 +93,10 @@ type jiraProjectWrite struct {
 	ID string `json:"id" doc:"The id in Triage Factory of a project this team tracks, as the response names it; an element sets exactly one of id and jira_id."`
 	// JiraID is Jira's project id of a project being added.
 	JiraID     string               `json:"jira_id" doc:"Jira's id for a project being added, as a decimal string; an element sets exactly one of id and jira_id."`
-	Pickup     *jiraPickupRuleWrite `json:"pickup" doc:"The statuses in which unassigned tickets are picked up; absent or null keeps the stored rule."`
-	InProgress *jiraStatusRuleWrite `json:"in_progress" doc:"The statuses that count as being worked on, and the one a claimed ticket is moved to; absent or null keeps the stored rule."`
-	InReview   *jiraStatusRuleWrite `json:"in_review" doc:"The optional statuses that mean the work awaits human review; absent or null keeps the stored rule."`
-	Done       *jiraStatusRuleWrite `json:"done" doc:"The statuses that count as complete, and the one a finished ticket is moved to; absent or null keeps the stored rule."`
+	Pickup     *jiraPickupRuleWrite `json:"pickup" doc:"The statuses in which unassigned tickets are picked up; absent or null keeps the stored rule, and leaves a project being added unmapped."`
+	InProgress *jiraStatusRuleWrite `json:"in_progress" doc:"The statuses that count as being worked on, and the one a claimed ticket is moved to; absent or null keeps the stored rule, and leaves a project being added unmapped."`
+	InReview   *jiraStatusRuleWrite `json:"in_review" doc:"The optional statuses that mean the work awaits human review; absent or null keeps the stored rule, and leaves a project being added unmapped."`
+	Done       *jiraStatusRuleWrite `json:"done" doc:"The statuses that count as complete, and the one a finished ticket is moved to; absent or null keeps the stored rule, and leaves a project being added unmapped."`
 }
 
 // jiraProjectIDRe is a Jira project id as both deployments write one: a

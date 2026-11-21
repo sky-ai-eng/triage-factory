@@ -253,10 +253,9 @@ func (s *Server) handleTeamReposPut(w http.ResponseWriter, r *http.Request) {
 	// is TTL-gated, so a repeated save re-profiles nothing that is fresh; a
 	// forced pass is its own route (handleRepoProfile).
 	//
-	// This is GitHub-only and no longer touches the Jira poller: onGitHubChanged
-	// shed its old RestartAll (which used to bounce Jira too), so there's no
-	// Jira readiness to reset here — a repo-set change leaves Jira snapshots
-	// valid and /api/jira/stock ungated.
+	// onGitHubChanged restarts nothing on the Jira side, so there is no Jira
+	// readiness to reset here: a repo-set change leaves Jira snapshots valid
+	// and /api/jira/stock ungated.
 	if s.onGitHubChanged != nil {
 		go s.onGitHubChanged(orgID)
 	}
