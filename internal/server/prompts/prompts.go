@@ -18,7 +18,7 @@ import (
 
 // CreateRequest is the body of a prompt create.
 type CreateRequest struct {
-	Name  string `json:"name" doc:"The prompt's name; required."`
+	Name  string `json:"name" doc:"The prompt's name; required, and not only whitespace."`
 	Body  string `json:"body" doc:"The prompt's text, what an agent running it is asked to do; required."`
 	Model string `json:"model" doc:"The model key the prompt runs on, one the deployment offers, or empty to use the team's default model."`
 	// TeamID is the acting team the write picker supplied. Required in the UI
@@ -31,7 +31,7 @@ type CreateRequest struct {
 // UpdateRequest is the body of a prompt update. The owning team is fixed at
 // create time, so unlike CreateRequest it carries no team_id.
 type UpdateRequest struct {
-	Name  string `json:"name" doc:"The prompt's name; required."`
+	Name  string `json:"name" doc:"The prompt's name; required, and not only whitespace."`
 	Body  string `json:"body" doc:"The prompt's text, what an agent running it is asked to do; required."`
 	Model string `json:"model" doc:"The model key the prompt runs on, one the deployment offers, or empty to use the team's default model; absent is empty."`
 }
@@ -64,11 +64,10 @@ func InvalidModelError(u modelcatalog.Universe) string {
 
 // ValidateFields records on v every fault in a prompt's name, body, and
 // model, each field named with prefix ("" for a prompt body, "first_prompt."
-// for one nested in a blueprint create). It is the one place the prompt
-// writes' field rules live, so every route that writes a prompt's content
-// refuses the same value the same way.
+// for one nested in a blueprint create). A name of only whitespace is
+// missing, because the library would list the prompt with no name.
 func ValidateFields(v *httpx.Validation, prefix, name, body, model string) {
-	if name == "" {
+	if strings.TrimSpace(name) == "" {
 		v.Missing(prefix + "name")
 	}
 	// A prompt is the step content unit — it always carries a body (the

@@ -109,6 +109,31 @@ func RunMarketplaceReturnedRowConformance(t *testing.T, mk MarketplaceStoreFacto
 		}
 	})
 
+	t.Run("repeat_status_write_leaves_the_row_as_it_was", func(t *testing.T) {
+		delisted, err := store.Delist(ctx, orgID, listingID)
+		if err != nil {
+			t.Fatalf("Delist: %v", err)
+		}
+		again, err := store.Delist(ctx, orgID, listingID)
+		if err != nil {
+			t.Fatalf("repeat Delist: %v", err)
+		}
+		if !again.UpdatedAt.Equal(delisted.UpdatedAt) || again.DelistedAt == nil || !again.DelistedAt.Equal(*delisted.DelistedAt) {
+			t.Errorf("repeat Delist moved the row's times: first %+v, repeat %+v", delisted, again)
+		}
+		published, err := store.Relist(ctx, orgID, listingID)
+		if err != nil {
+			t.Fatalf("Relist: %v", err)
+		}
+		again, err = store.Relist(ctx, orgID, listingID)
+		if err != nil {
+			t.Fatalf("repeat Relist: %v", err)
+		}
+		if !again.UpdatedAt.Equal(published.UpdatedAt) || again.DelistedAt != nil {
+			t.Errorf("repeat Relist moved the row: first %+v, repeat %+v", published, again)
+		}
+	})
+
 	t.Run("missing_id_reports_ErrNoSuchListing", func(t *testing.T) {
 		const missing = "00000000-0000-0000-0000-0000000000ff"
 		if _, err := store.Delist(ctx, orgID, missing); !errors.Is(err, db.ErrNoSuchListing) {

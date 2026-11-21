@@ -180,13 +180,13 @@ func (h *Handler) handleBlueprintGet(w http.ResponseWriter, r *http.Request) {
 // un-wrapped prompt can't be a canvas node or a trigger target). Absent ⇒ a
 // bare blueprint, as before.
 type firstPromptInput struct {
-	Name  string `json:"name" doc:"The prompt's name; required."`
+	Name  string `json:"name" doc:"The prompt's name; required, and not only whitespace."`
 	Body  string `json:"body" doc:"The prompt's text, what the step's agent is asked to do; required."`
 	Model string `json:"model" doc:"The model key the step runs on, one the deployment offers, or empty to use the team's default model."`
 }
 
 type createBlueprintRequest struct {
-	Name string `json:"name" doc:"The blueprint's name; required without first_prompt, and with it, absent or empty is the prompt's name."`
+	Name string `json:"name" doc:"The blueprint's name, which may not be empty or only whitespace; with first_prompt, an absent, empty, or whitespace-only name takes the prompt's name."`
 	// TeamID is the acting team the write picker supplied (see teamscope.ResolveActing).
 	TeamID string `json:"team_id" doc:"The id of the team to create the blueprint under, required when the caller writes to more than one team; absent is the caller's one team."`
 	// FirstPrompt, when set, auto-wraps a new prompt as this blueprint's sole
@@ -227,10 +227,10 @@ func (h *Handler) handleBlueprintCreate(w http.ResponseWriter, r *http.Request) 
 	var v httpx.Validation
 	if req.FirstPrompt != nil {
 		prompts.ValidateFields(&v, "first_prompt.", req.FirstPrompt.Name, req.FirstPrompt.Body, req.FirstPrompt.Model)
-		if req.Name == "" {
+		if strings.TrimSpace(req.Name) == "" {
 			req.Name = req.FirstPrompt.Name
 		}
-	} else if req.Name == "" {
+	} else if strings.TrimSpace(req.Name) == "" {
 		v.Missing("name")
 	}
 	if v.Flush(w, http.StatusBadRequest) {

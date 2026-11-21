@@ -88,14 +88,22 @@ func duplicateSourceMessage(kind, status string) string {
 	return "this " + kind + " is already published — use the republish endpoint to push an update"
 }
 
-// validateMarketplaceEventTypes records each event type not present in the
-// events_catalog registry on v, under its own index — the same check the
-// event-handler create path runs, reused here so a listing's facets can never
-// reference an id the catalog doesn't know.
+// validateMarketplaceEventTypes records on v, under its own index, each event
+// type not present in the events_catalog registry, so a listing's facets can
+// never reference an id the catalog doesn't know, and each repeat of an
+// earlier one, which the facet rows could hold only once while the version's
+// snapshot kept both.
 func validateMarketplaceEventTypes(v *httpx.Validation, eventTypes []string) {
+	seen := make(map[string]bool, len(eventTypes))
 	for i, et := range eventTypes {
+		field := fmt.Sprintf("event_types[%d]", i)
+		if seen[et] {
+			v.Invalid(field, "duplicate event_type: "+et)
+			continue
+		}
+		seen[et] = true
 		if _, ok := events.Get(et); !ok {
-			v.Invalid(fmt.Sprintf("event_types[%d]", i), "unknown event_type: "+et)
+			v.Invalid(field, "unknown event_type: "+et)
 		}
 	}
 }
@@ -185,7 +193,7 @@ type publishListingRequest struct {
 	SourceID    string   `json:"source_id" doc:"The id of the prompt or blueprint to publish, which must have no listing yet; required."`
 	Name        string   `json:"name" doc:"The listing's name, which may not be blank."`
 	Description string   `json:"description" doc:"The listing's description, or empty for none."`
-	EventTypes  []string `json:"event_types" doc:"The event types the listing is suited to, ids from GET /api/event-types, which browsing can filter on."`
+	EventTypes  []string `json:"event_types" doc:"The event types the listing is suited to, ids from GET /api/event-types, each at most once, which browsing can filter on."`
 }
 
 // marketplacePublishResponse is the answer to POST /api/marketplace/listings.
@@ -313,7 +321,7 @@ func (mh *Handler) handleMarketplacePublish(w http.ResponseWriter, r *http.Reque
 type publishVersionRequest struct {
 	Name        string   `json:"name" doc:"The listing's name, which may not be blank."`
 	Description string   `json:"description" doc:"The listing's description, or empty for none."`
-	EventTypes  []string `json:"event_types" doc:"The event types the listing is suited to, ids from GET /api/event-types, which replace the listing's current ones."`
+	EventTypes  []string `json:"event_types" doc:"The event types the listing is suited to, ids from GET /api/event-types, each at most once, which replace the listing's current ones."`
 }
 
 var opListingVersionCreate = httpx.NewJSONOp[publishVersionRequest, domain.MarketplaceListing](httpx.OpSpec{
@@ -473,7 +481,7 @@ var opListingUpdate = httpx.NewJSONOp[listingUpdateRequest, domain.MarketplaceLi
 // writers only. Copy-not-dependency invariant: a delist never touches the
 // copies other teams already installed from this listing, or the
 // votes/install history on the listing row itself — it is purely a
-// visibility flip (TFAC-535's marketplace_listings_select RLS: published OR
+// visibility flip (the marketplace_listings_select RLS: published OR
 // own-team-write), and publishing again reverses it.
 //
 // PATCH /api/marketplace/listings/{id}
@@ -828,17 +836,19 @@ var opListingUnvote = httpx.NewNoContentOp[httpx.NoBody](httpx.OpSpec{
 	Pattern:     "DELETE /api/marketplace/listings/{id}/vote",
 	ID:          "delete_marketplace_listing_vote",
 	Summary:     "Remove a vote for a marketplace listing",
-	Description: "Removes the caller's vote for a listing, and answers 204 when the caller has no vote there. Works only in multi mode, and answers 404 in local mode.",
+	Description: "Removes the caller's vote for a listing, and answers 204 when the caller has no vote there. A vote can be removed from a listing delisted since it was cast. Works only in multi mode, and answers 404 in local mode.",
 	PathParams:  map[string]string{"id": "The listing's id."},
 	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
 })
 
 // handleMarketplaceUnvote removes the caller's vote on a listing, if any.
-// Idempotent: removing a vote that doesn't exist is a no-op, still 204. A
-// listing the caller cannot see is 404 like on every other listing route,
-// which Unvote's DELETE would not say on its own: it carries no FK, so a
-// nonexistent id is a zero-row no-op. Hence the same pre-check
-// handleMarketplaceVote makes.
+// Idempotent: removing a vote that doesn't exist is a no-op, still 204. The
+// caller's own vote is removed even from a listing delisted since they cast
+// it, which they can no longer see, so a vote can always be withdrawn; it
+// discloses nothing, since they voted on that listing. With no vote to
+// remove, a listing the caller cannot see is 404 like on every other listing
+// route, which Unvote's DELETE would not say on its own: it carries no FK,
+// so a nonexistent id is a zero-row no-op.
 //
 // DELETE /api/marketplace/listings/{id}/vote
 func (mh *Handler) handleMarketplaceUnvote(w http.ResponseWriter, r *http.Request) {
@@ -852,13 +862,16 @@ func (mh *Handler) handleMarketplaceUnvote(w http.ResponseWriter, r *http.Reques
 	}
 	var missing bool
 	if err := mh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		removed, e := tx.Marketplace.Unvote(r.Context(), orgID, id, userID)
+		if e != nil || removed {
+			return e
+		}
 		if _, e := tx.Marketplace.Get(r.Context(), orgID, id, userID); errors.Is(e, sql.ErrNoRows) {
 			missing = true
-			return nil
 		} else if e != nil {
 			return e
 		}
-		return tx.Marketplace.Unvote(r.Context(), orgID, id, userID)
+		return nil
 	}); err != nil {
 		httpx.InternalError(w, "marketplace", err)
 		return

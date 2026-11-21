@@ -421,6 +421,9 @@ func TestMarketplacePublish_ValidationErrors(t *testing.T) {
 			[]httpx.ErrorItem{{Reason: httpx.ReasonMissingField, Field: "source_id"}}},
 		{"missing name", map[string]any{"kind": "prompt", "source_id": promptID},
 			[]httpx.ErrorItem{{Reason: httpx.ReasonMissingField, Field: "name"}}},
+		{"repeated event type", map[string]any{"kind": "prompt", "source_id": promptID, "name": "n",
+			"event_types": []string{eventTypeFixture, eventTypeFixture}},
+			[]httpx.ErrorItem{{Reason: httpx.ReasonInvalidField, Field: "event_types[1]"}}},
 		{"every field wrong", map[string]any{"kind": "widget", "event_types": []string{"not:a:real:event"}},
 			[]httpx.ErrorItem{
 				{Reason: httpx.ReasonInvalidField, Field: "kind"},
@@ -1131,6 +1134,37 @@ func TestMarketplaceUnvote_Idempotent(t *testing.T) {
 	}
 	if d := detailAs(r.member); d.VoteCount != 0 || d.ViewerVoted {
 		t.Errorf("after unvote = count %d, viewer_voted %v; want 0, false", d.VoteCount, d.ViewerVoted)
+	}
+}
+
+// TestMarketplaceUnvote_WithdrawsFromDelistedListing: a member who voted for
+// a listing can withdraw the vote after the listing is delisted and hidden
+// from them, so relisting it does not count the vote again. With no vote left,
+// the hidden listing is 404.
+func TestMarketplaceUnvote_WithdrawsFromDelistedListing(t *testing.T) {
+	r := newMarketplaceRig(t)
+	id := r.publishPrompt(t, "withdrawable", "m", "", "", "withdrawable")
+	voteReq := func(method string) *http.Request {
+		req := r.req(method, "/api/marketplace/listings/"+id+"/vote", r.member, nil)
+		req.SetPathValue("id", id)
+		return req
+	}
+	if rec := doMarketplaceJSON(r.mh.handleMarketplaceVote, voteReq(http.MethodPut)); rec.Code != http.StatusNoContent {
+		t.Fatalf("vote: status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+	}
+	r.delist(t, id)
+
+	if rec := doMarketplaceJSON(r.mh.handleMarketplaceUnvote, voteReq(http.MethodDelete)); rec.Code != http.StatusNoContent {
+		t.Fatalf("unvote on a delisted listing: status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+	}
+	if rec := doMarketplaceJSON(r.mh.handleMarketplaceUnvote, voteReq(http.MethodDelete)); rec.Code != http.StatusNotFound {
+		t.Fatalf("repeat unvote on a hidden listing: status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+	if rec := r.setStatus(r.admin, id, map[string]any{"status": domain.ListingStatusPublished}); rec.Code != http.StatusOK {
+		t.Fatalf("relist: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if d := r.getListingDetail(t, r.admin, id); d.VoteCount != 0 {
+		t.Errorf("vote_count after relist = %d, want 0", d.VoteCount)
 	}
 }
 

@@ -846,7 +846,7 @@
             ]
           },
           "name": {
-            "description": "The blueprint's name; required without first_prompt, and with it, absent or empty is the prompt's name.",
+            "description": "The blueprint's name, which may not be empty or only whitespace; with first_prompt, an absent, empty, or whitespace-only name takes the prompt's name.",
             "type": "string"
           },
           "team_id": {
@@ -939,7 +939,7 @@
             "type": "string"
           },
           "name": {
-            "description": "The prompt's name; required.",
+            "description": "The prompt's name; required, and not only whitespace.",
             "type": "string"
           },
           "team_id": {
@@ -1385,7 +1385,7 @@
             "type": "string"
           },
           "name": {
-            "description": "The prompt's name; required.",
+            "description": "The prompt's name; required, and not only whitespace.",
             "type": "string"
           }
         },
@@ -2117,7 +2117,7 @@
             "type": "boolean"
           },
           "status": {
-            "description": "hidden for a shipped or imported prompt, which is hidden from the library, or deleted for one a person created.",
+            "description": "hidden for a shipped or imported prompt, which is hidden from the library, or deleted for any other.",
             "type": "string"
           }
         },
@@ -2236,7 +2236,7 @@
             "type": "string"
           },
           "event_types": {
-            "description": "The event types the listing is suited to, ids from GET /api/event-types, which browsing can filter on.",
+            "description": "The event types the listing is suited to, ids from GET /api/event-types, each at most once, which browsing can filter on.",
             "items": {
               "type": "string"
             },
@@ -2267,7 +2267,7 @@
             "type": "string"
           },
           "event_types": {
-            "description": "The event types the listing is suited to, ids from GET /api/event-types, which replace the listing's current ones.",
+            "description": "The event types the listing is suited to, ids from GET /api/event-types, each at most once, which replace the listing's current ones.",
             "items": {
               "type": "string"
             },
@@ -2811,7 +2811,7 @@
             "type": "string"
           },
           "name": {
-            "description": "The prompt's name; required.",
+            "description": "The prompt's name; required, and not only whitespace.",
             "type": "string"
           }
         },
@@ -5049,7 +5049,7 @@
     },
     "/api/marketplace/listings/{id}/vote": {
       "delete": {
-        "description": "Removes the caller's vote for a listing, and answers 204 when the caller has no vote there. Works only in multi mode, and answers 404 in local mode.",
+        "description": "Removes the caller's vote for a listing, and answers 204 when the caller has no vote there. A vote can be removed from a listing delisted since it was cast. Works only in multi mode, and answers 404 in local mode.",
         "operationId": "delete_marketplace_listing_vote",
         "parameters": [
           {

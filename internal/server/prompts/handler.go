@@ -316,7 +316,7 @@ func (h *Handler) handlePromptPut(w http.ResponseWriter, r *http.Request) {
 
 // promptDeleteResponse is the answer to DELETE /api/prompts/{id}.
 type promptDeleteResponse struct {
-	Status            string `json:"status" doc:"hidden for a shipped or imported prompt, which is hidden from the library, or deleted for one a person created."`
+	Status            string `json:"status" doc:"hidden for a shipped or imported prompt, which is hidden from the library, or deleted for any other."`
 	OrphanedBlueprint bool   `json:"orphaned_blueprint" doc:"Whether the delete left the steps after the prompt in a new blueprint with no event handler."`
 }
 

@@ -49,7 +49,7 @@ func TestMarketplaceStore_SQLite_EveryMethodReturnsErrNotApplicableInLocal(t *te
 	if _, err := m.Vote(ctx, orgID, listingID, userID); !errors.Is(err, db.ErrNotApplicableInLocal) {
 		t.Errorf("Vote = %v, want ErrNotApplicableInLocal", err)
 	}
-	if err := m.Unvote(ctx, orgID, listingID, userID); !errors.Is(err, db.ErrNotApplicableInLocal) {
+	if _, err := m.Unvote(ctx, orgID, listingID, userID); !errors.Is(err, db.ErrNotApplicableInLocal) {
 		t.Errorf("Unvote = %v, want ErrNotApplicableInLocal", err)
 	}
 	if _, _, err := m.MaterializeListing(ctx, orgID, runmode.LocalDefaultTeamID, domain.ListingSnapshot{}, listingID, 1, userID); !errors.Is(err, db.ErrNotApplicableInLocal) {
