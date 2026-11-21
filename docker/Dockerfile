@@ -36,7 +36,7 @@
 
 # --- stage 1: frontend ------------------------------------------------------
 
-FROM --platform=$BUILDPLATFORM node:22.23.4-alpine AS frontend-builder
+FROM --platform=$BUILDPLATFORM node:22.23.5-alpine AS frontend-builder
 WORKDIR /src
 # pnpm is provisioned via corepack, pinned by the "packageManager" field
 # in the root package.json. COREPACK_ENABLE_DOWNLOAD_PROMPT=0 keeps the
@@ -66,7 +66,7 @@ RUN cd frontend && pnpm run build
 # second) makes the runtime layer see this as already-installed and
 # skip both the install AND the node/npm presence checks.
 
-FROM --platform=$BUILDPLATFORM node:22.23.4-alpine AS sdk-builder
+FROM --platform=$BUILDPLATFORM node:22.23.5-alpine AS sdk-builder
 WORKDIR /sdk-install
 # package-lock.json is the source of truth for transitive deps.
 # wrapper.mjs is the runtime shim the host binary materializes.
