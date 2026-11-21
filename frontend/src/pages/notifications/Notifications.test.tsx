@@ -117,6 +117,8 @@ let markReadFails: boolean
 // What a facets node answers; unset, it counts the rows the status and
 // dismissed filters match, and nothing narrower.
 let facetsAnswer: { by_priority: Facet[]; by_audience: Facet[] } | null
+// Holds every facets read.
+let facetsGate: Promise<void>
 let dismissFails: boolean
 type Call = { url: string; method: string; body: Record<string, unknown> | null }
 let calls: Call[]
@@ -195,6 +197,7 @@ const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
     })
   }
   if (url === '/api/me/notifications/facets' || url === '/api/orgs/org-1/notifications/facets') {
+    await facetsGate
     if (facetsAnswer) return ok(facetsAnswer)
     const from = url.startsWith('/api/orgs') ? orgRows : rows
     const items = from.filter((n) => matches(n, body))
@@ -318,6 +321,7 @@ beforeEach(() => {
   orgId.v = 'org-1'
   markReadFails = false
   facetsAnswer = null
+  facetsGate = Promise.resolve()
   dismissFails = false
   ws.dispatch = null
   actionAnswer = () => ({ status: 200, body: { notification: null, outcome: 'Done.' } })
@@ -588,6 +592,28 @@ describe('filters', () => {
     expect(within(rowOf('title theirs')).getByText('Platform admins')).toBeInTheDocument()
     // An archived team's open rows are named too.
     expect(within(rowOf('title old')).getByText('Old')).toBeInTheDocument()
+  })
+
+  it('keeps the options while a switch to the other list is out', async () => {
+    viewer.orgAdmin = true
+    rows = [note('a', { priority: 'urgent' })]
+    orgRows = [note('b', { priority: 'urgent' }), note('c', { priority: 'urgent' })]
+    await mount()
+    const urgent = () =>
+      within(screen.getByRole('group', { name: 'Priority' })).getByRole('button', {
+        name: /Urgent/,
+      })
+    expect(urgent()).toHaveTextContent('Urgent1')
+
+    let faceted!: () => void
+    facetsGate = new Promise((r) => (faceted = r))
+    fireEvent.click(screen.getByRole('radio', { name: 'All teams' }))
+    await settle()
+    expect(urgent()).toHaveTextContent('Urgent1')
+
+    await act(async () => faceted())
+    await settle()
+    expect(urgent()).toHaveTextContent('Urgent2')
   })
 
   it('leaves dismissed rows out until asked for them', async () => {
@@ -935,6 +961,33 @@ describe('nothing open', () => {
     ).toBeInTheDocument()
     expect(screen.getByText(/Last resolved 1d ago · Team row · Fixed\./)).toBeInTheDocument()
     expect(screen.getByRole('tab', { name: /Open/ })).toHaveTextContent('Open0')
+  })
+
+  it('stands in no list for one whose counts failed', async () => {
+    viewer.orgAdmin = true
+    orgRows = [note('t', { title: 'Team row' })]
+    await mount()
+    expect(screen.getByText('Nothing needs you')).toBeInTheDocument()
+
+    countFails = true
+    fireEvent.click(screen.getByRole('radio', { name: 'All teams' }))
+    await settle()
+    expect(screen.getByText('Team row')).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: /Open/ })).toHaveTextContent('Open--')
+
+    // A search goes out; while it does, the list left behind says nothing.
+    let open!: () => void
+    openGates = [new Promise((r) => (open = r))]
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search notifications' }), {
+      target: { value: 'team' },
+    })
+    await settle(300)
+    expect(screen.queryByText('Nothing needs you')).toBeNull()
+    expect(screen.getByRole('searchbox', { name: 'Search notifications' })).toHaveValue('team')
+
+    await act(async () => open())
+    await settle()
+    expect(screen.getByText('Team row')).toBeInTheDocument()
   })
 
   it('claims no dismissed rows when the counts do not answer', async () => {

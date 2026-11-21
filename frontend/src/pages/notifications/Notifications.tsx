@@ -265,9 +265,14 @@ function OrgNotifications({ org }: { org: string }) {
       const listed = loadPage({ ...request, page_size: PAGE }, { keepDepth: true })
       const page = (f: NotificationFilter, size: number, s?: NotificationSort) =>
         list === 'all' ? listOrgNotifications(org, f, size, s) : listNotifications(f, size, s)
+      // A list whose counts do not answer keeps its own last ones, if it has
+      // any, and never stands in the other list's.
+      const uncounted = () => {
+        if (latest()) setOpenCount((c) => (c?.path === path ? c : null))
+      }
       const counted = Promise.all([page(OPEN_COUNT, 0), page(OPEN_ANY, 0)]).then(
         async ([open, any]) => {
-          if (open.total_count === null || any.total_count === null) return
+          if (open.total_count === null || any.total_count === null) return uncounted()
           // The empty state's last resolution, read only when nothing is open,
           // and with the counts, so the empty state lands whole.
           const last =
@@ -281,13 +286,18 @@ function OrgNotifications({ org }: { org: string }) {
             setOpenCount({ path, list, n: open.total_count, any: any.total_count, last })
           }
         },
+        uncounted,
       )
-      // The filters' counts. Until they answer, the last ones stay.
+      // The filters' counts. Until they answer, the last ones stay, the other
+      // list's included, so a switch does not empty the filters between two
+      // answers; a failure keeps only this list's.
       notificationFacets(fpath, filter)
         .then((facets) => {
           if (latest()) setFacetAnswer({ path: fpath, facets })
         })
-        .catch(() => {})
+        .catch(() => {
+          if (latest()) setFacetAnswer((a) => (a?.path === fpath ? a : null))
+        })
       // Loaded once both have answered: with nothing undismissed open, the
       // counts are what say whether anything is.
       void Promise.allSettled([listed, counted]).then(() => {
@@ -549,7 +559,7 @@ function OrgNotifications({ org }: { org: string }) {
   // present across the whole list, each counted under the other filter, not
   // only the rows loaded. The option list itself is the page's own, so a
   // chosen option with nothing left in it stays to be unchosen.
-  const facetCounts = facetAnswer?.path === fpath ? facetAnswer.facets : null
+  const facetCounts = facetAnswer?.facets ?? null
   const facets = useMemo(() => {
     const byPri = new Map((facetCounts?.by_priority ?? []).map((f) => [f.value, f.count]))
     const byWho = new Map((facetCounts?.by_audience ?? []).map((f) => [f.value, f.count]))
@@ -728,10 +738,11 @@ function OrgNotifications({ org }: { org: string }) {
 
   const loaded = loadedKey === key
   // While a switch to the other list is out, the list it left still answers
-  // for the page, so moving between two lists with nothing open goes from one
-  // empty state to the other, and the count from one number to the other,
-  // with nothing drawn between them.
-  const counts = openCount?.path === path ? openCount : loaded ? null : openCount
+  // for the page, until the new list's counts answer or fail, so moving
+  // between two lists with nothing open goes from one empty state to the
+  // other, and the count from one number to the other, with nothing drawn
+  // between them.
+  const counts = openCount
   const count = counts ? counts.n : null
   const openView = tab === 'open' && !showDismissed && !paged.error
   // Nothing open at all, which the counts say before the list answers: a list
@@ -739,9 +750,10 @@ function OrgNotifications({ org }: { org: string }) {
   // dismissed rows left, the table stays, and so does the control that shows
   // them.
   const isEmpty = openView && counts?.any === 0 && !(loaded && pool.length > 0)
-  // Until the counts first answer, whether this is a table or the empty state
-  // is not known, and the page draws neither.
-  const undecided = openView && !counts && !loaded
+  // Until the page's first read answers, whether this is a table or the empty
+  // state is not known, and the page draws neither. After it, a view whose
+  // counts did not answer is a table.
+  const undecided = openView && !counts && !loadedKey
   const unreadIds = tab === 'open' ? pool.filter((n) => !n.read).map((n) => n.id) : []
   const filtering = !!(fPri || fWho || q)
   const emptyLabel = !loaded
