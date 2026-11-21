@@ -42,7 +42,7 @@ type githubRepoListRequest struct {
 	// Search is a case-insensitive literal substring matched against the
 	// slug, the description and the language (httpx.Search: trimmed, empty
 	// is absent, at most 200 characters).
-	Search string `json:"search"`
+	Search string `json:"search" doc:"Text to match, case-insensitively, against each repository's owner/name, description, and language; at most 200 characters, and empty matches every repository."`
 	httpx.PageRequest
 }
 
@@ -83,14 +83,14 @@ const (
 // by that id (POST /api/repos) before tracking it. FullName is for display, and
 // a rename moves it.
 type githubRepoJSON struct {
-	RepositoryID string `json:"repository_id"`
-	GitHubID     string `json:"github_id"`
-	FullName     string `json:"full_name"`
-	HTMLURL      string `json:"html_url"`
-	Description  string `json:"description"`
-	Language     string `json:"language"`
-	PushedAt     string `json:"pushed_at"`
-	Private      bool   `json:"private"`
+	RepositoryID string `json:"repository_id" doc:"The repository's id in Triage Factory, empty when it is not registered; POST /api/repos registers it by github_id, which a team needs before it can track the repository."`
+	GitHubID     string `json:"github_id" doc:"GitHub's id for the repository."`
+	FullName     string `json:"full_name" doc:"The repository's full name on GitHub, as owner/name."`
+	HTMLURL      string `json:"html_url" doc:"The URL of the repository's page on GitHub."`
+	Description  string `json:"description" doc:"The repository's description on GitHub, empty when it has none."`
+	Language     string `json:"language" doc:"The repository's main language as GitHub reports it, empty when GitHub reports none."`
+	PushedAt     string `json:"pushed_at" doc:"When the repository was last pushed to, as an RFC 3339 timestamp, empty when GitHub reports no push."`
+	Private      bool   `json:"private" doc:"Whether the repository is private on GitHub."`
 }
 
 // githubRepoListResponse is the list envelope plus the readiness discriminator.
@@ -101,22 +101,30 @@ type githubRepoJSON struct {
 // to every client (the API client normalizes a missing token to ""), so the
 // only difference is that a reader can tell the two states apart field-for-field.
 type githubRepoListResponse struct {
-	Items         []githubRepoJSON `json:"items"`
-	NextPageToken string           `json:"next_page_token"`
+	Items         []githubRepoJSON `json:"items" doc:"The repositories of this page, as an empty array when it has none."`
+	NextPageToken string           `json:"next_page_token" doc:"The page_token that reads the next page, empty on the last page."`
 	// TotalCount is what the filter matches across every page — a real number
 	// on both credential classes, which is the whole point of sourcing this
 	// locally. It is never null here; a proxy list's "this resource cannot count
 	// itself" no longer applies.
-	TotalCount int    `json:"total_count"`
-	Status     string `json:"status"`
+	TotalCount int    `json:"total_count" doc:"How many repositories match search across every page, 0 while status is discovering."`
+	Status     string `json:"status" doc:"ready when the page comes from the recorded list of reachable repositories, even an empty one, or discovering when nothing has been recorded for the organization yet and a refresh from GitHub has started."`
 }
+
+var opGitHubRepoList = httpx.NewJSONOp[githubRepoListRequest, githubRepoListResponse](httpx.OpSpec{
+	Pattern:     "POST /api/github/repos/list",
+	ID:          "list_github_repositories",
+	Summary:     "List reachable GitHub repositories",
+	Description: "Returns one page of the repositories the organization's GitHub credentials can reach on its GitHub host, as last recorded, matched by search and ordered by owner and name. A recorded list older than six hours, or none, starts a refresh from GitHub in the background, and the page answers from what is recorded; with nothing recorded yet, status is discovering and the page is empty.",
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 	orgID := OrgIDFrom(r.Context())
 	userID := ClaimsFrom(r.Context()).Subject
 
-	var req githubRepoListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opGitHubRepoList.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -174,7 +182,7 @@ func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 			internalError(w, "repos", pre.err)
 			return
 		}
-		writeJSON(w, http.StatusOK, githubRepoListResponse{
+		opGitHubRepoList.Write(w, githubRepoListResponse{
 			Items:  []githubRepoJSON{},
 			Status: githubRepoStatusDiscovering,
 		})
@@ -201,13 +209,27 @@ func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 			Private:      row.Private,
 		})
 	}
-	writeJSON(w, http.StatusOK, githubRepoListResponse{
+	opGitHubRepoList.Write(w, githubRepoListResponse{
 		Items:         items,
 		NextPageToken: httpx.NextPageToken(page, len(items), total),
 		TotalCount:    total,
 		Status:        githubRepoStatusReady,
 	})
 }
+
+// githubRepoRefreshResponse is the body of POST /api/github/repos/refresh.
+type githubRepoRefreshResponse struct {
+	Status string `json:"status" doc:"Always refreshing: the refresh has been asked for and runs after the response."`
+}
+
+var opGitHubRepoRefresh = httpx.NewJSONOp[httpx.NoBody, githubRepoRefreshResponse](httpx.OpSpec{
+	Pattern:     "POST /api/github/repos/refresh",
+	ID:          "refresh_github_repositories",
+	Summary:     "Refresh the reachable GitHub repositories",
+	Description: "Starts a refresh from GitHub of the recorded list of repositories the organization's GitHub credentials can reach, without waiting for the list to be six hours old, and answers before the refresh runs; a refresh already running for the organization is not started twice. The list's next read, or the github_repos_updated websocket event, shows the result.",
+	Status:      http.StatusAccepted,
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // handleGitHubReposRefresh forces a reachable-mirror refresh past the TTL.
 //
@@ -247,7 +269,7 @@ func (s *Server) handleGitHubReposRefresh(w http.ResponseWriter, r *http.Request
 		return
 	}
 	s.kickReachRefresh(orgID, true)
-	writeJSON(w, http.StatusAccepted, map[string]any{"status": "refreshing"})
+	opGitHubRepoRefresh.Write(w, githubRepoRefreshResponse{Status: "refreshing"})
 }
 
 // pickerPreflight is what the configuration check established. class is the
@@ -537,12 +559,20 @@ func optRFC3339(t *time.Time) *string {
 // repositories, the set a team's event-handler repo_in filter picks from.
 type repoListRequest struct {
 	httpx.PageRequest
-	TeamID string `json:"team_id"`
+	TeamID string `json:"team_id" doc:"The id of a team whose tracked repositories to list; empty lists every repository the caller can see."`
 }
 
 type repoListFilterKey struct {
 	TeamID string `json:"team_id"`
 }
+
+var opRepoList = httpx.NewListOp[repoListRequest, repoJSON](httpx.OpSpec{
+	Pattern:     "POST /api/repos/list",
+	ID:          "list_repositories",
+	Summary:     "List tracked repositories",
+	Description: "Returns one page of the repositories on the organization's GitHub host that at least one team tracks, ordered by owner and name: every one of them for an org admin, and for anyone else only those their own teams track. team_id narrows the page to the repositories one team tracks. Each repository says whether the caller may change its settings.",
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleRepositories returns the tracked repository rows from the DB. Org
 // admins get the org-wide union: every row at least one team tracks. Non-admin
@@ -565,8 +595,8 @@ func (s *Server) handleRepositories(w http.ResponseWriter, r *http.Request) {
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 
-	var req repoListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opRepoList.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -588,7 +618,7 @@ func (s *Server) handleRepositories(w http.ResponseWriter, r *http.Request) {
 	}
 	if host == "" {
 		// No GitHub URL, no host, and so no repository on it.
-		httpx.WriteList(w, page, []repoJSON{}, 0)
+		opRepoList.Write(w, page, []repoJSON{}, 0)
 		return
 	}
 
@@ -646,7 +676,7 @@ func (s *Server) handleRepositories(w http.ResponseWriter, r *http.Request) {
 	for i, row := range repos {
 		result[i] = repoToJSON(row, canEdit[i])
 	}
-	httpx.WriteList(w, page, result, total)
+	opRepoList.Write(w, page, result, total)
 }
 
 // repoAnnotation says whether a read wants can_edit resolved alongside the
@@ -708,6 +738,15 @@ func (s *Server) readRepo(
 	return row, canEdit, err
 }
 
+var opRepoGet = httpx.NewJSONOp[httpx.NoBody, repoJSON](httpx.OpSpec{
+	Pattern:     "GET /api/repos/{id}",
+	ID:          "get_repository",
+	Summary:     "Get a repository",
+	Description: "Returns the repository with this id, retired or not, when it is on the organization's GitHub host and the caller can see it: an org admin sees every registered repository there, and anyone else only those their own teams track.",
+	PathParams:  map[string]string{"id": "The repository's id in Triage Factory."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
+
 // handleRepoGet is the canonical single read for a registry row, in the list's
 // row shape.
 //
@@ -740,14 +779,22 @@ func (s *Server) handleRepoGet(w http.ResponseWriter, r *http.Request) {
 		notFound(w, "repo")
 		return
 	}
-	writeJSON(w, http.StatusOK, repoToJSON(*row, canEdit))
+	opRepoGet.Write(w, repoToJSON(*row, canEdit))
 }
 
 // repoRegisterRequest is the body of POST /api/repos: the repository to
 // register, named by GitHub's own id for it.
 type repoRegisterRequest struct {
-	GitHubID string `json:"github_id"`
+	GitHubID string `json:"github_id" doc:"GitHub's id for the repository, as a decimal string, which must be in the list of repositories the organization's GitHub credentials can reach."`
 }
+
+var opRepoRegister = httpx.NewJSONOp[repoRegisterRequest, repoJSON](httpx.OpSpec{
+	Pattern:     "POST /api/repos",
+	ID:          "create_repository",
+	Summary:     "Register a repository by its GitHub id",
+	Description: "Registers a repository the organization's GitHub credentials can reach, named by GitHub's id, so that a team can track it, and returns it; a repository already registered under that id is returned as it is, or restored if it was retired. When another registered repository holds the name, GitHub is asked about that repository, which is renamed or retired to match GitHub's answer.",
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // handleRepoRegister registers a repository by its GitHub id and returns its
 // registry row. Found or created, the answer is the row, so it is a 200 either
@@ -782,8 +829,8 @@ func (s *Server) handleRepoRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 
-	var req repoRegisterRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opRepoRegister.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -855,7 +902,7 @@ func (s *Server) handleRepoRegister(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "repos", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, repoToJSON(row, canEdit))
+	opRepoRegister.Write(w, repoToJSON(row, canEdit))
 }
 
 // registerRepository registers ref by its GitHub id under the caller's claims
@@ -923,6 +970,18 @@ func (s *Server) releaseRepoName(ctx context.Context, orgID string, ref domain.R
 	}
 }
 
+var opRepoGetByName = httpx.NewJSONOp[httpx.NoBody, repoJSON](httpx.OpSpec{
+	Pattern:     "GET /api/repos/by-name/{owner}/{repo}",
+	ID:          "get_repository_by_name",
+	Summary:     "Get a repository by its name",
+	Description: "Returns the repository GitHub now names owner/repo on the organization's GitHub host, when the caller can see it: an org admin sees every registered repository there, and anyone else only those their own teams track. A retired repository answers to no name.",
+	PathParams: map[string]string{
+		"owner": "The account that owns the repository on GitHub, matched case-insensitively.",
+		"repo":  "The repository's name without its owner, matched case-insensitively.",
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
+
 // handleRepoGetByName is the same read addressed by the provider's current
 // name for the repository — the `GET /…/by-name/{name}` half the API rules
 // give every resource with a unique name, and here the org-scoped folded
@@ -970,7 +1029,7 @@ func (s *Server) handleRepoGetByName(w http.ResponseWriter, r *http.Request) {
 		notFound(w, "repo")
 		return
 	}
-	writeJSON(w, http.StatusOK, repoToJSON(*row, canEdit))
+	opRepoGetByName.Write(w, repoToJSON(*row, canEdit))
 }
 
 // repoIDPath reads the {id} path segment — the registry row id every repo
@@ -1184,7 +1243,7 @@ const branchPagesTTL = time.Minute
 type branchListRequest struct {
 	// Search is a case-insensitive literal substring of the branch name
 	// (httpx.Search: trimmed, empty is absent, at most 200 characters).
-	Search string `json:"search"`
+	Search string `json:"search" doc:"Text to match, case-insensitively, against each branch's name; at most 200 characters, and empty matches every branch."`
 
 	httpx.PageRequest
 }
@@ -1197,8 +1256,17 @@ type branchListFilterKey struct {
 // shape can gain a field (protected, default, last commit) without becoming a
 // second list contract.
 type branchJSON struct {
-	Name string `json:"name"`
+	Name string `json:"name" doc:"The branch's name."`
 }
+
+var opRepoBranchList = httpx.NewListOp[branchListRequest, branchJSON](httpx.OpSpec{
+	Pattern:     "POST /api/repos/{id}/branches/list",
+	ID:          "list_repository_branches",
+	Summary:     "List a repository's branches",
+	Description: "Returns one page of the repository's branches, read from GitHub in GitHub's order and matched by search. total_count is null, because GitHub does not count them, and page_size may be at most 100. Each page GitHub returns is reused for up to a minute.",
+	PathParams:  map[string]string{"id": "The repository's id in Triage Factory."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // handleRepoBranches returns branches for a repo, with optional search
 // filtering. Gated the same as handleRepositories/handleRepoUpdate
@@ -1223,8 +1291,8 @@ func (s *Server) handleRepoBranches(w http.ResponseWriter, r *http.Request) {
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 
-	var req branchListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opRepoBranchList.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -1308,26 +1376,18 @@ func (s *Server) handleRepoBranches(w http.ResponseWriter, r *http.Request) {
 	for i, b := range branches {
 		out[i] = branchJSON{Name: b.Name}
 	}
-	httpx.WriteScannedProxyList(w, page, out, next)
+	opRepoBranchList.WriteScannedProxy(w, page, out, next)
 }
 
-// Repo *tracking* selection is per-team: writes go through
-// PUT /api/teams/{team_id}/github-repos (handleTeamReposPut), which writes
-// team_github_repos and brings any newly-tracked repository into the registry.
-// That save stays name-shaped, and deliberately: it is the ingest edge, where
-// tracking a repository is what mints its registry row, so its input names
-// things that may not have a row to be addressed by yet.
+// Repo *tracking* selection is per-team: PUT /api/teams/{team_id}/github-repos
+// (handleTeamReposPut) writes team_github_repos by registry id, and POST
+// /api/repos gives a repository the picker offers the registry row that id
+// names.
 //
-// The old org-global POST /api/repos was removed in favor of that single,
-// team-admin-gated entry point; the registry list, the single read, the
-// base_branch PATCH and the branch list remain, scoped per-caller and all
-// addressed by the registry row id.
-//
-// GET /api/repos lists the registry, which is a superset of the tracked set:
-// a repository the last team untracked keeps its row (a conversation's
-// worktree ledger or a pinned project may still name it), so an org admin can
-// still see it and re-track it. Non-admins see only what their own teams
-// track.
+// POST /api/repos/list lists the repositories at least one team tracks. A
+// repository the last team untracked keeps its registry row (a conversation's
+// worktree ledger or a pinned project may still name it), which an org admin
+// still reads by id.
 //
 // Reads (isOrgAdmin / repoVisible) go by membership: an org admin
 // sees every repo, a member only the repos their own team(s) track. The
@@ -1336,20 +1396,20 @@ func (s *Server) handleRepoBranches(w http.ResponseWriter, r *http.Request) {
 // team admin of a team that tracks the repo.
 
 func (s *Server) registerRepoRoutes() {
-	// Proxy list: the rows come from GitHub, which reports no total for this
-	// read, so total_count is null and page_token wraps the upstream cursor.
-	s.apiMutating("POST /api/github/repos/list", s.handleGitHubRepos)
-	s.apiMutating("POST /api/github/repos/refresh", s.handleGitHubReposRefresh)
-	s.apiMutating("POST /api/repos/list", s.handleRepositories)
+	// The picker's list reads the reachable mirror, not GitHub, so its
+	// total_count is a real count and its page_token an offset.
+	s.op(opGitHubRepoList, s.handleGitHubRepos)
+	s.op(opGitHubRepoRefresh, s.handleGitHubReposRefresh)
+	s.op(opRepoList, s.handleRepositories)
 	// Registration by GitHub id: how a repository the picker offers gets the
 	// registry id a team's tracked set is written with.
-	s.apiMutating("POST /api/repos", s.handleRepoRegister)
+	s.op(opRepoRegister, s.handleRepoRegister)
 	// Addressed by the registry row id, which is what every repo payload
 	// carries. by-name is the slug-accepting read the API rules give a
 	// resource with a unique name, and the only one: the writes take the id
 	// they were served, so a rename cannot repoint a save.
-	s.api("GET /api/repos/by-name/{owner}/{repo}", s.handleRepoGetByName)
-	s.api("GET /api/repos/{id}", s.handleRepoGet)
+	s.op(opRepoGetByName, s.handleRepoGetByName)
+	s.op(opRepoGet, s.handleRepoGet)
 	s.op(opRepoUpdate, s.handleRepoUpdate)
-	s.apiMutating("POST /api/repos/{id}/branches/list", s.handleRepoBranches)
+	s.op(opRepoBranchList, s.handleRepoBranches)
 }

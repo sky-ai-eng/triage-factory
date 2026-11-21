@@ -13,6 +13,38 @@
       }
     },
     "schemas": {
+      "BranchJSON": {
+        "properties": {
+          "name": {
+            "description": "The branch's name.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "BranchListRequest": {
+        "properties": {
+          "page_size": {
+            "description": "How many rows to return, 50 when absent; 0 returns no rows and only total_count, and a value above the list's maximum, 200 unless the route says otherwise, is refused.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "page_token": {
+            "description": "The next_page_token of the previous page, which reads the page after it; it is refused for a request with different filters.",
+            "type": "string"
+          },
+          "search": {
+            "description": "Text to match, case-insensitively, against each branch's name; at most 200 characters, and empty matches every branch.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "ConnectionsListRequest": {
         "properties": {
           "page_size": {
@@ -120,6 +152,190 @@
         ],
         "type": "object"
       },
+      "GitHubGroupJSON": {
+        "properties": {
+          "github_org_id": {
+            "description": "GitHub's id for the team's organization, empty when github_team_id is.",
+            "type": "string"
+          },
+          "github_team_id": {
+            "description": "GitHub's id for the team, which the PUT names the mapping by; empty on a mapping stored before ids were recorded, until the GitHub poll identifies it.",
+            "type": "string"
+          },
+          "org_login": {
+            "description": "The login of the team's organization on GitHub, as of the last save or poll.",
+            "type": "string"
+          },
+          "team_slug": {
+            "description": "The team's slug on GitHub, as of the last save or poll.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "github_team_id",
+          "github_org_id",
+          "org_login",
+          "team_slug"
+        ],
+        "type": "object"
+      },
+      "GitHubGroupListItemJSON": {
+        "properties": {
+          "github_org_id": {
+            "description": "GitHub's id for the team's organization, empty when github_team_id is.",
+            "type": "string"
+          },
+          "github_team_id": {
+            "description": "GitHub's id for the team, which the PUT names it by; empty only on a stored mapping GitHub no longer lists that was stored before ids were recorded.",
+            "type": "string"
+          },
+          "listed": {
+            "description": "False for a GitHub team this team is mapped to that GitHub did not list, because it was deleted or its organization's teams could not be read; such a row has no name or member count.",
+            "type": "boolean"
+          },
+          "member_count": {
+            "description": "How many members the team has on GitHub, absent when unknown.",
+            "type": "integer"
+          },
+          "mine": {
+            "description": "True when the caller belongs to the team on GitHub, present only when include_membership or only_mine is set and the caller's GitHub teams could be read.",
+            "type": "boolean"
+          },
+          "name": {
+            "description": "The team's name on GitHub, empty when listed is false.",
+            "type": "string"
+          },
+          "org_login": {
+            "description": "The login of the team's organization on GitHub.",
+            "type": "string"
+          },
+          "team_slug": {
+            "description": "The team's slug on GitHub.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "github_team_id",
+          "github_org_id",
+          "org_login",
+          "team_slug",
+          "name",
+          "listed"
+        ],
+        "type": "object"
+      },
+      "GithubRepoJSON": {
+        "properties": {
+          "description": {
+            "description": "The repository's description on GitHub, empty when it has none.",
+            "type": "string"
+          },
+          "full_name": {
+            "description": "The repository's full name on GitHub, as owner/name.",
+            "type": "string"
+          },
+          "github_id": {
+            "description": "GitHub's id for the repository.",
+            "type": "string"
+          },
+          "html_url": {
+            "description": "The URL of the repository's page on GitHub.",
+            "type": "string"
+          },
+          "language": {
+            "description": "The repository's main language as GitHub reports it, empty when GitHub reports none.",
+            "type": "string"
+          },
+          "private": {
+            "description": "Whether the repository is private on GitHub.",
+            "type": "boolean"
+          },
+          "pushed_at": {
+            "description": "When the repository was last pushed to, as an RFC 3339 timestamp, empty when GitHub reports no push.",
+            "type": "string"
+          },
+          "repository_id": {
+            "description": "The repository's id in Triage Factory, empty when it is not registered; POST /api/repos registers it by github_id, which a team needs before it can track the repository.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repository_id",
+          "github_id",
+          "full_name",
+          "html_url",
+          "description",
+          "language",
+          "pushed_at",
+          "private"
+        ],
+        "type": "object"
+      },
+      "GithubRepoListRequest": {
+        "properties": {
+          "page_size": {
+            "description": "How many rows to return, 50 when absent; 0 returns no rows and only total_count, and a value above the list's maximum, 200 unless the route says otherwise, is refused.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "page_token": {
+            "description": "The next_page_token of the previous page, which reads the page after it; it is refused for a request with different filters.",
+            "type": "string"
+          },
+          "search": {
+            "description": "Text to match, case-insensitively, against each repository's owner/name, description, and language; at most 200 characters, and empty matches every repository.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "GithubRepoListResponse": {
+        "properties": {
+          "items": {
+            "description": "The repositories of this page, as an empty array when it has none.",
+            "items": {
+              "$ref": "#/components/schemas/GithubRepoJSON"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "next_page_token": {
+            "description": "The page_token that reads the next page, empty on the last page.",
+            "type": "string"
+          },
+          "status": {
+            "description": "ready when the page comes from the recorded list of reachable repositories, even an empty one, or discovering when nothing has been recorded for the organization yet and a refresh from GitHub has started.",
+            "type": "string"
+          },
+          "total_count": {
+            "description": "How many repositories match search across every page, 0 while status is discovering.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "next_page_token",
+          "total_count",
+          "status"
+        ],
+        "type": "object"
+      },
+      "GithubRepoRefreshResponse": {
+        "properties": {
+          "status": {
+            "description": "Always refreshing: the refresh has been asked for and runs after the response.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
       "HealthResponse": {
         "properties": {
           "status": {
@@ -130,6 +346,395 @@
         "required": [
           "status"
         ],
+        "type": "object"
+      },
+      "JiraPickupRuleWrite": {
+        "properties": {
+          "member_ids": {
+            "description": "The ids of the Jira statuses in which unassigned tickets are picked up; an empty array clears the rule.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "JiraProjectSettings": {
+        "properties": {
+          "done": {
+            "$ref": "#/components/schemas/JiraStatusRuleJSON",
+            "description": "The statuses that count as complete, with the one a finished ticket is moved to."
+          },
+          "id": {
+            "description": "The project's id in Triage Factory, which a write names a tracked project by.",
+            "type": "string"
+          },
+          "in_progress": {
+            "$ref": "#/components/schemas/JiraStatusRuleJSON",
+            "description": "The statuses that count as being worked on, with the one a claimed ticket is moved to."
+          },
+          "in_review": {
+            "$ref": "#/components/schemas/JiraStatusRuleJSON",
+            "description": "The optional statuses that mean the work awaits human review."
+          },
+          "jira_id": {
+            "description": "Jira's id for the project, empty while the project has not been matched against Jira.",
+            "type": "string"
+          },
+          "key": {
+            "description": "The project's key in Jira, as last recorded.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The project's name in Jira, as last recorded.",
+            "type": "string"
+          },
+          "pickup": {
+            "$ref": "#/components/schemas/JiraStatusRuleJSON",
+            "description": "The statuses in which unassigned tickets are picked up."
+          }
+        },
+        "required": [
+          "id",
+          "jira_id",
+          "key",
+          "name",
+          "pickup",
+          "in_progress",
+          "in_review",
+          "done"
+        ],
+        "type": "object"
+      },
+      "JiraProjectWrite": {
+        "properties": {
+          "done": {
+            "description": "The statuses that count as complete, and the one a finished ticket is moved to; absent or null keeps the stored rule.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/JiraStatusRuleWrite"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "id": {
+            "description": "The id in Triage Factory of a project this team tracks, as the response names it; an element sets exactly one of id and jira_id.",
+            "type": "string"
+          },
+          "in_progress": {
+            "description": "The statuses that count as being worked on, and the one a claimed ticket is moved to; absent or null keeps the stored rule.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/JiraStatusRuleWrite"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "in_review": {
+            "description": "The optional statuses that mean the work awaits human review; absent or null keeps the stored rule.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/JiraStatusRuleWrite"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "jira_id": {
+            "description": "Jira's id for a project being added, as a decimal string; an element sets exactly one of id and jira_id.",
+            "type": "string"
+          },
+          "pickup": {
+            "description": "The statuses in which unassigned tickets are picked up; absent or null keeps the stored rule.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/JiraPickupRuleWrite"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "JiraStatusRefJSON": {
+        "properties": {
+          "id": {
+            "description": "Jira's id for the status.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The status's name, as Jira gave it at the rule's last save.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "type": "object"
+      },
+      "JiraStatusRuleJSON": {
+        "properties": {
+          "canonical": {
+            "description": "The status that stands for this state, or null on an unmapped rule; always null on pickup.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/JiraStatusRefJSON"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "members": {
+            "description": "The statuses that count as this state, as an empty array on an unmapped rule.",
+            "items": {
+              "$ref": "#/components/schemas/JiraStatusRefJSON"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "members",
+          "canonical"
+        ],
+        "type": "object"
+      },
+      "JiraStatusRuleWrite": {
+        "properties": {
+          "canonical_id": {
+            "description": "The id of the status, one of member_ids, that stands for this state, which Triage Factory moves a ticket into for in_progress and done; empty exactly when member_ids is.",
+            "type": "string"
+          },
+          "member_ids": {
+            "description": "The ids of the Jira statuses that count as this state; an empty array, with an empty canonical_id, clears the rule.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "LinearPickupRuleJSON": {
+        "properties": {
+          "members": {
+            "description": "The workflow states in which unassigned issues are picked up, as an empty array on an unmapped rule.",
+            "items": {
+              "$ref": "#/components/schemas/LinearStateRefJSON"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "members"
+        ],
+        "type": "object"
+      },
+      "LinearPickupRuleWrite": {
+        "properties": {
+          "member_ids": {
+            "description": "The ids of the Linear workflow states in which unassigned issues are picked up; an empty array clears the rule.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "LinearStateRefJSON": {
+        "properties": {
+          "id": {
+            "description": "Linear's id for the workflow state.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The workflow state's name, as Linear gave it at the rule's last save.",
+            "type": "string"
+          },
+          "type": {
+            "description": "The workflow state's type in Linear, such as unstarted, started, or completed, as of the rule's last save.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "type"
+        ],
+        "type": "object"
+      },
+      "LinearStateRuleJSON": {
+        "properties": {
+          "canonical": {
+            "description": "The workflow state that stands for this state, or null on an unmapped rule.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LinearStateRefJSON"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "members": {
+            "description": "The workflow states that count as this state, as an empty array on an unmapped rule.",
+            "items": {
+              "$ref": "#/components/schemas/LinearStateRefJSON"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "members",
+          "canonical"
+        ],
+        "type": "object"
+      },
+      "LinearStateRuleWrite": {
+        "properties": {
+          "canonical_id": {
+            "description": "The id of the workflow state, one of member_ids, that stands for this state, which Triage Factory moves an issue into for in_progress and done; empty exactly when member_ids is.",
+            "type": "string"
+          },
+          "member_ids": {
+            "description": "The ids of the Linear workflow states that count as this state; an empty array, with an empty canonical_id, clears the rule.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "LinearTeamSettings": {
+        "properties": {
+          "armed": {
+            "description": "Whether pickup, in_progress, and done are all mapped, which is when the team's issues are polled.",
+            "type": "boolean"
+          },
+          "done": {
+            "$ref": "#/components/schemas/LinearStateRuleJSON",
+            "description": "The workflow states that count as complete, with the one a finished issue is moved to."
+          },
+          "id": {
+            "description": "Linear's id for the team.",
+            "type": "string"
+          },
+          "in_progress": {
+            "$ref": "#/components/schemas/LinearStateRuleJSON",
+            "description": "The workflow states that count as being worked on, with the one a claimed issue is moved to."
+          },
+          "in_review": {
+            "$ref": "#/components/schemas/LinearStateRuleJSON",
+            "description": "The optional workflow states that mean the work awaits human review."
+          },
+          "key": {
+            "description": "The team's key in Linear, such as ENG, as of the last save.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The team's name in Linear, as of the last save.",
+            "type": "string"
+          },
+          "pickup": {
+            "$ref": "#/components/schemas/LinearPickupRuleJSON",
+            "description": "The workflow states in which unassigned issues are picked up."
+          }
+        },
+        "required": [
+          "id",
+          "key",
+          "name",
+          "armed",
+          "pickup",
+          "in_progress",
+          "in_review",
+          "done"
+        ],
+        "type": "object"
+      },
+      "LinearTeamWrite": {
+        "properties": {
+          "done": {
+            "description": "The workflow states that count as complete, and the one a finished issue is moved to; absent or null keeps the stored rule.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LinearStateRuleWrite"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "id": {
+            "description": "Linear's id for the team, a lowercase UUID.",
+            "type": "string"
+          },
+          "in_progress": {
+            "description": "The workflow states that count as being worked on, and the one a claimed issue is moved to; absent or null keeps the stored rule.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LinearStateRuleWrite"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "in_review": {
+            "description": "The optional workflow states that mean the work awaits human review; absent or null keeps the stored rule.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LinearStateRuleWrite"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "pickup": {
+            "description": "The workflow states in which unassigned issues are picked up; absent or null keeps the stored rule.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LinearPickupRuleWrite"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
         "type": "object"
       },
       "MemoryAttemptJSON": {
@@ -154,6 +759,124 @@
         "required": [
           "started_at"
         ],
+        "type": "object"
+      },
+      "PRSummaryRow": {
+        "properties": {
+          "author": {
+            "description": "The GitHub login of the pull request's author.",
+            "type": "string"
+          },
+          "created_at": {
+            "description": "When the pull request was opened, as an RFC 3339 timestamp.",
+            "type": "string"
+          },
+          "draft": {
+            "description": "Whether the pull request is a draft.",
+            "type": "boolean"
+          },
+          "entity_id": {
+            "description": "The id of the pull request's entity in Triage Factory.",
+            "type": "string"
+          },
+          "html_url": {
+            "description": "The URL of the pull request's page on GitHub.",
+            "type": "string"
+          },
+          "labels": {
+            "description": "The names of the pull request's labels.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "number": {
+            "description": "The pull request's number in its repository.",
+            "type": "integer"
+          },
+          "repo": {
+            "description": "The pull request's repository, as owner/name.",
+            "type": "string"
+          },
+          "state": {
+            "description": "open, merged, or closed, where closed means closed without being merged.",
+            "type": "string"
+          },
+          "title": {
+            "description": "The pull request's title.",
+            "type": "string"
+          },
+          "updated_at": {
+            "description": "When the pull request last had activity on GitHub, as an RFC 3339 timestamp, empty when unknown.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "entity_id",
+          "number",
+          "title",
+          "repo",
+          "author",
+          "state",
+          "draft",
+          "labels",
+          "created_at",
+          "updated_at",
+          "html_url"
+        ],
+        "type": "object"
+      },
+      "PrListRequest": {
+        "properties": {
+          "draft": {
+            "description": "true lists only drafts and false only pull requests ready for review; absent or null lists both.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "page_size": {
+            "description": "How many rows to return, 50 when absent; 0 returns no rows and only total_count, and a value above the list's maximum, 200 unless the route says otherwise, is refused.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "page_token": {
+            "description": "The next_page_token of the previous page, which reads the page after it; it is refused for a request with different filters.",
+            "type": "string"
+          },
+          "sort_dir": {
+            "description": "The direction of sort_key, asc or desc, desc when absent; it is refused without sort_key.",
+            "type": "string"
+          },
+          "sort_key": {
+            "description": "Orders the page by updated_at, the pull request's last activity on GitHub, with those that have none last; absent orders it by when each pull request was last polled, newest first.",
+            "type": "string"
+          },
+          "states": {
+            "description": "The states to narrow to, each one of open, merged, or closed; absent or empty lists every state.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "ReachabilityRequest": {
+        "properties": {
+          "url": {
+            "description": "The base URL to check, an http or https URL with no credentials, query, or fragment.",
+            "type": "string"
+          }
+        },
         "type": "object"
       },
       "RepoJSON": {
@@ -250,6 +973,35 @@
         ],
         "type": "object"
       },
+      "RepoListRequest": {
+        "properties": {
+          "page_size": {
+            "description": "How many rows to return, 50 when absent; 0 returns no rows and only total_count, and a value above the list's maximum, 200 unless the route says otherwise, is refused.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "page_token": {
+            "description": "The next_page_token of the previous page, which reads the page after it; it is refused for a request with different filters.",
+            "type": "string"
+          },
+          "team_id": {
+            "description": "The id of a team whose tracked repositories to list; empty lists every repository the caller can see.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "RepoRegisterRequest": {
+        "properties": {
+          "github_id": {
+            "description": "GitHub's id for the repository, as a decimal string, which must be in the list of repositories the organization's GitHub credentials can reach.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "RepoUpdateRequest": {
         "properties": {
           "base_branch": {
@@ -260,6 +1012,31 @@
             ]
           }
         },
+        "type": "object"
+      },
+      "Result": {
+        "properties": {
+          "probed_url": {
+            "description": "The URL the request was sent to.",
+            "type": "string"
+          },
+          "reachable": {
+            "description": "Whether the host answered with any HTTP response.",
+            "type": "boolean"
+          },
+          "reason": {
+            "description": "Why the host could not be reached, such as a name that does not resolve or a timeout, present only when it is unreachable.",
+            "type": "string"
+          },
+          "status": {
+            "description": "The HTTP status the host answered with, absent when it is unreachable.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "reachable",
+          "probed_url"
+        ],
         "type": "object"
       },
       "TaskJSON": {
@@ -559,6 +1336,299 @@
             ]
           }
         },
+        "type": "object"
+      },
+      "TeamGitHubGroupsListRequest": {
+        "properties": {
+          "exclude_ids": {
+            "description": "GitHub team ids to leave out of the page; absent or empty leaves out nothing.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "ids": {
+            "description": "GitHub team ids to narrow the page to; absent or empty narrows nothing, and a team with no GitHub team id matches none.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "include_membership": {
+            "description": "Whether to set mine on the GitHub teams the caller belongs to, which reads the caller's GitHub teams; it narrows nothing.",
+            "type": "boolean"
+          },
+          "only_mine": {
+            "description": "Whether to list only the GitHub teams the caller belongs to, with mine set; when the caller's GitHub teams cannot be read, it lists none.",
+            "type": "boolean"
+          },
+          "page_size": {
+            "description": "How many rows to return, 50 when absent; 0 returns no rows and only total_count, and a value above the list's maximum, 200 unless the route says otherwise, is refused.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "page_token": {
+            "description": "The next_page_token of the previous page, which reads the page after it; it is refused for a request with different filters.",
+            "type": "string"
+          },
+          "search": {
+            "description": "Text to match, case-insensitively, against each GitHub team's org_login/team_slug and its name; at most 200 characters, and empty matches every team.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "TeamGitHubGroupsListResponse": {
+        "properties": {
+          "credentials_missing": {
+            "description": "True when the organization's tracked repositories have owners but no GitHub credential connected to the organization reaches any of them, so no GitHub team could be listed.",
+            "type": "boolean"
+          },
+          "items": {
+            "description": "The GitHub teams of this page, as an empty array when it has none.",
+            "items": {
+              "$ref": "#/components/schemas/GitHubGroupListItemJSON"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "next_page_token": {
+            "description": "The page_token that reads the next page, absent on the last page.",
+            "type": "string"
+          },
+          "total_count": {
+            "description": "How many GitHub teams match the request's filters across every page.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total_count",
+          "credentials_missing"
+        ],
+        "type": "object"
+      },
+      "TeamGitHubGroupsPutRequest": {
+        "properties": {
+          "github_team_ids": {
+            "description": "GitHub's ids for every GitHub team this team is to be mapped to, each named once; an empty array removes every mapping, and the field is required.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "TeamGitHubGroupsPutResponse": {
+        "properties": {
+          "groups": {
+            "description": "The GitHub teams this team is mapped to, as stored.",
+            "items": {
+              "$ref": "#/components/schemas/GitHubGroupJSON"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "groups"
+        ],
+        "type": "object"
+      },
+      "TeamGitHubGroupsResponse": {
+        "properties": {
+          "groups": {
+            "description": "The GitHub teams this team is mapped to on the organization's GitHub host.",
+            "items": {
+              "$ref": "#/components/schemas/GitHubGroupJSON"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "role": {
+            "description": "The caller's role in the team: admin, member, or empty when the caller is not on it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "groups",
+          "role"
+        ],
+        "type": "object"
+      },
+      "TeamJiraProjectsRequest": {
+        "properties": {
+          "jira_projects": {
+            "description": "Every Jira project the team is to track, in display order; an empty array, or an absent field, untracks every project.",
+            "items": {
+              "$ref": "#/components/schemas/JiraProjectWrite"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "TeamJiraProjectsResponse": {
+        "properties": {
+          "jira_projects": {
+            "description": "The Jira projects the team tracks, as stored, in display order.",
+            "items": {
+              "$ref": "#/components/schemas/JiraProjectSettings"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "jira_projects"
+        ],
+        "type": "object"
+      },
+      "TeamLinearTeamsRequest": {
+        "properties": {
+          "linear_teams": {
+            "description": "Every Linear team this team is to track, in display order, each named once; an empty array untracks them all, and the field is required.",
+            "items": {
+              "$ref": "#/components/schemas/LinearTeamWrite"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "TeamLinearTeamsResponse": {
+        "properties": {
+          "linear_teams": {
+            "description": "The Linear teams this team tracks, as stored, in display order.",
+            "items": {
+              "$ref": "#/components/schemas/LinearTeamSettings"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "linear_teams"
+        ],
+        "type": "object"
+      },
+      "TeamReposPutRequest": {
+        "properties": {
+          "repository_ids": {
+            "description": "The ids in Triage Factory of every repository the team is to track, each named once; an empty array untracks them all, and the field is required.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "TeamReposPutResponse": {
+        "properties": {
+          "repos": {
+            "description": "The repositories the team tracks, as stored.",
+            "items": {
+              "$ref": "#/components/schemas/TrackedRepoJSON"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "repos"
+        ],
+        "type": "object"
+      },
+      "TeamReposResponse": {
+        "properties": {
+          "repos": {
+            "description": "The repositories the team tracks on the organization's GitHub host.",
+            "items": {
+              "$ref": "#/components/schemas/TrackedRepoJSON"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "role": {
+            "description": "The caller's role in the team: admin, member, or empty when the caller is not on it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repos",
+          "role"
+        ],
+        "type": "object"
+      },
+      "TrackedRepoJSON": {
+        "properties": {
+          "github_id": {
+            "description": "GitHub's id for the repository, empty while it is not yet known.",
+            "type": "string"
+          },
+          "id": {
+            "description": "The repository's id in Triage Factory, which the PUT names it by.",
+            "type": "string"
+          },
+          "owner": {
+            "description": "The account that owns the repository on GitHub, as last recorded.",
+            "type": "string"
+          },
+          "repo": {
+            "description": "The repository's name without its owner, as last recorded.",
+            "type": "string"
+          },
+          "retired_at": {
+            "description": "When the repository was retired because GitHub no longer serves it to the organization, as an RFC 3339 timestamp, or null; a retired repository stays tracked until a save leaves it out, and is not polled.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "github_id",
+          "owner",
+          "repo",
+          "retired_at"
+        ],
         "type": "object"
       },
       "UsageCategoryBucket": {
@@ -1241,6 +2311,128 @@
         }
       }
     },
+    "/api/github/reachability": {
+      "post": {
+        "description": "Sends one request, with no credential, to the API of the GitHub host at url, and returns whether the host answered; any HTTP response counts as reachable. It reads and changes nothing in the organization.",
+        "operationId": "check_github_reachability",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReachabilityRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Result"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Check that a GitHub host is reachable",
+        "x-hints": {
+          "openWorldHint": true,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/github/repos/list": {
+      "post": {
+        "description": "Returns one page of the repositories the organization's GitHub credentials can reach on its GitHub host, as last recorded, matched by search and ordered by owner and name. A recorded list older than six hours, or none, starts a refresh from GitHub in the background, and the page answers from what is recorded; with nothing recorded yet, status is discovering and the page is empty.",
+        "operationId": "list_github_repositories",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GithubRepoListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GithubRepoListResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List reachable GitHub repositories",
+        "x-hints": {
+          "openWorldHint": true,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/github/repos/refresh": {
+      "post": {
+        "description": "Starts a refresh from GitHub of the recorded list of repositories the organization's GitHub credentials can reach, without waiting for the list to be six hours old, and answers before the refresh runs; a refresh already running for the organization is not started twice. The list's next read, or the github_repos_updated websocket event, shows the result.",
+        "operationId": "refresh_github_repositories",
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GithubRepoRefreshResponse"
+                }
+              }
+            },
+            "description": "Accepted"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Refresh the reachable GitHub repositories",
+        "x-hints": {
+          "openWorldHint": true,
+          "readOnlyHint": true
+        }
+      }
+    },
     "/api/health": {
       "get": {
         "description": "Reports status ok once the server accepts requests. It needs no credential and checks no database or integration, so it says only that the process is serving.",
@@ -1264,6 +2456,50 @@
         "summary": "Check that the server is up",
         "x-hints": {
           "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/jira/reachability": {
+      "post": {
+        "description": "Sends one request, with no credential, to the server-information endpoint of the Jira site at url, and returns whether the site answered; any HTTP response counts as reachable. It reads and changes nothing in the organization.",
+        "operationId": "check_jira_reachability",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReachabilityRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Result"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Check that a Jira site is reachable",
+        "x-hints": {
+          "openWorldHint": true,
           "readOnlyHint": true
         }
       }
@@ -1464,7 +2700,218 @@
         }
       }
     },
+    "/api/repos": {
+      "post": {
+        "description": "Registers a repository the organization's GitHub credentials can reach, named by GitHub's id, so that a team can track it, and returns it; a repository already registered under that id is returned as it is, or restored if it was retired. When another registered repository holds the name, GitHub is asked about that repository, which is renamed or retired to match GitHub's answer.",
+        "operationId": "create_repository",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RepoRegisterRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepoJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Register a repository by its GitHub id",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/repos/by-name/{owner}/{repo}": {
+      "get": {
+        "description": "Returns the repository GitHub now names owner/repo on the organization's GitHub host, when the caller can see it: an org admin sees every registered repository there, and anyone else only those their own teams track. A retired repository answers to no name.",
+        "operationId": "get_repository_by_name",
+        "parameters": [
+          {
+            "description": "The account that owns the repository on GitHub, matched case-insensitively.",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The repository's name without its owner, matched case-insensitively.",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepoJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get a repository by its name",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/repos/list": {
+      "post": {
+        "description": "Returns one page of the repositories on the organization's GitHub host that at least one team tracks, ordered by owner and name: every one of them for an org admin, and for anyone else only those their own teams track. team_id narrows the page to the repositories one team tracks. Each repository says whether the caller may change its settings.",
+        "operationId": "list_repositories",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RepoListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "items": {
+                      "description": "The rows of this page, as an empty array when it has none.",
+                      "items": {
+                        "$ref": "#/components/schemas/RepoJSON"
+                      },
+                      "type": "array"
+                    },
+                    "next_page_token": {
+                      "description": "The page_token that reads the next page, absent on the last page.",
+                      "type": "string"
+                    },
+                    "total_count": {
+                      "description": "How many rows match the request's filters across every page, or null for a list whose upstream cannot count them.",
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "total_count"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List tracked repositories",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
     "/api/repos/{id}": {
+      "get": {
+        "description": "Returns the repository with this id, retired or not, when it is on the organization's GitHub host and the caller can see it: an org admin sees every registered repository there, and anyone else only those their own teams track.",
+        "operationId": "get_repository",
+        "parameters": [
+          {
+            "description": "The repository's id in Triage Factory.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepoJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get a repository",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      },
       "patch": {
         "description": "Sets or clears the branch agents base their work on in the repository, and returns the repository with the change applied.",
         "operationId": "update_repository",
@@ -1518,6 +2965,85 @@
           "idempotentHint": true,
           "openWorldHint": false,
           "readOnlyHint": false
+        }
+      }
+    },
+    "/api/repos/{id}/branches/list": {
+      "post": {
+        "description": "Returns one page of the repository's branches, read from GitHub in GitHub's order and matched by search. total_count is null, because GitHub does not count them, and page_size may be at most 100. Each page GitHub returns is reused for up to a minute.",
+        "operationId": "list_repository_branches",
+        "parameters": [
+          {
+            "description": "The repository's id in Triage Factory.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BranchListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "items": {
+                      "description": "The rows of this page, as an empty array when it has none.",
+                      "items": {
+                        "$ref": "#/components/schemas/BranchJSON"
+                      },
+                      "type": "array"
+                    },
+                    "next_page_token": {
+                      "description": "The page_token that reads the next page, absent on the last page.",
+                      "type": "string"
+                    },
+                    "total_count": {
+                      "description": "How many rows match the request's filters across every page, or null for a list whose upstream cannot count them.",
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "total_count"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List a repository's branches",
+        "x-hints": {
+          "openWorldHint": true,
+          "readOnlyHint": true
         }
       }
     },
@@ -1589,6 +3115,375 @@
         }
       }
     },
+    "/api/teams/{team_id}/github-groups": {
+      "get": {
+        "description": "Returns the GitHub teams this team is mapped to on the organization's GitHub host, with the caller's role in the team. A caller who is not on the team gets no mappings.",
+        "operationId": "get_team_github_groups",
+        "parameters": [
+          {
+            "description": "The team's id, or default for the one team in local mode.",
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeamGitHubGroupsResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get a team's GitHub team mappings",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      },
+      "put": {
+        "description": "Replaces the GitHub teams this team is mapped to on the organization's GitHub host with the ones the body names, and returns them as stored. A GitHub team being added is checked with GitHub, and must be a team of an organization that owns a repository a team in the organization tracks.",
+        "operationId": "replace_team_github_groups",
+        "parameters": [
+          {
+            "description": "The team's id, or default for the one team in local mode.",
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TeamGitHubGroupsPutRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeamGitHubGroupsPutResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Replace a team's GitHub team mappings",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/teams/{team_id}/github-groups/list": {
+      "post": {
+        "description": "Returns one page of the GitHub teams of the organizations that own the repositories teams in the organization track, read from GitHub, together with this team's mappings GitHub no longer lists, narrowed by the body's filters and ordered by org_login/team_slug and then GitHub's team id. A caller who is not on the team gets an empty list. GitHub's answer is reused for up to a minute.",
+        "operationId": "list_team_github_groups",
+        "parameters": [
+          {
+            "description": "The team's id, or default for the one team in local mode.",
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TeamGitHubGroupsListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeamGitHubGroupsListResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List GitHub teams a team can be mapped to",
+        "x-hints": {
+          "openWorldHint": true,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/teams/{team_id}/github-repos": {
+      "get": {
+        "description": "Returns the repositories the team tracks on the organization's GitHub host, retired ones included, with the caller's role in the team. A caller who is not on the team gets no repositories.",
+        "operationId": "get_team_github_repositories",
+        "parameters": [
+          {
+            "description": "The team's id, or default for the one team in local mode.",
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeamReposResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get a team's tracked GitHub repositories",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      },
+      "put": {
+        "description": "Replaces the repositories the team tracks on the organization's GitHub host with the ones the body names, and returns them as stored. A repository being added must be one the organization's GitHub credentials can reach, checked against the recorded list of reachable repositories or, when that list is older than six hours, with GitHub. Every call also starts polling the organization's tracked repositories again and profiling each of them, which reads them from GitHub and describes them with the organization's background-jobs model.",
+        "operationId": "replace_team_github_repositories",
+        "parameters": [
+          {
+            "description": "The team's id, or default for the one team in local mode.",
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TeamReposPutRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeamReposPutResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Replace a team's tracked GitHub repositories",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": false,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/teams/{team_id}/jira-projects": {
+      "put": {
+        "description": "Replaces the Jira projects the team tracks on the organization's Jira site, and each project's status rules, with the set the body names, in its order, and returns the set as stored. Projects being added, and the statuses of every rule that changes, are checked with Jira. A rule an element leaves out keeps its stored value, and a body with no jira_projects untracks every project.",
+        "operationId": "replace_team_jira_projects",
+        "parameters": [
+          {
+            "description": "The team's id, or default for the one team in local mode.",
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TeamJiraProjectsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeamJiraProjectsResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Replace a team's tracked Jira projects",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/teams/{team_id}/linear-teams": {
+      "put": {
+        "description": "Replaces the Linear teams this team tracks in the organization's Linear workspace, and each one's workflow-state rules, with the set the body names, in its order, and returns the set as stored. The ids of Linear teams being added, and of every rule that changes, are checked with Linear. A rule an element leaves out keeps its stored value.",
+        "operationId": "replace_team_linear_teams",
+        "parameters": [
+          {
+            "description": "The team's id, or default for the one team in local mode.",
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TeamLinearTeamsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeamLinearTeamsResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Replace a team's tracked Linear teams",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      }
+    },
     "/api/teams/{team_id}/members/{user_id}": {
       "delete": {
         "description": "Removes a person from the team. A caller who names their own id leaves the team, and the team's last admin cannot be removed.",
@@ -1635,6 +3530,85 @@
           "idempotentHint": true,
           "openWorldHint": false,
           "readOnlyHint": false
+        }
+      }
+    },
+    "/api/teams/{team_id}/prs/list": {
+      "post": {
+        "description": "Returns one page of the pull requests in the team's tracked repositories that a member of the team opened or that Triage Factory opened for the team, narrowed by states and draft, and ordered by sort_key or, without one, by when each was last polled, newest first. A caller who is not on the team gets an empty list.",
+        "operationId": "list_team_pull_requests",
+        "parameters": [
+          {
+            "description": "The team's id, or default for the one team in local mode.",
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PrListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "items": {
+                      "description": "The rows of this page, as an empty array when it has none.",
+                      "items": {
+                        "$ref": "#/components/schemas/PRSummaryRow"
+                      },
+                      "type": "array"
+                    },
+                    "next_page_token": {
+                      "description": "The page_token that reads the next page, absent on the last page.",
+                      "type": "string"
+                    },
+                    "total_count": {
+                      "description": "How many rows match the request's filters across every page, or null for a list whose upstream cannot count them.",
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "total_count"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List a team's pull requests",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
         }
       }
     },

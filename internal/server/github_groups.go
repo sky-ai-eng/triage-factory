@@ -36,12 +36,12 @@ type gitHubGroupJSON struct {
 	// the GitHub poll identifies it from the organization's team listing;
 	// the PUT cannot name such a mapping, so a client keeps it by picking
 	// its team from the candidates, which carry the ids.
-	GitHubTeamID string `json:"github_team_id"`
-	GitHubOrgID  string `json:"github_org_id"`
+	GitHubTeamID string `json:"github_team_id" doc:"GitHub's id for the team, which the PUT names the mapping by; empty on a mapping stored before ids were recorded, until the GitHub poll identifies it."`
+	GitHubOrgID  string `json:"github_org_id" doc:"GitHub's id for the team's organization, empty when github_team_id is."`
 	// OrgLogin and TeamSlug are what GitHub called the organization and the
 	// team when the mapping was saved or last reconciled, for display.
-	OrgLogin string `json:"org_login"`
-	TeamSlug string `json:"team_slug"`
+	OrgLogin string `json:"org_login" doc:"The login of the team's organization on GitHub, as of the last save or poll."`
+	TeamSlug string `json:"team_slug" doc:"The team's slug on GitHub, as of the last save or poll."`
 }
 
 // gitHubGroupCandidateJSON is one live GitHub team the admin can assign
@@ -50,29 +50,38 @@ type gitHubGroupJSON struct {
 // membership. MemberCount drives the "broad team — noisy queue" hint and is
 // best-effort (0/omitted = unknown).
 type gitHubGroupCandidateJSON struct {
-	GitHubTeamID string `json:"github_team_id"`
-	GitHubOrgID  string `json:"github_org_id"`
-	OrgLogin     string `json:"org_login"`
-	TeamSlug     string `json:"team_slug"`
-	Name         string `json:"name"`
-	MemberCount  int    `json:"member_count,omitempty"`
+	GitHubTeamID string `json:"github_team_id" doc:"GitHub's id for the team, which the PUT names it by; empty only on a stored mapping GitHub no longer lists that was stored before ids were recorded."`
+	GitHubOrgID  string `json:"github_org_id" doc:"GitHub's id for the team's organization, empty when github_team_id is."`
+	OrgLogin     string `json:"org_login" doc:"The login of the team's organization on GitHub."`
+	TeamSlug     string `json:"team_slug" doc:"The team's slug on GitHub."`
+	Name         string `json:"name" doc:"The team's name on GitHub, empty when listed is false."`
+	MemberCount  int    `json:"member_count,omitempty" doc:"How many members the team has on GitHub, absent when unknown."`
 	// Mine is true when the requesting user personally belongs to this
 	// GitHub team. Populated only when the list is asked for it
 	// (include_membership or only_mine — the onboarding wizard, to pre-check
 	// the admin's own teams); the Settings editor asks for neither and
 	// ignores it. Pre-checking is the ONLY onboarding-specific behavior — the
 	// candidate set itself is the same org-wide list both surfaces read.
-	Mine bool `json:"mine,omitempty"`
+	Mine bool `json:"mine,omitempty" doc:"True when the caller belongs to the team on GitHub, present only when include_membership or only_mine is set and the caller's GitHub teams could be read."`
 }
 
 // teamGitHubGroupsResponse is the team's stored mapping set, the resource the
 // PUT replaces.
 type teamGitHubGroupsResponse struct {
-	Groups []gitHubGroupJSON `json:"groups"`
+	Groups []gitHubGroupJSON `json:"groups" doc:"The GitHub teams this team is mapped to on the organization's GitHub host."`
 	// Role is the caller's role in this team ("admin"/"member"/""), so
 	// the editor can disable Save for non-admins without a second call.
-	Role string `json:"role"`
+	Role string `json:"role" doc:"The caller's role in the team: admin, member, or empty when the caller is not on it."`
 }
+
+var opTeamGitHubGroupsGet = httpx.NewJSONOp[httpx.NoBody, teamGitHubGroupsResponse](httpx.OpSpec{
+	Pattern:     "GET /api/teams/{team_id}/github-groups",
+	ID:          "get_team_github_groups",
+	Summary:     "Get a team's GitHub team mappings",
+	Description: "Returns the GitHub teams this team is mapped to on the organization's GitHub host, with the caller's role in the team. A caller who is not on the team gets no mappings.",
+	PathParams:  map[string]string{"team_id": teamIDPathDoc},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleTeamGitHubGroupsGet returns the team's stored GitHub-team mappings on
 // the org's current GitHub host. It reads only the store: the GitHub teams a
@@ -111,7 +120,7 @@ func (s *Server) handleTeamGitHubGroupsGet(w http.ResponseWriter, r *http.Reques
 		internalError(w, "teams/github-groups", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, teamGitHubGroupsResponse{Groups: toGitHubGroupJSON(groups), Role: role})
+	opTeamGitHubGroupsGet.Write(w, teamGitHubGroupsResponse{Groups: toGitHubGroupJSON(groups), Role: role})
 }
 
 // teamGitHubGroupsOnHost reads the team's stored mappings on host through RLS,
@@ -135,22 +144,22 @@ type teamGitHubGroupsListRequest struct {
 	// Search is a case-insensitive literal substring of a team's
 	// org_login/team_slug handle or its name (httpx.Search: trimmed, empty is
 	// absent, at most 200 characters).
-	Search string `json:"search"`
+	Search string `json:"search" doc:"Text to match, case-insensitively, against each GitHub team's org_login/team_slug and its name; at most 200 characters, and empty matches every team."`
 	// IncludeMembership sets Mine on the teams the caller belongs to. It
 	// annotates rows and narrows nothing, so it is not in the fingerprint.
-	IncludeMembership bool `json:"include_membership"`
+	IncludeMembership bool `json:"include_membership" doc:"Whether to set mine on the GitHub teams the caller belongs to, which reads the caller's GitHub teams; it narrows nothing."`
 	// OnlyMine narrows to the teams the caller belongs to, and sets Mine on
 	// them, as include_membership does. Membership is best-effort: when it
 	// cannot be read, no team is the caller's.
-	OnlyMine bool `json:"only_mine"`
+	OnlyMine bool `json:"only_mine" doc:"Whether to list only the GitHub teams the caller belongs to, with mine set; when the caller's GitHub teams cannot be read, it lists none."`
 	// IDs narrows to the GitHub teams with these GitHub team ids, and
 	// ExcludeIDs to the ones without them; an editor sends its unsaved
 	// selection as one or the other to page what it has picked, or what is
 	// left. A row with no GitHub team id (a mapping stored before ids were
 	// recorded that GitHub no longer lists) matches no id. Absent or empty
 	// narrows nothing.
-	IDs        []string `json:"ids"`
-	ExcludeIDs []string `json:"exclude_ids"`
+	IDs        []string `json:"ids" doc:"GitHub team ids to narrow the page to; absent or empty narrows nothing, and a team with no GitHub team id matches none."`
+	ExcludeIDs []string `json:"exclude_ids" doc:"GitHub team ids to leave out of the page; absent or empty leaves out nothing."`
 
 	httpx.PageRequest
 }
@@ -193,23 +202,32 @@ type gitHubGroupListItemJSON struct {
 	// credentials did not list: deleted on GitHub since the last poll, or in
 	// an organization whose teams could not be read. It carries no name or
 	// member count, and stays listed so an admin can always un-assign it.
-	Listed bool `json:"listed"`
+	Listed bool `json:"listed" doc:"False for a GitHub team this team is mapped to that GitHub did not list, because it was deleted or its organization's teams could not be read; such a row has no name or member count."`
 }
 
 // teamGitHubGroupsListResponse is the list envelope with the credential state
 // beside it.
 type teamGitHubGroupsListResponse struct {
-	Items         []gitHubGroupListItemJSON `json:"items"`
-	NextPageToken string                    `json:"next_page_token,omitempty"`
-	TotalCount    int                       `json:"total_count"`
+	Items         []gitHubGroupListItemJSON `json:"items" doc:"The GitHub teams of this page, as an empty array when it has none."`
+	NextPageToken string                    `json:"next_page_token,omitempty" doc:"The page_token that reads the next page, absent on the last page."`
+	TotalCount    int                       `json:"total_count" doc:"How many GitHub teams match the request's filters across every page."`
 	// CredentialsMissing is true when the team tracks repos but NOT ONE of
 	// their owners had a resolvable GitHub credential (no App install and no
 	// org PAT). Without this flag an empty list is ambiguous — a genuine "no
 	// teams" reads identical to "your GitHub credential is gone." It is a fact
 	// about the whole candidate set, not about this page, and the same under
 	// every search.
-	CredentialsMissing bool `json:"credentials_missing"`
+	CredentialsMissing bool `json:"credentials_missing" doc:"True when the organization's tracked repositories have owners but no GitHub credential connected to the organization reaches any of them, so no GitHub team could be listed."`
 }
+
+var opTeamGitHubGroupsList = httpx.NewJSONOp[teamGitHubGroupsListRequest, teamGitHubGroupsListResponse](httpx.OpSpec{
+	Pattern:     "POST /api/teams/{team_id}/github-groups/list",
+	ID:          "list_team_github_groups",
+	Summary:     "List GitHub teams a team can be mapped to",
+	Description: "Returns one page of the GitHub teams of the organizations that own the repositories teams in the organization track, read from GitHub, together with this team's mappings GitHub no longer lists, narrowed by the body's filters and ordered by org_login/team_slug and then GitHub's team id. A caller who is not on the team gets an empty list. GitHub's answer is reused for up to a minute.",
+	PathParams:  map[string]string{"team_id": teamIDPathDoc},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // handleTeamGitHubGroupsList pages the GitHub teams this team can map,
 // ordered by folded org_login/team_slug and then GitHub's team id.
@@ -244,8 +262,8 @@ func (s *Server) handleTeamGitHubGroupsList(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	var req teamGitHubGroupsListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opTeamGitHubGroupsList.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -315,7 +333,7 @@ func (s *Server) handleTeamGitHubGroupsList(w http.ResponseWriter, r *http.Reque
 		lo := min(page.Offset, total)
 		items = matched[lo:min(lo+page.Limit, total)]
 	}
-	writeJSON(w, http.StatusOK, teamGitHubGroupsListResponse{
+	opTeamGitHubGroupsList.Write(w, teamGitHubGroupsListResponse{
 		Items:              items,
 		NextPageToken:      httpx.NextPageToken(page, len(items), total),
 		TotalCount:         total,
@@ -385,8 +403,8 @@ func (s *Server) handleTeamGitHubGroupsPut(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	var req teamGitHubGroupsPutRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opTeamGitHubGroupsPut.Decode(w, r)
+	if !ok {
 		return
 	}
 	ids, ok := parseGitHubTeamIDs(w, req.GitHubTeamIDs)
@@ -480,20 +498,29 @@ func (s *Server) handleTeamGitHubGroupsPut(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	writeJSON(w, http.StatusOK, teamGitHubGroupsPutResponse{Groups: toGitHubGroupJSON(stored)})
+	opTeamGitHubGroupsPut.Write(w, teamGitHubGroupsPutResponse{Groups: toGitHubGroupJSON(stored)})
 }
 
 // teamGitHubGroupsPutRequest is the desired set. GitHubTeamIDs is a pointer
 // because an absent field is not an empty set: a body that forgot it must not
 // clear the team's mappings.
 type teamGitHubGroupsPutRequest struct {
-	GitHubTeamIDs *[]string `json:"github_team_ids"`
+	GitHubTeamIDs *[]string `json:"github_team_ids" doc:"GitHub's ids for every GitHub team this team is to be mapped to, each named once; an empty array removes every mapping, and the field is required."`
 }
 
 // teamGitHubGroupsPutResponse echoes the set as stored, in the GET's shape.
 type teamGitHubGroupsPutResponse struct {
-	Groups []gitHubGroupJSON `json:"groups"`
+	Groups []gitHubGroupJSON `json:"groups" doc:"The GitHub teams this team is mapped to, as stored."`
 }
+
+var opTeamGitHubGroupsPut = httpx.NewJSONOp[teamGitHubGroupsPutRequest, teamGitHubGroupsPutResponse](httpx.OpSpec{
+	Pattern:     "PUT /api/teams/{team_id}/github-groups",
+	ID:          "replace_team_github_groups",
+	Summary:     "Replace a team's GitHub team mappings",
+	Description: "Replaces the GitHub teams this team is mapped to on the organization's GitHub host with the ones the body names, and returns them as stored. A GitHub team being added is checked with GitHub, and must be a team of an organization that owns a repository a team in the organization tracks.",
+	PathParams:  map[string]string{"team_id": teamIDPathDoc},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // parseGitHubTeamIDs validates the PUT body's shape: the field present, and
 // every entry one of GitHub's numeric ids in canonical form

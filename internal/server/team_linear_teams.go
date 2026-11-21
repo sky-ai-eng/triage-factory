@@ -53,71 +53,80 @@ import (
 // else. Its own type, so a canonical_id sent here fails the strict decode with
 // the field named — TF never moves an issue back into pickup.
 type linearPickupRuleWrite struct {
-	MemberIDs []string `json:"member_ids"`
+	MemberIDs []string `json:"member_ids" doc:"The ids of the Linear workflow states in which unassigned issues are picked up; an empty array clears the rule."`
 }
 
 // linearStateRuleWrite is a write-target rule: the states that count as this
 // one, and the state TF moves an issue into. Both are state ids.
 type linearStateRuleWrite struct {
-	MemberIDs   []string `json:"member_ids"`
-	CanonicalID string   `json:"canonical_id"`
+	MemberIDs   []string `json:"member_ids" doc:"The ids of the Linear workflow states that count as this state; an empty array, with an empty canonical_id, clears the rule."`
+	CanonicalID string   `json:"canonical_id" doc:"The id of the workflow state, one of member_ids, that stands for this state, which Triage Factory moves an issue into for in_progress and done; empty exactly when member_ids is."`
 }
 
 // linearTeamWrite is one Linear team in the desired set. The rules are
 // pointers because absent and empty are different requests: absent keeps the
 // stored rule, an explicit empty clears it.
 type linearTeamWrite struct {
-	ID         string                 `json:"id"`
-	Pickup     *linearPickupRuleWrite `json:"pickup"`
-	InProgress *linearStateRuleWrite  `json:"in_progress"`
-	InReview   *linearStateRuleWrite  `json:"in_review"`
-	Done       *linearStateRuleWrite  `json:"done"`
+	ID         string                 `json:"id" doc:"Linear's id for the team, a lowercase UUID."`
+	Pickup     *linearPickupRuleWrite `json:"pickup" doc:"The workflow states in which unassigned issues are picked up; absent or null keeps the stored rule."`
+	InProgress *linearStateRuleWrite  `json:"in_progress" doc:"The workflow states that count as being worked on, and the one a claimed issue is moved to; absent or null keeps the stored rule."`
+	InReview   *linearStateRuleWrite  `json:"in_review" doc:"The optional workflow states that mean the work awaits human review; absent or null keeps the stored rule."`
+	Done       *linearStateRuleWrite  `json:"done" doc:"The workflow states that count as complete, and the one a finished issue is moved to; absent or null keeps the stored rule."`
 }
 
 // teamLinearTeamsRequest is the desired set, in display order. The field is
 // required: a body that names no set is not a request to untrack everything.
 type teamLinearTeamsRequest struct {
-	LinearTeams *[]linearTeamWrite `json:"linear_teams"`
+	LinearTeams *[]linearTeamWrite `json:"linear_teams" doc:"Every Linear team this team is to track, in display order, each named once; an empty array untracks them all, and the field is required."`
 }
 
 // teamLinearTeamsResponse echoes the set as stored, in display order.
 type teamLinearTeamsResponse struct {
-	LinearTeams []linearTeamSettings `json:"linear_teams"`
+	LinearTeams []linearTeamSettings `json:"linear_teams" doc:"The Linear teams this team tracks, as stored, in display order."`
 }
+
+var opTeamLinearTeamsPut = httpx.NewJSONOp[teamLinearTeamsRequest, teamLinearTeamsResponse](httpx.OpSpec{
+	Pattern:     "PUT /api/teams/{team_id}/linear-teams",
+	ID:          "replace_team_linear_teams",
+	Summary:     "Replace a team's tracked Linear teams",
+	Description: "Replaces the Linear teams this team tracks in the organization's Linear workspace, and each one's workflow-state rules, with the set the body names, in its order, and returns the set as stored. The ids of Linear teams being added, and of every rule that changes, are checked with Linear. A rule an element leaves out keeps its stored value.",
+	PathParams:  map[string]string{"team_id": teamIDPathDoc},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // linearStateRefJSON is one workflow state as the API renders it: the id the
 // rules are keyed on, and the name and type Linear gave for it at the last
 // save.
 type linearStateRefJSON struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	Type string `json:"type"`
+	ID   string `json:"id" doc:"Linear's id for the workflow state."`
+	Name string `json:"name" doc:"The workflow state's name, as Linear gave it at the rule's last save."`
+	Type string `json:"type" doc:"The workflow state's type in Linear, such as unstarted, started, or completed, as of the rule's last save."`
 }
 
 // linearPickupRuleJSON is the pickup rule's read shape: members only.
 type linearPickupRuleJSON struct {
-	Members []linearStateRefJSON `json:"members"`
+	Members []linearStateRefJSON `json:"members" doc:"The workflow states in which unassigned issues are picked up, as an empty array on an unmapped rule."`
 }
 
 // linearStateRuleJSON is a write-target rule's read shape. canonical is null
 // on an unmapped rule rather than absent, so a client reads one shape in both
 // states.
 type linearStateRuleJSON struct {
-	Members   []linearStateRefJSON `json:"members"`
-	Canonical *linearStateRefJSON  `json:"canonical"`
+	Members   []linearStateRefJSON `json:"members" doc:"The workflow states that count as this state, as an empty array on an unmapped rule."`
+	Canonical *linearStateRefJSON  `json:"canonical" doc:"The workflow state that stands for this state, or null on an unmapped rule."`
 }
 
 // linearTeamSettings is one tracked Linear team as the API renders it, on this
 // route and on the team-settings read.
 type linearTeamSettings struct {
-	ID         string               `json:"id"`
-	Key        string               `json:"key"`
-	Name       string               `json:"name"`
-	Armed      bool                 `json:"armed"`
-	Pickup     linearPickupRuleJSON `json:"pickup"`
-	InProgress linearStateRuleJSON  `json:"in_progress"`
-	InReview   linearStateRuleJSON  `json:"in_review"`
-	Done       linearStateRuleJSON  `json:"done"`
+	ID         string               `json:"id" doc:"Linear's id for the team."`
+	Key        string               `json:"key" doc:"The team's key in Linear, such as ENG, as of the last save."`
+	Name       string               `json:"name" doc:"The team's name in Linear, as of the last save."`
+	Armed      bool                 `json:"armed" doc:"Whether pickup, in_progress, and done are all mapped, which is when the team's issues are polled."`
+	Pickup     linearPickupRuleJSON `json:"pickup" doc:"The workflow states in which unassigned issues are picked up."`
+	InProgress linearStateRuleJSON  `json:"in_progress" doc:"The workflow states that count as being worked on, with the one a claimed issue is moved to."`
+	InReview   linearStateRuleJSON  `json:"in_review" doc:"The optional workflow states that mean the work awaits human review."`
+	Done       linearStateRuleJSON  `json:"done" doc:"The workflow states that count as complete, with the one a finished issue is moved to."`
 }
 
 // linearTeamWish is one shape-checked body element.
@@ -145,8 +154,8 @@ func (s *Server) handleTeamLinearTeamsPut(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	var req teamLinearTeamsRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opTeamLinearTeamsPut.Decode(w, r)
+	if !ok {
 		return
 	}
 	if req.LinearTeams == nil {
@@ -170,7 +179,7 @@ func (s *Server) handleTeamLinearTeamsPut(w http.ResponseWriter, r *http.Request
 		}
 		return
 	}
-	writeJSON(w, http.StatusOK, teamLinearTeamsResponse{LinearTeams: toLinearTeamSettings(stored)})
+	opTeamLinearTeamsPut.Write(w, teamLinearTeamsResponse{LinearTeams: toLinearTeamSettings(stored)})
 }
 
 // saveTeamLinearTeams is the write behind PUT /api/teams/{team_id}/linear-teams,
