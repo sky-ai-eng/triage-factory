@@ -550,8 +550,9 @@ func TestManagedClass_DoorsRefuseAManagedOrg(t *testing.T) {
 		rig.bindManaged(t, 4242)
 		calls := rig.gh.callCount()
 
+		// A body that passes validation, so the guard is what refuses it.
 		resp := rig.postJSONWithSid("POST", "/api/orgs/"+rig.orgID.String()+"/github/app/import", rig.sid,
-			map[string]string{"app_id": "777", "pem": "-----BEGIN RSA PRIVATE KEY-----\nnot-a-key\n-----END RSA PRIVATE KEY-----", "client_secret": "cs"})
+			map[string]string{"app_id": "777", "pem": testRSAPEM(t), "client_secret": "cs"})
 		if resp.StatusCode != http.StatusConflict {
 			t.Fatalf("import on a managed org status=%d, want 409", resp.StatusCode)
 		}
