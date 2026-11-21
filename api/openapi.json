@@ -512,7 +512,7 @@
       "ChannelsWarning": {
         "properties": {
           "channel_id": {
-            "description": "The channel a warning about one channel concerns, absent on a warning about the whole read.",
+            "description": "Slack's id for the channel a warning about one channel concerns, absent on a warning about the whole read.",
             "type": "string"
           },
           "code": {
@@ -755,32 +755,6 @@
         "required": [
           "app_id",
           "transport"
-        ],
-        "type": "object"
-      },
-      "DrainRequest": {
-        "properties": {
-          "draining": {
-            "description": "Whether the instance is to drain: true stops it starting new work until it is undrained, and false ends any drain, including one that would last until its next restart.",
-            "type": "boolean"
-          }
-        },
-        "type": "object"
-      },
-      "DrainResponse": {
-        "properties": {
-          "draining": {
-            "description": "The drain state the request set.",
-            "type": "boolean"
-          },
-          "id": {
-            "description": "The instance's id.",
-            "type": "string"
-          }
-        },
-        "required": [
-          "id",
-          "draining"
         ],
         "type": "object"
       },
@@ -1066,6 +1040,35 @@
           "stale",
           "draining"
         ],
+        "type": "object"
+      },
+      "InstanceDrainState": {
+        "properties": {
+          "draining": {
+            "description": "Whether the instance is now draining.",
+            "type": "boolean"
+          },
+          "id": {
+            "description": "The instance's id.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "draining"
+        ],
+        "type": "object"
+      },
+      "InstanceUpdateRequest": {
+        "properties": {
+          "draining": {
+            "description": "Whether the instance is draining: true stops it starting new work until it is undrained, and false ends any drain, including one that would last until its next restart. Required; null is refused, since the flag has no unset state.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
         "type": "object"
       },
       "InstancesDTO": {
@@ -2063,7 +2066,7 @@
       "SsoConnectionUpdateRequest": {
         "properties": {
           "enabled": {
-            "description": "Whether people can sign in through the connection; absent or null keeps it. It cannot be turned off while the organization requires SSO.",
+            "description": "Whether people can sign in through the connection; absent keeps it, and null is refused, since the flag has no unset state. It cannot be turned off while the organization requires SSO.",
             "type": [
               "boolean",
               "null"
@@ -3444,10 +3447,10 @@
         }
       }
     },
-    "/api/fleet/instances/{id}/drain": {
-      "post": {
-        "description": "Sets whether an instance is draining. A draining instance starts no new work and lets its running work finish, and the drain lasts across restarts until it is undrained. It answers only the deployment's operators, needs an Enterprise licence that includes fleet administration, and refuses API tokens.",
-        "operationId": "drain_fleet_instance",
+    "/api/fleet/instances/{id}": {
+      "patch": {
+        "description": "Sets whether an instance is draining, and returns the drain state it set. A draining instance starts no new work and lets its running work finish, and the drain lasts across restarts until it is undrained. It answers only the deployment's operators, needs an Enterprise licence that includes fleet administration, and refuses API tokens.",
+        "operationId": "update_fleet_instance",
         "parameters": [
           {
             "description": "The instance's id.",
@@ -3463,7 +3466,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/DrainRequest"
+                "$ref": "#/components/schemas/InstanceUpdateRequest"
               }
             }
           },
@@ -3474,7 +3477,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/DrainResponse"
+                  "$ref": "#/components/schemas/InstanceDrainState"
                 }
               }
             },

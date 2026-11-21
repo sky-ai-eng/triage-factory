@@ -140,7 +140,7 @@ func (h *channelsHandler) cachedSlackCandidates(ctx context.Context, orgID strin
 // + Reason (a per-channel outcome, "invite_required" | "join_failed").
 type channelsWarning struct {
 	Code      string `json:"code,omitempty" doc:"What is wrong with the whole read: slack_unreachable when a workspace's channels could not be read from Slack, or slack_channels_truncated when a workspace has more channels than one read of Slack collects; absent on a warning about one channel."`
-	ChannelID string `json:"channel_id,omitempty" doc:"The channel a warning about one channel concerns, absent on a warning about the whole read."`
+	ChannelID string `json:"channel_id,omitempty" doc:"Slack's id for the channel a warning about one channel concerns, absent on a warning about the whole read."`
 	Reason    string `json:"reason,omitempty" doc:"Why the bot did not join the channel: invite_required when the channel is private and someone must invite the bot in Slack, or join_failed; absent on a warning about the whole read."`
 }
 
@@ -297,6 +297,10 @@ func (h *channelsHandler) handlePut(w http.ResponseWriter, r *http.Request) {
 	// write resolves each id under the move lock.
 	var prior []slackstore.TeamChannel
 	var tracked []string
+	// slackIDs maps each tracked registry row to its Slack channel id, as the
+	// write left them, so a channel the auto-join cannot read back is still
+	// named by the id the caller knows it by.
+	slackIDs := map[string]string{}
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		bundle := slackstore.FromTx(tx)
 		var e error
@@ -305,6 +309,13 @@ func (h *channelsHandler) handlePut(w http.ResponseWriter, r *http.Request) {
 		}
 		if tracked, e = bundle.TeamChannels.ReplaceForTeam(r.Context(), orgID, teamID, req.ChannelIDs); e != nil {
 			return e
+		}
+		after, e := bundle.TeamChannels.ListForTeam(r.Context(), orgID, teamID)
+		if e != nil {
+			return e
+		}
+		for _, tc := range after {
+			slackIDs[tc.SlackChannelID] = tc.ChannelID
 		}
 		// Default blueprint, first-track only: the prior set was empty, the
 		// new set isn't, and the team hasn't already configured its own
@@ -345,7 +356,7 @@ func (h *channelsHandler) handlePut(w http.ResponseWriter, r *http.Request) {
 			ch, err := registry.GetSystem(r.Context(), orgID, id)
 			if err != nil || ch == nil {
 				slackLog.Warn("channels: read added channel for auto-join failed", "org_id", orgID, "channel_row", id, "error", err)
-				joinWarnings = append(joinWarnings, channelsWarning{ChannelID: id, Reason: "join_failed"})
+				joinWarnings = append(joinWarnings, channelsWarning{ChannelID: slackIDs[id], Reason: "join_failed"})
 				continue
 			}
 			addedChannels = append(addedChannels, *ch)

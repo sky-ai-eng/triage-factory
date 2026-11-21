@@ -366,28 +366,32 @@ func (h *handler) latestSamples(ctx context.Context, since time.Time) map[string
 	return out
 }
 
-// --- POST /api/fleet/instances/{id}/drain ---
+// --- PATCH /api/fleet/instances/{id} ---
 
-type drainRequest struct {
-	Draining bool `json:"draining" doc:"Whether the instance is to drain: true stops it starting new work until it is undrained, and false ends any drain, including one that would last until its next restart."`
+// instanceUpdateRequest is the body of PATCH /api/fleet/instances/{id}.
+// Draining is the instance's one field an operator writes, and it has no
+// unset state, so a null is refused rather than read as false.
+type instanceUpdateRequest struct {
+	Draining httpx.Patch[bool] `json:"draining" doc:"Whether the instance is draining: true stops it starting new work until it is undrained, and false ends any drain, including one that would last until its next restart. Required; null is refused, since the flag has no unset state."`
 }
 
-// drainResponse echoes the drain state the request wrote.
-type drainResponse struct {
+// instanceDrainState is the drain state the write left the instance in. The
+// write sets the flag outright, so the value written is the value stored.
+type instanceDrainState struct {
 	ID       string `json:"id" doc:"The instance's id."`
-	Draining bool   `json:"draining" doc:"The drain state the request set."`
+	Draining bool   `json:"draining" doc:"Whether the instance is now draining."`
 }
 
-var opDrain = httpx.NewJSONOp[drainRequest, drainResponse](httpx.OpSpec{
-	Pattern:     "POST /api/fleet/instances/{id}/drain",
-	ID:          "drain_fleet_instance",
+var opInstanceUpdate = httpx.NewJSONOp[instanceUpdateRequest, instanceDrainState](httpx.OpSpec{
+	Pattern:     "PATCH /api/fleet/instances/{id}",
+	ID:          "update_fleet_instance",
 	Summary:     "Drain or undrain an instance",
-	Description: "Sets whether an instance is draining. A draining instance starts no new work and lets its running work finish, and the drain lasts across restarts until it is undrained." + fleetAccess,
+	Description: "Sets whether an instance is draining, and returns the drain state it set. A draining instance starts no new work and lets its running work finish, and the drain lasts across restarts until it is undrained." + fleetAccess,
 	PathParams:  map[string]string{"id": "The instance's id."},
 	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
 })
 
-func (h *handler) handleDrain(w http.ResponseWriter, r *http.Request) {
+func (h *handler) handleInstanceUpdate(w http.ResponseWriter, r *http.Request) {
 	if h.gate(w, r) == nil {
 		return
 	}
@@ -396,11 +400,29 @@ func (h *handler) handleDrain(w http.ResponseWriter, r *http.Request) {
 		httpx.BadRequest(w, "instance id is required")
 		return
 	}
-	req, ok := opDrain.Decode(w, r)
+	req, ok := opInstanceUpdate.Decode(w, r)
 	if !ok {
 		return
 	}
-	matched, err := h.stores.Instances.SetDraining(r.Context(), id, req.Draining)
+	var v httpx.Validation
+	draining, state := req.Draining.Read(&v, "draining")
+	switch state {
+	case httpx.PatchAbsent:
+		// A PATCH that names no field wrote nothing, so it must not answer as
+		// if it had.
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason:  httpx.ReasonMissingField,
+			Message: "no fields to update: provide draining",
+			Field:   "draining",
+		})
+		return
+	case httpx.PatchClear:
+		v.Invalid("draining", "draining must be true or false; it has no unset state for null to clear it to")
+	}
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+	matched, err := h.stores.Instances.SetDraining(r.Context(), id, draining)
 	if err != nil {
 		httpx.InternalError(w, "fleet-drain", err)
 		return
@@ -409,7 +431,7 @@ func (h *handler) handleDrain(w http.ResponseWriter, r *http.Request) {
 		httpx.NotFound(w, "instance")
 		return
 	}
-	opDrain.Write(w, drainResponse{ID: id, Draining: req.Draining})
+	opInstanceUpdate.Write(w, instanceDrainState{ID: id, Draining: draining})
 }
 
 // --- GET /api/fleet/instances/{id}/sandboxes ---
@@ -538,7 +560,7 @@ func (h *handler) handleInstanceSandboxes(w http.ResponseWriter, r *http.Request
 	now := time.Now().UTC()
 
 	// Resolve the instance first so an unknown id 404s with the same shape as
-	// handleDrain, rather than reading as a live executor that happens to be
+	// handleInstanceUpdate, rather than reading as a live executor that happens to be
 	// idle — those are different operator situations.
 	inst, err := h.stores.Instances.Get(ctx, id)
 	if err != nil {

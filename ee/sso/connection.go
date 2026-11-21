@@ -361,10 +361,10 @@ func (h *ssoConnectionHandler) handleSSOConnectionCreate(w http.ResponseWriter, 
 }
 
 // ssoConnectionUpdateRequest is the body of PATCH /api/sso/connection.
-// Enabled is a pointer because absent keeps it; a null reads as absent too,
-// since the flag cannot be cleared.
+// Enabled keeps its raw bytes so a null reads apart from an absent field: the
+// flag has no unset state, so a null is refused rather than kept or cleared.
 type ssoConnectionUpdateRequest struct {
-	Enabled *bool               `json:"enabled" doc:"Whether people can sign in through the connection; absent or null keeps it. It cannot be turned off while the organization requires SSO."`
+	Enabled httpx.Patch[bool]   `json:"enabled" doc:"Whether people can sign in through the connection; absent keeps it, and null is refused, since the flag has no unset state. It cannot be turned off while the organization requires SSO."`
 	IdP     httpx.Patch[string] `json:"idp" doc:"The identity provider's product (entra, okta, google, onelogin, ping, or other), or null to clear it to not known; absent keeps it."`
 }
 
@@ -392,13 +392,17 @@ func (h *ssoConnectionHandler) handleSSOConnectionUpdate(w http.ResponseWriter, 
 		return
 	}
 	var v httpx.Validation
+	enabledValue, enabledState := body.Enabled.Read(&v, "enabled")
 	idpValue, idpState := body.IdP.Read(&v, "idp")
-	if body.Enabled == nil && idpState == httpx.PatchAbsent {
+	if enabledState == httpx.PatchAbsent && idpState == httpx.PatchAbsent {
 		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
 			Reason:  httpx.ReasonMissingField,
 			Message: "no fields to update: provide enabled and/or idp (null clears idp)",
 		})
 		return
+	}
+	if enabledState == httpx.PatchClear {
+		v.Invalid("enabled", "enabled must be true or false; it has no unset state for null to clear it to")
 	}
 	if v.Flush(w, http.StatusBadRequest) {
 		return
@@ -455,13 +459,13 @@ func (h *ssoConnectionHandler) handleSSOConnectionUpdate(w http.ResponseWriter, 
 		// Update writes the whole mutable set, so "absent" is spelled by
 		// passing what is already there.
 		enabled := before.Enabled
-		if body.Enabled != nil {
-			enabled = *body.Enabled
+		if enabledState == httpx.PatchSet {
+			enabled = enabledValue
 		}
 		// A disabled connection is one nobody can sign in through, so while it
 		// is required that would leave only break-glass accounts able to act in
 		// the org. Requirement first, then the connection.
-		if body.Enabled != nil && !enabled && before.Enforced {
+		if enabledState == httpx.PatchSet && !enabled && before.Enforced {
 			return errTurnOffEnforcementFirst
 		}
 		if e := sso.Connections.Update(r.Context(), orgID, existing.ID, ssostore.UpdateSSOConnectionParams{

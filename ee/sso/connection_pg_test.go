@@ -307,6 +307,22 @@ func TestSSOConnectionIdP_DerivedThenOverridable(t *testing.T) {
 		t.Errorf("empty PATCH status = %d; want 400 (body=%s)", empty.StatusCode, readBody(empty))
 	}
 
+	// enabled has no unset state, so a null is refused by name, alone or
+	// beside a valid idp, and the idp beside it is not written.
+	for _, b := range []map[string]any{{"enabled": nil}, {"enabled": nil, "idp": "okta"}} {
+		nullEnabled := doReq(r, http.MethodPatch, "/api/sso/connection", sid, b)
+		raw = readBody(nullEnabled)
+		if nullEnabled.StatusCode != http.StatusBadRequest ||
+			!strings.Contains(raw, `"reason":"INVALID_FIELD"`) || !strings.Contains(raw, `"field":"enabled"`) {
+			t.Errorf("PATCH %v = %d %s; want 400 INVALID_FIELD on enabled", b, nullEnabled.StatusCode, raw)
+		}
+	}
+	var afterRefused ssoConnectionResponse
+	_ = json.Unmarshal([]byte(readBody(doReq(r, http.MethodGet, "/api/sso/connection", sid, nil))), &afterRefused)
+	if afterRefused.Connection == nil || afterRefused.Connection.IdP != "" || !afterRefused.Connection.Enabled {
+		t.Errorf("a refused PATCH wrote: %+v; want idp still cleared and enabled", afterRefused.Connection)
+	}
+
 	// The store answers the read seam for the provider the connection binds,
 	// and only when an IdP is known — cleared above, so nothing now; set
 	// again, and it answers.

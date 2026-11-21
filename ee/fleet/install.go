@@ -32,13 +32,13 @@ func init() {
 // install mounts the operator-gated fleet console surfaces on the core server
 // through the extension API, with the same withSession/CSRF discipline as
 // core's own routes. Each is a declared operation, so api.Op mounts the reads
-// (GETs) behind the session check and the drain control (a POST) behind CSRF
+// (GETs) behind the session check and the drain control (a PATCH) behind CSRF
 // as well.
 func install(api server.ExtensionAPI) {
 	h := &handler{stores: api.Stores()}
 	api.Op(opOverview, h.handleOverview)
 	api.Op(opInstances, h.handleInstances)
-	api.Op(opDrain, h.handleDrain)
+	api.Op(opInstanceUpdate, h.handleInstanceUpdate)
 	api.Op(opTimeseries, h.handleTimeseries)
 	// The per-executor sandbox breakdown, one engagement by claim id, and one
 	// sandbox's in-run series — the operator lens whole-host telemetry can't

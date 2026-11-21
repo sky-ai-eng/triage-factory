@@ -148,7 +148,7 @@ func TestOverviewEndpoint_Integration(t *testing.T) {
 	}
 }
 
-// TestDrainEndpoint_Integration flips the drain flag through the POST handler
+// TestDrainEndpoint_Integration flips the drain flag through the PATCH handler
 // and confirms the registry row reflects it.
 func TestDrainEndpoint_Integration(t *testing.T) {
 	entitlements.Reset()
@@ -163,9 +163,9 @@ func TestDrainEndpoint_Integration(t *testing.T) {
 
 	h := &handler{stores: stores}
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/fleet/instances/exec-1/drain", body(`{"draining":true}`)).WithContext(ctx)
+	req := httptest.NewRequest("PATCH", "/api/fleet/instances/exec-1", body(`{"draining":true}`)).WithContext(ctx)
 	req.SetPathValue("id", "exec-1")
-	h.handleDrain(rec, req)
+	h.handleInstanceUpdate(rec, req)
 
 	if rec.Code != 200 {
 		t.Fatalf("drain expected 200, got %d: %s", rec.Code, rec.Body.String())
@@ -175,16 +175,34 @@ func TestDrainEndpoint_Integration(t *testing.T) {
 		t.Fatalf("get: %v", err)
 	}
 	if !inst.Draining {
-		t.Fatalf("instance should be draining after the POST")
+		t.Fatalf("instance should be draining after the PATCH")
 	}
 
 	// Unknown id → 404.
 	rec2 := httptest.NewRecorder()
-	req2 := httptest.NewRequest("POST", "/api/fleet/instances/ghost/drain", body(`{"draining":true}`)).WithContext(ctx)
+	req2 := httptest.NewRequest("PATCH", "/api/fleet/instances/ghost", body(`{"draining":true}`)).WithContext(ctx)
 	req2.SetPathValue("id", "ghost")
-	h.handleDrain(rec2, req2)
+	h.handleInstanceUpdate(rec2, req2)
 	if rec2.Code != 404 {
 		t.Fatalf("unknown instance drain should 404, got %d", rec2.Code)
+	}
+
+	// A body that names no field, and a null the flag has no unset state for,
+	// are both refused, and neither touches the row.
+	for _, tc := range []struct{ body, reason string }{
+		{`{}`, httpx.ReasonMissingField},
+		{`{"draining":null}`, httpx.ReasonInvalidField},
+	} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("PATCH", "/api/fleet/instances/exec-1", body(tc.body)).WithContext(ctx)
+		req.SetPathValue("id", "exec-1")
+		h.handleInstanceUpdate(rec, req)
+		if rec.Code != 400 || !strings.Contains(rec.Body.String(), tc.reason) || !strings.Contains(rec.Body.String(), `"field":"draining"`) {
+			t.Errorf("%s => %d %s, want 400 %s on draining", tc.body, rec.Code, rec.Body.String(), tc.reason)
+		}
+	}
+	if inst, err := stores.Instances.Get(ctx, "exec-1"); err != nil || inst == nil || !inst.Draining {
+		t.Fatalf("a refused PATCH changed the instance: %+v, %v", inst, err)
 	}
 }
 
@@ -402,7 +420,7 @@ func TestSourceManifest_OnSandboxRowsAndClaimDetail(t *testing.T) {
 }
 
 // TestInstanceSandboxesEndpoint_LimitAndNotFound pins the two input contracts:
-// limit is validated and capped, and an unknown instance 404s in handleDrain's
+// limit is validated and capped, and an unknown instance 404s in handleInstanceUpdate's
 // shape rather than reading as an idle executor.
 func TestInstanceSandboxesEndpoint_LimitAndNotFound(t *testing.T) {
 	entitlements.Reset()
@@ -436,13 +454,13 @@ func TestInstanceSandboxesEndpoint_LimitAndNotFound(t *testing.T) {
 		}
 	}
 
-	// Unknown instance: same not-found shape as handleDrain.
+	// Unknown instance: same not-found shape as handleInstanceUpdate.
 	rec, _ := getSandboxes(t, h, ctx, "ghost", "")
 	if rec.Code != 404 {
 		t.Fatalf("unknown instance => %d, want 404", rec.Code)
 	}
 	if !strings.Contains(rec.Body.String(), "instance not found") {
-		t.Errorf("not-found body = %s, want handleDrain's shape", rec.Body.String())
+		t.Errorf("not-found body = %s, want handleInstanceUpdate's shape", rec.Body.String())
 	}
 }
 
@@ -521,13 +539,13 @@ func TestClaimSeriesEndpoint_Integration(t *testing.T) {
 		t.Fatalf("unsampled claim should carry no samples: %+v", got)
 	}
 
-	// Unknown claim: handleDrain's not-found shape.
+	// Unknown claim: handleInstanceUpdate's not-found shape.
 	rec, _ = series(t, uuid.New().String())
 	if rec.Code != 404 {
 		t.Fatalf("unknown claim => %d, want 404", rec.Code)
 	}
 	if !strings.Contains(rec.Body.String(), "claim not found") {
-		t.Errorf("not-found body = %s, want handleDrain's shape", rec.Body.String())
+		t.Errorf("not-found body = %s, want handleInstanceUpdate's shape", rec.Body.String())
 	}
 }
 
@@ -556,9 +574,9 @@ func TestSandboxRoutesDenialParity(t *testing.T) {
 		body   io.Reader
 		serve  func(*handler, *httptest.ResponseRecorder, *http.Request)
 	}{
-		{name: "drain (sibling)", method: "POST", path: "/api/fleet/instances/exec-1/drain", id: "exec-1",
+		{name: "drain (sibling)", method: "PATCH", path: "/api/fleet/instances/exec-1", id: "exec-1",
 			body:  body(`{"draining":true}`),
-			serve: func(h *handler, w *httptest.ResponseRecorder, r *http.Request) { h.handleDrain(w, r) }},
+			serve: func(h *handler, w *httptest.ResponseRecorder, r *http.Request) { h.handleInstanceUpdate(w, r) }},
 		{name: "sandboxes", method: "GET", path: "/api/fleet/instances/exec-1/sandboxes", id: "exec-1",
 			serve: func(h *handler, w *httptest.ResponseRecorder, r *http.Request) { h.handleInstanceSandboxes(w, r) }},
 		{name: "claim", method: "GET", path: "/api/fleet/claims/c1", id: "c1",
