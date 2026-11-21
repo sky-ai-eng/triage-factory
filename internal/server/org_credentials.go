@@ -60,8 +60,23 @@ import (
 // called at all, which is exactly the ambiguity that disappears once the
 // credential has its own route.
 type githubPATRequest struct {
-	PAT string `json:"pat"`
+	PAT string `json:"pat" doc:"The GitHub personal access token, checked against the organization's GitHub host."`
 }
+
+// githubPATBindResponse is the body of PUT …/github/pat.
+type githubPATBindResponse struct {
+	Login  string `json:"login" doc:"The login of the GitHub account the token authenticates as."`
+	Status string `json:"status" doc:"Always connected."`
+}
+
+var opGitHubPATPut = httpx.NewJSONOp[githubPATRequest, githubPATBindResponse](httpx.OpSpec{
+	Pattern:     "PUT /api/orgs/{org_id}/github/pat",
+	ID:          "replace_github_pat",
+	Summary:     "Set the organization's GitHub token",
+	Description: "Checks the personal access token with the organization's GitHub host and stores it as the organization's GitHub credential, replacing any token it had, then restarts GitHub polling under it. An organization with a GitHub App is refused; it switches through the App's switch route. Local mode only.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // refuseOrgTokenInMulti answers 404 for a route that puts an org
 // GitHub token in place, when this is multi mode, and reports whether it did.
@@ -107,8 +122,8 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 
-	var req githubPATRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opGitHubPATPut.Decode(w, r)
+	if !ok {
 		return
 	}
 	pat := strings.TrimSpace(req.PAT)
@@ -255,12 +270,26 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 	release() // idempotent; the defer stays as the early-return safety net
 
 	s.kickGitHubChanged(r, orgID)
-	writeJSON(w, http.StatusOK, map[string]string{"status": "connected", "login": ghUser.Login})
+	opGitHubPATPut.Write(w, githubPATBindResponse{Login: ghUser.Login, Status: "connected"})
 }
 
 // errGitHubHostMovedDuringBind refuses a PAT bind whose token was checked
 // against a GitHub URL the org no longer has.
 var errGitHubHostMovedDuringBind = errors.New("this organization's GitHub URL changed while the token was being checked — connect it again")
+
+// githubPATUnbindResponse is the body of DELETE …/github/pat.
+type githubPATUnbindResponse struct {
+	Status string `json:"status" doc:"Always disconnected."`
+}
+
+var opGitHubPATDelete = httpx.NewJSONOp[httpx.NoBody, githubPATUnbindResponse](httpx.OpSpec{
+	Pattern:     "DELETE /api/orgs/{org_id}/github/pat",
+	ID:          "delete_github_pat",
+	Summary:     "Remove the organization's GitHub token",
+	Description: "Deletes the organization's GitHub personal access token, and clears its GitHub host unless a GitHub App or a commit signer is on it. An organization with no token gets the same answer.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleGitHubPATDelete unbinds the org's GitHub bot PAT — the disconnect.
 // Idempotent: disconnecting an org that has nothing bound is a 200 with no
@@ -368,7 +397,7 @@ func (s *Server) handleGitHubPATDelete(w http.ResponseWriter, r *http.Request) {
 	release() // idempotent; the defer stays as the early-return safety net
 
 	s.kickGitHubChanged(r, orgID)
-	writeJSON(w, http.StatusOK, map[string]string{"status": "disconnected"})
+	opGitHubPATDelete.Write(w, githubPATUnbindResponse{Status: "disconnected"})
 }
 
 // handleJiraCredentialDelete unbinds the org's Jira service credential — the

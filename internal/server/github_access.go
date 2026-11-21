@@ -67,7 +67,7 @@ const (
 // validates and stores it (and re-validating on commit is why sending it twice
 // from the same client is fine).
 type switchPATRequest struct {
-	PAT string `json:"pat"`
+	PAT string `json:"pat" doc:"The GitHub personal access token, checked against the organization's GitHub host."`
 }
 
 // githubAccessDiff is the inform-only reachability diff both switch preflights
@@ -76,9 +76,9 @@ type switchPATRequest struct {
 // can reach, and which tracked repos would go dark, each with the teams that
 // own it.
 type githubAccessDiff struct {
-	Tracked   int        `json:"tracked"`
-	Reachable int        `json:"reachable"`
-	DarkRepos []darkRepo `json:"dark_repos"`
+	Tracked   int        `json:"tracked" doc:"How many repositories the organization's teams track on its GitHub host."`
+	Reachable int        `json:"reachable" doc:"How many of the tracked repositories the new credential can reach."`
+	DarkRepos []darkRepo `json:"dark_repos" doc:"The tracked repositories the new credential cannot reach, which would stop being polled after the switch."`
 }
 
 // darkRepo is one tracked repository the target credential cannot reach.
@@ -86,10 +86,19 @@ type githubAccessDiff struct {
 // github_id is GitHub's id for it ("" while TF has not learned it), and repo is
 // its current name, for display.
 type darkRepo struct {
-	RepositoryID string   `json:"repository_id"`
-	GitHubID     string   `json:"github_id"`
-	Repo         string   `json:"repo"`
-	Teams        []string `json:"teams"`
+	RepositoryID string   `json:"repository_id" doc:"The repository's id in Triage Factory."`
+	GitHubID     string   `json:"github_id" doc:"GitHub's id for the repository, empty while it is not yet known."`
+	Repo         string   `json:"repo" doc:"The repository's full name, as owner/name."`
+	Teams        []string `json:"teams" doc:"The names of the teams that track the repository."`
+}
+
+// githubAppTeardownResponse is the body of every route that removes the
+// org's App registration: discarding a staged one, disconnecting a live one,
+// and switching to a token.
+type githubAppTeardownResponse struct {
+	GitHubAppDeletedLocally bool   `json:"github_app_deleted_locally" doc:"Always true: the App was removed from the organization and still exists on GitHub."`
+	GitHubAppSettingsURL    string `json:"github_app_settings_url" doc:"The page on the organization's GitHub that lists GitHub Apps, where the App can be deleted, empty when the host could not be read."`
+	Status                  string `json:"status" doc:"What was done: switched_to_pat, discarded, or disconnected."`
 }
 
 // buildAccessDiff partitions the org's tracked repos against what the target
@@ -210,6 +219,15 @@ func teardownAppSecrets(ctx context.Context, tx db.TxStores, orgID string, app *
 	}
 	return nil
 }
+
+var opGitHubAppCutover = httpx.NewJSONOp[httpx.NoBody, githubAppStatusResponse](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/github/app/cutover",
+	ID:          "cutover_github_app",
+	Summary:     "Switch from the token to the staged GitHub App",
+	Description: "Makes the organization's staged GitHub App its live credential and deletes its personal access token, after refreshing the App's installations from GitHub and checking it is installed on at least one account. Returns the App status as the switch leaves it.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // handleGitHubAppCutover commits a staged PAT→App switch: it activates the
 // registered App and deletes the org PAT in one transaction, after verifying
@@ -390,11 +408,20 @@ func (s *Server) handleGitHubAppCutover(w http.ResponseWriter, r *http.Request) 
 	// asserting the value the request sent — the SPA's cutoverToApp() discards
 	// the body today (it re-fetches status separately), so this is a pure
 	// improvement, not a wire break.
-	writeJSON(w, http.StatusOK, s.githubAppStatus(ctx, orgID, userID,
+	opGitHubAppCutover.Write(w, s.githubAppStatus(ctx, orgID, userID,
 		domain.GitHubCredentialClassBYOApp, activated, insts,
 		s.webhookHealthDTO(ctx, orgID, activated),
 	))
 }
+
+var opGitHubAccessSwitchToPAT = httpx.NewJSONOp[switchPATRequest, githubAppTeardownResponse](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/github/pat/switch-to",
+	ID:          "switch_to_github_pat",
+	Summary:     "Switch from the GitHub App to a token",
+	Description: "Checks the personal access token with GitHub, stores it as the organization's GitHub credential, and removes the organization's GitHub App, staged or live, with its installations and secrets. The App itself stays on GitHub, and the answer links to where it can be deleted. Local mode only.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // handleGitHubAccessSwitchToPAT switches an org from its GitHub App to a PAT —
 // a full App teardown. It validates the supplied PAT live, then in one
@@ -417,8 +444,8 @@ func (s *Server) handleGitHubAccessSwitchToPAT(w http.ResponseWriter, r *http.Re
 	}
 	ctx := r.Context()
 
-	var req switchPATRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opGitHubAccessSwitchToPAT.Decode(w, r)
+	if !ok {
 		return
 	}
 	pat := strings.TrimSpace(req.PAT)
@@ -551,12 +578,21 @@ func (s *Server) handleGitHubAccessSwitchToPAT(w http.ResponseWriter, r *http.Re
 		go s.onGitHubChanged(orgID)
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"status":                     "switched_to_pat",
-		"github_app_deleted_locally": true,
-		"github_app_settings_url":    base + "/settings/apps",
+	opGitHubAccessSwitchToPAT.Write(w, githubAppTeardownResponse{
+		Status:                  "switched_to_pat",
+		GitHubAppDeletedLocally: true,
+		GitHubAppSettingsURL:    base + "/settings/apps",
 	})
 }
+
+var opGitHubAppDiscard = httpx.NewJSONOp[httpx.NoBody, githubAppTeardownResponse](httpx.OpSpec{
+	Pattern:     "DELETE /api/orgs/{org_id}/github/app",
+	ID:          "delete_github_app",
+	Summary:     "Discard the staged GitHub App",
+	Description: "Removes the organization's staged GitHub App, with its installations and secrets, leaving its personal access token the live credential. A live App is refused; it is removed by disconnecting it. The App itself stays on GitHub, and the answer links to where it can be deleted.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleGitHubAppDiscard discards a STAGED App registration — the exit for an
 // abandoned PAT→App switch. It tears down the registration (row +
@@ -672,12 +708,21 @@ func (s *Server) handleGitHubAppDiscard(w http.ResponseWriter, r *http.Request) 
 		githubAppLog.Warn("discard: resolve github base failed", "org", orgID, "error", berr)
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"status":                     "discarded",
-		"github_app_deleted_locally": true,
-		"github_app_settings_url":    settingsURL,
+	opGitHubAppDiscard.Write(w, githubAppTeardownResponse{
+		Status:                  "discarded",
+		GitHubAppDeletedLocally: true,
+		GitHubAppSettingsURL:    settingsURL,
 	})
 }
+
+var opGitHubAppDisconnect = httpx.NewJSONOp[httpx.NoBody, githubAppTeardownResponse](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/github/app/disconnect",
+	ID:          "disconnect_github_app",
+	Summary:     "Disconnect the live GitHub App",
+	Description: "Removes the organization's live GitHub App, with its installations and secrets, and clears its GitHub host unless a commit signer is on it, leaving the organization with no GitHub access until another credential is connected. A staged App is refused; it is discarded instead. The App itself stays on GitHub, and the answer links to where it can be deleted.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleGitHubAppDisconnect tears down the org's LIVE App with nothing bound in
 // its place: registration row, installations, secrets, class and host all go
@@ -828,12 +873,21 @@ func (s *Server) handleGitHubAppDisconnect(w http.ResponseWriter, r *http.Reques
 	s.invalidateInstallationTokens(orgID, insts)
 	s.kickGitHubChanged(r, orgID)
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"status":                     "disconnected",
-		"github_app_deleted_locally": true,
-		"github_app_settings_url":    base + "/settings/apps",
+	opGitHubAppDisconnect.Write(w, githubAppTeardownResponse{
+		Status:                  "disconnected",
+		GitHubAppDeletedLocally: true,
+		GitHubAppSettingsURL:    base + "/settings/apps",
 	})
 }
+
+var opGitHubAppCutoverPreflight = httpx.NewJSONOp[httpx.NoBody, githubAccessDiff](httpx.OpSpec{
+	Pattern:     "GET /api/orgs/{org_id}/github/app/cutover-preflight",
+	ID:          "get_github_app_cutover_preflight",
+	Summary:     "Preview switching to the GitHub App",
+	Description: "Returns how many of the organization's tracked repositories its GitHub App's installations can reach, and which they cannot, so a switch from the token to the App would stop polling them. It first refreshes the App's stored installations from GitHub, and uses the stored ones when that fails.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintNo, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // handleGitHubAppCutoverPreflight returns the inform-only reachability diff for
 // a PAT→App cutover: how many of the org's tracked repos the App's
@@ -918,7 +972,7 @@ func (s *Server) handleGitHubAppCutoverPreflight(w http.ResponseWriter, r *http.
 		return
 	}
 
-	writeJSON(w, http.StatusOK, buildAccessDiff(tracked, reachableRepoSetOf(reachable)))
+	opGitHubAppCutoverPreflight.Write(w, buildAccessDiff(tracked, reachableRepoSetOf(reachable)))
 }
 
 // appInstallationReposUnion returns the union of repos every installation of
@@ -966,8 +1020,17 @@ func (s *Server) appInstallationReposUnion(ctx context.Context, orgID, base stri
 // the embedded struct.
 type patPreflightResponse struct {
 	githubAccessDiff
-	Login string `json:"login"`
+	Login string `json:"login" doc:"The login of the GitHub account the token authenticates as."`
 }
+
+var opGitHubAccessPATPreflight = httpx.NewJSONOp[switchPATRequest, patPreflightResponse](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/github/pat/preflight",
+	ID:          "preflight_github_pat",
+	Summary:     "Preview switching to a token",
+	Description: "Checks the personal access token with GitHub and returns the account it authenticates as, how many of the organization's tracked repositories it can reach, and which it cannot. The token is not stored. Local mode only.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // handleGitHubAccessPATPreflight validates a supplied PAT, enumerates its
 // reach, and returns the inform-only reachability diff for an App→PAT switch
@@ -987,8 +1050,8 @@ func (s *Server) handleGitHubAccessPATPreflight(w http.ResponseWriter, r *http.R
 	}
 	ctx := r.Context()
 
-	var req switchPATRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opGitHubAccessPATPreflight.Decode(w, r)
+	if !ok {
 		return
 	}
 	pat := strings.TrimSpace(req.PAT)
@@ -1029,7 +1092,7 @@ func (s *Server) handleGitHubAccessPATPreflight(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	writeJSON(w, http.StatusOK, patPreflightResponse{
+	opGitHubAccessPATPreflight.Write(w, patPreflightResponse{
 		githubAccessDiff: buildAccessDiff(tracked, reachableRepoSetOf(repos)),
 		Login:            ghUser.Login,
 	})

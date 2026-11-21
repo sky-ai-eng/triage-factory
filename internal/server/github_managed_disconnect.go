@@ -122,6 +122,15 @@ func (s *Server) refuseManagedInTheWay(w http.ResponseWriter, ctx context.Contex
 	return true
 }
 
+var opGitHubManagedDisconnect = httpx.NewNoContentOp[httpx.NoBody](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/github/managed/disconnect",
+	ID:          "disconnect_github_managed",
+	Summary:     "Disconnect the deployment's GitHub App",
+	Description: "Disconnects the organization from every installation of the deployment's GitHub App it is connected to, leaving it with no GitHub access until another credential is connected. The installations stay on GitHub. Multi mode only.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
+
 // handleGitHubManagedDisconnect moves the org off the deployment App:
 // every live installation row is soft-removed and the class returns to the
 // rowless default. Org admin. A verb route because it is a multi-row
@@ -135,8 +144,20 @@ func (s *Server) refuseManagedInTheWay(w http.ResponseWriter, ctx context.Contex
 //
 // POST /api/orgs/{org_id}/github/managed/disconnect
 func (s *Server) handleGitHubManagedDisconnect(w http.ResponseWriter, r *http.Request) {
-	s.serveManagedDisconnect(w, r, "")
+	s.serveManagedDisconnect(w, r, opGitHubManagedDisconnect, "")
 }
+
+var opGitHubManagedInstallationDisconnect = httpx.NewNoContentOp[httpx.NoBody](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/github/managed/installations/{installation_id}/disconnect",
+	ID:          "disconnect_github_managed_installation",
+	Summary:     "Disconnect one deployment App installation",
+	Description: "Disconnects the organization from one installation of the deployment's GitHub App. Disconnecting the last one leaves the organization with no GitHub access, as the full disconnect does. The installation stays on GitHub. Multi mode only.",
+	PathParams: map[string]string{
+		"org_id":          "The organization's id.",
+		"installation_id": "GitHub's id for the installation.",
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleGitHubManagedInstallationDisconnect is the same verb narrowed to one
 // installation: an org holds one per GitHub account and may want to drop
@@ -158,12 +179,12 @@ func (s *Server) handleGitHubManagedInstallationDisconnect(w http.ResponseWriter
 			Message: "installation_id must be a positive integer", Field: "installation_id"})
 		return
 	}
-	s.serveManagedDisconnect(w, r, strconv.FormatInt(id, 10))
+	s.serveManagedDisconnect(w, r, opGitHubManagedInstallationDisconnect, strconv.FormatInt(id, 10))
 }
 
-// serveManagedDisconnect is both verbs: the whole org when only is "",
-// one installation otherwise.
-func (s *Server) serveManagedDisconnect(w http.ResponseWriter, r *http.Request, only string) {
+// serveManagedDisconnect is both verbs, answering through op: the whole org
+// when only is "", one installation otherwise.
+func (s *Server) serveManagedDisconnect(w http.ResponseWriter, r *http.Request, op *httpx.NoContentOp[httpx.NoBody], only string) {
 	if s.deployCfg == nil || runmode.Current() != runmode.ModeMulti {
 		// Same door as the Connect click: the deployment App is a multi-mode
 		// credential, so in local mode the class is unreachable and the verb
@@ -238,7 +259,7 @@ func (s *Server) serveManagedDisconnect(w http.ResponseWriter, r *http.Request, 
 	// its class simply stays where it is.
 	resetClass := class == domain.GitHubCredentialClassManagedApp && len(remove) == len(live)
 	if len(remove) == 0 && !resetClass {
-		w.WriteHeader(http.StatusNoContent)
+		op.Write(w)
 		return
 	}
 
@@ -262,7 +283,7 @@ func (s *Server) serveManagedDisconnect(w http.ResponseWriter, r *http.Request, 
 		// whatever remains, as every other credential transition does.
 		s.kickGitHubChanged(r, orgID)
 	}
-	w.WriteHeader(http.StatusNoContent)
+	op.Write(w)
 }
 
 // disconnectManagedInstallations is the verb's write: the soft-removes, the

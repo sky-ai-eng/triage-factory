@@ -21,16 +21,16 @@ import (
 // `using_deployment_default` marks so the panel never offers it a second
 // credential it cannot hold.
 type githubAppStatusResponse struct {
-	App                    *githubAppInfo          `json:"app"`
-	Installations          []githubAppInstallation `json:"installations"`
-	UsingDeploymentDefault bool                    `json:"using_deployment_default"`
+	App                    *githubAppInfo          `json:"app" doc:"The organization's own GitHub App, or null when it has none: an organization on a personal access token, on the deployment's GitHub App, or with no GitHub access."`
+	Installations          []githubAppInstallation `json:"installations" doc:"The GitHub accounts the organization's App is installed on, or for an organization on the deployment's GitHub App the accounts it connected through it, on the organization's current GitHub host."`
+	UsingDeploymentDefault bool                    `json:"using_deployment_default" doc:"Whether the organization's GitHub access is the deployment's GitHub App, in which case app is null."`
 	// DeploymentAppAvailable is whether this deployment offers a deployment
 	// App for an org to bind — a fact about the deployment, not the org,
 	// carried here because the panel's empty state is where it matters: an
 	// org with no credential is offered Connect beside registering,
 	// importing and a token, and only when there is something to connect to.
 	// Always false in local mode, where the managed class does not exist.
-	DeploymentAppAvailable bool `json:"deployment_app_available"`
+	DeploymentAppAvailable bool `json:"deployment_app_available" doc:"Whether this deployment has a GitHub App of its own that an organization can connect through; always false in local mode."`
 	// ConnectCallbackURL is the absolute redirect_uri the App owner must register
 	// on the App for per-user "Connect GitHub" OAuth to work. It's the
 	// same URL buildManifestAndState bakes into a manifest-created App's
@@ -38,44 +38,44 @@ type githubAppStatusResponse struct {
 	// for a bring-your-own-App import whose owner must register it by hand. Empty
 	// when no deployment identity is configured (deployCfg nil — e.g. a unit-test
 	// server); the field is only actioned by an admin enabling OAuth.
-	ConnectCallbackURL string `json:"connect_callback_url"`
+	ConnectCallbackURL string `json:"connect_callback_url" doc:"The callback URL an organization's GitHub App must have registered for people to connect their GitHub accounts through it, empty when the server has no public URL configured."`
 	// WebhookHealth is whether GitHub is actually delivering this App's
 	// webhooks to this deployment — null when there is no App, no deployment
 	// identity to compare a hook URL against, or no probe answer yet. Its
 	// absence is "not known", never "fine": a registered App that receives
 	// nothing is the case this exists to make visible. See
 	// github_webhook_health.go.
-	WebhookHealth *githubAppWebhookHealth `json:"webhook_health"`
+	WebhookHealth *githubAppWebhookHealth `json:"webhook_health" doc:"Whether GitHub delivers the App's webhooks to this deployment, as last checked, or null when that is not known: the organization has no App of its own, GitHub no longer accepts the App, or no check has answered yet."`
 }
 
 type githubAppInfo struct {
-	AppID                   string `json:"app_id"`
-	Slug                    string `json:"slug"`
-	OwnerType               string `json:"owner_type"`
-	RegisteredAt            string `json:"registered_at"`
-	RegisteredByDisplayName string `json:"registered_by_display_name"`
+	AppID                   string `json:"app_id" doc:"GitHub's id for the App."`
+	Slug                    string `json:"slug" doc:"The App's slug on GitHub, which its pages are addressed by."`
+	OwnerType               string `json:"owner_type" doc:"The kind of GitHub account that owns the App: org or user."`
+	RegisteredAt            string `json:"registered_at" doc:"When the App was connected to the organization, as an RFC 3339 timestamp."`
+	RegisteredByDisplayName string `json:"registered_by_display_name" doc:"The display name of the person who connected the App, empty when it is not known."`
 	// Active is false while the registration is STAGED — registered during a
 	// PAT→App switch but not yet cut over, so the PAT is still the live
 	// credential (TFAC-328). The Setup/Settings UX reads this to resolve the
 	// live mode, paint the "switch pending" mode-card state, and show the
 	// staged-switch banner; without it a staged-app-plus-PAT org is
 	// indistinguishable from a live App. true once a cutover activates it.
-	Active bool `json:"active"`
+	Active bool `json:"active" doc:"Whether the App is the organization's live GitHub credential; false while it is staged beside a personal access token that stays live until a cutover."`
 	// UnusableReason is why GitHub no longer accepts this App, as the
 	// installation reconcile last established it: "missing" when the App was
 	// deleted on GitHub, "key_rejected" when its private key was deleted or
 	// regenerated there, null while GitHub accepts it. Both happen outside TF,
 	// so this is the only place the panel can learn of them. UnusableSince is
 	// RFC3339 when the reason was first observed, "" alongside a null reason.
-	UnusableReason *string `json:"unusable_reason"`
-	UnusableSince  string  `json:"unusable_since"`
+	UnusableReason *string `json:"unusable_reason" doc:"Why GitHub no longer accepts the App, as the last installation refresh found: missing when the App was deleted on GitHub, or key_rejected when its private key was deleted or regenerated there; null while GitHub accepts it."`
+	UnusableSince  string  `json:"unusable_since" doc:"When the reason in unusable_reason was first found, as an RFC 3339 timestamp, empty when unusable_reason is null."`
 }
 
 type githubAppInstallation struct {
-	InstallationID string `json:"installation_id"`
-	AccountType    string `json:"account_type"`
-	AccountLogin   string `json:"account_login"`
-	InstalledAt    string `json:"installed_at"`
+	InstallationID string `json:"installation_id" doc:"GitHub's id for the installation."`
+	AccountType    string `json:"account_type" doc:"The kind of GitHub account the App is installed on, as GitHub names it: Organization or User."`
+	AccountLogin   string `json:"account_login" doc:"The login of the GitHub account the App is installed on."`
+	InstalledAt    string `json:"installed_at" doc:"When the App was installed on the account, as an RFC 3339 timestamp."`
 	// SuspendedAt is RFC3339 when the account owner has suspended this
 	// installation, "" when it is live — the installation still holds its
 	// grant, but GitHub refuses every token minted from it. SuspendedBy is the
@@ -83,18 +83,18 @@ type githubAppInstallation struct {
 	// one. The panel renders a suspended installation in its own state, since
 	// one that merely looked connected would explain nothing about the 403s
 	// every run under it earns.
-	SuspendedAt string `json:"suspended_at"`
-	SuspendedBy string `json:"suspended_by"`
+	SuspendedAt string `json:"suspended_at" doc:"When the account's owner suspended the installation, as an RFC 3339 timestamp, empty when it is not suspended; GitHub refuses every token minted from a suspended installation."`
+	SuspendedBy string `json:"suspended_by" doc:"The login of the GitHub user who suspended the installation, empty when it is not suspended or GitHub named no one."`
 	// RepositorySelection is "all" or "selected" — whether the grant is every
 	// repository on the account or an enumerated set — and null when the
 	// mirror has not learned it yet. Three values on purpose: it decides
 	// whether scope drift is even possible on this installation, and "not
 	// known yet" is neither answer.
-	RepositorySelection *string `json:"repository_selection"`
+	RepositorySelection *string `json:"repository_selection" doc:"Which repositories on the account the installation grants: all, or selected for a chosen set; null while that is not known."`
 	// SettingsURL is the installation's settings page on GitHub — where the
 	// grant is chosen, and the only place it can be changed. TF links out to
 	// it and never edits the grant itself; GitHub enforces who may.
-	SettingsURL string `json:"settings_url"`
+	SettingsURL string `json:"settings_url" doc:"The installation's settings page on GitHub, where the repositories it grants are chosen."`
 }
 
 // installationSettingsURL is GitHub's settings page for an installation,
@@ -249,6 +249,15 @@ func (s *Server) registrantDisplayName(ctx context.Context, orgID, userID string
 	return name
 }
 
+var opGitHubAppStatus = httpx.NewJSONOp[httpx.NoBody, githubAppStatusResponse](httpx.OpSpec{
+	Pattern:     "GET /api/orgs/{org_id}/github/app",
+	ID:          "get_github_app",
+	Summary:     "Get the organization's GitHub App status",
+	Description: "Returns the organization's own GitHub App, the GitHub accounts it or the deployment's App is installed on, and whether GitHub delivers the App's webhooks here. The answer is read from stored state, and when the last webhook check is more than ten minutes old the read starts a new one with GitHub in the background.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
+
 // handleGitHubAppStatus returns the org's GitHub App registration +
 // installation state. Read-only; any org member (or local-mode user). It
 // reads the mirror and nothing else: opening the panel must never ask GitHub
@@ -293,7 +302,7 @@ func (s *Server) handleGitHubAppStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, s.githubAppStatus(ctx, orgID, userID, class, app, insts, s.webhookHealthDTO(ctx, orgID, app)))
+	opGitHubAppStatus.Write(w, s.githubAppStatus(ctx, orgID, userID, class, app, insts, s.webhookHealthDTO(ctx, orgID, app)))
 }
 
 // connectCallbackURLSafe returns the org's Connect OAuth callback URL, or ""
@@ -308,6 +317,15 @@ func (s *Server) connectCallbackURLSafe(orgID string) string {
 	}
 	return s.connectCallbackURL(orgID)
 }
+
+var opGitHubAppInstallationsRefresh = httpx.NewJSONOp[httpx.NoBody, githubAppStatusResponse](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/github/app/installations/refresh",
+	ID:          "refresh_github_app_installations",
+	Summary:     "Refresh the GitHub App's installations",
+	Description: "Asks GitHub which accounts the organization's GitHub App, or the deployment's App it is connected through, is installed on, updates the stored installations to match, and returns the same body as the App status read. GitHub refusing the App is recorded on the App and answered as an error that says what to do.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintNo, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // handleGitHubAppInstallationsRefresh reconciles the org's App installation
 // mirror against GitHub on demand, then returns the refreshed status payload.
@@ -432,7 +450,7 @@ func (s *Server) handleGitHubAppInstallationsRefresh(w http.ResponseWriter, r *h
 		internalError(w, "github-app", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.githubAppStatus(ctx, orgID, userID, class, app, insts, s.webhookHealthDTO(ctx, orgID, app)))
+	opGitHubAppInstallationsRefresh.Write(w, s.githubAppStatus(ctx, orgID, userID, class, app, insts, s.webhookHealthDTO(ctx, orgID, app)))
 }
 
 // githubAppUnusableMessage says what GitHub's refusal of the App means. Each
@@ -447,6 +465,20 @@ func githubAppUnusableMessage(reason domain.GitHubAppUnusableReason) string {
 	}
 	return "GitHub no longer accepts the GitHub App."
 }
+
+// githubAppInstallURLResponse is the body of GET …/github/app/install-url.
+type githubAppInstallURLResponse struct {
+	URL string `json:"url" doc:"The page on the organization's GitHub where the App is installed on another account."`
+}
+
+var opGitHubAppInstallURL = httpx.NewJSONOp[httpx.NoBody, githubAppInstallURLResponse](httpx.OpSpec{
+	Pattern:     "GET /api/orgs/{org_id}/github/app/install-url",
+	ID:          "get_github_app_install_url",
+	Summary:     "Get the GitHub App's install page",
+	Description: "Returns the address of the page on the organization's GitHub where its own GitHub App is installed on a GitHub account.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleGitHubAppInstallURL returns the GitHub deep-link the panel's
 // "Install on another GitHub account" button opens. 404 when the org
@@ -480,7 +512,7 @@ func (s *Server) handleGitHubAppInstallURL(w http.ResponseWriter, r *http.Reques
 		internalError(w, "github-app", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{
-		"url": ghBase + "/apps/" + app.Slug + "/installations/new",
+	opGitHubAppInstallURL.Write(w, githubAppInstallURLResponse{
+		URL: ghBase + "/apps/" + app.Slug + "/installations/new",
 	})
 }

@@ -40,11 +40,11 @@ import (
 // multi-mode only (local is hookless/backfill); accept_partial acknowledges
 // soft permission gaps.
 type githubAppImportRequest struct {
-	AppID         string `json:"app_id"`
-	PEM           string `json:"pem"`
-	ClientSecret  string `json:"client_secret"`
-	WebhookSecret string `json:"webhook_secret"`
-	AcceptPartial bool   `json:"accept_partial"`
+	AppID         string `json:"app_id" doc:"The App's numeric id on GitHub, not its client id."`
+	PEM           string `json:"pem" doc:"The full contents of a private key file generated for the App, including the BEGIN and END lines."`
+	ClientSecret  string `json:"client_secret" doc:"A client secret generated for the App, which lets people connect their GitHub accounts through it; required in multi mode, and an empty value stores none in local mode."`
+	WebhookSecret string `json:"webhook_secret" doc:"The secret the App's webhook signs its deliveries with; an empty value stores none, and this deployment then refuses the App's webhook deliveries."`
+	AcceptPartial bool   `json:"accept_partial" doc:"Whether to import an App that lacks some optional permissions, which turns off the features they serve; an App that lacks a required permission is refused either way."`
 }
 
 // githubAppPermissionRow is one entry in the import preflight's granted-vs-
@@ -52,12 +52,12 @@ type githubAppImportRequest struct {
 // "optional" (a soft gap blocks only until accept_partial acknowledges it);
 // Feature names the degraded capability for an unmet optional permission.
 type githubAppPermissionRow struct {
-	Permission string `json:"permission"`
-	Required   string `json:"required"`
-	Granted    string `json:"granted"`
-	Satisfied  bool   `json:"satisfied"`
-	Severity   string `json:"severity"`
-	Feature    string `json:"feature,omitempty"`
+	Permission string `json:"permission" doc:"The name of the GitHub App permission, such as contents or pull_requests."`
+	Required   string `json:"required" doc:"The level Triage Factory needs: read or write."`
+	Granted    string `json:"granted" doc:"The level the App has, such as read, write, or admin, empty when it has none."`
+	Satisfied  bool   `json:"satisfied" doc:"Whether the granted level meets the required one."`
+	Severity   string `json:"severity" doc:"How much the permission matters: required when the App cannot be imported without it, or optional when only the feature named in feature is turned off without it."`
+	Feature    string `json:"feature,omitempty" doc:"The feature that is turned off without an optional permission, absent for a required one."`
 }
 
 // githubAppImportErrorResponse is the 422 body for a permission gap: the
@@ -87,10 +87,19 @@ func permissionGapErrors(msg string) []httpx.ErrorItem {
 // inconclusive) — see checkAppClientSecret.
 type githubAppImportResponse struct {
 	githubAppStatusResponse
-	Permissions           []githubAppPermissionRow `json:"permissions"`
-	ClientSecretStored    bool                     `json:"client_secret_stored"`
-	ClientSecretValidated bool                     `json:"client_secret_validated"`
+	Permissions           []githubAppPermissionRow `json:"permissions" doc:"Each permission Triage Factory asks of a GitHub App, beside the level the imported App has."`
+	ClientSecretStored    bool                     `json:"client_secret_stored" doc:"Whether a client secret was stored with the App."`
+	ClientSecretValidated bool                     `json:"client_secret_validated" doc:"Whether GitHub confirmed the stored client secret; false when none was stored or GitHub's answer was inconclusive."`
 }
+
+var opGitHubAppImport = httpx.NewJSONOp[githubAppImportRequest, githubAppImportResponse](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/github/app/import",
+	ID:          "import_github_app",
+	Summary:     "Import an existing GitHub App",
+	Description: "Connects a GitHub App that already exists to the organization, from its id and private key, after checking the pair, the App's permissions, and any client secret with GitHub. The App is staged while the organization's personal access token stays live, and is live at once otherwise; the answer is the App status with the permissions check beside it.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintNo, Idempotent: httpx.HintNo, OpenWorld: httpx.HintYes},
+})
 
 // importRequiredPermission is one permission the manifest path requests, with
 // the minimum level and whether a gap is hard (blocks) or soft (degrades a named
@@ -277,8 +286,8 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 
-	var req githubAppImportRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opGitHubAppImport.Decode(w, r)
+	if !ok {
 		return
 	}
 	appIDStr := strings.TrimSpace(req.AppID)
@@ -590,7 +599,7 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, githubAppImportResponse{
+	opGitHubAppImport.Write(w, githubAppImportResponse{
 		// The class the transaction above just committed for this org — passed
 		// as the literal rather than re-read, since the import IS what put the
 		// org in the BYO-App system.

@@ -13,6 +13,239 @@
       }
     },
     "schemas": {
+      "CommitIdentityAccountJSON": {
+        "properties": {
+          "email": {
+            "description": "The email address the commits carry.",
+            "type": "string"
+          },
+          "github_user_id": {
+            "description": "GitHub's id for the account the identity belongs to, or null when it is not known.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "login": {
+            "description": "The commit signer's GitHub login when the identity is a signer's, or null otherwise.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "description": "The name the commits carry.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "email",
+          "github_user_id",
+          "login"
+        ],
+        "type": "object"
+      },
+      "CommitIdentityJSON": {
+        "properties": {
+          "git_version": {
+            "description": "The version of this machine's git that unsigned_reason was read from, or null when there is none.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "identity": {
+            "description": "The author and committer of the organization's agents' commits, or null when it has none and agents commit under their own git configuration.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CommitIdentityAccountJSON"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "signing": {
+            "description": "How the commits are signed: none, org with the organization's own commit signer, or deployment with the deployment's commit signer.",
+            "type": "string"
+          },
+          "unsigned_reason": {
+            "description": "Why the commits are unsigned although a commit signer is active, or null when that is not the case: git_too_old when this machine's git predates SSH signing, which came in 2.34, or git_unavailable when git could not be run. Only local mode reports one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "identity",
+          "signing",
+          "unsigned_reason",
+          "git_version"
+        ],
+        "type": "object"
+      },
+      "CommitSignerCreateRequest": {
+        "properties": {
+          "email": {
+            "description": "The committer email address the signer's commits carry, which must be verified on the account; absent or null commits under the account's noreply address, which only github.com has.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "login": {
+            "description": "The login of the GitHub user account to sign as, on the organization's GitHub host.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "CommitSignerJSON": {
+        "properties": {
+          "checked_at": {
+            "description": "When a check last read the account's signing keys from GitHub, as an RFC 3339 timestamp, or null when none has.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "commit_email": {
+            "description": "The author and committer email address the signer's commits carry.",
+            "type": "string"
+          },
+          "commit_name": {
+            "description": "The author and committer name the signer's commits carry.",
+            "type": "string"
+          },
+          "created_at": {
+            "description": "When the signer was registered, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "created_by": {
+            "description": "The id of the person who registered the signer, or null once that person is deleted.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "email": {
+            "description": "The committer email address the signer was given, or null when its commits carry the account's noreply address on github.com.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "github_user_id": {
+            "description": "GitHub's id for the account.",
+            "type": "string"
+          },
+          "host": {
+            "description": "The GitHub host the account is on, which was the organization's GitHub host when the signer was registered.",
+            "type": "string"
+          },
+          "key_title": {
+            "description": "The title to give the key when adding it to the account as a signing key.",
+            "type": "string"
+          },
+          "login": {
+            "description": "The account's login.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The account's profile name on GitHub, empty when it has none.",
+            "type": "string"
+          },
+          "pending_public_key": {
+            "description": "The public half of the new key a rotation is moving to, or null when no rotation is under way.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "public_key": {
+            "description": "The public half of the SSH key Triage Factory signs commits with, in the form GitHub lists keys.",
+            "type": "string"
+          },
+          "status": {
+            "description": "The signer's state: pending until its key is found on the account, active while it signs, or broken once a check fails.",
+            "type": "string"
+          },
+          "status_reason": {
+            "description": "Why a broken signer is broken: key_missing when its key is no longer on the account, or the reason GitHub gave for not verifying a pushed commit; null otherwise.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status_since": {
+            "description": "When the signer entered its status, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "updated_at": {
+            "description": "When the signer was last changed, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "host",
+          "github_user_id",
+          "login",
+          "name",
+          "email",
+          "commit_name",
+          "commit_email",
+          "public_key",
+          "pending_public_key",
+          "key_title",
+          "status",
+          "status_reason",
+          "status_since",
+          "checked_at",
+          "created_at",
+          "updated_at",
+          "created_by"
+        ],
+        "type": "object"
+      },
+      "CommitSignerPatch": {
+        "properties": {
+          "email": {
+            "description": "The committer email address the signer's commits carry, which must be verified on the account, or null to commit under the account's noreply address, which only github.com has.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "ConnectAccountRequest": {
+        "properties": {
+          "account": {
+            "description": "The login of the GitHub account to connect, which has the deployment's GitHub App installed.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ConnectAccountResponse": {
+        "properties": {
+          "authorize_url": {
+            "description": "The GitHub page the browser goes to next, where the person authorizes the deployment's GitHub App to confirm they can act for the account.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "authorize_url"
+        ],
+        "type": "object"
+      },
       "ConnectionsListRequest": {
         "properties": {
           "page_size": {
@@ -27,6 +260,66 @@
             "type": "string"
           }
         },
+        "type": "object"
+      },
+      "DarkRepo": {
+        "properties": {
+          "github_id": {
+            "description": "GitHub's id for the repository, empty while it is not yet known.",
+            "type": "string"
+          },
+          "repo": {
+            "description": "The repository's full name, as owner/name.",
+            "type": "string"
+          },
+          "repository_id": {
+            "description": "The repository's id in Triage Factory.",
+            "type": "string"
+          },
+          "teams": {
+            "description": "The names of the teams that track the repository.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "repository_id",
+          "github_id",
+          "repo",
+          "teams"
+        ],
+        "type": "object"
+      },
+      "DependabotAccessJSON": {
+        "properties": {
+          "disabled": {
+            "description": "How many tracked repositories have Dependabot alerts turned off.",
+            "type": "integer"
+          },
+          "no_permission": {
+            "description": "How many tracked repositories the credential lacks the permission to read Dependabot alerts on.",
+            "type": "integer"
+          },
+          "readable": {
+            "description": "How many tracked repositories the organization's GitHub credential can read Dependabot alerts on.",
+            "type": "integer"
+          },
+          "unchecked": {
+            "description": "How many tracked repositories have no current answer, because polling has not checked them yet or has not read them recently.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "readable",
+          "no_permission",
+          "disabled",
+          "unchecked"
+        ],
         "type": "object"
       },
       "DependabotAlertJSON": {
@@ -120,6 +413,546 @@
         ],
         "type": "object"
       },
+      "GitHubAccountJSON": {
+        "properties": {
+          "github_user_id": {
+            "description": "GitHub's id for the account, which the identity filters of a GitHub event handler's predicate take.",
+            "type": "string"
+          },
+          "login": {
+            "description": "The account's current login.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "github_user_id",
+          "login"
+        ],
+        "type": "object"
+      },
+      "GithubAccessDiff": {
+        "properties": {
+          "dark_repos": {
+            "description": "The tracked repositories the new credential cannot reach, which would stop being polled after the switch.",
+            "items": {
+              "$ref": "#/components/schemas/DarkRepo"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "reachable": {
+            "description": "How many of the tracked repositories the new credential can reach.",
+            "type": "integer"
+          },
+          "tracked": {
+            "description": "How many repositories the organization's teams track on its GitHub host.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "tracked",
+          "reachable",
+          "dark_repos"
+        ],
+        "type": "object"
+      },
+      "GithubAppImportRequest": {
+        "properties": {
+          "accept_partial": {
+            "description": "Whether to import an App that lacks some optional permissions, which turns off the features they serve; an App that lacks a required permission is refused either way.",
+            "type": "boolean"
+          },
+          "app_id": {
+            "description": "The App's numeric id on GitHub, not its client id.",
+            "type": "string"
+          },
+          "client_secret": {
+            "description": "A client secret generated for the App, which lets people connect their GitHub accounts through it; required in multi mode, and an empty value stores none in local mode.",
+            "type": "string"
+          },
+          "pem": {
+            "description": "The full contents of a private key file generated for the App, including the BEGIN and END lines.",
+            "type": "string"
+          },
+          "webhook_secret": {
+            "description": "The secret the App's webhook signs its deliveries with; an empty value stores none, and this deployment then refuses the App's webhook deliveries.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "GithubAppImportResponse": {
+        "properties": {
+          "app": {
+            "description": "The organization's own GitHub App, or null when it has none: an organization on a personal access token, on the deployment's GitHub App, or with no GitHub access.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/GithubAppInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "client_secret_stored": {
+            "description": "Whether a client secret was stored with the App.",
+            "type": "boolean"
+          },
+          "client_secret_validated": {
+            "description": "Whether GitHub confirmed the stored client secret; false when none was stored or GitHub's answer was inconclusive.",
+            "type": "boolean"
+          },
+          "connect_callback_url": {
+            "description": "The callback URL an organization's GitHub App must have registered for people to connect their GitHub accounts through it, empty when the server has no public URL configured.",
+            "type": "string"
+          },
+          "deployment_app_available": {
+            "description": "Whether this deployment has a GitHub App of its own that an organization can connect through; always false in local mode.",
+            "type": "boolean"
+          },
+          "installations": {
+            "description": "The GitHub accounts the organization's App is installed on, or for an organization on the deployment's GitHub App the accounts it connected through it, on the organization's current GitHub host.",
+            "items": {
+              "$ref": "#/components/schemas/GithubAppInstallation"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "permissions": {
+            "description": "Each permission Triage Factory asks of a GitHub App, beside the level the imported App has.",
+            "items": {
+              "$ref": "#/components/schemas/GithubAppPermissionRow"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "using_deployment_default": {
+            "description": "Whether the organization's GitHub access is the deployment's GitHub App, in which case app is null.",
+            "type": "boolean"
+          },
+          "webhook_health": {
+            "description": "Whether GitHub delivers the App's webhooks to this deployment, as last checked, or null when that is not known: the organization has no App of its own, GitHub no longer accepts the App, or no check has answered yet.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/GithubAppWebhookHealth"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "app",
+          "installations",
+          "using_deployment_default",
+          "deployment_app_available",
+          "connect_callback_url",
+          "webhook_health",
+          "permissions",
+          "client_secret_stored",
+          "client_secret_validated"
+        ],
+        "type": "object"
+      },
+      "GithubAppInfo": {
+        "properties": {
+          "active": {
+            "description": "Whether the App is the organization's live GitHub credential; false while it is staged beside a personal access token that stays live until a cutover.",
+            "type": "boolean"
+          },
+          "app_id": {
+            "description": "GitHub's id for the App.",
+            "type": "string"
+          },
+          "owner_type": {
+            "description": "The kind of GitHub account that owns the App: org or user.",
+            "type": "string"
+          },
+          "registered_at": {
+            "description": "When the App was connected to the organization, as an RFC 3339 timestamp.",
+            "type": "string"
+          },
+          "registered_by_display_name": {
+            "description": "The display name of the person who connected the App, empty when it is not known.",
+            "type": "string"
+          },
+          "slug": {
+            "description": "The App's slug on GitHub, which its pages are addressed by.",
+            "type": "string"
+          },
+          "unusable_reason": {
+            "description": "Why GitHub no longer accepts the App, as the last installation refresh found: missing when the App was deleted on GitHub, or key_rejected when its private key was deleted or regenerated there; null while GitHub accepts it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "unusable_since": {
+            "description": "When the reason in unusable_reason was first found, as an RFC 3339 timestamp, empty when unusable_reason is null.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "app_id",
+          "slug",
+          "owner_type",
+          "registered_at",
+          "registered_by_display_name",
+          "active",
+          "unusable_reason",
+          "unusable_since"
+        ],
+        "type": "object"
+      },
+      "GithubAppInstallURLResponse": {
+        "properties": {
+          "url": {
+            "description": "The page on the organization's GitHub where the App is installed on another account.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
+      "GithubAppInstallation": {
+        "properties": {
+          "account_login": {
+            "description": "The login of the GitHub account the App is installed on.",
+            "type": "string"
+          },
+          "account_type": {
+            "description": "The kind of GitHub account the App is installed on, as GitHub names it: Organization or User.",
+            "type": "string"
+          },
+          "installation_id": {
+            "description": "GitHub's id for the installation.",
+            "type": "string"
+          },
+          "installed_at": {
+            "description": "When the App was installed on the account, as an RFC 3339 timestamp.",
+            "type": "string"
+          },
+          "repository_selection": {
+            "description": "Which repositories on the account the installation grants: all, or selected for a chosen set; null while that is not known.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "settings_url": {
+            "description": "The installation's settings page on GitHub, where the repositories it grants are chosen.",
+            "type": "string"
+          },
+          "suspended_at": {
+            "description": "When the account's owner suspended the installation, as an RFC 3339 timestamp, empty when it is not suspended; GitHub refuses every token minted from a suspended installation.",
+            "type": "string"
+          },
+          "suspended_by": {
+            "description": "The login of the GitHub user who suspended the installation, empty when it is not suspended or GitHub named no one.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "installation_id",
+          "account_type",
+          "account_login",
+          "installed_at",
+          "suspended_at",
+          "suspended_by",
+          "repository_selection",
+          "settings_url"
+        ],
+        "type": "object"
+      },
+      "GithubAppPermissionRow": {
+        "properties": {
+          "feature": {
+            "description": "The feature that is turned off without an optional permission, absent for a required one.",
+            "type": "string"
+          },
+          "granted": {
+            "description": "The level the App has, such as read, write, or admin, empty when it has none.",
+            "type": "string"
+          },
+          "permission": {
+            "description": "The name of the GitHub App permission, such as contents or pull_requests.",
+            "type": "string"
+          },
+          "required": {
+            "description": "The level Triage Factory needs: read or write.",
+            "type": "string"
+          },
+          "satisfied": {
+            "description": "Whether the granted level meets the required one.",
+            "type": "boolean"
+          },
+          "severity": {
+            "description": "How much the permission matters: required when the App cannot be imported without it, or optional when only the feature named in feature is turned off without it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "permission",
+          "required",
+          "granted",
+          "satisfied",
+          "severity"
+        ],
+        "type": "object"
+      },
+      "GithubAppStatusResponse": {
+        "properties": {
+          "app": {
+            "description": "The organization's own GitHub App, or null when it has none: an organization on a personal access token, on the deployment's GitHub App, or with no GitHub access.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/GithubAppInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "connect_callback_url": {
+            "description": "The callback URL an organization's GitHub App must have registered for people to connect their GitHub accounts through it, empty when the server has no public URL configured.",
+            "type": "string"
+          },
+          "deployment_app_available": {
+            "description": "Whether this deployment has a GitHub App of its own that an organization can connect through; always false in local mode.",
+            "type": "boolean"
+          },
+          "installations": {
+            "description": "The GitHub accounts the organization's App is installed on, or for an organization on the deployment's GitHub App the accounts it connected through it, on the organization's current GitHub host.",
+            "items": {
+              "$ref": "#/components/schemas/GithubAppInstallation"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "using_deployment_default": {
+            "description": "Whether the organization's GitHub access is the deployment's GitHub App, in which case app is null.",
+            "type": "boolean"
+          },
+          "webhook_health": {
+            "description": "Whether GitHub delivers the App's webhooks to this deployment, as last checked, or null when that is not known: the organization has no App of its own, GitHub no longer accepts the App, or no check has answered yet.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/GithubAppWebhookHealth"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "app",
+          "installations",
+          "using_deployment_default",
+          "deployment_app_available",
+          "connect_callback_url",
+          "webhook_health"
+        ],
+        "type": "object"
+      },
+      "GithubAppTeardownResponse": {
+        "properties": {
+          "github_app_deleted_locally": {
+            "description": "Always true: the App was removed from the organization and still exists on GitHub.",
+            "type": "boolean"
+          },
+          "github_app_settings_url": {
+            "description": "The page on the organization's GitHub that lists GitHub Apps, where the App can be deleted, empty when the host could not be read.",
+            "type": "string"
+          },
+          "status": {
+            "description": "What was done: switched_to_pat, discarded, or disconnected.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "github_app_deleted_locally",
+          "github_app_settings_url",
+          "status"
+        ],
+        "type": "object"
+      },
+      "GithubAppWebhookHealth": {
+        "properties": {
+          "checked_at": {
+            "description": "When GitHub was last asked, as an RFC 3339 timestamp.",
+            "type": "string"
+          },
+          "hook_host": {
+            "description": "The scheme and host of the App's webhook URL, empty when the App has no webhook.",
+            "type": "string"
+          },
+          "last_delivery_at": {
+            "description": "When GitHub made the most recent delivery, as an RFC 3339 timestamp, empty when it has made none.",
+            "type": "string"
+          },
+          "last_delivery_status_code": {
+            "description": "The HTTP status the receiver answered the most recent delivery with, 0 when GitHub could not connect or has made no delivery.",
+            "type": "integer"
+          },
+          "secret_configured": {
+            "description": "Whether the App's webhook on GitHub has a secret set.",
+            "type": "boolean"
+          },
+          "state": {
+            "description": "What GitHub reports about the App's webhook: not_configured when the App has none, pointing_elsewhere when it delivers to another URL, delivering_rejected when it delivers here and the deliveries are refused, no_deliveries when it points here and GitHub has recorded no delivery in the last 30 days, healthy when the last delivery was accepted, or unavailable when the GitHub host does not report webhook deliveries.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "state",
+          "hook_host",
+          "secret_configured",
+          "last_delivery_at",
+          "last_delivery_status_code",
+          "checked_at"
+        ],
+        "type": "object"
+      },
+      "GithubIdentityCaptureResponse": {
+        "properties": {
+          "host": {
+            "description": "The GitHub host the account is linked on.",
+            "type": "string"
+          },
+          "login": {
+            "description": "The login of the GitHub account linked to the caller.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "login",
+          "host"
+        ],
+        "type": "object"
+      },
+      "GithubIdentityPATRequest": {
+        "properties": {
+          "pat": {
+            "description": "A GitHub personal access token of the caller's own, which needs read access to the account's email addresses; it is used once and not stored.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "GithubIdentityStatusResponse": {
+        "properties": {
+          "connect_available": {
+            "description": "Whether the caller can link an account by signing in to GitHub, through the organization's own GitHub App or the deployment's.",
+            "type": "boolean"
+          },
+          "connected": {
+            "description": "Whether the caller has a GitHub account linked on the organization's GitHub host.",
+            "type": "boolean"
+          },
+          "host": {
+            "description": "The GitHub host accounts are linked on: the organization's, or the deployment GitHub App's host when the organization has none and that App serves it.",
+            "type": "string"
+          },
+          "login": {
+            "description": "The login of the caller's linked GitHub account, absent when none is linked.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "connected",
+          "host",
+          "connect_available"
+        ],
+        "type": "object"
+      },
+      "GithubPATBindResponse": {
+        "properties": {
+          "login": {
+            "description": "The login of the GitHub account the token authenticates as.",
+            "type": "string"
+          },
+          "status": {
+            "description": "Always connected.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "login",
+          "status"
+        ],
+        "type": "object"
+      },
+      "GithubPATRequest": {
+        "properties": {
+          "pat": {
+            "description": "The GitHub personal access token, checked against the organization's GitHub host.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "GithubPATUnbindResponse": {
+        "properties": {
+          "status": {
+            "description": "Always disconnected.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
+      "GithubWebhookReplayResponse": {
+        "properties": {
+          "candidates": {
+            "description": "How many failed installation deliveries were among the App's 200 most recent failed webhook deliveries; the newest 50 of them are sent again.",
+            "type": "integer"
+          },
+          "failed": {
+            "description": "How many of them GitHub refused to deliver again.",
+            "type": "integer"
+          },
+          "replayed": {
+            "description": "How many of them GitHub accepted to deliver again.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "candidates",
+          "replayed",
+          "failed"
+        ],
+        "type": "object"
+      },
+      "GrantFindingListRequest": {
+        "properties": {
+          "page_size": {
+            "description": "How many rows to return, 50 when absent; 0 returns no rows and only total_count, and a value above the list's maximum, 200 unless the route says otherwise, is refused.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "page_token": {
+            "description": "The next_page_token of the previous page, which reads the page after it; it is refused for a request with different filters.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "HealthResponse": {
         "properties": {
           "status": {
@@ -153,6 +986,101 @@
         },
         "required": [
           "started_at"
+        ],
+        "type": "object"
+      },
+      "PatPreflightResponse": {
+        "properties": {
+          "dark_repos": {
+            "description": "The tracked repositories the new credential cannot reach, which would stop being polled after the switch.",
+            "items": {
+              "$ref": "#/components/schemas/DarkRepo"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "login": {
+            "description": "The login of the GitHub account the token authenticates as.",
+            "type": "string"
+          },
+          "reachable": {
+            "description": "How many of the tracked repositories the new credential can reach.",
+            "type": "integer"
+          },
+          "tracked": {
+            "description": "How many repositories the organization's teams track on its GitHub host.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "tracked",
+          "reachable",
+          "dark_repos",
+          "login"
+        ],
+        "type": "object"
+      },
+      "ReachWithoutPurposeItem": {
+        "properties": {
+          "account_login": {
+            "description": "The login of the GitHub account the installation is on.",
+            "type": "string"
+          },
+          "github_id": {
+            "description": "GitHub's id for the repository, empty when GitHub's listing gave none.",
+            "type": "string"
+          },
+          "html_url": {
+            "description": "The repository's page on GitHub.",
+            "type": "string"
+          },
+          "installation_id": {
+            "description": "GitHub's id for the installation whose grant reaches the repository.",
+            "type": "string"
+          },
+          "observed_at": {
+            "description": "When the installation refresh that found the repository in the grant ran, as an RFC 3339 timestamp.",
+            "type": "string"
+          },
+          "owner": {
+            "description": "The account that owns the repository on GitHub.",
+            "type": "string"
+          },
+          "private": {
+            "description": "Whether the repository is private on GitHub.",
+            "type": "boolean"
+          },
+          "repo": {
+            "description": "The repository's name without its owner.",
+            "type": "string"
+          },
+          "repository_id": {
+            "description": "The repository's id in Triage Factory, empty when Triage Factory holds no record of it.",
+            "type": "string"
+          },
+          "settings_url": {
+            "description": "The installation's settings page on GitHub, where the repositories it grants are chosen.",
+            "type": "string"
+          },
+          "slug": {
+            "description": "The repository's full name, as owner/name.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "installation_id",
+          "account_login",
+          "settings_url",
+          "github_id",
+          "repository_id",
+          "owner",
+          "repo",
+          "slug",
+          "private",
+          "html_url",
+          "observed_at"
         ],
         "type": "object"
       },
@@ -258,6 +1186,62 @@
               "string",
               "null"
             ]
+          }
+        },
+        "type": "object"
+      },
+      "ScopeDriftItem": {
+        "properties": {
+          "account_login": {
+            "description": "The login of the GitHub account the installation is on, empty when installation_id is.",
+            "type": "string"
+          },
+          "github_id": {
+            "description": "GitHub's id for the repository, empty while it is not yet known.",
+            "type": "string"
+          },
+          "installation_id": {
+            "description": "GitHub's id for the installation on the repository's owner account, whose grant leaves the repository out, or empty when no installation is on that account.",
+            "type": "string"
+          },
+          "owner": {
+            "description": "The account that owns the repository on GitHub.",
+            "type": "string"
+          },
+          "repo": {
+            "description": "The repository's name without its owner.",
+            "type": "string"
+          },
+          "repository_id": {
+            "description": "The tracked repository's id in Triage Factory.",
+            "type": "string"
+          },
+          "settings_url": {
+            "description": "The installation's settings page on GitHub, where the repository can be added to the grant, empty when installation_id is.",
+            "type": "string"
+          },
+          "slug": {
+            "description": "The repository's full name, as owner/name.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repository_id",
+          "github_id",
+          "owner",
+          "repo",
+          "slug",
+          "installation_id",
+          "account_login",
+          "settings_url"
+        ],
+        "type": "object"
+      },
+      "SwitchPATRequest": {
+        "properties": {
+          "pat": {
+            "description": "The GitHub personal access token, checked against the organization's GitHub host.",
+            "type": "string"
           }
         },
         "type": "object"
@@ -1318,6 +2302,1538 @@
         "summary": "Get your LLM spend",
         "x-hints": {
           "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/github/app": {
+      "delete": {
+        "description": "Removes the organization's staged GitHub App, with its installations and secrets, leaving its personal access token the live credential. A live App is refused; it is removed by disconnecting it. The App itself stays on GitHub, and the answer links to where it can be deleted.",
+        "operationId": "delete_github_app",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GithubAppTeardownResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Discard the staged GitHub App",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      },
+      "get": {
+        "description": "Returns the organization's own GitHub App, the GitHub accounts it or the deployment's App is installed on, and whether GitHub delivers the App's webhooks here. The answer is read from stored state, and when the last webhook check is more than ten minutes old the read starts a new one with GitHub in the background.",
+        "operationId": "get_github_app",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GithubAppStatusResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get the organization's GitHub App status",
+        "x-hints": {
+          "openWorldHint": true,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/github/app/cutover": {
+      "post": {
+        "description": "Makes the organization's staged GitHub App its live credential and deletes its personal access token, after refreshing the App's installations from GitHub and checking it is installed on at least one account. Returns the App status as the switch leaves it.",
+        "operationId": "cutover_github_app",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GithubAppStatusResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Switch from the token to the staged GitHub App",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/orgs/{org_id}/github/app/cutover-preflight": {
+      "get": {
+        "description": "Returns how many of the organization's tracked repositories its GitHub App's installations can reach, and which they cannot, so a switch from the token to the App would stop polling them. It first refreshes the App's stored installations from GitHub, and uses the stored ones when that fails.",
+        "operationId": "get_github_app_cutover_preflight",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GithubAccessDiff"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Preview switching to the GitHub App",
+        "x-hints": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/orgs/{org_id}/github/app/disconnect": {
+      "post": {
+        "description": "Removes the organization's live GitHub App, with its installations and secrets, and clears its GitHub host unless a commit signer is on it, leaving the organization with no GitHub access until another credential is connected. A staged App is refused; it is discarded instead. The App itself stays on GitHub, and the answer links to where it can be deleted.",
+        "operationId": "disconnect_github_app",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GithubAppTeardownResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Disconnect the live GitHub App",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/orgs/{org_id}/github/app/import": {
+      "post": {
+        "description": "Connects a GitHub App that already exists to the organization, from its id and private key, after checking the pair, the App's permissions, and any client secret with GitHub. The App is staged while the organization's personal access token stays live, and is live at once otherwise; the answer is the App status with the permissions check beside it.",
+        "operationId": "import_github_app",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GithubAppImportRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GithubAppImportResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Import an existing GitHub App",
+        "x-hints": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/orgs/{org_id}/github/app/install-url": {
+      "get": {
+        "description": "Returns the address of the page on the organization's GitHub where its own GitHub App is installed on a GitHub account.",
+        "operationId": "get_github_app_install_url",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GithubAppInstallURLResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get the GitHub App's install page",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/github/app/installations/refresh": {
+      "post": {
+        "description": "Asks GitHub which accounts the organization's GitHub App, or the deployment's App it is connected through, is installed on, updates the stored installations to match, and returns the same body as the App status read. GitHub refusing the App is recorded on the App and answered as an error that says what to do.",
+        "operationId": "refresh_github_app_installations",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GithubAppStatusResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Refresh the GitHub App's installations",
+        "x-hints": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/orgs/{org_id}/github/app/webhook/replay": {
+      "post": {
+        "description": "Asks GitHub to deliver again the newest 50 failed installation deliveries of the organization's own GitHub App, from the 30 days of deliveries GitHub keeps, and returns how many there were and how many GitHub accepted. GitHub makes the deliveries afterwards, and the next App status read checks the webhook again.",
+        "operationId": "replay_github_app_webhook",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GithubWebhookReplayResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Replay the GitHub App's failed installation webhooks",
+        "x-hints": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/orgs/{org_id}/github/commit-identity": {
+      "get": {
+        "description": "Returns the name and email address the organization's agents' commits carry, and whether and how they are signed, resolved the way an agent's commits are.",
+        "operationId": "get_github_commit_identity",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommitIdentityJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get who the organization's agents commit as",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/github/commit-signer": {
+      "delete": {
+        "description": "Removes the organization's commit signer and deletes its private keys, and clears the organization's GitHub host when no other GitHub credential is on it. The public keys stay on the account until someone removes them on GitHub.",
+        "operationId": "delete_github_commit_signer",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Remove the organization's commit signer",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      },
+      "get": {
+        "description": "Returns the GitHub user account the organization's agents' commits are authored, committed, and signed as, with the public key Triage Factory signs with and the signer's status.",
+        "operationId": "get_github_commit_signer",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommitSignerJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get the organization's commit signer",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      },
+      "patch": {
+        "description": "Sets or clears the committer email address the signer's commits carry, and returns the signer with the change applied. GitHub's verified addresses for the account cannot be read, so a wrong address shows when a pushed commit fails GitHub's verification.",
+        "operationId": "update_github_commit_signer",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CommitSignerPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommitSignerJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Update the commit signer",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      },
+      "post": {
+        "description": "Looks up the GitHub user account on the organization's GitHub host, generates an SSH key pair, and registers the account as the organization's commit signer, pending until its key is verified. The answer carries the public key and the title to add it to the account under as a signing key.",
+        "operationId": "create_github_commit_signer",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CommitSignerCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommitSignerJSON"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Register the organization's commit signer",
+        "x-hints": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/orgs/{org_id}/github/commit-signer/rotate": {
+      "post": {
+        "description": "Generates a new SSH key pair for the signer and returns it as the pending key, replacing any pending key an earlier rotation left. The current key keeps signing until a verify finds the new one on the account.",
+        "operationId": "rotate_github_commit_signer",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommitSignerJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Start rotating the commit signer's key",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/orgs/{org_id}/github/commit-signer/verify": {
+      "post": {
+        "description": "Looks for the signer's key among the account's signing keys on GitHub, or for a rotation's new key while one is under way, and for a broken signer checks the commit that broke it again. When the check passes the signer becomes active, and a rotation's new key, when it was the one found, replaces the old key, whose private half is deleted.",
+        "operationId": "verify_github_commit_signer",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommitSignerJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Verify the commit signer's key on GitHub",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/orgs/{org_id}/github/dependabot-access": {
+      "get": {
+        "description": "Counts the repositories the organization's teams track on its GitHub host by whether its GitHub credential can read their Dependabot alerts, as polling last found them.",
+        "operationId": "get_github_dependabot_access",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DependabotAccessJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Count Dependabot alert access on tracked repositories",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/github/grant/reach-without-purpose/list": {
+      "post": {
+        "description": "Returns one page of the repositories the organization's GitHub App installations can reach that no team tracks, as the last installation refresh found them. It reads stored state and asks GitHub nothing.",
+        "operationId": "list_github_grant_reach_without_purpose",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GrantFindingListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "items": {
+                      "description": "The rows of this page, as an empty array when it has none.",
+                      "items": {
+                        "$ref": "#/components/schemas/ReachWithoutPurposeItem"
+                      },
+                      "type": "array"
+                    },
+                    "next_page_token": {
+                      "description": "The page_token that reads the next page, absent on the last page.",
+                      "type": "string"
+                    },
+                    "total_count": {
+                      "description": "How many rows match the request's filters across every page, or null for a list whose upstream cannot count them.",
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "total_count"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List repositories the GitHub App reaches untracked",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/github/grant/scope-drift/list": {
+      "post": {
+        "description": "Returns one page of the repositories a team tracks that the organization's GitHub App installations do not grant, as the last installation refresh found them, so they are not polled. It reads stored state and asks GitHub nothing.",
+        "operationId": "list_github_grant_scope_drift",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GrantFindingListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "items": {
+                      "description": "The rows of this page, as an empty array when it has none.",
+                      "items": {
+                        "$ref": "#/components/schemas/ScopeDriftItem"
+                      },
+                      "type": "array"
+                    },
+                    "next_page_token": {
+                      "description": "The page_token that reads the next page, absent on the last page.",
+                      "type": "string"
+                    },
+                    "total_count": {
+                      "description": "How many rows match the request's filters across every page, or null for a list whose upstream cannot count them.",
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "total_count"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List tracked repositories the GitHub App cannot reach",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/github/identity": {
+      "get": {
+        "description": "Returns whether the caller has a GitHub account linked on the organization's GitHub host, its login, and whether the caller can link one by signing in to GitHub.",
+        "operationId": "get_github_identity",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GithubIdentityStatusResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get the caller's linked GitHub account",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/github/identity/pat": {
+      "post": {
+        "description": "Asks the organization's GitHub host which account the personal access token belongs to, links that account to the caller on that host, replacing any linked there before, and discards the token. Local mode only.",
+        "operationId": "create_github_identity_pat",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GithubIdentityPATRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GithubIdentityCaptureResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Link the caller's GitHub account with a token",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/orgs/{org_id}/github/managed/connect-account": {
+      "post": {
+        "description": "Starts connecting the organization to an installation of the deployment's GitHub App on the named GitHub account, and returns the GitHub authorization page the caller's browser must open to finish it. It sets a cookie the finish reads, expiring with the attempt. Multi mode only.",
+        "operationId": "connect_github_managed_account",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectAccountRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectAccountResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Start connecting a GitHub account",
+        "x-hints": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/orgs/{org_id}/github/managed/disconnect": {
+      "post": {
+        "description": "Disconnects the organization from every installation of the deployment's GitHub App it is connected to, leaving it with no GitHub access until another credential is connected. The installations stay on GitHub. Multi mode only.",
+        "operationId": "disconnect_github_managed",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Disconnect the deployment's GitHub App",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/orgs/{org_id}/github/managed/installations/{installation_id}/disconnect": {
+      "post": {
+        "description": "Disconnects the organization from one installation of the deployment's GitHub App. Disconnecting the last one leaves the organization with no GitHub access, as the full disconnect does. The installation stays on GitHub. Multi mode only.",
+        "operationId": "disconnect_github_managed_installation",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "GitHub's id for the installation.",
+            "in": "path",
+            "name": "installation_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Disconnect one deployment App installation",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/orgs/{org_id}/github/pat": {
+      "delete": {
+        "description": "Deletes the organization's GitHub personal access token, and clears its GitHub host unless a GitHub App or a commit signer is on it. An organization with no token gets the same answer.",
+        "operationId": "delete_github_pat",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GithubPATUnbindResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Remove the organization's GitHub token",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      },
+      "put": {
+        "description": "Checks the personal access token with the organization's GitHub host and stores it as the organization's GitHub credential, replacing any token it had, then restarts GitHub polling under it. An organization with a GitHub App is refused; it switches through the App's switch route. Local mode only.",
+        "operationId": "replace_github_pat",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GithubPATRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GithubPATBindResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Set the organization's GitHub token",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/orgs/{org_id}/github/pat/preflight": {
+      "post": {
+        "description": "Checks the personal access token with GitHub and returns the account it authenticates as, how many of the organization's tracked repositories it can reach, and which it cannot. The token is not stored. Local mode only.",
+        "operationId": "preflight_github_pat",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SwitchPATRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PatPreflightResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Preview switching to a token",
+        "x-hints": {
+          "openWorldHint": true,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/github/pat/switch-to": {
+      "post": {
+        "description": "Checks the personal access token with GitHub, stores it as the organization's GitHub credential, and removes the organization's GitHub App, staged or live, with its installations and secrets. The App itself stays on GitHub, and the answer links to where it can be deleted. Local mode only.",
+        "operationId": "switch_to_github_pat",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SwitchPATRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GithubAppTeardownResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Switch from the GitHub App to a token",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/orgs/{org_id}/github/users/by-name/{login}": {
+      "get": {
+        "description": "Asks the organization's GitHub host, through the organization's GitHub credential, for the account a login names, and returns its id and login.",
+        "operationId": "get_github_user_by_name",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The account's login on the organization's GitHub host, with a [bot] suffix for a bot.",
+            "in": "path",
+            "name": "login",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GitHubAccountJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Look up a GitHub account by login",
+        "x-hints": {
+          "openWorldHint": true,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/github/users/{github_user_id}": {
+      "get": {
+        "description": "Asks the organization's GitHub host, through the organization's GitHub credential, for the account an id names, and returns its id and the login it has now.",
+        "operationId": "get_github_user",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "GitHub's id for the account.",
+            "in": "path",
+            "name": "github_user_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GitHubAccountJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get a GitHub account",
+        "x-hints": {
+          "openWorldHint": true,
           "readOnlyHint": true
         }
       }
