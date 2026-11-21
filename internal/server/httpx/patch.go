@@ -1,6 +1,7 @@
 package httpx
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,9 +11,9 @@ import (
 // The PATCH field vocabulary. A partial update has to distinguish three things
 // a client can say about one field — leave it alone, clear it, set it to this —
 // and a typed pointer can only express two: both `absent` and `null` decode to
-// nil. So a PATCH body declares its fields as json.RawMessage and reads them
-// through the helpers here, which is the convention PATCH /api/repos/{id}
-// established and every settings PATCH now follows.
+// nil. So a PATCH body keeps each field's raw bytes, as a Patch[T], which also
+// names the type the field takes for the API spec, or as a json.RawMessage
+// read through the helpers here.
 //
 // The helpers all take the request's Validation, so a body with several bad
 // fields reports all of them at once instead of the first one hit.
@@ -64,6 +65,25 @@ func PatchStrings(v *Validation, raw json.RawMessage, field string) ([]string, P
 	return patchValue[[]string](v, raw, field)
 }
 
+// Patch is a PATCH body field of type T. It keeps the field's raw bytes the
+// way a json.RawMessage field does, so absent and null stay apart, and names
+// the type the field takes, which a RawMessage cannot tell the API spec.
+type Patch[T any] struct{ raw json.RawMessage }
+
+// UnmarshalJSON keeps the bytes and never fails; absent fields never reach it.
+// A type fault in the value is reported by Read, which names the field.
+func (p *Patch[T]) UnmarshalJSON(b []byte) error {
+	p.raw = append(json.RawMessage(nil), b...)
+	return nil
+}
+
+// Read reports what the body said about the field, as PatchString and the
+// other readers do. A struct T refuses a key it does not declare, as the body
+// decode does.
+func (p Patch[T]) Read(v *Validation, field string) (T, PatchState) {
+	return patchValue[T](v, p.raw, field)
+}
+
 // patchValue is the shared body of the readers above: absent stays absent, the
 // literal null clears, and anything else must decode as T or it's a 400 naming
 // the field, in the words the strict body decode uses for the same fault.
@@ -76,9 +96,32 @@ func patchValue[T any](v *Validation, raw json.RawMessage, field string) (T, Pat
 		return zero, PatchClear
 	}
 	var out T
-	if err := json.Unmarshal(raw, &out); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&out); err != nil {
+		if name, ok := unknownFieldName(err); ok {
+			v.Invalid(field, fmt.Sprintf("%s has no field %q", field, name))
+			return zero, patchInvalid
+		}
 		var typeErr *json.UnmarshalTypeError
 		errors.As(err, &typeErr)
+		// A fault inside a struct or map T is reported on the member at
+		// fault, as the body decode reports one, rather than on the whole
+		// value.
+		if typeErr != nil {
+			if sub, subType := jsonFieldPath(reflect.TypeFor[T](), typeErr.Field); sub != "" {
+				if subType == nil {
+					subType = typeErr.Type
+				}
+				path := field + "." + sub
+				message := path + " has the wrong type"
+				if want, _ := jsonType(subType, typeErr); want != "" {
+					message = path + " must be " + want
+				}
+				v.Invalid(path, message)
+				return zero, patchInvalid
+			}
+		}
 		want, _ := jsonType(reflect.TypeFor[T](), typeErr)
 		v.Invalid(field, fmt.Sprintf("%s must be %s, or null", field, want))
 		return zero, patchInvalid

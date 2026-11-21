@@ -7,18 +7,26 @@ import (
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
+var opWS = httpx.NewWebSocketOp(httpx.OpSpec{
+	Pattern:     "GET /api/ws",
+	ID:          "open_event_stream",
+	Summary:     "Open the event stream",
+	Description: "Upgrades the connection to a websocket that streams events for the caller in their current organization, such as a changed task list or a run's new messages. Most events say only that a resource changed, and the client reads it again through its route.",
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
+
 // handleWS wraps the hub's HandleWS so the websocket package stays
 // free of any dependency on internal/server. Identity (userID, orgID)
 // is pulled out of r.Context() before the upgrade and passed to the
 // hub, which captures them on the per-connection struct for the
 // Broadcast-side scoping filter.
 //
-// /api/ws is mounted via s.api(...), so withSession has already run
-// by the time we get here: in local mode both values are the sentinel
-// org/user, in multi mode they're the identity the request's credential
-// resolved to — a session cookie's, or an API token's (a non-browser client
-// can set the handshake's Authorization header, so Bearer works here by
-// construction, and the org this scopes to is the one the token is sealed to).
+// Both values are read from the claims withSession seeds, so the route is
+// mounted behind it: in local mode they are the sentinel org/user, in multi
+// mode the identity the request's credential resolved to — a session
+// cookie's, or an API token's (a non-browser client can set the handshake's
+// Authorization header, so Bearer works here by construction, and the org
+// this scopes to is the one the token is sealed to).
 //
 // Every socket this handler opens is scoped to a (user, org) pair. The
 // hub delivers every event to a client with no identity, whatever its

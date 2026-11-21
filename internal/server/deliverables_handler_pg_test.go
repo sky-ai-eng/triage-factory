@@ -96,7 +96,7 @@ func TestDeliverableReject_TeammateClosesTheTaskOfACompletedRun_Postgres(t *test
 	mount := func(pattern string, hf http.HandlerFunc) { mux.HandleFunc(pattern, hf) }
 	deliverables.New(s.tx, s.az, s.ws, s.ghResolver, nil,
 		func() *reconcile.Reconciler { return rc }, func() string { return "" },
-	).Register(httpx.Mounts{API: mount, APIMutating: mount})
+	).Register(httpx.Mounts{API: mount, APIMutating: mount, Op: func(op httpx.Operation, h http.HandlerFunc) { mount(op.Spec().Pattern, h) }})
 
 	req := httptest.NewRequest(http.MethodPost, "/api/deliverables/"+stored.ID+"/reject", nil)
 	reqCtx := httpx.WithClaims(req.Context(), &verify.Claims{Subject: teammate})

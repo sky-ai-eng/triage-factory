@@ -47,8 +47,8 @@ const (
 // figure doesn't pay for a page of rows it discards. Every other value
 // outside 1..max is rejected.
 type PageRequest struct {
-	PageSize  *int   `json:"page_size"`
-	PageToken string `json:"page_token"`
+	PageSize  *int   `json:"page_size" doc:"How many rows to return, 50 when absent; 0 returns no rows and only total_count, and a value above the list's maximum, 200 unless the route says otherwise, is refused."`
+	PageToken string `json:"page_token" doc:"The next_page_token of the previous page, which reads the page after it; it is refused for a request with different filters."`
 }
 
 // Page is the resolved window a store read takes. It also carries the filter

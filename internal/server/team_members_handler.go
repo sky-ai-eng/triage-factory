@@ -350,6 +350,18 @@ func (h *teamMembersHandler) handleTeamMemberRoleChange(w http.ResponseWriter, r
 	w.WriteHeader(http.StatusNoContent)
 }
 
+var opTeamMemberRemove = httpx.NewNoContentOp[httpx.NoBody](httpx.OpSpec{
+	Pattern:     "DELETE /api/teams/{team_id}/members/{user_id}",
+	ID:          "delete_team_member",
+	Summary:     "Remove a team member",
+	Description: "Removes a person from the team. A caller who names their own id leaves the team, and the team's last admin cannot be removed.",
+	PathParams: map[string]string{
+		"team_id": "The team's id.",
+		"user_id": "The id of the person to remove.",
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
+
 // handleTeamMemberRemove removes a member from the team. A team/org admin may
 // remove anyone; any member may remove themselves (a self-leave) — the split
 // memberships_delete RLS already permits. Removing the team's last admin is
@@ -399,7 +411,7 @@ func (h *teamMembersHandler) handleTeamMemberRemove(w http.ResponseWriter, r *ht
 	if !writeTeamMemberMutationResult(w, err) {
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	opTeamMemberRemove.Write(w)
 }
 
 // resolve runs the shared front gate for every team-roster endpoint: the active
@@ -526,5 +538,5 @@ func (s *Server) registerTeamMemberRoutes() {
 	s.apiMutating("POST /api/teams/{team_id}/members/list", tmh.handleTeamRosterList)
 	s.apiMutating("POST /api/teams/{team_id}/members", tmh.handleTeamMemberAdd)
 	s.apiMutating("PATCH /api/teams/{team_id}/members/{user_id}", tmh.handleTeamMemberRoleChange)
-	s.apiMutating("DELETE /api/teams/{team_id}/members/{user_id}", tmh.handleTeamMemberRemove)
+	s.op(opTeamMemberRemove, tmh.handleTeamMemberRemove)
 }

@@ -43,6 +43,10 @@ on:
       - 'go.mod'
       - 'go.sum'
       - 'e2e/**'
+      # The suite's dependencies are locked in the root workspace.
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
       - '.github/workflows/sso-e2e.yml'
   push:
     branches: [main]
@@ -115,16 +119,14 @@ jobs:
       - uses: pnpm/action-setup@v4
         if: steps.access.outputs.ok == 'true'
         with:
-          package_json_file: frontend/package.json
+          package_json_file: package.json
 
       - uses: actions/setup-node@v4
         if: steps.access.outputs.ok == 'true'
         with:
           node-version: '22'
           cache: pnpm
-          cache-dependency-path: |
-            frontend/pnpm-lock.yaml
-            e2e/sso/pnpm-lock.yaml
+          cache-dependency-path: pnpm-lock.yaml
 
       - uses: actions/setup-go@v5
         if: steps.access.outputs.ok == 'true'
@@ -145,10 +147,9 @@ jobs:
 
       - name: Install Playwright's Chromium
         if: steps.access.outputs.ok == 'true'
-        working-directory: e2e/sso
         run: |
           pnpm install --frozen-lockfile
-          pnpm exec playwright install --with-deps chromium
+          cd e2e/sso && pnpm exec playwright install --with-deps chromium
 
       - name: SSO end-to-end suite
         if: steps.access.outputs.ok == 'true'

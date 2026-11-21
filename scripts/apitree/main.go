@@ -36,6 +36,11 @@
 // no longer trusted to be complete: TestRegistrarsCoverExtensionAPI reads
 // ExtensionAPI's declaration and fails if a method that mounts routes is not
 // listed here.
+//
+// A route can also be mounted through a declared operation (s.op, api.Op,
+// m.Op, and their raw twins), whose pattern is not at the call but in the
+// httpx.OpSpec of the package variable the call names. Those variables are
+// read from every file of the package before the calls are resolved.
 package main
 
 import (
@@ -99,6 +104,34 @@ var registrars = map[string]authClass{
 	"mux.Handle":     classRaw,
 	"mux.HandleFunc": classRaw,
 	"api.Raw":        classRaw,
+	// A handler subpackage registers through the httpx.Mounts it is handed.
+	"m.API":         classSession,
+	"m.APIMutating": classMutating,
+}
+
+// opRegistrars are the mounts that take a declared operation rather than a
+// pattern. raw is whether the mount has no session wrapper; otherwise the
+// class follows the method, as the op mounts decide it.
+var opRegistrars = map[string]bool{
+	"s.op":      false,
+	"api.Op":    false,
+	"m.Op":      false,
+	"s.rawOp":   true,
+	"api.RawOp": true,
+}
+
+// opMount is a mount through a declared operation, named by its variable.
+type opMount struct {
+	op  string
+	raw bool
+}
+
+// fileScan is what one file contributes: the routes mounted by pattern, the
+// operation variables it declares, and the mounts that name one.
+type fileScan struct {
+	routes   []route
+	ops      map[string]string
+	opMounts []opMount
 }
 
 func main() {
@@ -129,6 +162,8 @@ func main() {
 // any nested checkout, for correctness rather than speed.
 func collect(root string) ([]route, error) {
 	var out []route
+	pkgs := map[string]*fileScan{}
+	var pkgOrder []string
 	skip := map[string]bool{
 		".git": true, "node_modules": true, "dist": true, "vendor": true,
 		"target": true, "testdata": true,
@@ -160,7 +195,8 @@ func collect(root string) ([]route, error) {
 			return nil
 		}
 		rel, _ := filepath.Rel(root, path)
-		found, ferr := parseFile(path, filepath.ToSlash(filepath.Dir(rel)))
+		pkgDir := filepath.ToSlash(filepath.Dir(rel))
+		found, ferr := scanFile(path, pkgDir)
 		if ferr != nil {
 			// A file that will not parse is a compile error someone else is
 			// already looking at; it must not stop the rest of the surface
@@ -168,10 +204,48 @@ func collect(root string) ([]route, error) {
 			fmt.Fprintf(os.Stderr, "apitree: skipping %s: %v\n", rel, ferr)
 			return nil
 		}
-		out = append(out, found...)
+		pkg, ok := pkgs[pkgDir]
+		if !ok {
+			pkg = &fileScan{ops: map[string]string{}}
+			pkgs[pkgDir] = pkg
+			pkgOrder = append(pkgOrder, pkgDir)
+		}
+		pkg.routes = append(pkg.routes, found.routes...)
+		for name, pattern := range found.ops {
+			pkg.ops[name] = pattern
+		}
+		pkg.opMounts = append(pkg.opMounts, found.opMounts...)
 		return nil
 	})
+	for _, dir := range pkgOrder {
+		out = append(out, pkgs[dir].resolve(dir)...)
+	}
 	return out, err
+}
+
+// resolve returns the scan's routes, with each op mount resolved to its op's
+// pattern. A mount naming an op the package does not declare is reported and
+// left out.
+func (f *fileScan) resolve(pkgDir string) []route {
+	out := f.routes
+	for _, m := range f.opMounts {
+		pattern, ok := f.ops[m.op]
+		if !ok {
+			fmt.Fprintf(os.Stderr, "apitree: %s mounts %s, which it declares nowhere this tool can read\n", pkgDir, m.op)
+			continue
+		}
+		method, p := splitPattern(pattern)
+		class := classRaw
+		switch {
+		case m.raw:
+		case method == "GET":
+			class = classSession
+		default:
+			class = classMutating
+		}
+		out = append(out, route{Method: method, Path: p, Class: class, Pkg: pkgDir})
+	}
+	return out
 }
 
 // isCheckout reports whether dir is the root of its own git checkout. A linked
@@ -188,16 +262,32 @@ func isCheckout(dir string) bool {
 	return err == nil
 }
 
+// parseFile returns the routes one file mounts, resolving its op mounts
+// against the ops the same file declares.
 func parseFile(path, pkgDir string) ([]route, error) {
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, path, nil, 0)
+	f, err := scanFile(path, pkgDir)
 	if err != nil {
 		return nil, err
 	}
-	var out []route
+	return f.resolve(pkgDir), nil
+}
+
+func scanFile(path, pkgDir string) (fileScan, error) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, path, nil, 0)
+	if err != nil {
+		return fileScan{}, err
+	}
+	scan := fileScan{ops: opDecls(f)}
 	ast.Inspect(f, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok || len(call.Args) == 0 {
+			return true
+		}
+		if raw, ok := opRegistrars[selectorText(call.Fun)]; ok {
+			if id, ok := call.Args[0].(*ast.Ident); ok {
+				scan.opMounts = append(scan.opMounts, opMount{op: id.Name, raw: raw})
+			}
 			return true
 		}
 		class, ok := registrars[selectorText(call.Fun)]
@@ -218,10 +308,77 @@ func parseFile(path, pkgDir string) ([]route, error) {
 			// name and take a string first.
 			return true
 		}
-		out = append(out, route{Method: method, Path: p, Class: class, Pkg: pkgDir})
+		scan.routes = append(scan.routes, route{Method: method, Path: p, Class: class, Pkg: pkgDir})
 		return true
 	})
-	return out, nil
+	return scan, nil
+}
+
+// opDecls maps each package-level variable the file declares as an httpx
+// operation (var opX = httpx.NewJSONOp[…](httpx.OpSpec{Pattern: "…"}), and
+// its siblings) to the operation's pattern.
+func opDecls(f *ast.File) map[string]string {
+	out := map[string]string{}
+	for _, decl := range f.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.VAR {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for i, name := range vs.Names {
+				if i >= len(vs.Values) {
+					break
+				}
+				if pattern, ok := opPattern(vs.Values[i]); ok {
+					out[name.Name] = pattern
+				}
+			}
+		}
+	}
+	return out
+}
+
+// opPattern reads the Pattern of an httpx op constructor's OpSpec literal.
+func opPattern(e ast.Expr) (string, bool) {
+	call, ok := e.(*ast.CallExpr)
+	if !ok || len(call.Args) == 0 {
+		return "", false
+	}
+	fun := call.Fun
+	switch idx := fun.(type) {
+	case *ast.IndexExpr:
+		fun = idx.X
+	case *ast.IndexListExpr:
+		fun = idx.X
+	}
+	name := selectorText(fun)
+	if !strings.HasPrefix(name, "httpx.New") || !strings.HasSuffix(name, "Op") {
+		return "", false
+	}
+	lit, ok := call.Args[0].(*ast.CompositeLit)
+	if !ok {
+		return "", false
+	}
+	for _, elt := range lit.Elts {
+		kv, ok := elt.(*ast.KeyValueExpr)
+		if !ok || !isIdent(kv.Key, "Pattern") {
+			continue
+		}
+		if bl, ok := kv.Value.(*ast.BasicLit); ok && bl.Kind == token.STRING {
+			pattern, err := strconv.Unquote(bl.Value)
+			return pattern, err == nil
+		}
+	}
+	return "", false
+}
+
+func isIdent(e ast.Expr, name string) bool {
+	id, ok := e.(*ast.Ident)
+	return ok && id.Name == name
 }
 
 // selectorText renders a call's function expression as the dotted source text

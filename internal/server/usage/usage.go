@@ -61,23 +61,23 @@ func New(tx db.TxRunner, az *authz.Checker, conversationQueue db.ConversationQue
 // usageCategoryBucket is one spend category's cost + token totals over the
 // window. cost is real dollars (SDK token counts × list price; see TFAC-449).
 type usageCategoryBucket struct {
-	Category            string  `json:"category"`
-	Cost                float64 `json:"cost"`
-	InputTokens         int     `json:"input_tokens"`
-	OutputTokens        int     `json:"output_tokens"`
-	CacheReadTokens     int     `json:"cache_read_tokens"`
-	CacheCreationTokens int     `json:"cache_creation_tokens"`
+	Category            string  `json:"category" doc:"The spend category: manual for runs a person started, autonomous for runs an event handler started, or system_overhead for background jobs."`
+	Cost                float64 `json:"cost" doc:"Spend in the category in USD."`
+	InputTokens         int     `json:"input_tokens" doc:"Input tokens billed in the category."`
+	OutputTokens        int     `json:"output_tokens" doc:"Output tokens billed in the category."`
+	CacheReadTokens     int     `json:"cache_read_tokens" doc:"Input tokens read from the prompt cache in the category."`
+	CacheCreationTokens int     `json:"cache_creation_tokens" doc:"Input tokens written to the prompt cache in the category."`
 }
 
 type usageModelBucket struct {
-	Model string  `json:"model"`
-	Cost  float64 `json:"cost"`
+	Model string  `json:"model" doc:"The model's id."`
+	Cost  float64 `json:"cost" doc:"Spend on the model in USD."`
 }
 
 // usageDayBucket is one UTC calendar day's total cost (date as YYYY-MM-DD).
 type usageDayBucket struct {
-	Date string  `json:"date"`
-	Cost float64 `json:"cost"`
+	Date string  `json:"date" doc:"The UTC calendar day, as YYYY-MM-DD."`
+	Cost float64 `json:"cost" doc:"Spend on the day in USD."`
 }
 
 // usageDayModelBucket is one (UTC day, model) cell — the long-format series the
@@ -86,41 +86,41 @@ type usageDayBucket struct {
 // same as by_model, so the stack covers model-attributed spend; the per-day
 // total (by_day) still includes their share.
 type usageDayModelBucket struct {
-	Date  string  `json:"date"`
-	Model string  `json:"model"`
-	Cost  float64 `json:"cost"`
+	Date  string  `json:"date" doc:"The UTC calendar day, as YYYY-MM-DD."`
+	Model string  `json:"model" doc:"The model's id."`
+	Cost  float64 `json:"cost" doc:"Spend on the model on the day in USD."`
 }
 
 type usageUserBucket struct {
-	UserID      string  `json:"user_id"`
-	DisplayName string  `json:"display_name"`
-	AvatarURL   string  `json:"avatar_url,omitempty"`
-	Cost        float64 `json:"cost"`
+	UserID      string  `json:"user_id" doc:"The id of the person who started the runs."`
+	DisplayName string  `json:"display_name" doc:"The person's display name."`
+	AvatarURL   string  `json:"avatar_url,omitempty" doc:"The URL of the person's avatar, absent when they have none."`
+	Cost        float64 `json:"cost" doc:"Spend on the person's runs in USD."`
 }
 
 type usageRuleBucket struct {
-	TriggerID string  `json:"trigger_id"`
-	RuleName  string  `json:"rule_name"`
-	Cost      float64 `json:"cost"`
+	TriggerID string  `json:"trigger_id" doc:"The id of the event handler whose runs spent it."`
+	RuleName  string  `json:"rule_name" doc:"The event handler's name, empty when the caller cannot read the handler."`
+	Cost      float64 `json:"cost" doc:"Spend on the handler's runs in USD."`
 }
 
 type usageTeamBucket struct {
-	TeamID   string  `json:"team_id"`
-	TeamName string  `json:"team_name"`
-	Cost     float64 `json:"cost"`
+	TeamID   string  `json:"team_id" doc:"The team's id."`
+	TeamName string  `json:"team_name" doc:"The team's name."`
+	Cost     float64 `json:"cost" doc:"Spend attributed to the team in USD."`
 }
 
 type usageOrgLevelBucket struct {
-	Category string  `json:"category"`
-	Cost     float64 `json:"cost"`
+	Category string  `json:"category" doc:"The spend category of spend attributed to no team, such as system_overhead."`
+	Cost     float64 `json:"cost" doc:"Spend in the category in USD."`
 }
 
 type usageMeResponse struct {
-	TotalCostUSD float64               `json:"total_cost_usd"`
-	ByCategory   []usageCategoryBucket `json:"by_category"`
-	ByModel      []usageModelBucket    `json:"by_model"`
-	ByDay        []usageDayBucket      `json:"by_day"`
-	ByDayModel   []usageDayModelBucket `json:"by_day_model"`
+	TotalCostUSD float64               `json:"total_cost_usd" doc:"The caller's total spend in the window in USD."`
+	ByCategory   []usageCategoryBucket `json:"by_category" doc:"The caller's spend by category."`
+	ByModel      []usageModelBucket    `json:"by_model" doc:"The caller's spend by model, leaving out spend attributed to no single model."`
+	ByDay        []usageDayBucket      `json:"by_day" doc:"The caller's spend by UTC day."`
+	ByDayModel   []usageDayModelBucket `json:"by_day_model" doc:"The caller's spend by UTC day and model, leaving out spend attributed to no single model."`
 }
 
 // usageTeamResponse is one team's breakdown. Every cut here is a fact about
@@ -133,15 +133,15 @@ type usageMeResponse struct {
 // `[]` means nobody on the team has attributed spend in the window. A reader
 // renders the first as "unknown" and only the second as zero.
 type usageTeamResponse struct {
-	TeamID       string                `json:"team_id"`
-	TeamName     string                `json:"team_name"`
-	TotalCostUSD float64               `json:"total_cost_usd"`
-	ByCategory   []usageCategoryBucket `json:"by_category"`
-	ByUser       *[]usageUserBucket    `json:"by_user,omitempty"`
-	ByRule       []usageRuleBucket     `json:"by_rule"`
-	ByModel      []usageModelBucket    `json:"by_model"`
-	ByDay        []usageDayBucket      `json:"by_day"`
-	ByDayModel   []usageDayModelBucket `json:"by_day_model"`
+	TeamID       string                `json:"team_id" doc:"The team's id."`
+	TeamName     string                `json:"team_name" doc:"The team's name."`
+	TotalCostUSD float64               `json:"total_cost_usd" doc:"The team's total spend in the window in USD."`
+	ByCategory   []usageCategoryBucket `json:"by_category" doc:"The team's spend by category."`
+	ByUser       *[]usageUserBucket    `json:"by_user,omitempty" doc:"The team's spend by the person who started each run, present only for a team admin, and an empty array when no person has spend in the window."`
+	ByRule       []usageRuleBucket     `json:"by_rule" doc:"The team's spend by the event handler that started each run."`
+	ByModel      []usageModelBucket    `json:"by_model" doc:"The team's spend by model, leaving out spend attributed to no single model."`
+	ByDay        []usageDayBucket      `json:"by_day" doc:"The team's spend by UTC day."`
+	ByDayModel   []usageDayModelBucket `json:"by_day_model" doc:"The team's spend by UTC day and model, leaving out spend attributed to no single model."`
 }
 
 // usageOrgResponse is the org rollup. Partition invariant: total_cost_usd ==
@@ -151,22 +151,31 @@ type usageTeamResponse struct {
 // axes (creator / category), so neither sums to total on its own; a consumer
 // reproducing the total must add by_team + org_level, not by_team alone.
 type usageOrgResponse struct {
-	TotalCostUSD float64               `json:"total_cost_usd"`
-	ByTeam       []usageTeamBucket     `json:"by_team"`
-	ByUser       []usageUserBucket     `json:"by_user"`
-	OrgLevel     []usageOrgLevelBucket `json:"org_level"`
-	ByCategory   []usageCategoryBucket `json:"by_category"`
-	ByModel      []usageModelBucket    `json:"by_model"`
-	ByDay        []usageDayBucket      `json:"by_day"`
-	ByDayModel   []usageDayModelBucket `json:"by_day_model"`
+	TotalCostUSD float64               `json:"total_cost_usd" doc:"The organization's total spend in the window in USD, which equals the sum of by_team and org_level."`
+	ByTeam       []usageTeamBucket     `json:"by_team" doc:"Spend attributed to each team."`
+	ByUser       []usageUserBucket     `json:"by_user" doc:"Spend by the person who started each run, across every team."`
+	OrgLevel     []usageOrgLevelBucket `json:"org_level" doc:"Spend attributed to no team, by category."`
+	ByCategory   []usageCategoryBucket `json:"by_category" doc:"The organization's spend by category."`
+	ByModel      []usageModelBucket    `json:"by_model" doc:"The organization's spend by model, leaving out spend attributed to no single model."`
+	ByDay        []usageDayBucket      `json:"by_day" doc:"The organization's spend by UTC day."`
+	ByDayModel   []usageDayModelBucket `json:"by_day_model" doc:"The organization's spend by UTC day and model, leaving out spend attributed to no single model."`
 	// ByRule is populated ONLY in local mode (N=1): there's a single team, so the
 	// cross-team boundary that keeps per-rule detail off the org rollup in multi
 	// mode doesn't apply, and the local console can read everything in one request.
 	// omitempty → absent entirely in multi mode.
-	ByRule []usageRuleBucket `json:"by_rule,omitempty"`
+	ByRule []usageRuleBucket `json:"by_rule,omitempty" doc:"Spend by the event handler that started each run, present only in local mode."`
 }
 
 // --- handlers ---
+
+var opUsageMe = httpx.NewJSONOp[httpx.NoBody, usageMeResponse](httpx.OpSpec{
+	Pattern:     "GET /api/me/usage",
+	ID:          "get_my_usage",
+	Summary:     "Get your LLM spend",
+	Description: "Returns the LLM spend of the runs the caller started in their current organization over the window, in USD, with its totals by category, model, and UTC day.",
+	Query:       httpx.WindowQuery(),
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleUsageMe returns the caller's own spend: manual runs they created
 // (autonomous/system rows carry a NULL creator and are excluded by
@@ -179,9 +188,13 @@ func (h *Handler) handleUsageMe(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	since, until, errMsg := httpx.ParseWindow(r.URL.Query(), time.Now().UTC())
-	if errMsg != "" {
-		httpx.BadRequest(w, errMsg)
+	q, ok := opUsageMe.Query(w, r)
+	if !ok {
+		return
+	}
+	var v httpx.Validation
+	since, until := httpx.ParseWindow(&v, q, time.Now().UTC())
+	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
 
@@ -198,7 +211,7 @@ func (h *Handler) handleUsageMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	httpx.WriteJSON(w, http.StatusOK, usageMeResponse{
+	opUsageMe.Write(w, usageMeResponse{
 		TotalCostUSD: sumSpendCost(rows),
 		ByCategory:   spendByCategory(rows),
 		ByModel:      spendByModel(rows),
@@ -206,6 +219,16 @@ func (h *Handler) handleUsageMe(w http.ResponseWriter, r *http.Request) {
 		ByDayModel:   spendByDayModel(rows),
 	})
 }
+
+var opUsageTeam = httpx.NewJSONOp[httpx.NoBody, usageTeamResponse](httpx.OpSpec{
+	Pattern:     "GET /api/teams/{team_id}/usage",
+	ID:          "get_team_usage",
+	Summary:     "Get a team's LLM spend",
+	Description: "Returns the team's LLM spend over the window, in USD, with its totals by category, event handler, model, and UTC day. The totals by person are included only for a team admin.",
+	PathParams:  map[string]string{"team_id": "The team's id, or default for the one team in local mode."},
+	Query:       httpx.WindowQuery(),
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleUsageTeam returns one team's breakdown. Gate: MEMBERSHIP — the same
 // resolution the team's activity node uses, because team spend is a fact about
@@ -257,9 +280,13 @@ func (h *Handler) handleUsageTeam(w http.ResponseWriter, r *http.Request) {
 		httpx.InternalError(w, "usage", err)
 		return
 	}
-	since, until, errMsg := httpx.ParseWindow(r.URL.Query(), time.Now().UTC())
-	if errMsg != "" {
-		httpx.BadRequest(w, errMsg)
+	q, ok := opUsageTeam.Query(w, r)
+	if !ok {
+		return
+	}
+	var v httpx.Validation
+	since, until := httpx.ParseWindow(&v, q, time.Now().UTC())
+	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
 
@@ -317,8 +344,18 @@ func (h *Handler) handleUsageTeam(w http.ResponseWriter, r *http.Request) {
 		byUser := spendByUser(rows, userProfiles)
 		resp.ByUser = &byUser
 	}
-	httpx.WriteJSON(w, http.StatusOK, resp)
+	opUsageTeam.Write(w, resp)
 }
+
+var opUsageOrg = httpx.NewJSONOp[httpx.NoBody, usageOrgResponse](httpx.OpSpec{
+	Pattern:     "GET /api/orgs/{org_id}/usage",
+	ID:          "get_org_usage",
+	Summary:     "Get an organization's LLM spend",
+	Description: "Returns the organization's LLM spend over the window, in USD, with its totals by team, person, category, model, and UTC day, and the spend attributed to no team.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Query:       httpx.WindowQuery(),
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleUsageOrg returns the org rollup across every team + system job. Gate:
 // org admin (a cross-team read — the authorized intent, not a workaround).
@@ -336,9 +373,13 @@ func (h *Handler) handleUsageOrg(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	since, until, errMsg := httpx.ParseWindow(r.URL.Query(), time.Now().UTC())
-	if errMsg != "" {
-		httpx.BadRequest(w, errMsg)
+	q, ok := opUsageOrg.Query(w, r)
+	if !ok {
+		return
+	}
+	var v httpx.Validation
+	since, until := httpx.ParseWindow(&v, q, time.Now().UTC())
+	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
 
@@ -388,7 +429,7 @@ func (h *Handler) handleUsageOrg(w http.ResponseWriter, r *http.Request) {
 	if local {
 		resp.ByRule = spendByRule(rows, ruleNames)
 	}
-	httpx.WriteJSON(w, http.StatusOK, resp)
+	opUsageOrg.Write(w, resp)
 }
 
 // teamCapUpdate is the PUT /api/teams/{team_id}/usage/cap body. A pointer so an
@@ -894,9 +935,9 @@ func (h *Handler) Register(m httpx.Mounts) {
 	// held to team admin), /orgs/{id} is org-admin. The team/org reads use the
 	// admin-pool ListSpendSystem (the route's gate is the authorization for
 	// crossing RLS).
-	m.API("GET /api/me/usage", h.handleUsageMe)
-	m.API("GET /api/teams/{team_id}/usage", h.handleUsageTeam)
-	m.API("GET /api/orgs/{org_id}/usage", h.handleUsageOrg)
+	m.Op(opUsageMe, h.handleUsageMe)
+	m.Op(opUsageTeam, h.handleUsageTeam)
+	m.Op(opUsageOrg, h.handleUsageOrg)
 	// Org-scoped operations subset: an org admin's own queue waits + run
 	// durations + failure rates. Org-admin gated, SaaS-safe (no cross-tenant
 	// machine truth) — the org-facing complement to the operator-only fleet

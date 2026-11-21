@@ -147,7 +147,7 @@ func TestDeliverableWriteGate_Postgres(t *testing.T) {
 	mux := http.NewServeMux()
 	mount := func(pattern string, hf http.HandlerFunc) { mux.HandleFunc(pattern, hf) }
 	New(stores.Tx, authz.New(h.AdminDB, stores.Tx), nil, resolver, nil, nil, func() string { return "" }).
-		Register(httpx.Mounts{API: mount, APIMutating: mount})
+		Register(httpx.Mounts{API: mount, APIMutating: mount, Op: func(op httpx.Operation, h http.HandlerFunc) { mount(op.Spec().Pattern, h) }})
 
 	do := func(caller, method, path string, body any) *httptest.ResponseRecorder {
 		t.Helper()

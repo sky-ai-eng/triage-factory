@@ -27,25 +27,25 @@ import (
 // taskJSON is the API representation of a task. Maps entity-joined fields
 // to the frontend's expected shape for backward compatibility.
 type taskJSON struct {
-	ID                  string   `json:"id"`
-	EntityID            string   `json:"entity_id"`   // FK to entities.id — lets callers correlate tasks back to their entity
-	Source              string   `json:"source"`      // from entity
-	SourceID            string   `json:"source_id"`   // from entity
-	SourceURL           string   `json:"source_url"`  // from entity
-	Title               string   `json:"title"`       // from entity
-	EntityKind          string   `json:"entity_kind"` // "pr" | "issue"
-	EventType           string   `json:"event_type"`
-	DedupKey            string   `json:"dedup_key,omitempty"`
-	Severity            string   `json:"severity,omitempty"`
-	RelevanceReason     string   `json:"relevance_reason,omitempty"`
-	ScoringStatus       string   `json:"scoring_status"`
-	CreatedAt           string   `json:"created_at"`
-	Status              string   `json:"status"`
-	PriorityScore       *float64 `json:"priority_score"`
-	AutonomySuitability *float64 `json:"autonomy_suitability"`
-	AISummary           string   `json:"ai_summary,omitempty"`
-	PriorityReasoning   string   `json:"priority_reasoning,omitempty"`
-	CloseReason         string   `json:"close_reason,omitempty"`
+	ID                  string   `json:"id" doc:"The task's id."`
+	EntityID            string   `json:"entity_id" doc:"The id of the entity the task is about: a pull request, an issue, a vulnerable package, or a Slack thread or message."` // FK to entities.id — lets callers correlate tasks back to their entity
+	Source              string   `json:"source" doc:"The system the task's entity comes from, such as github or jira."`                                                         // from entity
+	SourceID            string   `json:"source_id" doc:"The entity's key in its source, such as owner/repo#42 for a pull request or PROJ-123 for a Jira issue."`                // from entity
+	SourceURL           string   `json:"source_url" doc:"The entity's page in its source."`                                                                                     // from entity
+	Title               string   `json:"title" doc:"The entity's title."`                                                                                                       // from entity
+	EntityKind          string   `json:"entity_kind" doc:"The kind of entity the task is about: pr, issue, vulnerable_package, thread, or message."`                            // "pr" | "issue"
+	EventType           string   `json:"event_type" doc:"The event type that created the task, such as github:pr:review_requested."`
+	DedupKey            string   `json:"dedup_key,omitempty" doc:"The value that tells apart tasks of one event type on one entity, such as a label name, absent for most event types."`
+	Severity            string   `json:"severity,omitempty" doc:"The task's severity, absent when none is recorded."`
+	RelevanceReason     string   `json:"relevance_reason,omitempty" doc:"Why the task concerns the person it was routed to, one of review_requested, authored, mentioned, and assigned, absent when none applies."`
+	ScoringStatus       string   `json:"scoring_status" doc:"Where the task is in priority scoring: pending, in_progress, or scored."`
+	CreatedAt           string   `json:"created_at" doc:"When the task was created, as an RFC 3339 timestamp."`
+	Status              string   `json:"status" doc:"The task's lane: queued, in_progress, done, dismissed, or snoozed."`
+	PriorityScore       *float64 `json:"priority_score" doc:"How urgently the task needs a person's attention, from 0 to 1, or null before the task is scored."`
+	AutonomySuitability *float64 `json:"autonomy_suitability" doc:"How suitable the task is for an agent to work without a person, from 0 to 1, or null before the task is scored."`
+	AISummary           string   `json:"ai_summary,omitempty" doc:"A summary of the task written when it was scored, absent before then."`
+	PriorityReasoning   string   `json:"priority_reasoning,omitempty" doc:"The reasoning behind priority_score, absent before the task is scored."`
+	CloseReason         string   `json:"close_reason,omitempty" doc:"Why the task closed, such as run_completed, user_completed, user_dismissed, or auto_closed_by_event, absent while it is open."`
 	// SnoozeUntil — populated when the task is in a snoozed state.
 	// A snoozed task holds no claim (the tasks_queue_unclaimed CHECK),
 	// so this is only ever set on queue-lane tasks. Any claim-axis
@@ -55,53 +55,53 @@ type taskJSON struct {
 	// future-snoozed entries hidden via the TaskListFilter status filter;
 	// the Board's Queue lane could optionally render them at the
 	// tail with a "wakes Mar 5" badge (deferred UI follow-up).
-	SnoozeUntil string `json:"snooze_until,omitempty"`
+	SnoozeUntil string `json:"snooze_until,omitempty" doc:"When a snoozed task returns to the queue, as an RFC 3339 timestamp, absent when the task is not snoozed."`
 	// OpenSubtaskCount lets the UI flag a task whose Jira entity has open
 	// subtasks — the "consider decomposing" signal. Zero for
 	// GitHub tasks and Jira tickets without subtasks.
-	OpenSubtaskCount int `json:"open_subtask_count"`
+	OpenSubtaskCount int `json:"open_subtask_count" doc:"How many open subtasks the task's Jira issue has, 0 for any other entity."`
 	// Claim cols: exposed so the per-card assignee picker
 	// can render the current assignee without a second round-trip.
 	// Exactly one is set when claimed; both empty when unclaimed.
 	// omitempty keeps the wire shape clean for the unclaimed-queue case.
-	ClaimedByAgentID string `json:"claimed_by_agent_id,omitempty"`
-	ClaimedByUserID  string `json:"claimed_by_user_id,omitempty"`
+	ClaimedByAgentID string `json:"claimed_by_agent_id,omitempty" doc:"The id of the agent that holds the task, absent when no agent does."`
+	ClaimedByUserID  string `json:"claimed_by_user_id,omitempty" doc:"The id of the person who holds the task, absent when no person does."`
 	// TeamID is the task's owning team. Exposed so the multi-team board
 	// can color-code / tag rows by team. Always set; the
 	// frontend only surfaces it when the viewer belongs to ≥2 teams.
 	// TODO: board row color-coding consumes this.
-	TeamID string `json:"team_id,omitempty"`
+	TeamID string `json:"team_id,omitempty" doc:"The id of the team that owns the task, absent while no single team owns it."`
 	// Version is the task's optimistic-concurrency token (domain.Task.Version).
 	// Every task write requires the value the caller read and is refused with
 	// 409 VERSION_CONFLICT once the task has moved past it; every write's
 	// response carries the new one, so a client can chain writes without a
 	// read between them. Not omitempty: it is what the next write sends.
-	Version int64 `json:"version"`
+	Version int64 `json:"version" doc:"The task's version, which a write to the task must send and which each write raises."`
 	// RequestedReviewer is, on a github:pr:review_requested task, the
 	// requested user's login or team's org/slug as the event that spawned the
 	// task named it, for display. dedup_key identifies the reviewer, by
 	// GitHub's id ("user_id:<id>" / "team_id:<id>") when the request carried
 	// one, and pins it, so every event that bumps the task names the same one.
 	// Omitted on every other task.
-	RequestedReviewer string `json:"requested_reviewer,omitempty"`
+	RequestedReviewer string `json:"requested_reviewer,omitempty" doc:"On a github:pr:review_requested task, the requested user's login or the requested team's org/slug, absent on every other task."`
 	// VulnerablePackage is, on a task whose entity_kind is
 	// "vulnerable_package", the package and the Dependabot alerts open on it.
 	// Omitted on every other task.
-	VulnerablePackage *vulnerablePackageJSON `json:"vulnerable_package,omitempty"`
+	VulnerablePackage *vulnerablePackageJSON `json:"vulnerable_package,omitempty" doc:"The package and its open Dependabot alerts on a task whose entity_kind is vulnerable_package, absent on every other task."`
 	// ConversationID is the task's current conversation: the one a person's
 	// claim minted on a task a person holds, the agent's on a task the agent
 	// holds. Absent on a task nobody holds, and on one whose queued firing has
 	// not started its run.
-	ConversationID string `json:"conversation_id,omitempty"`
+	ConversationID string `json:"conversation_id,omitempty" doc:"The id of the task's current conversation, absent when nobody holds the task or its run has not started."`
 	// MemoryPending says a conversation on this task ended without leaving
 	// the memory its successor is owed, and the dispatcher claims none of the
 	// task's conversations until one exists. Not omitempty: false is a real
 	// answer about the task, and a flag that vanishes when false reads as one
 	// the server failed to compute.
-	MemoryPending bool `json:"memory_pending"`
+	MemoryPending bool `json:"memory_pending" doc:"Whether a conversation on the task ended without the memory the next conversation needs, in which case no further conversation on the task starts until that memory exists."`
 	// MemoryAttempt is the newest try at that memory — absent when none has
 	// run yet, which is the ordinary case for a wait that has just begun.
-	MemoryAttempt *memoryAttemptJSON `json:"memory_attempt,omitempty"`
+	MemoryAttempt *memoryAttemptJSON `json:"memory_attempt,omitempty" doc:"The newest attempt to write that memory, absent when none has run."`
 	// CanWrite is whether the caller may write the task (PATCH, claim,
 	// delegate, requeue), from the check those routes run
 	// (authz.Checker.UserCanWriteTask, and WritableTasks for a page of them),
@@ -109,14 +109,14 @@ type taskJSON struct {
 	// accept. On the detail read and on each row of the list. Absent from the
 	// task a write answers with, and when the check fails, which a client
 	// reads as unknown.
-	CanWrite *bool `json:"can_write,omitempty"`
+	CanWrite *bool `json:"can_write,omitempty" doc:"Whether the caller may update, claim, delegate, or requeue the task, present on the task reads and absent from a write's response or when the check fails."`
 	// ClaimTeamIDs is the teams the caller's claim of the task, or their
 	// delegate of it, may land it on (db.TaskStore.ClaimTeamCandidates), in
 	// the order that read gives: what those routes accept as team_id, and
 	// with one entry the team they resolve an absent team_id to. On the
 	// detail read only. A pointer so that no candidate is an empty list and
 	// a failed read is an absent key, which a client reads as unknown.
-	ClaimTeamIDs *[]string `json:"claim_team_ids,omitempty"`
+	ClaimTeamIDs *[]string `json:"claim_team_ids,omitempty" doc:"The ids of the teams the caller's claim or delegation may put the task on, in order, present on the single-task read only and absent when that read fails."`
 }
 
 // memoryAttemptJSON is the wire shape of the newest memory-generation attempt
@@ -127,12 +127,12 @@ type taskJSON struct {
 // free to grow a field the API has not decided to publish.
 type memoryAttemptJSON struct {
 	// Outcome is empty while the attempt is still running.
-	Outcome string `json:"outcome,omitempty"`
+	Outcome string `json:"outcome,omitempty" doc:"What the attempt came to: generated, empty, or failed, absent while it is running."`
 	// ErrorKind and ErrorMessage are set exactly when the outcome is `failed`.
 	// The message is TF's own wording, never an upstream response body.
-	ErrorKind    string `json:"error_kind,omitempty"`
-	ErrorMessage string `json:"error_message,omitempty"`
-	StartedAt    string `json:"started_at"`
+	ErrorKind    string `json:"error_kind,omitempty" doc:"Why the attempt failed, present only when outcome is failed."`
+	ErrorMessage string `json:"error_message,omitempty" doc:"A description of the failure, present only when outcome is failed."`
+	StartedAt    string `json:"started_at" doc:"When the attempt started, as an RFC 3339 timestamp."`
 }
 
 // vulnerablePackageJSON is what a vulnerable-package task shows of its
@@ -141,35 +141,35 @@ type memoryAttemptJSON struct {
 // key, which a repository rename rewrites, rather than from its snapshot,
 // which the next listing does.
 type vulnerablePackageJSON struct {
-	Repo      string `json:"repo"` // owner/name
-	Ecosystem string `json:"ecosystem"`
-	Package   string `json:"package"`
+	Repo      string `json:"repo" doc:"The repository, as owner/name."` // owner/name
+	Ecosystem string `json:"ecosystem" doc:"The package's ecosystem, such as npm or pip."`
+	Package   string `json:"package" doc:"The package's name."`
 	// HighestSeverity is the highest severity among the open alerts, one of
 	// low, medium, high and critical. Absent when no open alert carries one of
 	// those four, which includes a package whose last alert closed.
-	HighestSeverity string `json:"highest_severity,omitempty"`
-	OpenAlertCount  int    `json:"open_alert_count"`
+	HighestSeverity string `json:"highest_severity,omitempty" doc:"The highest severity among the open alerts, one of low, medium, high, and critical, absent when no open alert has one of those."`
+	OpenAlertCount  int    `json:"open_alert_count" doc:"How many alerts are open on the package."`
 	// Alerts are the open alerts, highest severity first and by number within
 	// a severity. Never null.
-	Alerts []dependabotAlertJSON `json:"alerts"`
+	Alerts []dependabotAlertJSON `json:"alerts" doc:"The open alerts, highest severity first and then by number."`
 }
 
 // dependabotAlertJSON is one open Dependabot alert. summary is the advisory's,
 // written outside the org, so a client renders it as plain text.
 type dependabotAlertJSON struct {
-	Number int    `json:"number"`
-	URL    string `json:"url"` // the alert's page on GitHub
-	GHSAID string `json:"ghsa_id"`
-	CVEID  string `json:"cve_id,omitempty"`
+	Number int    `json:"number" doc:"The alert's number in its repository."`
+	URL    string `json:"url" doc:"The alert's page on GitHub."` // the alert's page on GitHub
+	GHSAID string `json:"ghsa_id" doc:"The advisory's GitHub Security Advisory id."`
+	CVEID  string `json:"cve_id,omitempty" doc:"The advisory's CVE id, absent when it has none."`
 	// Summary is absent when the advisory has none.
-	Summary      string `json:"summary,omitempty"`
-	Severity     string `json:"severity"`
-	ManifestPath string `json:"manifest_path"`
+	Summary      string `json:"summary,omitempty" doc:"The advisory's summary, to be shown as plain text, absent when the advisory has none."`
+	Severity     string `json:"severity" doc:"The advisory's severity: low, medium, high, or critical."`
+	ManifestPath string `json:"manifest_path" doc:"The path of the manifest file that declares the package."`
 	// Scope is runtime or development, absent when GitHub does not know.
-	Scope                  string `json:"scope,omitempty"`
-	VulnerableVersionRange string `json:"vulnerable_version_range,omitempty"`
+	Scope                  string `json:"scope,omitempty" doc:"Whether the dependency is runtime or development, absent when GitHub does not know."`
+	VulnerableVersionRange string `json:"vulnerable_version_range,omitempty" doc:"The range of versions the advisory affects, absent when GitHub reports none."`
 	// FirstPatchedVersion is absent when no fixed version has been released.
-	FirstPatchedVersion string `json:"first_patched_version,omitempty"`
+	FirstPatchedVersion string `json:"first_patched_version,omitempty" doc:"The first version that fixes the advisory, absent when none has been released."`
 }
 
 func vulnerablePackageToJSON(sourceID string, p *domain.TaskVulnerablePackage) *vulnerablePackageJSON {
@@ -305,33 +305,33 @@ type taskLaneRequest struct {
 	// Statuses selects the lanes. Empty = all. Validated against
 	// db.TaskListStatuses; an unknown value is a client fault, not an
 	// empty page.
-	Statuses []string `json:"statuses"`
+	Statuses []string `json:"statuses" doc:"Lanes to include, from queued, in_progress, done, dismissed, and snoozed; empty includes every lane."`
 	// TeamIDs is the per-page multi-team view scope. Empty = the union of
 	// the viewer's teams (the RLS-scoped default). Well-formedness is
 	// checked strictly: a corrupt filter must not silently widen back to
 	// the union.
-	TeamIDs []string `json:"team_ids"`
+	TeamIDs []string `json:"team_ids" doc:"Ids of the teams whose tasks to include; empty includes every team the caller belongs to."`
 	// OnlyUnclaimed keeps just the rows nobody has taken.
-	OnlyUnclaimed bool `json:"only_unclaimed"`
+	OnlyUnclaimed bool `json:"only_unclaimed" doc:"Whether to include only tasks nobody holds."`
 	// IncludeSnoozed keeps rows still inside their snooze window.
-	IncludeSnoozed bool `json:"include_snoozed"`
+	IncludeSnoozed bool `json:"include_snoozed" doc:"Whether to include tasks still inside their snooze window."`
 	// ClosedSince (RFC3339) windows done/dismissed rows by closed_at.
 	// Absent = no window. The board asks for the seven days it wants to
 	// render; the server no longer applies one behind the caller's back.
-	ClosedSince string `json:"closed_since"`
+	ClosedSince string `json:"closed_since" doc:"An RFC 3339 timestamp that limits done and dismissed tasks to those closed at or after it."`
 	// CreatedSince (RFC3339) keeps rows created at or after it, whatever
 	// their status — combined with a count-only page it is the "tasks over
 	// the last N days" figure. Absent = no window.
-	CreatedSince string `json:"created_since"`
+	CreatedSince string `json:"created_since" doc:"An RFC 3339 timestamp that limits the result to tasks created at or after it."`
 	// Sources narrows to tasks whose entity came from these sources.
 	// Validated against the event catalog's source vocabulary
 	// (domain.EventSources); an unknown value is a client fault, not an
 	// empty page. Empty = all sources.
-	Sources []string `json:"sources"`
+	Sources []string `json:"sources" doc:"Sources whose tasks to include, such as github or jira; empty includes every source."`
 	// EntityKinds narrows to tasks whose entity is of these kinds, as a
 	// lane of vulnerable packages is. Validated against domain.EntityKinds
 	// on the same terms as Sources. Empty = every kind.
-	EntityKinds []string `json:"entity_kinds"`
+	EntityKinds []string `json:"entity_kinds" doc:"Entity kinds whose tasks to include, such as pr or vulnerable_package; empty includes every kind."`
 }
 
 // taskListRequest is the body of POST /api/tasks/list: the lane, the reader's
@@ -342,37 +342,37 @@ type taskListRequest struct {
 	// IDs narrows to the tasks with these ids, for a caller that already
 	// holds the ids of the tasks it shows. Validated by taskListIDs. Empty =
 	// every id.
-	IDs []string `json:"ids"`
+	IDs []string `json:"ids" doc:"Ids of the tasks to include, at most 200, each a UUID in lowercase hyphenated form; empty includes every task."`
 	// EntityIDs narrows to the tasks on these entities, for a caller that
 	// holds the entities it shows and wants their work. Validated like IDs.
 	// Empty = every entity.
-	EntityIDs []string `json:"entity_ids"`
+	EntityIDs []string `json:"entity_ids" doc:"Ids of the entities whose tasks to include, at most 200, each a UUID in lowercase hyphenated form; empty includes every entity."`
 	// CreatedBefore (RFC3339) is CreatedSince's other half: rows created at
 	// or before it. The pair is how a lane asks for a window rather than a
 	// ray, and either end may stand alone. It sits with the reader's own
 	// narrowing rather than in the lane: it is the moving end of the window
 	// a column's filter popover offers, so a facet computed under it would
 	// describe the reader's slice instead of the column.
-	CreatedBefore string `json:"created_before"`
+	CreatedBefore string `json:"created_before" doc:"An RFC 3339 timestamp that limits the result to tasks created at or before it."`
 	// EventTypes narrows to these stations. Validated against the catalog
 	// (domain.EventTypeIDs) on the same terms as Sources. Empty = all.
-	EventTypes []string `json:"event_types"`
+	EventTypes []string `json:"event_types" doc:"Event types whose tasks to include, from the catalog GET /api/event-types returns; empty includes every event type."`
 	// Search is a case-insensitive substring the row must carry in its
 	// title, source id, ai_summary or event type. Trimmed; empty after the
 	// trim is absent. It runs here rather than in the client because a lane
 	// holds one page: a match on an unfetched page is invisible to a
 	// client-side filter, and the tail's total would answer a different
 	// query from the items above it.
-	Search string `json:"search"`
+	Search string `json:"search" doc:"Text the task's title, source id, summary, or event type must contain, matched without regard to case."`
 	// SortKey reorders the lane (db.TaskListSortKeys). Absent asks for the
 	// store's default order — there is deliberately no "default" value to
 	// send, since a name for the absent case is a second spelling of it.
-	SortKey string `json:"sort_key"`
+	SortKey string `json:"sort_key" doc:"Orders the result by title, created, event_type, or claimee; absent orders it by the default, open tasks needing attention first and then by priority."`
 	// SortDir is SortKey's direction. Absent alongside a key means desc.
 	// Alone it is refused rather than ignored: the default order has no
 	// direction, so a lone sort_dir is a caller expecting something the
 	// answer will not show.
-	SortDir string `json:"sort_dir"`
+	SortDir string `json:"sort_dir" doc:"The direction of sort_key, asc or desc, desc when absent; it is refused without sort_key."`
 
 	httpx.PageRequest
 }
@@ -770,6 +770,14 @@ func teamDefaultPriority(ctx context.Context, tx db.TxStores, orgID, teamID, eve
 	return priority, nil
 }
 
+var opTaskList = httpx.NewListOp[taskListRequest, taskJSON](httpx.OpSpec{
+	Pattern:     "POST /api/tasks/list",
+	ID:          "list_tasks",
+	Summary:     "List tasks",
+	Description: "Returns one page of the tasks the caller can see, narrowed by the body's filters and ordered by sort_key, or without one by attention and then priority. Each task says whether the caller may write it. A page_token resumes after the last task of the page that returned it, and is refused for different filters.",
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
+
 // handleTaskList is the tasks resource's list read — every task-list surface
 // (the triage deck, each board column) is a filter set over this one route.
 //
@@ -803,8 +811,8 @@ func (s *Server) handleTaskList(w http.ResponseWriter, r *http.Request) {
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 
-	var req taskListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opTaskList.Decode(w, r)
+	if !ok {
 		return
 	}
 
@@ -892,7 +900,7 @@ func (s *Server) handleTaskList(w http.ResponseWriter, r *http.Request) {
 		items[i] = taskToJSON(t)
 	}
 	s.addTaskCanWrite(r.Context(), orgID, userID, items)
-	httpx.WriteListKeyset(w, page, items, total, nextKey)
+	opTaskList.WriteKeyset(w, page, items, total, nextKey)
 }
 
 // addTaskCanWrite puts the write gate's answer on each task of a list page,
@@ -1941,9 +1949,9 @@ func (s *Server) registerTaskRoutes() {
 	s.apiMutating("POST /api/tasks", s.handleTaskCreate)
 	// The one tasks list read: every filtered view of the queue goes through
 	// it, so two spellings of the same read cannot drift into two different
-	// hidden filters. apiMutating is deliberate for a body-carrying read — see
-	// handleTaskList.
-	s.apiMutating("POST /api/tasks/list", s.handleTaskList)
+	// hidden filters. As a POST it mounts behind the CSRF check, which is
+	// deliberate for a body-carrying read — see handleTaskList.
+	s.op(opTaskList, s.handleTaskList)
 	// The lane's own event-type set, beside the list and under the same
 	// filters minus the reader's own — the chips a lane offers are about the
 	// lane, not about the page a filtered query happened to return. A POST

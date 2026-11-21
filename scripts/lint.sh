@@ -170,6 +170,23 @@ go_group() {
     rc=1
   fi
 
+  # TestAPISpec renders api/openapi.json from the routes' declared operations
+  # and fails on an undocumented field or parameter, a route with no operation,
+  # or a stale spec; --fix writes the spec instead of comparing. It builds
+  # package main, so it needs frontend/dist like golangci-lint above.
+  blue "API spec"
+  if (( FIX )); then
+    if go test -run '^TestAPISpec$' -count=1 . -args -update-api-spec; then
+      green "api/openapi.json regenerated"
+    else
+      rc=1
+    fi
+  elif go test -run '^TestAPISpec$' -count=1 .; then
+    green "API spec OK"
+  else
+    rc=1
+  fi
+
   # forbidigo (in .golangci.yml) bans os.UserHomeDir outside internal/paths,
   # but its AST matcher can't see string literals — so the ".triagefactory"
   # path literal needs this companion grep. It must catch both the
@@ -436,11 +453,11 @@ frontend_group() {
     corepack enable >/dev/null 2>&1 || true
   fi
   if ! command -v pnpm >/dev/null 2>&1; then
-    red "pnpm not found — run: corepack enable (version pinned in frontend/package.json)"
+    red "pnpm not found — run: corepack enable (version pinned in package.json at the repo root)"
     return 1
   fi
   if [[ ! -d node_modules ]]; then
-    red "frontend deps not installed — run: cd frontend && pnpm install"
+    red "frontend deps not installed — run: pnpm install (at the repo root)"
     return 1
   fi
 

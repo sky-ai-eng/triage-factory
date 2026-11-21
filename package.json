@@ -1,0 +1,5 @@
+{
+  "name": "triage-factory",
+  "private": true,
+  "packageManager": "pnpm@11.9.0"
+}

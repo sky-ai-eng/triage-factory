@@ -1,3 +1,7 @@
+packages:
+  - frontend
+  - e2e/sso
+
 # pnpm supply-chain hardening.
 #
 # minimumReleaseAge: refuse to *resolve* a dependency version until it has been

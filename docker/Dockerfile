@@ -37,20 +37,24 @@
 # --- stage 1: frontend ------------------------------------------------------
 
 FROM --platform=$BUILDPLATFORM node:22.23.4-alpine AS frontend-builder
-WORKDIR /src/frontend
+WORKDIR /src
 # pnpm is provisioned via corepack, pinned by the "packageManager" field
-# in frontend/package.json. COREPACK_ENABLE_DOWNLOAD_PROMPT=0 keeps the
+# in the root package.json. COREPACK_ENABLE_DOWNLOAD_PROMPT=0 keeps the
 # pinned-version download non-interactive in the build.
 ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
-# pnpm-workspace.yaml carries the dependency overrides, and pnpm records them
-# in the lockfile — so a frozen install that can't see the file reads it as a
-# config/lockfile mismatch and refuses to proceed. It belongs in the same
-# dependency-only layer as the manifest, ahead of the full source copy, so an
-# unrelated source edit doesn't invalidate the install cache.
-COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml ./
-RUN corepack enable && pnpm install --frozen-lockfile
-COPY frontend/ ./
-RUN pnpm run build
+# The repo root is the pnpm workspace: the root pnpm-workspace.yaml lists the
+# members and carries the dependency overrides, and pnpm records both in the
+# root pnpm-lock.yaml — so a frozen install that can't see the workspace file
+# reads it as a config/lockfile mismatch and refuses to proceed. The three
+# root files and the frontend's manifest belong in the same dependency-only
+# layer, ahead of the full source copy, so an unrelated source edit doesn't
+# invalidate the install cache. --filter installs the frontend alone, since
+# the workspace's other members are not copied into this stage.
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY frontend/package.json frontend/
+RUN corepack enable && pnpm install --frozen-lockfile --filter ./frontend
+COPY frontend/ frontend/
+RUN cd frontend && pnpm run build
 
 # --- stage 2: Agent SDK pre-install -----------------------------------------
 #

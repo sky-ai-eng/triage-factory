@@ -376,6 +376,15 @@ type Handler struct {
 	fetcher *avatarFetcher
 }
 
+var opAvatar = httpx.NewBytesOp[httpx.NoBody](httpx.OpSpec{
+	Pattern:     "GET /api/avatars/{user_id}",
+	ID:          "get_avatar",
+	Summary:     "Get a person's avatar",
+	Description: "Returns the avatar image of a person in the caller's organization. The image is fetched from the address the person's sign-in provider gave and cached for a short time.",
+	PathParams:  map[string]string{"user_id": "The person's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintYes},
+}, "image/png", "image/jpeg", "image/gif", "image/webp")
+
 // handleAvatar proxies one user's OAuth avatar same-origin so it renders under
 // the app's `img-src 'self'` CSP.
 //
@@ -459,5 +468,5 @@ func (h *Handler) Register(m httpx.Mounts) {
 	// to the caller + co-org-members (a cross-org id 404s). One
 	// process-lifetime fetcher owns the upstream fetch + cache. Consumed by
 	// Usage's by-user roster and the topbar UserMenu.
-	m.API("GET /api/avatars/{user_id}", h.handleAvatar)
+	m.Op(opAvatar, h.handleAvatar)
 }
