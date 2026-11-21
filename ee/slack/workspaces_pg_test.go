@@ -662,6 +662,60 @@ func TestHandleConnect_AuthTestFailure_400(t *testing.T) {
 	}
 }
 
+// TestHandleConnect_TokenCheckFaults: Slack refusing the bot token is a fault
+// in bot_token, and a Slack that answers nothing about it is a 502 that echoes
+// no transport detail. Neither persists anything.
+func TestHandleConnect_TokenCheckFaults(t *testing.T) {
+	r := newSlackWorkspaceRig(t, "https://tf.example")
+	orgID, owner, _ := pgtest.SeedOrgWithUser(t, r.h, "slack-tokencheck")
+
+	rec := httptest.NewRecorder()
+	r.hdl.handleConnect(rec, r.importReq(owner, orgID, map[string]string{"bot_token": "xoxb-refused", "app_token": "xapp-1"}))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("refused token: status = %d, want 400 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if errs := decodeErrors(t, rec); len(errs) != 1 || errs[0].Reason != httpx.ReasonInvalidField || errs[0].Field != "bot_token" || !strings.Contains(errs[0].Message, "invalid_auth") {
+		t.Errorf("refused token: errors = %+v, want one INVALID_FIELD on bot_token naming invalid_auth", errs)
+	}
+
+	r.fake.stageAuthTestStatus("xoxb-outage", http.StatusServiceUnavailable)
+	rec = httptest.NewRecorder()
+	r.hdl.handleConnect(rec, r.importReq(owner, orgID, map[string]string{"bot_token": "xoxb-outage", "app_token": "xapp-1"}))
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("Slack outage: status = %d, want 502 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if errs := decodeErrors(t, rec); len(errs) != 1 || errs[0].Reason != httpx.ReasonUpstreamUnavailable || errs[0].Field != "" || strings.Contains(errs[0].Message, "503") {
+		t.Errorf("Slack outage: errors = %+v, want one UPSTREAM_UNAVAILABLE with no field and no upstream detail", errs)
+	}
+
+	if list := r.listConnections(owner, orgID); len(list) != 0 {
+		t.Errorf("workspaces after failed token checks = %v; want none persisted", list)
+	}
+}
+
+// TestSlack_TransportFaultsNameTheField: the manifest's transport parameter
+// and the import's transport field, when both credentials leave it to the
+// caller, are refused by name.
+func TestSlack_TransportFaultsNameTheField(t *testing.T) {
+	r := newSlackWorkspaceRig(t, "https://tf.example")
+	orgID, owner, _ := pgtest.SeedOrgWithUser(t, r.h, "slack-transportfault")
+
+	rec := httptest.NewRecorder()
+	r.hdl.handleManifest(rec, r.manifestReq(owner, orgID, "carrier_pigeon"))
+	if errs := decodeErrors(t, rec); rec.Code != http.StatusBadRequest || len(errs) != 1 ||
+		errs[0].Reason != httpx.ReasonInvalidParam || errs[0].Field != "transport" {
+		t.Errorf("manifest: %d %+v, want 400 INVALID_PARAM on transport", rec.Code, errs)
+	}
+
+	r.fake.stageConnectOK("xoxb-both", "T0BOTH0001", "Acme", "U0BOTB", "A0BOTH0001", "")
+	rec = httptest.NewRecorder()
+	r.hdl.handleConnect(rec, r.importReq(owner, orgID, map[string]string{"bot_token": "xoxb-both", "signing_secret": "s", "app_token": "xapp-both"}))
+	if errs := decodeErrors(t, rec); rec.Code != http.StatusBadRequest || len(errs) != 1 ||
+		errs[0].Reason != httpx.ReasonMissingField || errs[0].Field != "transport" {
+		t.Errorf("import: %d %+v, want 400 MISSING_FIELD on transport", rec.Code, errs)
+	}
+}
+
 // TestHandleConnect_AppTokenValidationFailure_400: apps.connections.open
 // rejecting the app token also surfaces as a 400, and nothing is persisted.
 func TestHandleConnect_AppTokenValidationFailure_400(t *testing.T) {

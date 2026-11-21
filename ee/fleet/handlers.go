@@ -407,7 +407,7 @@ func (h *handler) handleInstanceUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var v httpx.Validation
-	draining, state := req.Draining.Read(&v, "draining")
+	draining, state := req.Draining.ReadNonNull(&v, "draining")
 	switch state {
 	case httpx.PatchAbsent:
 		// A PATCH that names no field wrote nothing, so it must not answer as
@@ -556,7 +556,7 @@ func (h *handler) handleInstanceSandboxes(w http.ResponseWriter, r *http.Request
 	}
 	limit, ok := parseSandboxLimit(q.Get("limit"))
 	if !ok {
-		httpx.BadRequest(w, "limit must be a positive integer")
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidParam, Message: "limit must be a positive integer", Field: "limit"})
 		return
 	}
 	ctx := r.Context()

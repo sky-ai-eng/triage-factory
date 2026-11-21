@@ -417,6 +417,35 @@ func TestSSOConnectionGet_NoPublicURL_500(t *testing.T) {
 	}
 }
 
+// TestSSO_FieldFaultsNameTheField: each SSO route's refusal of a missing or
+// unusable body field carries the field it is about.
+func TestSSO_FieldFaultsNameTheField(t *testing.T) {
+	r, _ := newSSORig(t)
+	owner := r.seedUser()
+	r.seedOrg(owner, "sso-field-faults")
+	sid := r.signInAs(owner)
+
+	for _, tc := range []struct {
+		method, path string
+		body         any
+		reason       string
+		field        string
+	}{
+		{http.MethodPost, "/api/sso/connection", map[string]string{}, "MISSING_FIELD", "metadata_url"},
+		{http.MethodPost, "/api/sso/connection", map[string]string{"metadata_url": "http://idp/metadata.xml"}, "INVALID_FIELD", "metadata_url"},
+		{http.MethodPatch, "/api/sso/connection/enforcement", map[string]any{}, "MISSING_FIELD", "enforced"},
+		{http.MethodPost, "/api/sso/break-glass", map[string]string{"email": " "}, "MISSING_FIELD", "email"},
+		{http.MethodPost, "/api/sso/domains", map[string]string{"domain": "not a domain"}, "INVALID_FIELD", "domain"},
+	} {
+		resp := doReq(r, tc.method, tc.path, sid, tc.body)
+		raw := readBody(resp)
+		if resp.StatusCode != http.StatusBadRequest ||
+			!strings.Contains(raw, `"reason":"`+tc.reason+`"`) || !strings.Contains(raw, `"field":"`+tc.field+`"`) {
+			t.Errorf("%s %s %v = %d %s; want 400 %s on %s", tc.method, tc.path, tc.body, resp.StatusCode, raw, tc.reason, tc.field)
+		}
+	}
+}
+
 // TestSSOConnectionCreate_NonHTTPSMetadata_400: metadata_url must be a valid
 // https URL — SSRF defense-in-depth, since GoTrue fetches it server-side from
 // inside the compose network. Non-https / malformed values are rejected before

@@ -17,10 +17,6 @@ func (m muxMounter) matched(w http.ResponseWriter, _ *http.Request) { w.WriteHea
 
 func (m muxMounter) API(pattern string, _ http.HandlerFunc) { m.mux.HandleFunc(pattern, m.matched) }
 
-func (m muxMounter) APIMutating(pattern string, _ http.HandlerFunc) {
-	m.mux.HandleFunc(pattern, m.matched)
-}
-
 func (m muxMounter) Raw(pattern string, _ http.Handler) { m.mux.HandleFunc(pattern, m.matched) }
 
 func (m muxMounter) Op(op httpx.Operation, _ http.HandlerFunc) {

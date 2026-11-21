@@ -108,7 +108,7 @@ func (h *ssoBreakGlassHandler) handleBreakGlassAdd(w http.ResponseWriter, r *htt
 	}
 	email := strings.ToLower(strings.TrimSpace(body.Email))
 	if email == "" {
-		httpx.BadRequest(w, "email is required")
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "email is required", Field: "email"})
 		return
 	}
 
@@ -173,7 +173,7 @@ func (h *ssoBreakGlassHandler) handleBreakGlassRemove(w http.ResponseWriter, r *
 	}
 	target := r.PathValue("user_id")
 	if _, err := uuid.Parse(target); err != nil {
-		httpx.BadRequest(w, "invalid user id")
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidID, Message: "user_id must be a UUID"})
 		return
 	}
 

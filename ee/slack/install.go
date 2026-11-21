@@ -52,8 +52,9 @@ func init() {
 
 // install mounts the Slack connection, install and channel surfaces plus both
 // ingest transports on the core server through the extension API
-// (mountRoutes). The connection and channel routes go through
-// API/APIMutating (session + CSRF, like core's own routes); the two webhook
+// (mountRoutes). The connection and channel routes are declared operations
+// mounted through Op (session, plus CSRF on every method but GET, like core's
+// own routes); the two webhook
 // routes are pre-auth (Slack has no session) so they mount through Raw +
 // SignedWebhookRateLimit and authorize themselves per-request: an org's own
 // app's by the workspace's signing secret, the deployment app's by the one in
@@ -159,7 +160,6 @@ func install(api server.ExtensionAPI) {
 // through.
 type routeMounter interface {
 	API(pattern string, h http.HandlerFunc)
-	APIMutating(pattern string, h http.HandlerFunc)
 	Raw(pattern string, h http.Handler)
 	Op(op httpx.Operation, h http.HandlerFunc)
 	RawOp(op httpx.Operation, h http.Handler)
@@ -169,8 +169,8 @@ type routeMounter interface {
 // mountRoutes is the Slack route table. An org's connections, manifest and
 // install start are addressed by the org in the path; a team's channels are
 // the team's resource, under its own path, with the org the credential's as on
-// every core team route. The list and facets reads mount through APIMutating
-// because they are POSTs, and CSRF follows the method.
+// every core team route. The list and facets reads are POSTs, so Op gives
+// them the CSRF check, which follows the method.
 func mountRoutes(api routeMounter, h *workspacesHandler, dh *deploymentAppHandler, ih *installHandler, ch *channelsHandler, wh *webhookHandler) {
 	api.Op(opManifest, h.handleManifest)
 	api.Op(opConnect, h.handleConnect)

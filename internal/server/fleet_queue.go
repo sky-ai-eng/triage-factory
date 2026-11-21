@@ -80,7 +80,9 @@ func (s *Server) handleFleetQueue(w http.ResponseWriter, r *http.Request) {
 	}
 	orgID := strings.TrimSpace(q.Get("org"))
 	if orgID == "" {
-		badRequest(w, "org query parameter is required")
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidParam, Message: "org query parameter is required", Field: "org",
+		})
 		return
 	}
 	// RequireOrgAdmin's path-org handling: a non-uuid org is not found, and a

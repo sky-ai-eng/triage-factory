@@ -148,8 +148,8 @@ type botsInfoResult struct {
 // the shipped manifest (confirmed against Slack's current docs: bots.info
 // is users:read-scoped despite the "bots" name). A non-2xx HTTP response or
 // a Slack-level {"ok":false} both surface as an error; the connect handler
-// treats any error here as fatal (400, connect refused) — the app id is now
-// key material, not an optional enrichment, so there is no fallback.
+// treats any error here as fatal (connect refused) — the app id is key
+// material, not an optional enrichment, so there is no fallback.
 func slackBotsInfo(ctx context.Context, client *http.Client, caller slackCaller, botToken, botID string) (*botsInfoResult, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		slackAPIBase+"/bots.info?bot="+url.QueryEscape(botID), nil)
@@ -170,10 +170,10 @@ func slackBotsInfo(ctx context.Context, client *http.Client, caller slackCaller,
 		return nil, err
 	}
 	if !out.OK {
-		return nil, fmt.Errorf("slack bots.info: %s", nonEmpty(out.Error, "not ok"))
+		return nil, slackRefusal("bots.info", nonEmpty(out.Error, "not ok"))
 	}
 	if out.Bot.AppID == "" {
-		return nil, fmt.Errorf("slack bots.info: response carried no app_id")
+		return nil, &slackRejectedError{method: "bots.info", reason: "response carried no app_id"}
 	}
 	return &botsInfoResult{AppID: out.Bot.AppID, Name: out.Bot.Name}, nil
 }

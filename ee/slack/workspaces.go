@@ -352,6 +352,19 @@ var opConnect = httpx.NewJSONOp[connectionImportRequest, workspaceView](httpx.Op
 	Hints:         httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
 })
 
+// writeTokenCheckFault answers a connect whose check of a pasted token with
+// Slack failed. Slack refusing the token is a fault in field, worded with
+// Slack's error code, which says what is wrong with it. A call that met no
+// answer about the token says nothing against it, so it is a 502 rather than
+// a refusal the admin would try to fix by pasting the token again.
+func writeTokenCheckFault(w http.ResponseWriter, orgID, field, prefix string, err error) {
+	if isSlackRejected(err) || isSlackAuthError(err) {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: prefix + ": " + err.Error(), Field: field})
+		return
+	}
+	writeSlackUnreachable(w, orgID, "the "+field+" check", err)
+}
+
 // handleConnect connects an org's own Slack app from the tokens an org admin
 // pasted. In a workspace where the org already has an active connection of
 // another app, the new connection is stored inactive: the first step of a
@@ -404,7 +417,7 @@ func (h *workspacesHandler) handleConnect(w http.ResponseWriter, r *http.Request
 	caller := slackCaller{orgID: orgID}
 	result, err := slackAuthTest(r.Context(), h.client, caller, botToken)
 	if err != nil {
-		httpx.BadRequest(w, "could not validate the bot token with Slack: "+err.Error())
+		writeTokenCheckFault(w, orgID, "bot_token", "could not validate the bot token with Slack", err)
 		return
 	}
 
@@ -414,7 +427,7 @@ func (h *workspacesHandler) handleConnect(w http.ResponseWriter, r *http.Request
 	// no fallback, connect refused.
 	botsInfo, err := slackBotsInfo(r.Context(), h.client, caller, botToken, result.BotID)
 	if err != nil {
-		httpx.BadRequest(w, "could not resolve the app id for this bot token: "+err.Error())
+		writeTokenCheckFault(w, orgID, "bot_token", "could not resolve the app id for this bot token", err)
 		return
 	}
 	apiAppID := botsInfo.AppID
@@ -437,7 +450,11 @@ func (h *workspacesHandler) handleConnect(w http.ResponseWriter, r *http.Request
 	hasAppToken, keepAppToken := mergeCredentialPresence(appToken != "", existing != nil && existing.AppTokenRef != "")
 
 	transport, err := inferTransport(hasSigningSecret, hasAppToken, strings.TrimSpace(body.Transport))
-	if err != nil {
+	switch {
+	case errors.Is(err, errTransportAmbiguous):
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: err.Error(), Field: "transport"})
+		return
+	case err != nil:
 		httpx.BadRequest(w, err.Error())
 		return
 	}
@@ -448,7 +465,7 @@ func (h *workspacesHandler) handleConnect(w http.ResponseWriter, r *http.Request
 	// leaf's job.
 	if transport == transportSocket && appToken != "" {
 		if err := slackOpenConnection(r.Context(), h.client, caller, appToken); err != nil {
-			httpx.BadRequest(w, "could not validate the app-level token with Slack: "+err.Error())
+			writeTokenCheckFault(w, orgID, "app_token", "could not validate the app-level token with Slack", err)
 			return
 		}
 	}
@@ -727,7 +744,7 @@ func (h *workspacesHandler) handleManifest(w http.ResponseWriter, r *http.Reques
 	}
 	transport := q.Get("transport")
 	if transport != transportSocket && transport != transportEventsAPI {
-		httpx.BadRequest(w, `transport must be "socket" or "events_api"`)
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidParam, Message: `transport must be "socket" or "events_api"`, Field: "transport"})
 		return
 	}
 	publicURL := h.publicURL()

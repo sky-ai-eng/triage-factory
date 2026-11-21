@@ -123,7 +123,7 @@ func (h *ssoDomainsHandler) handleDomainClaim(w http.ResponseWriter, r *http.Req
 	}
 	domainName, valid := normalizeSSODomain(body.Domain)
 	if !valid {
-		httpx.BadRequest(w, "domain must be a bare domain like example.com")
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: "domain must be a bare domain like example.com", Field: "domain"})
 		return
 	}
 
@@ -270,7 +270,7 @@ func (h *ssoDomainsHandler) handleDomainVerify(w http.ResponseWriter, r *http.Re
 	}
 	id := r.PathValue("id")
 	if _, err := uuid.Parse(id); err != nil {
-		httpx.NotFound(w, "sso connection")
+		httpx.NotFound(w, "sso domain")
 		return
 	}
 
@@ -284,7 +284,7 @@ func (h *ssoDomainsHandler) handleDomainVerify(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if claim == nil {
-		httpx.NotFound(w, "sso connection")
+		httpx.NotFound(w, "sso domain")
 		return
 	}
 	if claim.VerifiedAt != nil {
@@ -349,7 +349,7 @@ func (h *ssoDomainsHandler) handleDomainVerify(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if verified == nil {
-		httpx.NotFound(w, "sso connection")
+		httpx.NotFound(w, "sso domain")
 		return
 	}
 	ssoLog.Info("sso domain verified", "org", orgID, "domain", verified.Domain, "id", verified.ID)
@@ -373,7 +373,7 @@ func (h *ssoDomainsHandler) handleDomainDelete(w http.ResponseWriter, r *http.Re
 	}
 	id := r.PathValue("id")
 	if _, err := uuid.Parse(id); err != nil {
-		httpx.NotFound(w, "sso connection")
+		httpx.NotFound(w, "sso domain")
 		return
 	}
 
@@ -427,7 +427,7 @@ func (h *ssoDomainsHandler) handleDomainDelete(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if !existed {
-		httpx.NotFound(w, "sso connection")
+		httpx.NotFound(w, "sso domain")
 		return
 	}
 	opDomainDelete.Write(w, ssoDomainDeleteResponse{Status: "deleted"})

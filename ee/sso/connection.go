@@ -274,13 +274,13 @@ func (h *ssoConnectionHandler) handleSSOConnectionCreate(w http.ResponseWriter, 
 	}
 	metadataURL := strings.TrimSpace(body.MetadataURL)
 	if metadataURL == "" {
-		httpx.BadRequest(w, "metadata_url is required")
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "metadata_url is required", Field: "metadata_url"})
 		return
 	}
 	// Defense-in-depth against SSRF: GoTrue fetches this URL server-side, so
 	// constrain it to a well-formed https URL.
 	if u, err := url.Parse(metadataURL); err != nil || u.Scheme != "https" || u.Host == "" {
-		httpx.BadRequest(w, "metadata_url must be a valid https URL")
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: "metadata_url must be a valid https URL", Field: "metadata_url"})
 		return
 	}
 
@@ -392,7 +392,7 @@ func (h *ssoConnectionHandler) handleSSOConnectionUpdate(w http.ResponseWriter, 
 		return
 	}
 	var v httpx.Validation
-	enabledValue, enabledState := body.Enabled.Read(&v, "enabled")
+	enabledValue, enabledState := body.Enabled.ReadNonNull(&v, "enabled")
 	idpValue, idpState := body.IdP.Read(&v, "idp")
 	if enabledState == httpx.PatchAbsent && idpState == httpx.PatchAbsent {
 		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
@@ -538,7 +538,7 @@ func (h *ssoConnectionHandler) handleSSOEnforcementUpdate(w http.ResponseWriter,
 		return
 	}
 	if body.Enforced == nil {
-		httpx.BadRequest(w, "enforced is required")
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "enforced is required", Field: "enforced"})
 		return
 	}
 

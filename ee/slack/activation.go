@@ -400,10 +400,10 @@ func writeAlreadyActive(w http.ResponseWriter) {
 }
 
 // writeSlackUnreachable answers 502 for a Slack call that met no answer about
-// the token: a transport failure, a non-200, or a rate limit. The cause goes
-// to the log, not the response.
+// the token: a transport failure, a non-200, a rate limit, or Slack failing on
+// its own side. The cause goes to the log, not the response.
 func writeSlackUnreachable(w http.ResponseWriter, orgID, what string, err error) {
-	slackLog.Warn("slack switch: Slack could not be reached", "org", orgID, "call", what, "error", err)
+	slackLog.Warn("slack: Slack could not be reached", "org", orgID, "call", what, "error", err)
 	httpx.WriteErrors(w, http.StatusBadGateway, httpx.ErrorItem{
 		Reason:  httpx.ReasonUpstreamUnavailable,
 		Message: "Slack could not be reached; try again.",

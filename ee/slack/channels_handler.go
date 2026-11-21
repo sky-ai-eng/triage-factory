@@ -170,7 +170,7 @@ type channelView struct {
 	IsPrimary     bool          `json:"is_primary" doc:"Whether the team is the channel's primary, the team the channel's mentions are routed to."`
 	TrackedBy     []trackerView `json:"tracked_by" doc:"Every team that tracks the channel."`
 	LastMentionAt *time.Time    `json:"last_mention_at,omitempty" doc:"When the app last saw a mention in the channel, as an RFC 3339 timestamp, absent when it has seen none."`
-	Source        string        `json:"source" doc:"Where the row comes from: tracked when the team tracks the channel, sighting when the app has seen it, or slack when only the read of Slack lists it."` // "tracked" | "sighting" | "slack"
+	Source        string        `json:"source" doc:"Where the row comes from: tracked when the team tracks the channel, sighting when the team does not track it but Triage Factory holds a registry row for it, such as one a mention the app saw or another team tracking it made, or slack when only the read of Slack lists it."` // "tracked" | "sighting" | "slack"
 }
 
 // channelsResponse is PUT's answer: the team's whole merged set after the
@@ -482,7 +482,7 @@ func (h *channelsHandler) handlePatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var v httpx.Validation
-	isPrimary, state := req.IsPrimary.Read(&v, "is_primary")
+	isPrimary, state := req.IsPrimary.ReadNonNull(&v, "is_primary")
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}

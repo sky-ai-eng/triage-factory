@@ -460,6 +460,8 @@ func TestInstanceSandboxesEndpoint_LimitAndNotFound(t *testing.T) {
 	for _, q := range []string{"?limit=abc", "?limit=0", "?limit=-3"} {
 		if rec, _ := getSandboxes(t, h, ctx, "exec-1", q); rec.Code != 400 {
 			t.Errorf("%s => %d, want 400 (validated, not silently defaulted)", q, rec.Code)
+		} else if !strings.Contains(rec.Body.String(), `"reason":"INVALID_PARAM"`) || !strings.Contains(rec.Body.String(), `"field":"limit"`) {
+			t.Errorf("%s => %s, want INVALID_PARAM on limit", q, rec.Body.String())
 		}
 	}
 
@@ -548,13 +550,13 @@ func TestClaimSeriesEndpoint_Integration(t *testing.T) {
 		t.Fatalf("unsampled claim should carry no samples: %+v", got)
 	}
 
-	// Unknown claim: handleInstanceUpdate's not-found shape.
+	// Unknown claim: a 404 that names the claim.
 	rec, _ = series(t, uuid.New().String())
 	if rec.Code != 404 {
 		t.Fatalf("unknown claim => %d, want 404", rec.Code)
 	}
 	if !strings.Contains(rec.Body.String(), "claim not found") {
-		t.Errorf("not-found body = %s, want handleInstanceUpdate's shape", rec.Body.String())
+		t.Errorf("not-found body = %s, want a 404 naming the claim", rec.Body.String())
 	}
 }
 
