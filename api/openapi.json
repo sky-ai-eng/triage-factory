@@ -60,7 +60,7 @@
       "AccessLogListRequest": {
         "properties": {
           "category": {
-            "description": "The kind of change to include: membership for memberships, roles, and ownership, credential for credentials and API tokens, or policy for SSO and event-source settings; surrounding whitespace is ignored, and empty includes every change.",
+            "description": "The kind of change to include: membership for memberships, roles, and ownership, credential for credentials and API tokens, or policy for SSO and event-source settings. Empty or absent includes every change.",
             "type": "string"
           },
           "page_size": {
@@ -1390,7 +1390,7 @@
       "ModelTestSweepRequest": {
         "properties": {
           "provider": {
-            "description": "The provider whose models to test, anthropic or bedrock; surrounding whitespace is ignored.",
+            "description": "The provider whose models to test, anthropic or bedrock.",
             "type": "string"
           }
         },
@@ -2249,8 +2249,11 @@
       "OrgSettingsResponse": {
         "properties": {
           "api_token_max_age_days": {
-            "description": "The longest any of the organization's API tokens may live, in days, 0 when there is no maximum.",
-            "type": "integer"
+            "description": "The longest any of the organization's API tokens may live, in days, or null when there is no maximum.",
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "background_jobs_model": {
             "description": "The model key the organization's background jobs run on (priority scoring, repository profiling, and memory writing), empty when none is chosen, in which case those jobs do not run.",
@@ -2339,12 +2342,18 @@
             "type": "string"
           },
           "max_concurrent_runs": {
-            "description": "The most of the organization's runs that may run at once, 0 when there is no limit.",
-            "type": "integer"
+            "description": "The most of the organization's runs that may run at once, or null when there is no limit.",
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "max_daily_cost_usd": {
-            "description": "The organization's LLM spend cap per UTC day, in USD, 0 when there is no cap.",
-            "type": "number"
+            "description": "The organization's LLM spend cap per UTC day, in USD, or null when there is no cap.",
+            "type": [
+              "number",
+              "null"
+            ]
           },
           "member_count": {
             "description": "How many people are members of the organization.",

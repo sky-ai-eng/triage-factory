@@ -210,7 +210,7 @@ type modelTestSweepResponse struct {
 // prompted it, and a body that meant "all of them" when the field was absent
 // would make an empty object spend money on the other provider too.
 type modelTestSweepRequest struct {
-	Provider string `json:"provider" doc:"The provider whose models to test, anthropic or bedrock; surrounding whitespace is ignored."`
+	Provider string `json:"provider" doc:"The provider whose models to test, anthropic or bedrock."`
 }
 
 var opModelTest = httpx.NewJSONOp[httpx.NoBody, modelTestResult](httpx.OpSpec{

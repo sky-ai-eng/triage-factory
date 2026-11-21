@@ -452,7 +452,7 @@ func (se *settingsHandler) handleJiraDataCenterCredentialPut(w http.ResponseWrit
 	var v httpx.Validation
 	url := validateJiraSite(&v, req.URL)
 	if req.PAT == "" {
-		v.Invalid("pat", "a personal access token is required for Jira Data Center")
+		v.Missing("pat")
 	}
 	if v.Flush(w, http.StatusBadRequest) {
 		return

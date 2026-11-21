@@ -153,9 +153,10 @@ func TestOrgSettingsPatch_NullClearsEveryClearableField(t *testing.T) {
 		// in which the background jobs do not run, and a form that has to
 		// render it needs the key present rather than absent.
 		{"background_jobs_model", ""},
-		{"max_daily_cost_usd", float64(0)},
-		{"max_concurrent_runs", float64(0)},
-		{"api_token_max_age_days", float64(0)},
+		// The three limits read back null, the spelling that cleared them.
+		{"max_daily_cost_usd", nil},
+		{"max_concurrent_runs", nil},
+		{"api_token_max_age_days", nil},
 	}
 
 	body := map[string]any{}

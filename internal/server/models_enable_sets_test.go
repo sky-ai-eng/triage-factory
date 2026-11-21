@@ -224,6 +224,28 @@ func assertFieldError(t *testing.T, rec *httptest.ResponseRecorder, field string
 // NOT_CONFIGURED naming the provider to connect, not a 500 whose message multi
 // mode redacts. The model is a step pin whose provider was disconnected after
 // the save.
+// A key in an enable-set is matched exactly, as ai_model is: a padded key is
+// one this deployment does not offer, on both settings scopes.
+func TestSettingsPatch_EnabledModels_RefusesAPaddedKey(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+
+	body := map[string]any{"enabled_models": []string{" " + domain.ModelAliasHaiku + " "}}
+	for name, patch := range map[string]func() *httptest.ResponseRecorder{
+		"org":  func() *httptest.ResponseRecorder { return patchOrgSettings(t, s, body) },
+		"team": func() *httptest.ResponseRecorder { return patchTeamSettings(t, s, "default", body) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := patch()
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("a padded key on a %s save = %d, want 400 (body: %s)", name, rec.Code, rec.Body.String())
+			}
+			assertFieldError(t, rec, "enabled_models")
+		})
+	}
+}
+
 func TestDelegate_ModelProviderUnavailable_SurfacesTheRemedy(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()

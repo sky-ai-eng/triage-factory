@@ -269,8 +269,7 @@ func (s *Server) handleJiraIdentityStatus(w http.ResponseWriter, r *http.Request
 // site — so unlike the org-credential bind, which has a route per deployment,
 // the caller names no deployment. The struct is still picked before the decode
 // rather than after, so the other deployment's fields are rejected by name
-// instead of being accepted and silently ignored, which is what a single
-// both-shapes struct did.
+// instead of being accepted and silently ignored.
 //
 // Unlike the GitHub sibling, the credential is retained (per-user vault scope):
 // the user acts as themselves on board claims, so it must outlive the request.

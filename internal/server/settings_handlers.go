@@ -347,7 +347,7 @@ type teamSettingsJSON struct {
 // stored in milliseconds and read in seconds, rounded to the nearest one, which
 // is exact for every row the API wrote: the PATCH stores whole seconds.
 func toTeamSettingsJSON(t domain.TeamSettings) teamSettingsJSON {
-	out := teamSettingsJSON{
+	return teamSettingsJSON{
 		AIModel:                         t.DefaultModel,
 		EnabledModels:                   t.EnabledModels,
 		AIAutoDelegate:                  t.AutoDelegateEnabled,
@@ -360,12 +360,17 @@ func toTeamSettingsJSON(t domain.TeamSettings) teamSettingsJSON {
 		BaseBranchPushPolicy:            t.BaseBranchPushPolicy,
 		PermissionAbsentAutodenyEnabled: t.PermissionAbsentAutodenyEnabled,
 		PermissionAbsentGraceSeconds:    (t.PermissionAbsentGraceMS + 500) / 1000,
+		MaxDailyCostUSD:                 limitOrNull(t.MaxDailyCostUSD),
 	}
-	if t.MaxDailyCostUSD > 0 {
-		capUSD := t.MaxDailyCostUSD
-		out.MaxDailyCostUSD = &capUSD
+}
+
+// limitOrNull renders a stored limit, whose 0 is "none", in the spelling the
+// PATCHes clear one with: null.
+func limitOrNull[T int | float64](v T) *T {
+	if v <= 0 {
+		return nil
 	}
-	return out
+	return &v
 }
 
 var opTeamSettingsGet = httpx.NewJSONOp[httpx.NoBody, teamSettingsResponse](httpx.OpSpec{
@@ -467,11 +472,8 @@ func (s *Server) readTeamSettings(w http.ResponseWriter, r *http.Request, orgID,
 // Every field is a Patch under ONE clearing convention: absent keeps the
 // stored value, an explicit null clears it (enabled_models) or resets it to the
 // shipped default (everything else but ai_model, which refuses it), and any
-// other value is applied. The route
-// used to speak three conventions at once — pointer-nil-keeps for most fields,
-// ""-keeps for ai_model, present-but-empty-resets for the three string enums —
-// so "how do I clear this" had a different answer per field, and for ai_model
-// no answer at all.
+// other value is applied, so "how do I clear this" has one answer for every
+// field.
 //
 // jira_projects is deliberately absent. The team's Jira rules are a child
 // collection with their own replace-set write (PUT
@@ -917,24 +919,15 @@ type orgSettingsResponse struct {
 	// the org's "not picked yet", which is the state the settings form has to
 	// render, and an omitted field would read to a client as "unchanged".
 	BackgroundJobsModel string `json:"background_jobs_model" doc:"The model key the organization's background jobs run on (priority scoring, repository profiling, and memory writing), empty when none is chosen, in which case those jobs do not run."`
-	// MaxDailyCostUSD is the org-wide daily LLM spend cap (TFAC-477); 0 = no
-	// cap. Always emitted (not omitempty) so the Settings form can render the
-	// numeric input's current value, including an explicit "0 / no cap".
-	MaxDailyCostUSD float64 `json:"max_daily_cost_usd" doc:"The organization's LLM spend cap per UTC day, in USD, 0 when there is no cap."`
-	// MaxConcurrentRuns is the org-wide concurrent-run ceiling; 0 = unlimited.
-	// Always emitted (not omitempty) for the same reason as MaxDailyCostUSD —
-	// the form renders the numeric input's current value, "0 / unlimited"
-	// included.
-	MaxConcurrentRuns int `json:"max_concurrent_runs" doc:"The most of the organization's runs that may run at once, 0 when there is no limit."`
-	// APITokenMaxAgeDays is the ceiling on how long any of the org's API tokens
-	// may live, in days; 0 = no maximum. Always emitted, for the same reason as
-	// the two caps above — the form renders the input's current value, "no
-	// maximum" included.
-	//
-	// Readable by any org member, not just the admin who can write it: the cap
-	// is policy a token minter has to see before choosing an expiry, and the
-	// create form states it.
-	APITokenMaxAgeDays int `json:"api_token_max_age_days" doc:"The longest any of the organization's API tokens may live, in days, 0 when there is no maximum."`
+	// MaxDailyCostUSD and MaxConcurrentRuns are always emitted, null for
+	// none, so a client reads "no limit" in the spelling the PATCH writes it.
+	MaxDailyCostUSD   *float64 `json:"max_daily_cost_usd" doc:"The organization's LLM spend cap per UTC day, in USD, or null when there is no cap."`
+	MaxConcurrentRuns *int     `json:"max_concurrent_runs" doc:"The most of the organization's runs that may run at once, or null when there is no limit."`
+	// APITokenMaxAgeDays is emitted the same way as the two caps above, and
+	// is readable by any org member, not just the admin who can write it: the
+	// cap is policy a token minter has to see before choosing an expiry, and
+	// the create form states it.
+	APITokenMaxAgeDays *int `json:"api_token_max_age_days" doc:"The longest any of the organization's API tokens may live, in days, or null when there is no maximum."`
 	// LLMAuthMethod is where this org's Claude credentials come from:
 	// "system" (the host's, resolved by the SDK from the environment the agent
 	// subprocess inherits) or "byok" (the org's own bound material). The
@@ -1104,9 +1097,9 @@ func (s *Server) readOrgSettings(w http.ResponseWriter, r *http.Request, orgID, 
 		HasJiraCredential:   hasJiraCred,
 		EnabledModels:       orgSet.EnabledModels,
 		BackgroundJobsModel: orgSet.BackgroundJobsModel,
-		MaxDailyCostUSD:     orgSet.MaxDailyCostUSD,
-		MaxConcurrentRuns:   orgSet.MaxConcurrentRuns,
-		APITokenMaxAgeDays:  orgSet.APITokenMaxAgeDays,
+		MaxDailyCostUSD:     limitOrNull(orgSet.MaxDailyCostUSD),
+		MaxConcurrentRuns:   limitOrNull(orgSet.MaxConcurrentRuns),
+		APITokenMaxAgeDays:  limitOrNull(orgSet.APITokenMaxAgeDays),
 		LLMAuthMethod:       domain.EffectiveLLMAuthMethod(orgSet.LLMAuthMethod, runmode.Current() == runmode.ModeMulti),
 		HasAnthropicAPIKey:  orgSet.AnthropicAPIKeyRef != "",
 		HasBedrockCreds:     orgSet.BedrockCredentialsRef != "",

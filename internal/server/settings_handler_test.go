@@ -506,6 +506,29 @@ func TestJiraConnect_Cloud_RequiresBothHalves(t *testing.T) {
 	}
 }
 
+// TestJiraConnect_DataCenter_RequiresThePAT: a Data Center bind with no pat is
+// refused with the same reason a Cloud bind's missing half is, and stores
+// nothing.
+func TestJiraConnect_DataCenter_RequiresThePAT(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+
+	rec := doJSON(t, s, "PUT", jiraDataCenterCredentialRoute(),
+		map[string]any{"url": "https://jira.acme.internal"})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s, want 400", rec.Code, rec.Body.String())
+	}
+	httpxtest.AssertFirstError(t, rec, httpx.ReasonMissingField, "pat")
+	creds, err := integrations.Load(t.Context(), s.secrets, runmode.LocalDefaultOrgID)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if creds.JiraPAT != "" || creds.JiraAuthMethod != "" {
+		t.Errorf("a Data Center bind with no pat persisted credentials: %+v", creds)
+	}
+}
+
 // TestJiraConnect_Cloud_MismatchHint: a Cloud credential rejected by a host that
 // is not a Cloud host is a 422 hinting at the Data Center scheme. The hint is
 // advisory: validation, not the hostname, gates storage.
@@ -812,15 +835,16 @@ func TestTeamSettingsPatch_EnabledModels_HeldToBothSets(t *testing.T) {
 
 // --- daily spend cap and concurrent-run limit ------------------------------
 
-// orgDailyCap reads the org settings GET and returns max_daily_cost_usd.
-func orgDailyCap(t *testing.T, s *Server) float64 {
+// orgDailyCap reads the org settings GET and returns max_daily_cost_usd, nil
+// when it is null.
+func orgDailyCap(t *testing.T, s *Server) *float64 {
 	t.Helper()
 	rec := doJSON(t, s, "GET", orgSettingsPath(), nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET %s: %d: %s", orgSettingsPath(), rec.Code, rec.Body.String())
 	}
 	var resp struct {
-		MaxDailyCostUSD float64 `json:"max_daily_cost_usd"`
+		MaxDailyCostUSD *float64 `json:"max_daily_cost_usd"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode org settings: %v", err)
@@ -828,15 +852,16 @@ func orgDailyCap(t *testing.T, s *Server) float64 {
 	return resp.MaxDailyCostUSD
 }
 
-// orgConcurrentRuns reads the org settings GET and returns max_concurrent_runs.
-func orgConcurrentRuns(t *testing.T, s *Server) int {
+// orgConcurrentRuns reads the org settings GET and returns
+// max_concurrent_runs, nil when it is null.
+func orgConcurrentRuns(t *testing.T, s *Server) *int {
 	t.Helper()
 	rec := doJSON(t, s, "GET", orgSettingsPath(), nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET %s: %d: %s", orgSettingsPath(), rec.Code, rec.Body.String())
 	}
 	var resp struct {
-		MaxConcurrentRuns int `json:"max_concurrent_runs"`
+		MaxConcurrentRuns *int `json:"max_concurrent_runs"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode org settings: %v", err)
@@ -849,18 +874,24 @@ func orgConcurrentRuns(t *testing.T, s *Server) int {
 // stored values alone.
 func TestOrgSettingsPatch_DailyCostCap_OmittedFieldUntouched(t *testing.T) {
 	s := newTestServer(t)
-	if capUSD, runs := orgDailyCap(t, s), orgConcurrentRuns(t, s); capUSD != 0 || runs != 0 {
-		t.Fatalf("fresh org cap = %v, concurrent runs = %v; want 0 and 0 (no limit by default)", capUSD, runs)
+	if capUSD, runs := orgDailyCap(t, s), orgConcurrentRuns(t, s); capUSD != nil || runs != nil {
+		t.Fatalf("fresh org cap = %v, concurrent runs = %v; want null and null (no limit by default)", capUSD, runs)
 	}
 	patchOrgSettingsOK(t, s, map[string]any{"max_daily_cost_usd": 40, "max_concurrent_runs": 5})
 
 	// A save touching only the enable-set omits both → they must survive.
 	patchOrgSettingsOK(t, s, map[string]any{"enabled_models": []string{domain.ModelAliasSonnet}})
-	if got := orgDailyCap(t, s); got != 40 {
+	if got := orgDailyCap(t, s); got == nil || *got != 40 {
 		t.Errorf("omitting max_daily_cost_usd cleared the cap: got %v, want 40 preserved", got)
 	}
-	if got := orgConcurrentRuns(t, s); got != 5 {
+	if got := orgConcurrentRuns(t, s); got == nil || *got != 5 {
 		t.Errorf("omitting max_concurrent_runs cleared the limit: got %v, want 5 preserved", got)
+	}
+
+	// null clears both, and the read answers them in the same spelling.
+	patchOrgSettingsOK(t, s, map[string]any{"max_daily_cost_usd": nil, "max_concurrent_runs": nil})
+	if capUSD, runs := orgDailyCap(t, s), orgConcurrentRuns(t, s); capUSD != nil || runs != nil {
+		t.Errorf("after clearing: cap = %v, concurrent runs = %v; want null and null", capUSD, runs)
 	}
 }
 
@@ -890,15 +921,15 @@ func TestOrgSettingsPatch_LimitsOutOfRange(t *testing.T) {
 			httpxtest.AssertFirstError(t, rec, httpx.ReasonOutOfRange, c.field)
 		})
 	}
-	if got := orgDailyCap(t, s); got != 12 {
+	if got := orgDailyCap(t, s); got == nil || *got != 12 {
 		t.Errorf("a refused save changed the cap: got %v, want 12", got)
 	}
-	if got := orgConcurrentRuns(t, s); got != 4 {
+	if got := orgConcurrentRuns(t, s); got == nil || *got != 4 {
 		t.Errorf("a refused save changed the concurrent-run limit: got %v, want 4", got)
 	}
 
 	patchOrgSettingsOK(t, s, map[string]any{"max_concurrent_runs": domain.MaxConcurrentClaimsCeiling})
-	if got := orgConcurrentRuns(t, s); got != domain.MaxConcurrentClaimsCeiling {
+	if got := orgConcurrentRuns(t, s); got == nil || *got != domain.MaxConcurrentClaimsCeiling {
 		t.Errorf("ceiling value should round-trip, got %v want %v", got, domain.MaxConcurrentClaimsCeiling)
 	}
 }

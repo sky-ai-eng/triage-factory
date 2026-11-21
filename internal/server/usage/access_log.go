@@ -46,7 +46,7 @@ type accessChangeJSON struct {
 // accessLogListRequest is the body of POST /api/orgs/{org_id}/usage/access-log/list.
 // Category narrows to one bucket of actions; empty is every action.
 type accessLogListRequest struct {
-	Category string `json:"category" doc:"The kind of change to include: membership for memberships, roles, and ownership, credential for credentials and API tokens, or policy for SSO and event-source settings; surrounding whitespace is ignored, and empty includes every change."`
+	Category string `json:"category" doc:"The kind of change to include: membership for memberships, roles, and ownership, credential for credentials and API tokens, or policy for SSO and event-source settings. Empty or absent includes every change."`
 
 	httpx.PageRequest
 }

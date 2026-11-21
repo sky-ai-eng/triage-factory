@@ -131,14 +131,15 @@ export interface OrgSettingsData {
   // The background-jobs model as a catalog key; "" = not picked. Always
   // present — "" is a state the form renders, not an absent field.
   background_jobs_model: string
-  // Org-wide daily spend cap in USD (TFAC-477); 0 = no cap. Always present.
-  max_daily_cost_usd: number
-  // Org-wide concurrent-run limit; 0 = unlimited. Always present.
-  max_concurrent_runs: number
-  // Ceiling on how long any of the org's API tokens may live, in days; 0 = no
-  // maximum. Always present. Readable by any org member, not just the admin who
-  // can change it — the token create form states the cap it is minting under.
-  api_token_max_age_days: number
+  // Org-wide daily spend cap in USD; null = no cap. Always present.
+  max_daily_cost_usd: number | null
+  // Org-wide concurrent-run limit; null = unlimited. Always present.
+  max_concurrent_runs: number | null
+  // Ceiling on how long any of the org's API tokens may live, in days; null =
+  // no maximum. Always present. Readable by any org member, not just the admin
+  // who can change it — the token create form states the cap it is minting
+  // under.
+  api_token_max_age_days: number | null
   // Where the org's Claude credentials come from: 'system' (the host's,
   // resolved by the SDK from the environment the agent subprocess inherits) or
   // 'byok' (the org's own bound material). The EFFECTIVE value — multi always
