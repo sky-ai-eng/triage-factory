@@ -42,8 +42,16 @@ func New(database *sql.DB, tx db.TxRunner, az *authz.Checker) *Handler {
 // unchanged and only supports_watch is added.
 type eventTypeResponse struct {
 	domain.EventType
-	SupportsWatch bool `json:"supports_watch"`
+	SupportsWatch bool `json:"supports_watch" doc:"Whether an event handler for this event type may set applies_to_unowned, which reaches entities no member of the handler's team owns."`
 }
+
+var opEventTypeList = httpx.NewJSONOp[httpx.NoBody, []eventTypeResponse](httpx.OpSpec{
+	Pattern:     "GET /api/event-types",
+	ID:          "list_event_types",
+	Summary:     "List event types",
+	Description: "Returns every event type the organization is licensed for, as an array with no pagination. The set is fixed by the deployment's build.",
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 func (h *Handler) handleEventTypes(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := httpx.RequireOrg(w, r)
@@ -66,7 +74,7 @@ func (h *Handler) handleEventTypes(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, eventTypeResponse{EventType: t, SupportsWatch: routing.EventSupportsWatch(t.ID)})
 	}
-	httpx.WriteJSON(w, http.StatusOK, out)
+	opEventTypeList.Write(w, out)
 }
 
 // promptListRequest is the body of POST /api/prompts/list. TeamID narrows to
@@ -74,11 +82,19 @@ func (h *Handler) handleEventTypes(w http.ResponseWriter, r *http.Request) {
 // visible (solo/local, or an unfiltered view). Search narrows to prompts whose
 // name carries it, case-insensitively and literally (httpx.Search).
 type promptListRequest struct {
-	TeamID string `json:"team_id"`
-	Search string `json:"search"`
+	TeamID string `json:"team_id" doc:"Narrows to the prompts of this team; absent is every team the caller can see."`
+	Search string `json:"search" doc:"Narrows to prompts whose name contains this text, compared case-insensitively and literally; trimmed, at most 200 characters, and empty is absent."`
 
 	httpx.PageRequest
 }
+
+var opPromptList = httpx.NewListOp[promptListRequest, domain.Prompt](httpx.OpSpec{
+	Pattern:     "POST /api/prompts/list",
+	ID:          "list_prompts",
+	Summary:     "List prompts",
+	Description: "Returns one page of the prompts the caller can see, narrowed by the body's filters and most recently updated first.",
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 type promptListFilterKey struct {
 	TeamID string `json:"team_id"`
@@ -93,8 +109,8 @@ func (h *Handler) handlePromptsList(w http.ResponseWriter, r *http.Request) {
 	}
 	userID := httpx.ClaimsFrom(r.Context()).Subject
 
-	var req promptListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opPromptList.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -119,8 +135,17 @@ func (h *Handler) handlePromptsList(w http.ResponseWriter, r *http.Request) {
 		httpx.InternalError(w, "prompts", err)
 		return
 	}
-	httpx.WriteList(w, page, list, total)
+	opPromptList.Write(w, page, list, total)
 }
+
+var opPromptGet = httpx.NewJSONOp[httpx.NoBody, domain.Prompt](httpx.OpSpec{
+	Pattern:     "GET /api/prompts/{id}",
+	ID:          "get_prompt",
+	Summary:     "Get a prompt",
+	Description: "Returns one prompt, in the list's row shape.",
+	PathParams:  map[string]string{"id": "The prompt's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 func (h *Handler) handlePromptGet(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := httpx.RequireOrg(w, r)
@@ -146,16 +171,25 @@ func (h *Handler) handlePromptGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	httpx.WriteJSON(w, http.StatusOK, prompt)
+	opPromptGet.Write(w, *prompt)
 }
+
+var opPromptCreate = httpx.NewJSONOp[CreateRequest, domain.Prompt](httpx.OpSpec{
+	Pattern:     "POST /api/prompts",
+	ID:          "create_prompt",
+	Summary:     "Create a prompt",
+	Description: "Creates a prompt on the caller's team and returns it. The prompt is part of no blueprint until a blueprint's steps name it.",
+	Status:      http.StatusCreated,
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintNo, Idempotent: httpx.HintNo, OpenWorld: httpx.HintNo},
+})
 
 func (h *Handler) handlePromptCreate(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
 		return
 	}
-	var req CreateRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opPromptCreate.Decode(w, r)
+	if !ok {
 		return
 	}
 	if req.Name == "" {
@@ -226,8 +260,17 @@ func (h *Handler) handlePromptCreate(w http.ResponseWriter, r *http.Request) {
 		httpx.InternalError(w, "prompts", err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusCreated, created)
+	opPromptCreate.Write(w, created)
 }
+
+var opPromptReplace = httpx.NewJSONOp[UpdateRequest, domain.Prompt](httpx.OpSpec{
+	Pattern:     "PUT /api/prompts/{id}",
+	ID:          "replace_prompt",
+	Summary:     "Update a prompt",
+	Description: "Sets a prompt's name, body, and model, all three of which the body must carry, and returns the prompt.",
+	PathParams:  map[string]string{"id": "The prompt's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 func (h *Handler) handlePromptPut(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := httpx.RequireOrg(w, r)
@@ -240,8 +283,8 @@ func (h *Handler) handlePromptPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req UpdateRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opPromptReplace.Decode(w, r)
+	if !ok {
 		return
 	}
 	if req.Name == "" {
@@ -298,8 +341,23 @@ func (h *Handler) handlePromptPut(w http.ResponseWriter, r *http.Request) {
 		httpx.InternalError(w, "prompts", err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, updated)
+	opPromptReplace.Write(w, updated)
 }
+
+// promptDeleteResponse is the answer to DELETE /api/prompts/{id}.
+type promptDeleteResponse struct {
+	Status            string `json:"status" doc:"hidden for a shipped or imported prompt, which is hidden from the library, or deleted for one a person created."`
+	OrphanedBlueprint bool   `json:"orphaned_blueprint" doc:"Whether the delete left the steps after the prompt in a new blueprint with no event handler."`
+}
+
+var opPromptDelete = httpx.NewJSONOp[httpx.NoBody, promptDeleteResponse](httpx.OpSpec{
+	Pattern:     "DELETE /api/prompts/{id}",
+	ID:          "delete_prompt",
+	Summary:     "Delete a prompt",
+	Description: "Deletes a prompt and takes it out of its blueprint. A one-step blueprint is deleted with it. In a longer blueprint, the steps after the prompt move to a new blueprint with no event handler, and when the prompt was the first step the blueprint is deleted; a deleted blueprint's event handlers lose their blueprint, and one in automate moves to watch.",
+	PathParams:  map[string]string{"id": "The prompt's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 func (h *Handler) handlePromptDelete(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := httpx.RequireOrg(w, r)
@@ -456,7 +514,7 @@ func (h *Handler) handlePromptDelete(w http.ResponseWriter, r *http.Request) {
 		httpx.NotFound(w, "prompt")
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"status": status, "orphaned_blueprint": orphaned})
+	opPromptDelete.Write(w, promptDeleteResponse{Status: status, OrphanedBlueprint: orphaned})
 }
 
 // errOwnerChanged is a prompt delete whose owning blueprint was retired, or
@@ -473,6 +531,15 @@ func indexOfStep(steps []domain.BlueprintStep, promptID string) int {
 	}
 	return -1
 }
+
+var opPromptStats = httpx.NewJSONOp[httpx.NoBody, domain.PromptStats](httpx.OpSpec{
+	Pattern:     "GET /api/prompts/{id}/stats",
+	ID:          "get_prompt_stats",
+	Summary:     "Get a prompt's run statistics",
+	Description: "Returns counts, cost, and duration over every agent conversation that ran the prompt, and a daily count of those conversations for the last 30 days.",
+	PathParams:  map[string]string{"id": "The prompt's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 func (h *Handler) handlePromptStats(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := httpx.RequireOrg(w, r)
@@ -507,7 +574,7 @@ func (h *Handler) handlePromptStats(w http.ResponseWriter, r *http.Request) {
 		httpx.NotFound(w, "prompt")
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, stats)
+	opPromptStats.Write(w, *stats)
 }
 
 // Register mounts the prompt and event-type routes.
@@ -520,11 +587,11 @@ func (h *Handler) Register(m httpx.Mounts) {
 	// only changes when the binary does. A client reads them once and caches.
 	// Their shape stays a bare list on purpose: paginating a constant is
 	// ceremony that makes the surface look mutable.
-	m.API("GET /api/event-types", h.handleEventTypes)
-	m.APIMutating("POST /api/prompts/list", h.handlePromptsList)
-	m.APIMutating("POST /api/prompts", h.handlePromptCreate)
-	m.API("GET /api/prompts/{id}", h.handlePromptGet)
-	m.APIMutating("PUT /api/prompts/{id}", h.handlePromptPut)
-	m.APIMutating("DELETE /api/prompts/{id}", h.handlePromptDelete)
-	m.API("GET /api/prompts/{id}/stats", h.handlePromptStats)
+	m.Op(opEventTypeList, h.handleEventTypes)
+	m.Op(opPromptList, h.handlePromptsList)
+	m.Op(opPromptCreate, h.handlePromptCreate)
+	m.Op(opPromptGet, h.handlePromptGet)
+	m.Op(opPromptReplace, h.handlePromptPut)
+	m.Op(opPromptDelete, h.handlePromptDelete)
+	m.Op(opPromptStats, h.handlePromptStats)
 }

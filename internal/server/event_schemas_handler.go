@@ -9,6 +9,14 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
+var opEventSchemaList = httpx.NewJSONOp[httpx.NoBody, map[string]schemaPayload](httpx.OpSpec{
+	Pattern:     "GET /api/event-schemas",
+	ID:          "list_event_schemas",
+	Summary:     "List event predicate schemas",
+	Description: "Returns the predicate fields of every event type the organization is licensed for, as an object keyed by event type. The whole set is returned at once, with no pagination.",
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
+
 // GET /api/event-schemas
 //
 // Returns a map keyed by event_type, where each value is the predicate field
@@ -31,8 +39,17 @@ func handleEventSchemasList(w http.ResponseWriter, r *http.Request) {
 		}
 		out[sc.EventType] = toPayload(sc)
 	}
-	writeJSON(w, http.StatusOK, out)
+	opEventSchemaList.Write(w, out)
 }
+
+var opEventSchemaGet = httpx.NewJSONOp[httpx.NoBody, schemaPayload](httpx.OpSpec{
+	Pattern:     "GET /api/event-schemas/{event_type}",
+	ID:          "get_event_schema",
+	Summary:     "Get an event predicate schema",
+	Description: "Returns the predicate fields of one event type, the fields an event handler's scope_predicate may name. An event type the organization is not licensed for is answered as unknown.",
+	PathParams:  map[string]string{"event_type": "The event type's id, from GET /api/event-types."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // GET /api/event-schemas/{event_type}
 //
@@ -52,15 +69,15 @@ func handleEventSchemaGet(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	writeJSON(w, http.StatusOK, toPayload(sc))
+	opEventSchemaGet.Write(w, toPayload(sc))
 }
 
 // schemaPayload is the wire shape for a single event schema. Intentionally
 // narrower than events.EventSchema — the reflect.Type fields and the
 // matcher closure have no meaningful JSON form and shouldn't leak.
 type schemaPayload struct {
-	EventType string               `json:"event_type"`
-	Fields    []events.FieldSchema `json:"fields"`
+	EventType string               `json:"event_type" doc:"The event type's id."`
+	Fields    []events.FieldSchema `json:"fields" doc:"The fields a predicate for this event type may name, ordered by name."`
 }
 
 func toPayload(sc events.EventSchema) schemaPayload {

@@ -83,23 +83,23 @@ func (eh *eventHandlersHandler) gateHandlerWrite(w http.ResponseWriter, r *http.
 // yours; explained means not yet. A write answers with the row it stored,
 // which is a different question, so it carries no source_available.
 type eventHandlerWire struct {
-	ID                     string    `json:"id"`
-	TeamID                 string    `json:"team_id"`
-	EventType              string    `json:"event_type"`
-	Mode                   string    `json:"mode"`
-	Name                   string    `json:"name"`
-	ScopePredicateJSON     *string   `json:"scope_predicate_json"`
-	DefaultPriority        float64   `json:"default_priority"`
-	SortOrder              int       `json:"sort_order"`
-	BlueprintID            *string   `json:"blueprint_id"`
-	BreakerThreshold       int       `json:"breaker_threshold"`
-	MinAutonomySuitability float64   `json:"min_autonomy_suitability"`
-	AppliesToUnowned       bool      `json:"applies_to_unowned"`
-	Source                 string    `json:"source"`
-	CreatorUserID          string    `json:"creator_user_id,omitempty"`
-	CreatedAt              time.Time `json:"created_at"`
-	UpdatedAt              time.Time `json:"updated_at"`
-	SourceAvailable        *bool     `json:"source_available,omitempty"`
+	ID                     string    `json:"id" doc:"The event handler's id."`
+	TeamID                 string    `json:"team_id" doc:"The id of the team that owns the handler."`
+	EventType              string    `json:"event_type" doc:"The event type the handler matches, an id from GET /api/event-types."`
+	Mode                   string    `json:"mode" doc:"What a matching event does: off does nothing, notify tells the team's members, watch creates or updates a task, and automate also runs the handler's blueprint on that task."`
+	Name                   string    `json:"name" doc:"The handler's display name."`
+	ScopePredicateJSON     *string   `json:"scope_predicate_json" doc:"The predicate an event must match, as JSON text holding an object of the event type's predicate fields, or null when the handler matches every event of its type."`
+	DefaultPriority        float64   `json:"default_priority" doc:"The priority, from 0 to 1, that a task the handler creates starts at."`
+	SortOrder              int       `json:"sort_order" doc:"The handler's position among the organization's handlers, lowest first."`
+	BlueprintID            *string   `json:"blueprint_id" doc:"The id of the blueprint the handler runs in automate, or null when it has none."`
+	BreakerThreshold       int       `json:"breaker_threshold" doc:"How many of the handler's runs on one entity may fail in a row before the handler stops starting runs there."`
+	MinAutonomySuitability float64   `json:"min_autonomy_suitability" doc:"The lowest autonomy suitability score, from 0 to 1, a task must have for the handler in automate to run its blueprint on it; 0 runs it on every task."`
+	AppliesToUnowned       bool      `json:"applies_to_unowned" doc:"Whether the handler also reaches entities no member of its team owns, such as a pull request from an external author."`
+	Source                 string    `json:"source" doc:"Where the handler came from: system for one shipped with Triage Factory, or user for one a person created."`
+	CreatorUserID          string    `json:"creator_user_id,omitempty" doc:"The id of the user who created the handler, absent for a shipped handler."`
+	CreatedAt              time.Time `json:"created_at" doc:"When the handler was created, as an RFC 3339 timestamp."`
+	UpdatedAt              time.Time `json:"updated_at" doc:"When the handler was last changed, as an RFC 3339 timestamp."`
+	SourceAvailable        *bool     `json:"source_available,omitempty" doc:"Whether the handler's event source can produce events for this organization; present on a read, and absent from the handler a create or update returns."`
 }
 
 // storedRow is h as a write answers it.
@@ -141,16 +141,24 @@ func readRows(handlers []domain.EventHandler, sources eventsource.Availability) 
 type eventHandlerListRequest struct {
 	// Modes narrows to handlers in one of these modes; absent or empty is
 	// every mode.
-	Modes []string `json:"modes"`
+	Modes []string `json:"modes" doc:"Narrows to handlers in one of these modes, off, notify, watch, or automate; absent or empty is every mode."`
 	// EventType narrows to one event type.
-	EventType string `json:"event_type"`
+	EventType string `json:"event_type" doc:"Narrows to handlers of this event type, an id from GET /api/event-types; absent is every event type."`
 	// HasBlueprint narrows to handlers that reference a blueprint (true) or
 	// none (false); absent is both.
-	HasBlueprint *bool  `json:"has_blueprint"`
-	TeamID       string `json:"team_id"`
+	HasBlueprint *bool  `json:"has_blueprint" doc:"Narrows to handlers that have a blueprint when true, or none when false; absent or null is both."`
+	TeamID       string `json:"team_id" doc:"Narrows to the handlers of this team; absent is every team the caller can see."`
 
 	httpx.PageRequest
 }
+
+var opEventHandlerList = httpx.NewListOp[eventHandlerListRequest, eventHandlerWire](httpx.OpSpec{
+	Pattern:     "POST /api/event-handlers/list",
+	ID:          "list_event_handlers",
+	Summary:     "List event handlers",
+	Description: "Returns one page of the event handlers the caller can see, narrowed by the body's filters and ordered by sort_order and then name. Handlers of an event type the organization is not licensed for are left out, and each handler says whether its event source can produce events for the organization.",
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 type eventHandlerListFilterKey struct {
 	Modes        []string `json:"modes"`
@@ -167,8 +175,8 @@ func (eh *eventHandlersHandler) handleEventHandlersList(w http.ResponseWriter, r
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 
-	var req eventHandlerListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opEventHandlerList.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -225,8 +233,17 @@ func (eh *eventHandlersHandler) handleEventHandlersList(w http.ResponseWriter, r
 		internalError(w, "event_handlers", err)
 		return
 	}
-	httpx.WriteList(w, page, readRows(handlers, sources), total)
+	opEventHandlerList.Write(w, page, readRows(handlers, sources), total)
 }
+
+var opEventHandlerGet = httpx.NewJSONOp[httpx.NoBody, eventHandlerWire](httpx.OpSpec{
+	Pattern:     "GET /api/event-handlers/{id}",
+	ID:          "get_event_handler",
+	Summary:     "Get an event handler",
+	Description: "Returns one event handler, in the list's row shape, including one of an event type the organization is not licensed for.",
+	PathParams:  map[string]string{"id": "The event handler's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleEventHandlerGet is the canonical single read, in the list's row shape.
 //
@@ -269,7 +286,7 @@ func (eh *eventHandlersHandler) handleEventHandlerGet(w http.ResponseWriter, r *
 		notFound(w, "event handler")
 		return
 	}
-	writeJSON(w, http.StatusOK, readRow(*handler, sources))
+	opEventHandlerGet.Write(w, readRow(*handler, sources))
 }
 
 // fieldScopePredicate is the wire name of the predicate on every write. One
@@ -468,27 +485,28 @@ func sourceUnavailableMessage(kind string, state eventsource.State) string {
 // as it is (the create default, or the stored value), null clears
 // scope_predicate and blueprint_id and is refused for every other field,
 // because each always holds a value.
+//
+// scope_predicate keeps its raw bytes because the object it holds is the event
+// type's predicate schema, which scopePredicateField validates.
 type eventHandlerFields struct {
-	Mode                   json.RawMessage `json:"mode"`
-	Name                   json.RawMessage `json:"name"`
-	ScopePredicate         json.RawMessage `json:"scope_predicate"`
-	DefaultPriority        json.RawMessage `json:"default_priority"`
-	SortOrder              json.RawMessage `json:"sort_order"`
-	BlueprintID            json.RawMessage `json:"blueprint_id"`
-	BreakerThreshold       json.RawMessage `json:"breaker_threshold"`
-	MinAutonomySuitability json.RawMessage `json:"min_autonomy_suitability"`
-	AppliesToUnowned       json.RawMessage `json:"applies_to_unowned"`
-}
-
-// named reports whether the body named any field at all.
-func (f eventHandlerFields) named() bool {
-	return httpx.PatchNamed(f.Mode, f.Name, f.ScopePredicate, f.DefaultPriority, f.SortOrder,
-		f.BlueprintID, f.BreakerThreshold, f.MinAutonomySuitability, f.AppliesToUnowned)
+	Mode                   httpx.Patch[string]          `json:"mode" doc:"What a matching event does: off, notify, watch, or automate. Absent on a create is watch, absent on an update keeps the stored mode, and null is refused."`
+	Name                   httpx.Patch[string]          `json:"name" doc:"The handler's display name, trimmed, which may not be empty. Absent on a create is the blueprint's name when blueprint_id is given and otherwise the event type's label, absent on an update keeps the stored name, and null is refused."`
+	ScopePredicate         httpx.Patch[json.RawMessage] `json:"scope_predicate" doc:"The predicate an event must match, a JSON object of the fields GET /api/event-schemas/{event_type} lists for the handler's event type. Null or an empty object matches every event of the type; absent on a create matches every event, and absent on an update keeps the stored predicate."`
+	DefaultPriority        httpx.Patch[float64]         `json:"default_priority" doc:"The priority, from 0 to 1, that a task the handler creates starts at. Absent on a create is 0.5, absent on an update keeps the stored value, and null is refused."`
+	SortOrder              httpx.Patch[int]             `json:"sort_order" doc:"The handler's position among the organization's handlers, lowest first, a 32-bit signed integer. Absent on a create is 0, absent on an update keeps the stored value, and null is refused."`
+	BlueprintID            httpx.Patch[string]          `json:"blueprint_id" doc:"The id of a blueprint of the handler's team for the handler to run in automate, or null for none. Absent on a create is none, and absent on an update keeps the stored blueprint; a handler in automate must have one."`
+	BreakerThreshold       httpx.Patch[int]             `json:"breaker_threshold" doc:"How many of the handler's runs on one entity may fail in a row before the handler stops starting runs there, at least 1. Absent on a create is 4, absent on an update keeps the stored value, and null is refused."`
+	MinAutonomySuitability httpx.Patch[float64]         `json:"min_autonomy_suitability" doc:"The lowest autonomy suitability score, from 0 to 1, a task must have for the handler in automate to run its blueprint on it. Absent on a create is 0, absent on an update keeps the stored value, and null is refused."`
+	AppliesToUnowned       httpx.Patch[bool]            `json:"applies_to_unowned" doc:"Whether the handler also reaches entities no member of its team owns; true is refused for an event type whose supports_watch is false in GET /api/event-types. Absent on a create is false, absent on an update keeps the stored value, and null is refused."`
 }
 
 // fieldWrites is what applyHandlerFields learned beyond the values it wrote:
-// which of the fields that need more than the body to decide were named.
+// whether the body named any field, and which of the fields that need more
+// than the body to decide were named.
 type fieldWrites struct {
+	// any is true when the body named at least one field. A PATCH that names
+	// none wrote nothing, and must not answer as if it had.
+	any        bool
 	mode, name bool
 	// blueprint is true when blueprint_id was named; the new value is then on
 	// the handler, "" for a null.
@@ -514,7 +532,14 @@ func refuseNull(v *httpx.Validation, state httpx.PatchState, field string) {
 // refuse the same value the same way.
 func applyHandlerFields(bad, unproc *httpx.Validation, f eventHandlerFields, h *domain.EventHandler, prior *string, eventTypeKnown bool) fieldWrites {
 	var w fieldWrites
-	if mode, state := httpx.PatchString(bad, f.Mode, "mode"); state == httpx.PatchSet {
+	named := func(state httpx.PatchState) httpx.PatchState {
+		if state != httpx.PatchAbsent {
+			w.any = true
+		}
+		return state
+	}
+	mode, modeState := f.Mode.Read(bad, "mode")
+	if state := named(modeState); state == httpx.PatchSet {
 		w.mode = true
 		if domain.ValidEventHandlerMode(mode) {
 			h.Mode = mode
@@ -524,7 +549,8 @@ func applyHandlerFields(bad, unproc *httpx.Validation, f eventHandlerFields, h *
 	} else {
 		refuseNull(bad, state, "mode")
 	}
-	if name, state := httpx.PatchString(bad, f.Name, "name"); state == httpx.PatchSet {
+	name, nameState := f.Name.Read(bad, "name")
+	if state := named(nameState); state == httpx.PatchSet {
 		w.name = true
 		if trimmed := strings.TrimSpace(name); trimmed == "" {
 			bad.Invalid("name", "name cannot be empty")
@@ -534,12 +560,17 @@ func applyHandlerFields(bad, unproc *httpx.Validation, f eventHandlerFields, h *
 	} else {
 		refuseNull(bad, state, "name")
 	}
+	rawPredicate, predicateState := f.ScopePredicate.Read(bad, fieldScopePredicate)
+	if named(predicateState) == httpx.PatchClear {
+		rawPredicate = json.RawMessage("null")
+	}
 	if eventTypeKnown {
-		if predicate, named := scopePredicateField(bad, unproc, f.ScopePredicate, h.EventType, prior); named {
+		if predicate, set := scopePredicateField(bad, unproc, rawPredicate, h.EventType, prior); set {
 			h.ScopePredicateJSON = predicate
 		}
 	}
-	if priority, state := httpx.PatchFloat(bad, f.DefaultPriority, "default_priority"); state == httpx.PatchSet {
+	priority, priorityState := f.DefaultPriority.Read(bad, "default_priority")
+	if state := named(priorityState); state == httpx.PatchSet {
 		if priority < 0 || priority > 1 {
 			unproc.OutOfRange("default_priority", "default_priority must be between 0 and 1")
 		} else {
@@ -548,7 +579,8 @@ func applyHandlerFields(bad, unproc *httpx.Validation, f eventHandlerFields, h *
 	} else {
 		refuseNull(bad, state, "default_priority")
 	}
-	if sortOrder, state := httpx.PatchInt(bad, f.SortOrder, "sort_order"); state == httpx.PatchSet {
+	sortOrder, sortOrderState := f.SortOrder.Read(bad, "sort_order")
+	if state := named(sortOrderState); state == httpx.PatchSet {
 		if sortOrder < math.MinInt32 || sortOrder > math.MaxInt32 {
 			unproc.OutOfRange("sort_order", fmt.Sprintf("sort_order must be between %d and %d", math.MinInt32, math.MaxInt32))
 		} else {
@@ -557,7 +589,8 @@ func applyHandlerFields(bad, unproc *httpx.Validation, f eventHandlerFields, h *
 	} else {
 		refuseNull(bad, state, "sort_order")
 	}
-	switch blueprintID, state := httpx.PatchString(bad, f.BlueprintID, "blueprint_id"); state {
+	blueprintID, blueprintState := f.BlueprintID.Read(bad, "blueprint_id")
+	switch named(blueprintState) {
 	case httpx.PatchSet:
 		w.blueprint = true
 		if blueprintID == "" {
@@ -569,7 +602,8 @@ func applyHandlerFields(bad, unproc *httpx.Validation, f eventHandlerFields, h *
 		w.blueprint = true
 		h.BlueprintID = ""
 	}
-	if threshold, state := httpx.PatchInt(bad, f.BreakerThreshold, "breaker_threshold"); state == httpx.PatchSet {
+	threshold, thresholdState := f.BreakerThreshold.Read(bad, "breaker_threshold")
+	if state := named(thresholdState); state == httpx.PatchSet {
 		if threshold <= 0 || threshold > math.MaxInt32 {
 			unproc.OutOfRange("breaker_threshold", fmt.Sprintf("breaker_threshold must be between 1 and %d", math.MaxInt32))
 		} else {
@@ -578,7 +612,8 @@ func applyHandlerFields(bad, unproc *httpx.Validation, f eventHandlerFields, h *
 	} else {
 		refuseNull(bad, state, "breaker_threshold")
 	}
-	if suitability, state := httpx.PatchFloat(bad, f.MinAutonomySuitability, "min_autonomy_suitability"); state == httpx.PatchSet {
+	suitability, suitabilityState := f.MinAutonomySuitability.Read(bad, "min_autonomy_suitability")
+	if state := named(suitabilityState); state == httpx.PatchSet {
 		if suitability < 0 || suitability > 1 {
 			unproc.OutOfRange("min_autonomy_suitability", "min_autonomy_suitability must be between 0 and 1")
 		} else {
@@ -587,7 +622,8 @@ func applyHandlerFields(bad, unproc *httpx.Validation, f eventHandlerFields, h *
 	} else {
 		refuseNull(bad, state, "min_autonomy_suitability")
 	}
-	if applies, state := httpx.PatchBool(bad, f.AppliesToUnowned, "applies_to_unowned"); state == httpx.PatchSet {
+	applies, appliesState := f.AppliesToUnowned.Read(bad, "applies_to_unowned")
+	if state := named(appliesState); state == httpx.PatchSet {
 		if eventTypeKnown {
 			appliesToUnownedField(unproc, h.EventType, applies)
 		}
@@ -674,10 +710,19 @@ type createEventHandlerRequest struct {
 	// TeamID is the acting team the write picker supplied — the team the
 	// handler is created under. Required when the caller belongs to ≥2 teams;
 	// empty (sole-team fallback) otherwise.
-	TeamID    string `json:"team_id"`
-	EventType string `json:"event_type"`
+	TeamID    string `json:"team_id" doc:"The id of the team to create the handler under, required when the caller writes to more than one team; absent is the caller's one team."`
+	EventType string `json:"event_type" doc:"The event type the handler matches, an id from GET /api/event-types; required, and it cannot be changed after the handler is created."`
 	eventHandlerFields
 }
+
+var opEventHandlerCreate = httpx.NewJSONOp[createEventHandlerRequest, eventHandlerWire](httpx.OpSpec{
+	Pattern:     "POST /api/event-handlers",
+	ID:          "create_event_handler",
+	Summary:     "Create an event handler",
+	Description: "Creates an event handler for one event type on the caller's team and returns the stored handler. The Jira and Linear ids a predicate names, such as a status or a priority, are checked against that service, and an event type whose source cannot produce events for the organization is refused.",
+	Status:      http.StatusCreated,
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintNo, Idempotent: httpx.HintNo, OpenWorld: httpx.HintYes},
+})
 
 // eventTypeLabel is an event type's label in the catalog, or its id when the
 // catalog does not list it.
@@ -698,8 +743,8 @@ func (eh *eventHandlersHandler) handleEventHandlerCreate(w http.ResponseWriter, 
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 
-	var req createEventHandlerRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opEventHandlerCreate.Decode(w, r)
+	if !ok {
 		return
 	}
 
@@ -845,8 +890,17 @@ func (eh *eventHandlersHandler) insertEventHandler(w http.ResponseWriter, r *htt
 		internalError(w, "event_handlers", err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, storedRow(stored))
+	opEventHandlerCreate.Write(w, storedRow(stored))
 }
+
+var opEventHandlerUpdate = httpx.NewJSONOp[eventHandlerFields, eventHandlerWire](httpx.OpSpec{
+	Pattern:     "PATCH /api/event-handlers/{id}",
+	ID:          "update_event_handler",
+	Summary:     "Update an event handler",
+	Description: "Sets the fields the body names on an event handler, leaving the rest as they are, and returns the stored handler. The team and the event type cannot be changed, and the Jira and Linear ids a new predicate names, such as a status or a priority, are checked against that service.",
+	PathParams:  map[string]string{"id": "The event handler's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // PATCH /api/event-handlers/{id}
 //
@@ -882,21 +936,23 @@ func (eh *eventHandlersHandler) handleEventHandlerUpdate(w http.ResponseWriter, 
 		return
 	}
 
-	var req eventHandlerFields
-	if !httpx.DecodeJSONStrict(w, r, &req) {
-		return
-	}
-	if !req.named() {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-			Reason:  httpx.ReasonMissingField,
-			Message: "nothing to update: name at least one field",
-		})
+	req, ok := opEventHandlerUpdate.Decode(w, r)
+	if !ok {
 		return
 	}
 
 	updated := *existing
 	var bad, unproc httpx.Validation
 	writes := applyHandlerFields(&bad, &unproc, req, &updated, existing.ScopePredicateJSON, true)
+	// applyHandlerFields records no fault for a field the body leaves out, so
+	// a body that names none reaches this check with nothing recorded.
+	if !writes.any {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason:  httpx.ReasonMissingField,
+			Message: "nothing to update: name at least one field",
+		})
+		return
+	}
 	if bad.Flush(w, http.StatusBadRequest) {
 		return
 	}
@@ -971,8 +1027,22 @@ func (eh *eventHandlersHandler) handleEventHandlerUpdate(w http.ResponseWriter, 
 		return
 	}
 	eh.recheckJiraDrift(context.WithoutCancel(r.Context()), orgID, userID, *existing, stored)
-	writeJSON(w, http.StatusOK, storedRow(stored))
+	opEventHandlerUpdate.Write(w, storedRow(stored))
 }
+
+// eventHandlerDeleteResponse is the answer to DELETE /api/event-handlers/{id}.
+type eventHandlerDeleteResponse struct {
+	Status string `json:"status" doc:"Always deleted."`
+}
+
+var opEventHandlerDelete = httpx.NewJSONOp[httpx.NoBody, eventHandlerDeleteResponse](httpx.OpSpec{
+	Pattern:     "DELETE /api/event-handlers/{id}",
+	ID:          "delete_event_handler",
+	Summary:     "Delete an event handler",
+	Description: "Deletes an event handler, so that no further event matches it. The runs and tasks it already started are left as they are.",
+	PathParams:  map[string]string{"id": "The event handler's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // DELETE /api/event-handlers/{id}
 //
@@ -1018,14 +1088,27 @@ func (eh *eventHandlersHandler) handleEventHandlerDelete(w http.ResponseWriter, 
 		return
 	}
 	resolveJiraDriftOnDelete(context.WithoutCancel(r.Context()), orgID, *existing)
-	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+	opEventHandlerDelete.Write(w, eventHandlerDeleteResponse{Status: "deleted"})
 }
 
 // reorderEventHandlersRequest is the body of PUT /api/event-handlers/reorder.
 // ids is the caller's whole visible handler list in its new order.
 type reorderEventHandlersRequest struct {
-	IDs []string `json:"ids"`
+	IDs []string `json:"ids" doc:"The id of every event handler the caller can see, each once, in their new order."`
 }
+
+// eventHandlerReorderResponse is the answer to PUT /api/event-handlers/reorder.
+type eventHandlerReorderResponse struct {
+	Status string `json:"status" doc:"Always reordered."`
+}
+
+var opEventHandlerReorder = httpx.NewJSONOp[reorderEventHandlersRequest, eventHandlerReorderResponse](httpx.OpSpec{
+	Pattern:     "PUT /api/event-handlers/reorder",
+	ID:          "reorder_event_handlers",
+	Summary:     "Reorder event handlers",
+	Description: "Rewrites every visible event handler's sort_order to follow the order of ids. The body must name every event handler the caller can see, in every mode, and nothing else.",
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // PUT /api/event-handlers/reorder
 //
@@ -1046,8 +1129,8 @@ func (eh *eventHandlersHandler) handleEventHandlerReorder(w http.ResponseWriter,
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 
-	var req reorderEventHandlersRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opEventHandlerReorder.Decode(w, r)
+	if !ok {
 		return
 	}
 	if len(req.IDs) == 0 {
@@ -1128,17 +1211,17 @@ func (eh *eventHandlersHandler) handleEventHandlerReorder(w http.ResponseWriter,
 		internalError(w, "event_handlers", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "reordered"})
+	opEventHandlerReorder.Write(w, eventHandlerReorderResponse{Status: "reordered"})
 }
 
 func (s *Server) registerEventHandlerRoutes() {
-	s.api("GET /api/event-schemas", handleEventSchemasList)
-	s.api("GET /api/event-schemas/{event_type}", handleEventSchemaGet)
+	s.op(opEventSchemaList, handleEventSchemasList)
+	s.op(opEventSchemaGet, handleEventSchemaGet)
 	eh := &eventHandlersHandler{tx: s.tx, az: s.az, catalogs: s}
-	s.apiMutating("POST /api/event-handlers/list", eh.handleEventHandlersList)
-	s.api("GET /api/event-handlers/{id}", eh.handleEventHandlerGet)
-	s.apiMutating("POST /api/event-handlers", eh.handleEventHandlerCreate)
-	s.apiMutating("PUT /api/event-handlers/reorder", eh.handleEventHandlerReorder)
-	s.apiMutating("PATCH /api/event-handlers/{id}", eh.handleEventHandlerUpdate)
-	s.apiMutating("DELETE /api/event-handlers/{id}", eh.handleEventHandlerDelete)
+	s.op(opEventHandlerList, eh.handleEventHandlersList)
+	s.op(opEventHandlerGet, eh.handleEventHandlerGet)
+	s.op(opEventHandlerCreate, eh.handleEventHandlerCreate)
+	s.op(opEventHandlerReorder, eh.handleEventHandlerReorder)
+	s.op(opEventHandlerUpdate, eh.handleEventHandlerUpdate)
+	s.op(opEventHandlerDelete, eh.handleEventHandlerDelete)
 }

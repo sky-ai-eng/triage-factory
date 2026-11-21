@@ -181,12 +181,26 @@ func buildListingSnapshot(ctx context.Context, tx db.TxStores, orgID, kind, sour
 
 // publishListingRequest is the POST /api/marketplace/listings body.
 type publishListingRequest struct {
-	Kind        string   `json:"kind"` // domain.ListingKindPrompt | domain.ListingKindBlueprint
-	SourceID    string   `json:"source_id"`
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	EventTypes  []string `json:"event_types"`
+	Kind        string   `json:"kind" doc:"What the listing publishes: prompt or blueprint."` // domain.ListingKindPrompt | domain.ListingKindBlueprint
+	SourceID    string   `json:"source_id" doc:"The id of the prompt or blueprint to publish, which must have no listing yet; required."`
+	Name        string   `json:"name" doc:"The listing's name, which may not be blank."`
+	Description string   `json:"description" doc:"The listing's description, or empty for none."`
+	EventTypes  []string `json:"event_types" doc:"The event types the listing is suited to, ids from GET /api/event-types, which browsing can filter on."`
 }
+
+// marketplacePublishResponse is the answer to POST /api/marketplace/listings.
+type marketplacePublishResponse struct {
+	ID string `json:"id" doc:"The new listing's id."`
+}
+
+var opListingPublish = httpx.NewJSONOp[publishListingRequest, marketplacePublishResponse](httpx.OpSpec{
+	Pattern:     "POST /api/marketplace/listings",
+	ID:          "create_marketplace_listing",
+	Summary:     "Publish a prompt or blueprint to the marketplace",
+	Description: "Publishes a copy of one of the caller's team's prompts or blueprints, as it stands now, as a listing every member of the organization can browse, and returns the listing's id. A source that already has a listing, published or delisted, is refused. Works only in multi mode, and answers 404 in local mode.",
+	Status:      http.StatusCreated,
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintNo, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleMarketplacePublish publishes a fresh snapshot of a team blueprint or
 // standalone prompt as a new org-visible listing.
@@ -198,8 +212,8 @@ func (mh *Handler) handleMarketplacePublish(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	var req publishListingRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opListingPublish.Decode(w, r)
+	if !ok {
 		return
 	}
 	if req.Kind != domain.ListingKindPrompt && req.Kind != domain.ListingKindBlueprint {
@@ -290,7 +304,7 @@ func (mh *Handler) handleMarketplacePublish(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	httpx.WriteJSON(w, http.StatusCreated, map[string]string{"id": listingID})
+	opListingPublish.Write(w, marketplacePublishResponse{ID: listingID})
 }
 
 // publishVersionRequest is the POST /api/marketplace/listings/{id}/versions
@@ -299,10 +313,19 @@ func (mh *Handler) handleMarketplacePublish(w http.ResponseWriter, r *http.Reque
 // are threaded from the request so a republish can retune the listing's
 // live/searchable fields independent of what the frozen snapshot carries.
 type publishVersionRequest struct {
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	EventTypes  []string `json:"event_types"`
+	Name        string   `json:"name" doc:"The listing's name, which may not be blank."`
+	Description string   `json:"description" doc:"The listing's description, or empty for none."`
+	EventTypes  []string `json:"event_types" doc:"The event types the listing is suited to, ids from GET /api/event-types, which replace the listing's current ones."`
 }
+
+var opListingVersionCreate = httpx.NewJSONOp[publishVersionRequest, domain.MarketplaceListing](httpx.OpSpec{
+	Pattern:     "POST /api/marketplace/listings/{id}/versions",
+	ID:          "create_marketplace_listing_version",
+	Summary:     "Publish a new version of a marketplace listing",
+	Description: "Adds a version holding a copy of the listing's source prompt or blueprint as it stands now, sets the listing's name, description, and event types, and returns the listing. Earlier versions are left as they are, and a listing whose source has been deleted is refused. Works only in multi mode, and answers 404 in local mode.",
+	PathParams:  map[string]string{"id": "The listing's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintNo, OpenWorld: httpx.HintNo},
+})
 
 // handleMarketplaceListingVersionCreate republishes: rebuilds the snapshot
 // from the listing's source object as it stands right now, appends it as a
@@ -320,8 +343,8 @@ func (mh *Handler) handleMarketplaceListingVersionCreate(w http.ResponseWriter, 
 		return
 	}
 
-	var req publishVersionRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opListingVersionCreate.Decode(w, r)
+	if !ok {
 		return
 	}
 	if strings.TrimSpace(req.Name) == "" {
@@ -396,7 +419,7 @@ func (mh *Handler) handleMarketplaceListingVersionCreate(w http.ResponseWriter, 
 		return
 	}
 
-	httpx.WriteJSON(w, http.StatusOK, updated)
+	opListingVersionCreate.Write(w, updated)
 }
 
 // gateMarketplaceListingWrite resolves a listing's publisher team and applies
@@ -434,6 +457,15 @@ func (mh *Handler) gateMarketplaceListingWrite(w http.ResponseWriter, r *http.Re
 	return listing, true
 }
 
+var opListingDelist = httpx.NewNoContentOp[httpx.NoBody](httpx.OpSpec{
+	Pattern:     "POST /api/marketplace/listings/{id}/delist",
+	ID:          "delist_marketplace_listing",
+	Summary:     "Delist a marketplace listing",
+	Description: "Hides a listing from every member who may not write its publishing team, so they can no longer browse or install it. Copies already installed from it are left as they are. Works only in multi mode, and answers 404 in local mode.",
+	PathParams:  map[string]string{"id": "The listing's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
+
 // handleMarketplaceListingDelist hides a listing from every other member's
 // browse. Publisher-team writers only. Copy-not-dependency invariant: this
 // never touches the copies other teams already installed from this listing,
@@ -466,8 +498,17 @@ func (mh *Handler) handleMarketplaceListingDelist(w http.ResponseWriter, r *http
 		httpx.InternalError(w, "marketplace", err)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	opListingDelist.Write(w)
 }
+
+var opListingRelist = httpx.NewNoContentOp[httpx.NoBody](httpx.OpSpec{
+	Pattern:     "POST /api/marketplace/listings/{id}/relist",
+	ID:          "relist_marketplace_listing",
+	Summary:     "Relist a marketplace listing",
+	Description: "Makes a delisted listing visible to every member of the organization again. Works only in multi mode, and answers 404 in local mode.",
+	PathParams:  map[string]string{"id": "The listing's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleMarketplaceListingRelist reverses a delist, restoring the listing to
 // other members' browse. Publisher-team writers only. Copies + votes already
@@ -499,8 +540,17 @@ func (mh *Handler) handleMarketplaceListingRelist(w http.ResponseWriter, r *http
 		httpx.InternalError(w, "marketplace", err)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	opListingRelist.Write(w)
 }
+
+var opListingBySource = httpx.NewJSONOp[httpx.NoBody, domain.ListingSummary](httpx.OpSpec{
+	Pattern:     "GET /api/marketplace/listings/by-source/{source_id}",
+	ID:          "get_marketplace_listing_by_source",
+	Summary:     "Get the marketplace listing of a prompt or blueprint",
+	Description: "Returns the listing published from a prompt or blueprint, whether it is published or delisted. A delisted listing is visible only to members who may write its publishing team. Works only in multi mode, and answers 404 in local mode.",
+	PathParams:  map[string]string{"source_id": "The id of the prompt or blueprint the listing was published from."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleMarketplaceListingBySource resolves the org's listing for a
 // team-side source object — published OR delisted — or null when none. The
@@ -544,7 +594,7 @@ func (mh *Handler) handleMarketplaceListingBySource(w http.ResponseWriter, r *ht
 		httpx.NotFound(w, "listing")
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, listing)
+	opListingBySource.Write(w, *listing)
 }
 
 // marketplaceListingIDOr404 guards the {id} path value on every listing route
@@ -567,16 +617,24 @@ type marketplaceListRequest struct {
 	// Search is a case-insensitive literal substring of the listing's name or
 	// description (httpx.Search: trimmed, empty is absent, at most 200
 	// characters).
-	Search    string `json:"search"`
-	EventType string `json:"event_type"`
-	Kind      string `json:"kind"`
+	Search    string `json:"search" doc:"Narrows to listings whose name or description contains this text, compared case-insensitively and literally; trimmed, at most 200 characters, and empty is absent."`
+	EventType string `json:"event_type" doc:"Narrows to listings suited to this event type, an id from GET /api/event-types; absent is every listing."`
+	Kind      string `json:"kind" doc:"Narrows to listings of this kind, prompt or blueprint; absent is both."`
 	// SortKey is one of domain.ListingSortKeys; absent is installs. SortDir is
 	// asc or desc, desc when absent, and refused without a SortKey.
-	SortKey string `json:"sort_key"`
-	SortDir string `json:"sort_dir"`
+	SortKey string `json:"sort_key" doc:"The order of the list: installs, votes, recent for the most recently updated, or used for the most runs; absent is installs."`
+	SortDir string `json:"sort_dir" doc:"asc or desc, desc when absent; refused without sort_key."`
 
 	httpx.PageRequest
 }
+
+var opListingList = httpx.NewListOp[marketplaceListRequest, domain.ListingSummary](httpx.OpSpec{
+	Pattern:     "POST /api/marketplace/listings/list",
+	ID:          "list_marketplace_listings",
+	Summary:     "List marketplace listings",
+	Description: "Returns one page of the organization's marketplace listings, narrowed by the body's filters and ordered by sort_key, the most installed first by default. A delisted listing is included only for members who may write its publishing team. Works only in multi mode, and answers 404 in local mode.",
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // marketplaceListFilterKey is the resolved filter set the page token is
 // fingerprinted against: the needle through httpx.SearchKey, and the sort as
@@ -608,8 +666,8 @@ func (mh *Handler) handleMarketplaceList(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	var req marketplaceListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opListingList.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -653,8 +711,17 @@ func (mh *Handler) handleMarketplaceList(w http.ResponseWriter, r *http.Request)
 		httpx.InternalError(w, "marketplace", err)
 		return
 	}
-	httpx.WriteList(w, page, listings, total)
+	opListingList.Write(w, page, listings, total)
 }
+
+var opListingGet = httpx.NewJSONOp[httpx.NoBody, domain.ListingDetail](httpx.OpSpec{
+	Pattern:     "GET /api/marketplace/listings/{id}",
+	ID:          "get_marketplace_listing",
+	Summary:     "Get a marketplace listing",
+	Description: "Returns one listing with its counts, the full content of its current version, and its version history. A delisted listing is visible only to members who may write its publishing team. Works only in multi mode, and answers 404 in local mode.",
+	PathParams:  map[string]string{"id": "The listing's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleMarketplaceGet serves the listing detail view: header + counts, the
 // current snapshot (full step/prompt bodies for preview), and version
@@ -692,8 +759,17 @@ func (mh *Handler) handleMarketplaceGet(w http.ResponseWriter, r *http.Request) 
 		httpx.NotFound(w, "listing")
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, detail)
+	opListingGet.Write(w, detail)
 }
+
+var opListingVote = httpx.NewNoContentOp[httpx.NoBody](httpx.OpSpec{
+	Pattern:     "PUT /api/marketplace/listings/{id}/vote",
+	ID:          "replace_marketplace_listing_vote",
+	Summary:     "Vote for a marketplace listing",
+	Description: "Records the caller's vote recommending a listing. A vote the caller has already cast is left as it is. Works only in multi mode, and answers 404 in local mode.",
+	PathParams:  map[string]string{"id": "The listing's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintNo, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleMarketplaceVote records the caller's "recommend" vote on a listing.
 // Any org member — no team-write gate, this is a read-adjacent social action,
@@ -751,8 +827,17 @@ func (mh *Handler) handleMarketplaceVote(w http.ResponseWriter, r *http.Request)
 		httpx.InternalError(w, "marketplace", err)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	opListingVote.Write(w)
 }
+
+var opListingUnvote = httpx.NewNoContentOp[httpx.NoBody](httpx.OpSpec{
+	Pattern:     "DELETE /api/marketplace/listings/{id}/vote",
+	ID:          "delete_marketplace_listing_vote",
+	Summary:     "Remove a vote for a marketplace listing",
+	Description: "Removes the caller's vote for a listing. It answers 204 when the caller has no vote there, and for a listing that does not exist. Works only in multi mode, and answers 404 in local mode.",
+	PathParams:  map[string]string{"id": "The listing's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleMarketplaceUnvote removes the caller's vote on a listing, if any.
 // Idempotent: removing a vote that doesn't exist is a no-op, still 204 —
@@ -776,7 +861,7 @@ func (mh *Handler) handleMarketplaceUnvote(w http.ResponseWriter, r *http.Reques
 		httpx.InternalError(w, "marketplace", err)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	opListingUnvote.Write(w)
 }
 
 // installListingRequest is the POST /api/marketplace/listings/{id}/install
@@ -784,7 +869,7 @@ func (mh *Handler) handleMarketplaceUnvote(w http.ResponseWriter, r *http.Reques
 // solo/single-team caller omits it and teamscope resolves their sole team
 // (see authz.Checker.RequireActingTeamWrite / teamscope.ResolveActing).
 type installListingRequest struct {
-	TeamID string `json:"team_id"`
+	TeamID string `json:"team_id" doc:"The id of the team to install the copy into, required when the caller writes to more than one team; absent is the caller's one team."`
 }
 
 // installListingResponse returns the id(s) of everything the install
@@ -793,10 +878,20 @@ type installListingRequest struct {
 // root_object_id. PromptIDs is every prompt row created (the step copies
 // for kind=blueprint, the single prompt for kind=prompt).
 type installListingResponse struct {
-	Kind      string   `json:"kind"`
-	ID        string   `json:"id"`
-	PromptIDs []string `json:"prompt_ids"`
+	Kind      string   `json:"kind" doc:"What was installed: prompt or blueprint."`
+	ID        string   `json:"id" doc:"The id of the new blueprint, or of the new prompt for a prompt listing."`
+	PromptIDs []string `json:"prompt_ids" doc:"The ids of every prompt the install created: the blueprint's step prompts, or the one prompt."`
 }
+
+var opListingInstall = httpx.NewJSONOp[installListingRequest, installListingResponse](httpx.OpSpec{
+	Pattern:     "POST /api/marketplace/listings/{id}/install",
+	ID:          "install_marketplace_listing",
+	Summary:     "Install a marketplace listing into a team",
+	Description: "Copies the current version of a listing into the caller's team as a new prompt or blueprint, and returns the ids of what it created. The copy does not change when the listing is republished, and each install makes a new copy; a delisted listing is refused. Works only in multi mode, and answers 404 in local mode.",
+	PathParams:  map[string]string{"id": "The listing's id."},
+	Status:      http.StatusCreated,
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintNo, Idempotent: httpx.HintNo, OpenWorld: httpx.HintNo},
+})
 
 // handleMarketplaceInstall is "copy to my team" (TFAC-538): it materializes
 // the listing's current-version snapshot into the caller's chosen team as
@@ -821,8 +916,8 @@ func (mh *Handler) handleMarketplaceInstall(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	var req installListingRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opListingInstall.Decode(w, r)
+	if !ok {
 		return
 	}
 
@@ -892,7 +987,7 @@ func (mh *Handler) handleMarketplaceInstall(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	httpx.WriteJSON(w, http.StatusCreated, resp)
+	opListingInstall.Write(w, resp)
 }
 
 // New builds the marketplace handler.
@@ -905,16 +1000,16 @@ func (mh *Handler) Register(m httpx.Mounts) {
 	// Within-org prompt marketplace — multi-mode only; every handler opens
 	// with gateMarketplace, which 404s in local mode (see
 	// marketplace.go).
-	m.APIMutating("POST /api/marketplace/listings/list", mh.handleMarketplaceList)
-	m.APIMutating("POST /api/marketplace/listings", mh.handleMarketplacePublish)
-	m.API("GET /api/marketplace/listings/{id}", mh.handleMarketplaceGet)
-	m.APIMutating("POST /api/marketplace/listings/{id}/versions", mh.handleMarketplaceListingVersionCreate)
-	m.APIMutating("POST /api/marketplace/listings/{id}/delist", mh.handleMarketplaceListingDelist)
-	m.APIMutating("POST /api/marketplace/listings/{id}/relist", mh.handleMarketplaceListingRelist)
-	m.APIMutating("PUT /api/marketplace/listings/{id}/vote", mh.handleMarketplaceVote)
-	m.APIMutating("DELETE /api/marketplace/listings/{id}/vote", mh.handleMarketplaceUnvote)
-	m.API("GET /api/marketplace/listings/by-source/{source_id}", mh.handleMarketplaceListingBySource)
+	m.Op(opListingList, mh.handleMarketplaceList)
+	m.Op(opListingPublish, mh.handleMarketplacePublish)
+	m.Op(opListingGet, mh.handleMarketplaceGet)
+	m.Op(opListingVersionCreate, mh.handleMarketplaceListingVersionCreate)
+	m.Op(opListingDelist, mh.handleMarketplaceListingDelist)
+	m.Op(opListingRelist, mh.handleMarketplaceListingRelist)
+	m.Op(opListingVote, mh.handleMarketplaceVote)
+	m.Op(opListingUnvote, mh.handleMarketplaceUnvote)
+	m.Op(opListingBySource, mh.handleMarketplaceListingBySource)
 	// Install/"copy to my team" — materializes the listing's
 	// current snapshot into the caller's team as a brand-new fork.
-	m.APIMutating("POST /api/marketplace/listings/{id}/install", mh.handleMarketplaceInstall)
+	m.Op(opListingInstall, mh.handleMarketplaceInstall)
 }

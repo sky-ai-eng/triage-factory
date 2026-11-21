@@ -16,22 +16,22 @@ import (
 
 // ImportResult summarizes what happened during an import run.
 type ImportResult struct {
-	Scanned  int             `json:"scanned"`
-	Imported int             `json:"imported"`
-	Skipped  int             `json:"skipped"`
-	Failed   []ImportFailure `json:"failed"`
+	Scanned  int             `json:"scanned" doc:"How many SKILL.md files the scan found, the sum of imported, skipped, and the length of failed."`
+	Imported int             `json:"imported" doc:"How many files were imported as new prompts or updated an imported prompt that had changed."`
+	Skipped  int             `json:"skipped" doc:"How many files changed nothing, because the file was already imported as it is, has the same content as another imported prompt, or was found twice."`
+	Failed   []ImportFailure `json:"failed" doc:"The files that could not be imported, and why."`
 	// Errors carries scan-level problems that belong to no single file — an
 	// unreadable search directory, a glob that wouldn't expand, a cancelled
 	// run. Per-file failures live in Failed, so the accounting invariant below
 	// holds regardless of what is in here.
-	Errors []string `json:"errors,omitempty"`
+	Errors []string `json:"errors,omitempty" doc:"Problems with the scan that belong to no one file, such as a directory it could not read, absent when there were none."`
 }
 
 // ImportFailure is one file the scan could not import, and why. Structured
 // rather than a formatted string so a caller can name the file it belongs to.
 type ImportFailure struct {
-	Path    string `json:"path"`
-	Message string `json:"message"`
+	Path    string `json:"path" doc:"The file's path on the server's disk."`
+	Message string `json:"message" doc:"Why the file could not be imported."`
 }
 
 // The accounting invariant: every file the scan turns up lands in exactly one

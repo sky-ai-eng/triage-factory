@@ -16,22 +16,22 @@ import (
 
 // CreateRequest is the body of a prompt create.
 type CreateRequest struct {
-	Name  string `json:"name"`
-	Body  string `json:"body"`
-	Model string `json:"model"`
+	Name  string `json:"name" doc:"The prompt's name; required."`
+	Body  string `json:"body" doc:"The prompt's text, what an agent running it is asked to do; required."`
+	Model string `json:"model" doc:"The model key the prompt runs on, one the deployment offers, or empty to use the team's default model."`
 	// TeamID is the acting team the write picker supplied. Required in the UI
 	// whenever the caller belongs to ≥2 teams; empty for a solo caller (the
 	// picker is hidden), where the resolver falls back to the sole team. See
 	// teamscope.ResolveActing.
-	TeamID string `json:"team_id"`
+	TeamID string `json:"team_id" doc:"The id of the team to create the prompt under, required when the caller writes to more than one team; absent is the caller's one team."`
 }
 
 // UpdateRequest is the body of a prompt update. The owning team is fixed at
 // create time, so unlike CreateRequest it carries no team_id.
 type UpdateRequest struct {
-	Name  string `json:"name"`
-	Body  string `json:"body"`
-	Model string `json:"model"`
+	Name  string `json:"name" doc:"The prompt's name; required."`
+	Body  string `json:"body" doc:"The prompt's text, what an agent running it is asked to do; required."`
+	Model string `json:"model" doc:"The model key the prompt runs on, one the deployment offers, or empty to use the team's default model; absent is empty."`
 }
 
 // ValidModel reports whether model is an acceptable prompts.model value — ""
