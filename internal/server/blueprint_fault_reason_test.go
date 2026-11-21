@@ -75,7 +75,7 @@ func TestBlueprintStepsPut_FaultReasons(t *testing.T) {
 		}
 	})
 
-	t.Run("version", func(t *testing.T) {
+	t.Run("shape", func(t *testing.T) {
 		bp, steps := createChainBlueprint(t, s, "Unversioned", 1)
 		for _, c := range []struct {
 			name    string
@@ -89,6 +89,8 @@ func TestBlueprintStepsPut_FaultReasons(t *testing.T) {
 			// Both shape faults are reported, not the first.
 			{"absent beside a step with no prompt", map[string]any{"steps": []map[string]any{{"brief": "no prompt"}}},
 				map[string]string{"version": httpx.ReasonMissingField, "steps": httpx.ReasonMissingField}},
+			{"a prompt named twice", map[string]any{"steps": []map[string]any{{"step_prompt_id": steps[0]}, {"step_prompt_id": steps[0]}}, "version": blueprintVersion(t, s, bp)},
+				map[string]string{"steps": httpx.ReasonInvalidField}},
 		} {
 			rec := doJSON(t, s, http.MethodPut, "/api/blueprints/"+bp+"/steps", c.body)
 			if rec.Code != http.StatusBadRequest {
@@ -136,8 +138,9 @@ func TestBlueprintStepsPut_FaultReasons(t *testing.T) {
 				Version int64 `json:"version"`
 			} `json:"blueprint"`
 			Steps []struct {
-				StepPromptID string `json:"step_prompt_id"`
-				Brief        string `json:"brief"`
+				StepPromptID     string `json:"step_prompt_id"`
+				Brief            string `json:"brief"`
+				BlueprintVersion int64  `json:"blueprint_version"`
 			} `json:"steps"`
 		}
 		if err := json.Unmarshal(first.Body.Bytes(), &wrote); err != nil {
@@ -148,6 +151,13 @@ func TestBlueprintStepsPut_FaultReasons(t *testing.T) {
 		}
 		if len(wrote.Steps) != 2 || wrote.Steps[0].StepPromptID != steps[1] || wrote.Steps[0].Brief != "first" {
 			t.Errorf("first PUT answered steps %+v, want the ones it wrote", wrote.Steps)
+		}
+		// The answer's steps carry the version a next PUT names, as the step
+		// list's do.
+		for i, st := range wrote.Steps {
+			if st.BlueprintVersion != wrote.Blueprint.Version {
+				t.Errorf("first PUT's step %d blueprint_version = %d, want the blueprint's %d", i, st.BlueprintVersion, wrote.Blueprint.Version)
+			}
 		}
 
 		// The second names the same steps, so only the version tells it was

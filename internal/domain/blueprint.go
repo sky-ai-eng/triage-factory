@@ -114,11 +114,13 @@ type BlueprintStep struct {
 	StepPromptID string    `json:"step_prompt_id"`
 	Brief        string    `json:"brief"`
 	CreatedAt    time.Time `json:"created_at"`
-	// BlueprintVersion is the step's blueprint's Version, read in the same
-	// statement as the step. The step list carries it so a steps PUT can name
-	// the version of the steps it was decided against, whatever order the
-	// caller read the blueprint and its steps in. Reads that return the
-	// blueprint beside its steps leave it zero, and it is omitted.
+	// BlueprintVersion is the step's blueprint's Version, as of the read
+	// that returned the step, so a steps PUT can name the version of the
+	// steps it was decided against whatever order the caller read the
+	// blueprint and its steps in. The step list reads it in the same
+	// statement as the step, and the step writes' answers copy it from the
+	// blueprint they return. A blueprint run's steps leave it zero, and it is
+	// omitted.
 	BlueprintVersion int64 `json:"blueprint_version,omitempty"`
 }
 

@@ -661,6 +661,14 @@ func (h *Handler) handleBlueprintStepsPut(w http.ResponseWriter, r *http.Request
 	if slices.Contains(stepIDs, "") {
 		shape.Add(httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "step_prompt_id is required for every step", Field: "steps"})
 	}
+	// A prompt is one step of one blueprint, so a list naming it twice could
+	// only fail at the insert.
+	for i, sid := range stepIDs {
+		if sid != "" && slices.Index(stepIDs, sid) < i {
+			shape.Invalid("steps", "step "+strconv.Itoa(i)+" names the same prompt as step "+strconv.Itoa(slices.Index(stepIDs, sid))+": a prompt is one step")
+			break
+		}
+	}
 	if shape.Flush(w, http.StatusBadRequest) {
 		return
 	}
@@ -761,7 +769,7 @@ func (h *Handler) handleBlueprintStepsPut(w http.ResponseWriter, r *http.Request
 		if e != nil {
 			return e
 		}
-		written = blueprintWithSteps{Blueprint: &stamped, Steps: steps}
+		written = withSteps(&stamped, steps)
 		return nil
 	}); err != nil {
 		httpx.InternalError(w, "blueprints", err)
@@ -773,9 +781,6 @@ func (h *Handler) handleBlueprintStepsPut(w http.ResponseWriter, r *http.Request
 	}
 	if fault.write(w) {
 		return
-	}
-	if written.Steps == nil {
-		written.Steps = []domain.BlueprintStep{}
 	}
 	httpx.WriteJSON(w, http.StatusOK, written)
 }
@@ -826,6 +831,20 @@ func (f *blueprintFault) write(w http.ResponseWriter) bool {
 type blueprintWithSteps struct {
 	Blueprint *domain.Blueprint      `json:"blueprint"`
 	Steps     []domain.BlueprintStep `json:"steps"`
+}
+
+// withSteps builds a blueprintWithSteps whose steps carry the blueprint's
+// version, as the step list's do, so a caller can name the version of the
+// steps it holds from either read. Steps are a list, never null.
+func withSteps(b *domain.Blueprint, steps []domain.BlueprintStep) blueprintWithSteps {
+	out := make([]domain.BlueprintStep, len(steps))
+	for i, st := range steps {
+		if b != nil {
+			st.BlueprintVersion = b.Version
+		}
+		out[i] = st
+	}
+	return blueprintWithSteps{Blueprint: b, Steps: out}
 }
 
 type mergeBlueprintRequest struct {
@@ -958,10 +977,7 @@ func (h *Handler) handleBlueprintMerge(w http.ResponseWriter, r *http.Request) {
 	if fault.write(w) {
 		return
 	}
-	if steps == nil {
-		steps = []domain.BlueprintStep{}
-	}
-	httpx.WriteJSON(w, http.StatusOK, blueprintWithSteps{Blueprint: merged, Steps: steps})
+	httpx.WriteJSON(w, http.StatusOK, withSteps(merged, steps))
 }
 
 type splitBlueprintRequest struct {
@@ -1073,15 +1089,9 @@ func (h *Handler) handleBlueprintSplit(w http.ResponseWriter, r *http.Request) {
 	if fault.write(w) {
 		return
 	}
-	if upSteps == nil {
-		upSteps = []domain.BlueprintStep{}
-	}
-	if downSteps == nil {
-		downSteps = []domain.BlueprintStep{}
-	}
 	httpx.WriteJSON(w, http.StatusOK, blueprintSplitResponse{
-		Upstream:   blueprintWithSteps{Blueprint: upstream, Steps: upSteps},
-		Downstream: blueprintWithSteps{Blueprint: downstream, Steps: downSteps},
+		Upstream:   withSteps(upstream, upSteps),
+		Downstream: withSteps(downstream, downSteps),
 	})
 }
 
@@ -1256,11 +1266,8 @@ func (h *Handler) handleBlueprintReconnect(w http.ResponseWriter, r *http.Reques
 	if fault.write(w) {
 		return
 	}
-	if hostSteps == nil {
-		hostSteps = []domain.BlueprintStep{}
-	}
 	httpx.WriteJSON(w, http.StatusOK, blueprintReconnectResponse{
-		Host:              blueprintWithSteps{Blueprint: hostOut, Steps: hostSteps},
+		Host:              withSteps(hostOut, hostSteps),
 		OrphanBlueprintID: orphanID,
 	})
 }
@@ -1345,10 +1352,7 @@ func (h *Handler) handleBlueprintDuplicate(w http.ResponseWriter, r *http.Reques
 			if ge != nil {
 				return ge
 			}
-			if steps == nil {
-				steps = []domain.BlueprintStep{}
-			}
-			out = append(out, blueprintWithSteps{Blueprint: bp, Steps: steps})
+			out = append(out, withSteps(bp, steps))
 		}
 		return nil
 	}); err != nil {

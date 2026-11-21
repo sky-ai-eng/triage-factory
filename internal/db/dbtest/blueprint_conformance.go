@@ -1490,10 +1490,10 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 			_, err := store.DeleteStep(ctx, orgID, bp, 2, "")
 			return err
 		})
+		if _, err := store.ReplaceSteps(ctx, orgID, bp, []string{p[0], p[1], p[5]}, nil); err != nil {
+			t.Fatalf("ReplaceSteps before the mid delete: %v", err)
+		}
 		rises("DeleteStep in the middle", bp, func() error {
-			if _, err := store.ReplaceSteps(ctx, orgID, bp, []string{p[0], p[1], p[5]}, nil); err != nil {
-				return err
-			}
 			_, err := store.DeleteStep(ctx, orgID, bp, 1, "Downstream")
 			return err
 		})
