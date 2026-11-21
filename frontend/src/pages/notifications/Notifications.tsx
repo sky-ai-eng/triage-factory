@@ -147,6 +147,16 @@ const OPEN_ANY: NotificationFilter = { status: 'open' }
 const RESOLVED: NotificationFilter = { status: 'resolved' }
 const LATEST_RESOLUTION: NotificationSort = { sort_key: 'resolved_at', sort_dir: 'desc' }
 
+/** A list's counts: what is open undismissed (`n`) and at all (`any`), and,
+ *  with nothing open, the last thing that resolved. */
+type OpenCount = {
+  path: string
+  list: List
+  n: number
+  any: number
+  last: NotificationItem | null
+}
+
 /** Minutes between an ISO time and `now`, past or future. */
 function minutes(at: string | null, now: number): number {
   if (!at) return 0
@@ -235,7 +245,7 @@ function OrgNotifications({ org }: { org: string }) {
   const request = useMemo(() => viewRequest(filter, sort), [filter, sort])
   const key = viewKey(path, request)
   const [loadedKey, setLoadedKey] = useState('')
-  const [openCount, setOpenCount] = useState<{ path: string; n: number; any: number } | null>(null)
+  const [openCount, setOpenCount] = useState<OpenCount | null>(null)
   const [facetAnswer, setFacetAnswer] = useState<{
     path: string
     facets: NotificationFacets
@@ -253,13 +263,25 @@ function OrgNotifications({ org }: { org: string }) {
       const latest = () => live && n === reads.current
       // A reread keeps the depth "load more" reached.
       const listed = loadPage({ ...request, page_size: PAGE }, { keepDepth: true })
-      const count = (f: NotificationFilter) =>
-        list === 'all' ? listOrgNotifications(org, f, 0) : listNotifications(f, 0)
-      const counted = Promise.all([count(OPEN_COUNT), count(OPEN_ANY)]).then(([open, any]) => {
-        if (latest() && open.total_count !== null && any.total_count !== null) {
-          setOpenCount({ path, n: open.total_count, any: any.total_count })
-        }
-      })
+      const page = (f: NotificationFilter, size: number, s?: NotificationSort) =>
+        list === 'all' ? listOrgNotifications(org, f, size, s) : listNotifications(f, size, s)
+      const counted = Promise.all([page(OPEN_COUNT, 0), page(OPEN_ANY, 0)]).then(
+        async ([open, any]) => {
+          if (open.total_count === null || any.total_count === null) return
+          // The empty state's last resolution, read only when nothing is open,
+          // and with the counts, so the empty state lands whole.
+          const last =
+            any.total_count === 0
+              ? await page(RESOLVED, 1, LATEST_RESOLUTION).then(
+                  (p) => p.items[0] ?? null,
+                  () => null,
+                )
+              : null
+          if (latest()) {
+            setOpenCount({ path, list, n: open.total_count, any: any.total_count, last })
+          }
+        },
+      )
       // The filters' counts. Until they answer, the last ones stay.
       notificationFacets(fpath, filter)
         .then((facets) => {
@@ -705,17 +727,21 @@ function OrgNotifications({ org }: { org: string }) {
   // ---- the page -----------------------------------------------------
 
   const loaded = loadedKey === key
-  const counts = openCount?.path === path ? openCount : null
+  // While a switch to the other list is out, the list it left still answers
+  // for the page, so moving between two lists with nothing open goes from one
+  // empty state to the other, and the count from one number to the other,
+  // with nothing drawn between them.
+  const counts = openCount?.path === path ? openCount : loaded ? null : openCount
   const count = counts ? counts.n : null
-  // Nothing open at all. With dismissed rows left, the table stays, and so
-  // does the control that shows them.
-  const isEmpty =
-    loaded &&
-    tab === 'open' &&
-    !showDismissed &&
-    pool.length === 0 &&
-    counts?.any === 0 &&
-    !paged.error
+  const openView = tab === 'open' && !showDismissed && !paged.error
+  // Nothing open at all, which the counts say before the list answers: a list
+  // answering rows after all is the one thing that overrules them. With
+  // dismissed rows left, the table stays, and so does the control that shows
+  // them.
+  const isEmpty = openView && counts?.any === 0 && !(loaded && pool.length > 0)
+  // Until the counts first answer, whether this is a table or the empty state
+  // is not known, and the page draws neither.
+  const undecided = openView && !counts && !loaded
   const unreadIds = tab === 'open' ? pool.filter((n) => !n.read).map((n) => n.id) : []
   const filtering = !!(fPri || fWho || q)
   const emptyLabel = !loaded
@@ -731,25 +757,7 @@ function OrgNotifications({ org }: { org: string }) {
             : // The counts did not answer: claim nothing about dismissed rows.
               'Nothing open to show.'
 
-  // The last thing that resolved, for the empty state: read only when it
-  // shows, from the same list, as its first row by resolution.
-  const [lastResolved, setLastResolved] = useState<{ path: string; n: NotificationItem } | null>(
-    null,
-  )
-  useEffect(() => {
-    if (!isEmpty || !org) return
-    const read =
-      list === 'all'
-        ? listOrgNotifications(org, RESOLVED, 1, LATEST_RESOLUTION)
-        : listNotifications(RESOLVED, 1, LATEST_RESOLUTION)
-    read
-      .then((p) => {
-        const latest = p.items[0]
-        if (latest) setLastResolved({ path, n: latest })
-      })
-      .catch(() => {})
-  }, [isEmpty, org, list, path])
-  const last = lastResolved?.path === path ? lastResolved.n : null
+  const last = counts?.last ?? null
 
   const subtitle = isEmpty
     ? 'all clear'
@@ -837,11 +845,11 @@ function OrgNotifications({ org }: { org: string }) {
         ) : null}
       </div>
 
-      {isEmpty ? (
+      {undecided ? null : isEmpty ? (
         <div className="nt-empty">
           <div className="nt-empty-title">Nothing needs you</div>
           <div className="nt-empty-body">
-            {list === 'all'
+            {counts?.list === 'all'
               ? `No team in ${orgName || 'this organization'} has an open notification.`
               : 'When something stops working for you or a team you are on, it shows up here until it is fixed.'}
           </div>

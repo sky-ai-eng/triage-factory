@@ -794,6 +794,7 @@ describe('switching orgs', () => {
 
 describe('rereads', () => {
   it('does not call a view loaded on a read a later one replaced', async () => {
+    rows = [note('d', { dismissed: true })]
     let first!: () => void
     let second!: () => void
     openGates = [new Promise((r) => (first = r)), new Promise((r) => (second = r))]
@@ -804,12 +805,12 @@ describe('rereads', () => {
 
     await act(async () => first())
     await settle()
-    expect(screen.queryByText('Nothing needs you')).toBeNull()
+    expect(screen.queryByText('Everything open here is dismissed.')).toBeNull()
     expect(screen.getByText('Loading…')).toBeInTheDocument()
 
     await act(async () => second())
     await settle()
-    expect(screen.getByText('Nothing needs you')).toBeInTheDocument()
+    expect(screen.getByText('Everything open here is dismissed.')).toBeInTheDocument()
   })
 })
 
@@ -891,16 +892,49 @@ describe('nothing open', () => {
     expect(screen.getByText('title d')).toBeInTheDocument()
   })
 
-  it('says what nothing open means only once the counts have answered', async () => {
+  it('draws neither the table nor the empty state until the counts have answered', async () => {
     let counted!: () => void
     countGate = new Promise((r) => (counted = r))
     await mount()
-    expect(screen.queryByText('Everything open here is dismissed.')).toBeNull()
-    expect(screen.getByText('Loading…')).toBeInTheDocument()
+    expect(screen.queryByRole('searchbox', { name: 'Search notifications' })).toBeNull()
+    expect(screen.queryByText('Loading…')).toBeNull()
+    expect(screen.queryByText('Nothing needs you')).toBeNull()
 
     await act(async () => counted())
     await settle()
     expect(screen.getByText('Nothing needs you')).toBeInTheDocument()
+    expect(screen.queryByRole('searchbox', { name: 'Search notifications' })).toBeNull()
+  })
+
+  it('goes from one empty list to the other with nothing drawn between them', async () => {
+    viewer.orgAdmin = true
+    const day = 24 * 3600_000
+    orgRows = [
+      note('r', {
+        title: 'Team row',
+        resolved_at: new Date(Date.now() - day).toISOString(),
+        resolution: 'Fixed.',
+      }),
+    ]
+    await mount()
+    expect(screen.getByText(/When something stops working for you/)).toBeInTheDocument()
+
+    let counted!: () => void
+    countGate = new Promise((r) => (counted = r))
+    fireEvent.click(screen.getByRole('radio', { name: 'All teams' }))
+    await settle()
+    // The list it left stands until the one it switched to answers.
+    expect(screen.getByText(/When something stops working for you/)).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: /Open/ })).toHaveTextContent('Open0')
+    expect(screen.queryByText('Loading…')).toBeNull()
+
+    await act(async () => counted())
+    await settle()
+    expect(
+      screen.getByText('No team in this organization has an open notification.'),
+    ).toBeInTheDocument()
+    expect(screen.getByText(/Last resolved 1d ago · Team row · Fixed\./)).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: /Open/ })).toHaveTextContent('Open0')
   })
 
   it('claims no dismissed rows when the counts do not answer', async () => {
