@@ -114,13 +114,13 @@ const (
 // Source is one source's answer, and the wire shape of an element of the org
 // availability read.
 type Source struct {
-	Kind  string `json:"kind"`
-	State State  `json:"state"`
+	Kind  string `json:"kind" doc:"The event source, such as github, jira, linear, or slack."`
+	State State  `json:"state" doc:"Whether the organization can receive events from the source: available; unconfigured when it lacks the setup the source needs; disabled when an organization admin turned it off; unlicensed when the deployment's licence does not include it; or wip when Triage Factory does not support it yet."`
 	// Disableable carries the vocabulary rule to the client, so a caller can
 	// know which sources have an off switch without holding a copy of the list
 	// that decides. A UI that hardcoded the answer would offer a control the
 	// PATCH refuses the moment a second source becomes required.
-	Disableable bool `json:"disableable"`
+	Disableable bool `json:"disableable" doc:"Whether an organization admin may turn the source off; GitHub cannot be turned off."`
 }
 
 // NewSource builds one source's answer with the vocabulary-derived fields

@@ -29,17 +29,35 @@ import (
 // will force-stop, plus the team's current archived state so a stale client can
 // render "already archived".
 type teamArchivePreviewJSON struct {
-	TeamID     string `json:"team_id"`
-	Name       string `json:"name"`
-	Archived   bool   `json:"archived"`
-	ActiveRuns int    `json:"active_runs"`
+	TeamID     string `json:"team_id" doc:"The team's id."`
+	Name       string `json:"name" doc:"The team's display name."`
+	Archived   bool   `json:"archived" doc:"Whether the team is already archived."`
+	ActiveRuns int    `json:"active_runs" doc:"How many of the team's agent runs are in progress, which archiving the team would stop."`
 }
+
+var opTeamArchivePreview = httpx.NewJSONOp[httpx.NoBody, teamArchivePreviewJSON](httpx.OpSpec{
+	Pattern:     "GET /api/teams/{team_id}/archive/preview",
+	ID:          "get_team_archive_preview",
+	Summary:     "Preview what archiving a team stops",
+	Description: "Returns how many of the team's agent runs are in progress, which archiving it would stop, and whether it is already archived. Only an organization admin may call it. Multi mode only.",
+	PathParams:  map[string]string{"team_id": "The team's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // teamArchiveResultJSON is the POST /archive response: the counts of work the
 // cascade actually stopped.
 type teamArchiveResultJSON struct {
-	CancelledRuns int `json:"cancelled_runs"`
+	CancelledRuns int `json:"cancelled_runs" doc:"How many of the team's in-progress agent runs the archive stopped."`
 }
+
+var opTeamArchive = httpx.NewJSONOp[httpx.NoBody, teamArchiveResultJSON](httpx.OpSpec{
+	Pattern:     "POST /api/teams/{team_id}/archive",
+	ID:          "archive_team",
+	Summary:     "Archive a team",
+	Description: "Archives the team, which hides it and refuses further changes to it, stops its agent runs in progress, and ends its conversations. It returns how many runs it stopped. Only an organization admin may call it, the organization's only active team cannot be archived, and an archived team is refused. Multi mode only.",
+	PathParams:  map[string]string{"team_id": "The team's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // resolveTeamForLifecycle runs the shared front gate for every archive/restore
 // endpoint: multi-mode only, active org resolved, a syntactically valid team_id
@@ -107,7 +125,7 @@ func (th *Handler) handleTeamArchivePreview(w http.ResponseWriter, r *http.Reque
 		httpx.InternalError(w, "teams", err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, teamArchivePreviewJSON{
+	opTeamArchivePreview.Write(w, teamArchivePreviewJSON{
 		TeamID:     teamID,
 		Name:       team.Name,
 		Archived:   team.DeletedAt != nil,
@@ -225,10 +243,19 @@ func (th *Handler) handleTeamArchive(w http.ResponseWriter, r *http.Request) {
 
 	teamsLog.Info("team archived",
 		"org", orgID, "team", teamID, "cancelled_runs", cancelledRuns)
-	httpx.WriteJSON(w, http.StatusOK, teamArchiveResultJSON{
+	opTeamArchive.Write(w, teamArchiveResultJSON{
 		CancelledRuns: cancelledRuns,
 	})
 }
+
+var opTeamRestore = httpx.NewJSONOp[httpx.NoBody, teamJSON](httpx.OpSpec{
+	Pattern:     "POST /api/teams/{team_id}/restore",
+	ID:          "restore_team",
+	Summary:     "Restore an archived team",
+	Description: "Restores an archived team so it can be seen and changed again, and returns it. The agent runs and conversations the archive ended stay ended. Only an organization admin may call it, and a team that is not archived is refused. Multi mode only.",
+	PathParams:  map[string]string{"team_id": "The team's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleTeamRestore clears the team's tombstone so it's visible + writable
 // again. Killed conversations are NOT resurrected — archive's teardown is
@@ -274,7 +301,7 @@ func (th *Handler) handleTeamRestore(w http.ResponseWriter, r *http.Request) {
 	// The row the write returned, not the copy read before it: that copy still
 	// carries the tombstone this request removed, and patching the field off it
 	// by hand was a response asserting a state nobody had read.
-	httpx.WriteJSON(w, http.StatusOK, teamToJSON(restored, ""))
+	opTeamRestore.Write(w, teamToJSON(restored, ""))
 }
 
 // archivedTeamListRequest is the body of POST /api/teams/archived/list. The
@@ -282,6 +309,14 @@ func (th *Handler) handleTeamRestore(w http.ResponseWriter, r *http.Request) {
 type archivedTeamListRequest struct {
 	httpx.PageRequest
 }
+
+var opTeamArchivedList = httpx.NewListOp[archivedTeamListRequest, teamJSON](httpx.OpSpec{
+	Pattern:     "POST /api/teams/archived/list",
+	ID:          "list_archived_teams",
+	Summary:     "List archived teams",
+	Description: "Returns one page of the archived teams in the caller's current organization. Only an organization admin may call it. Multi mode only.",
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleTeamArchivedList returns the org's archived teams for the org-admin
 // restore surface (a toggle on the Teams management view). Org-admin only,
@@ -321,8 +356,8 @@ func (th *Handler) handleTeamArchivedList(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	var req archivedTeamListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opTeamArchivedList.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -341,7 +376,7 @@ func (th *Handler) handleTeamArchivedList(w http.ResponseWriter, r *http.Request
 	for _, t := range teams {
 		out = append(out, teamToJSON(t, ""))
 	}
-	httpx.WriteList(w, page, out, total)
+	opTeamArchivedList.Write(w, page, out, total)
 }
 
 // teamActiveWork returns the count of active conversations for the team —

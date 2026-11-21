@@ -376,7 +376,7 @@ func TestTeamMemberRemove_NonManagerCantRemoveOther(t *testing.T) {
 }
 
 // TestTeamMemberAdd_AdminAddsOrgMember: a team admin adds an existing org member
-// (not yet on the team) with a role — 201, and the membership round-trips.
+// (not yet on the team) with a role — 204, and the membership round-trips.
 func TestTeamMemberAdd_AdminAddsOrgMember(t *testing.T) {
 	r := newTeamMembersRig(t)
 
@@ -389,8 +389,11 @@ func TestTeamMemberAdd_AdminAddsOrgMember(t *testing.T) {
 	r.tmh.handleTeamMemberAdd(rec, r.req(http.MethodPost, r.admin, "", map[string]string{
 		"user_id": newcomer, "role": "member",
 	}))
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("body = %q, want empty", rec.Body.String())
 	}
 	if got := r.teamRoleOf(t, newcomer); got != "member" {
 		t.Errorf("newcomer role = %q after add, want member", got)

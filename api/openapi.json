@@ -13,6 +13,280 @@
       }
     },
     "schemas": {
+      "ActiveOrgRequest": {
+        "properties": {
+          "org_id": {
+            "description": "The id of the organization to make the session's current one, which must be one the caller belongs to.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ActiveOrgResponse": {
+        "type": "object"
+      },
+      "ApiTokenCreateRequest": {
+        "properties": {
+          "allowed_cidrs": {
+            "description": "Up to 20 address ranges in CIDR notation, a bare address meaning that one host, that requests with the token must come from; absent or empty leaves it unrestricted. A range with bits set below its prefix length is refused.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "expires_at": {
+            "description": "When the token stops working, as an RFC 3339 timestamp in the future and within the organization's cap on token age; absent or empty creates a token with no expiry of its own.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The token's display name, required, at most 100 bytes.",
+            "type": "string"
+          },
+          "org_id": {
+            "description": "The id of the organization the token acts in, which must be one the caller belongs to; a request made with an API token may name only that token's organization.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ApiTokenCreateResponse": {
+        "properties": {
+          "allowed_cidrs": {
+            "description": "The address ranges, in CIDR notation, that requests with the token must come from; empty when it is not restricted.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "created_at": {
+            "description": "When the token was created, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "effective_expires_at": {
+            "description": "When the token stops working, as an RFC 3339 timestamp: the earlier of expires_at and the organization's current cap on token age, or null when neither applies.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expires_at": {
+            "description": "The expiry asked for when the token was created, as an RFC 3339 timestamp, or null when none was.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "description": "The token's id.",
+            "type": "string"
+          },
+          "last_used_at": {
+            "description": "When the token last authenticated a request, as an RFC 3339 timestamp, or null when it never has.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "description": "The token's display name.",
+            "type": "string"
+          },
+          "org_id": {
+            "description": "The id of the organization the token acts in, fixed when it was created.",
+            "type": "string"
+          },
+          "token": {
+            "description": "The token itself, sent as a Bearer credential. It is returned only here, never by a later read.",
+            "type": "string"
+          },
+          "token_prefix": {
+            "description": "The first eleven characters of the token, which tell two tokens apart.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "org_id",
+          "token_prefix",
+          "created_at",
+          "last_used_at",
+          "expires_at",
+          "effective_expires_at",
+          "allowed_cidrs",
+          "token"
+        ],
+        "type": "object"
+      },
+      "ApiTokenJSON": {
+        "properties": {
+          "allowed_cidrs": {
+            "description": "The address ranges, in CIDR notation, that requests with the token must come from; empty when it is not restricted.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "created_at": {
+            "description": "When the token was created, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "effective_expires_at": {
+            "description": "When the token stops working, as an RFC 3339 timestamp: the earlier of expires_at and the organization's current cap on token age, or null when neither applies.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expires_at": {
+            "description": "The expiry asked for when the token was created, as an RFC 3339 timestamp, or null when none was.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "description": "The token's id.",
+            "type": "string"
+          },
+          "last_used_at": {
+            "description": "When the token last authenticated a request, as an RFC 3339 timestamp, or null when it never has.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "description": "The token's display name.",
+            "type": "string"
+          },
+          "org_id": {
+            "description": "The id of the organization the token acts in, fixed when it was created.",
+            "type": "string"
+          },
+          "token_prefix": {
+            "description": "The first eleven characters of the token, which tell two tokens apart.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "org_id",
+          "token_prefix",
+          "created_at",
+          "last_used_at",
+          "expires_at",
+          "effective_expires_at",
+          "allowed_cidrs"
+        ],
+        "type": "object"
+      },
+      "ApiTokenListRequest": {
+        "properties": {
+          "org_id": {
+            "description": "Keeps only the tokens for this organization. Absent or empty keeps the tokens for every organization, except in a request made with an API token, which reads only its own organization's tokens.",
+            "type": "string"
+          },
+          "page_size": {
+            "description": "How many rows to return, 50 when absent; 0 returns no rows and only total_count, and a value above the list's maximum, 200 unless the route says otherwise, is refused.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "page_token": {
+            "description": "The next_page_token of the previous page, which reads the page after it; it is refused for a request with different filters.",
+            "type": "string"
+          },
+          "sort_dir": {
+            "description": "The order's direction, asc or desc; it needs sort_key.",
+            "type": "string"
+          },
+          "sort_key": {
+            "description": "What to order by: last_used_at or created_at, newest first by default. A token never used sorts last under last_used_at in either direction. Absent orders by creation, newest first.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ApiTokenPolicyJSON": {
+        "properties": {
+          "max_age_days": {
+            "description": "The most days an API token in the organization may live, counted from its creation, or null when there is no cap.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "max_age_days"
+        ],
+        "type": "object"
+      },
+      "ApiTokenRenameRequest": {
+        "properties": {
+          "name": {
+            "description": "The token's new display name, at most 100 bytes. It cannot be cleared, and a body without it, or with null, is refused.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "ArchivedTeamListRequest": {
+        "properties": {
+          "page_size": {
+            "description": "How many rows to return, 50 when absent; 0 returns no rows and only total_count, and a value above the list's maximum, 200 unless the route says otherwise, is refused.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "page_token": {
+            "description": "The next_page_token of the previous page, which reads the page after it; it is refused for a request with different filters.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ConfigResponse": {
+        "properties": {
+          "default_github_host": {
+            "description": "The base URL of the GitHub that Sign in with GitHub uses, such as https://github.com.",
+            "type": "string"
+          },
+          "deployment_mode": {
+            "description": "How this deployment runs: local for one person on their own machine, or multi for a shared deployment with sign-in.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "deployment_mode",
+          "default_github_host"
+        ],
+        "type": "object"
+      },
       "ConnectionsListRequest": {
         "properties": {
           "page_size": {
@@ -27,6 +301,46 @@
             "type": "string"
           }
         },
+        "type": "object"
+      },
+      "CreateInviteRequest": {
+        "properties": {
+          "email": {
+            "description": "The email address to invite, which the invitee must hold verified to accept; it is stored in lower case.",
+            "type": "string"
+          },
+          "role": {
+            "description": "The role the invitee takes in the organization: admin or member, member when absent or empty.",
+            "type": "string"
+          },
+          "target_team_id": {
+            "description": "The id of a team in the organization the invitee also joins, as a member; absent or empty invites to the organization alone.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "CreateInviteResponse": {
+        "properties": {
+          "accept_url": {
+            "description": "The link the invitee opens to accept, which carries the invite's secret token. It is returned only here, never by a later read.",
+            "type": "string"
+          },
+          "expires_at": {
+            "description": "When the invite stops being redeemable, as an RFC 3339 timestamp, seven days after it was created.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "description": "The invite's id.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "accept_url",
+          "expires_at"
+        ],
         "type": "object"
       },
       "DependabotAlertJSON": {
@@ -81,6 +395,24 @@
         ],
         "type": "object"
       },
+      "EntitlementsResponse": {
+        "properties": {
+          "features": {
+            "description": "The Enterprise features licensed for the caller's current organization, such as governance; empty when none is.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "features"
+        ],
+        "type": "object"
+      },
       "ErrorEnvelope": {
         "properties": {
           "errors": {
@@ -132,6 +464,396 @@
         ],
         "type": "object"
       },
+      "IntegrationsStatusResponse": {
+        "properties": {
+          "configured": {
+            "description": "Whether the organization exists; false in local mode until it is created, and always true in multi mode.",
+            "type": "boolean"
+          },
+          "github": {
+            "description": "Whether the organization holds a GitHub personal access token.",
+            "type": "boolean"
+          },
+          "github_ready": {
+            "description": "Whether the organization has GitHub access it can use, through a personal access token or a GitHub App.",
+            "type": "boolean"
+          },
+          "github_repos": {
+            "description": "How many repositories on the organization's GitHub host at least one of its teams tracks.",
+            "type": "integer"
+          },
+          "github_url": {
+            "description": "The base URL of the organization's GitHub, absent when none is set.",
+            "type": "string"
+          },
+          "jira": {
+            "description": "Whether the organization holds a usable Jira credential.",
+            "type": "boolean"
+          },
+          "jira_deployment": {
+            "description": "Which kind of Jira the organization's credential is for, cloud or data_center, present only when jira is true.",
+            "type": "string"
+          },
+          "jira_url": {
+            "description": "The base URL of the organization's Jira site, absent when none is set.",
+            "type": "string"
+          },
+          "linear": {
+            "description": "Whether the organization holds a usable Linear credential.",
+            "type": "boolean"
+          },
+          "linear_workspace_url_key": {
+            "description": "The URL key of the Linear workspace the organization's credential belongs to, absent when none is recorded.",
+            "type": "string"
+          },
+          "setup_complete": {
+            "description": "Whether setup is finished: GitHub access is configured, a team tracks at least one repository, and in multi mode the background-jobs model and the default team's model are chosen.",
+            "type": "boolean"
+          },
+          "setup_step": {
+            "description": "Where an unfinished setup resumes: org for the organization's GitHub access or background-jobs model, team for the default team's repositories or model, or done.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "configured",
+          "github",
+          "github_ready",
+          "jira",
+          "linear",
+          "github_repos",
+          "setup_complete",
+          "setup_step"
+        ],
+        "type": "object"
+      },
+      "InviteAcceptRequest": {
+        "properties": {
+          "token": {
+            "description": "The token from the invite's accept link.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "InviteAcceptResponse": {
+        "properties": {
+          "org_id": {
+            "description": "The id of the organization the caller joined, which is now the session's current organization.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "org_id"
+        ],
+        "type": "object"
+      },
+      "InviteListItem": {
+        "properties": {
+          "created_at": {
+            "description": "When the invite was created, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "email": {
+            "description": "The invited email address, in lower case.",
+            "type": "string"
+          },
+          "expires_at": {
+            "description": "When the invite stops being redeemable, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "description": "The invite's id.",
+            "type": "string"
+          },
+          "invited_by": {
+            "description": "The user id of the admin who created the invite, absent when it is not recorded.",
+            "type": "string"
+          },
+          "role": {
+            "description": "The role the invitee takes in the organization: admin or member.",
+            "type": "string"
+          },
+          "target_team_id": {
+            "description": "The id of the team the invitee also joins, absent for an invite to the organization alone.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "email",
+          "role",
+          "created_at",
+          "expires_at"
+        ],
+        "type": "object"
+      },
+      "InviteListRequest": {
+        "properties": {
+          "page_size": {
+            "description": "How many rows to return, 50 when absent; 0 returns no rows and only total_count, and a value above the list's maximum, 200 unless the route says otherwise, is refused.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "page_token": {
+            "description": "The next_page_token of the previous page, which reads the page after it; it is refused for a request with different filters.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "InvitePreviewResponse": {
+        "properties": {
+          "expires_at": {
+            "description": "When the invite stops being redeemable, as an RFC 3339 timestamp, absent when status is not_found.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "invited_by_name": {
+            "description": "The display name of the admin who created the invite, absent when status is not_found or none is recorded.",
+            "type": "string"
+          },
+          "org_name": {
+            "description": "The name of the organization the invite is to, absent when status is not_found.",
+            "type": "string"
+          },
+          "role": {
+            "description": "The role the invitee takes in the organization, admin or member, absent when status is not_found.",
+            "type": "string"
+          },
+          "status": {
+            "description": "Whether the invite can be accepted: valid, expired, revoked, accepted, or not_found when no invite has the token.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
+      "InviteRevokeResponse": {
+        "properties": {
+          "status": {
+            "description": "Always revoked.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
+      "LoginMethod": {
+        "properties": {
+          "current": {
+            "description": "Whether this is the identity the request's session signed in with.",
+            "type": "boolean"
+          },
+          "email": {
+            "description": "The email address the identity carries, absent when it has none.",
+            "type": "string"
+          },
+          "email_verified": {
+            "description": "Whether the identity's email address is verified.",
+            "type": "boolean"
+          },
+          "idp": {
+            "description": "The identity provider behind a saml identity: entra, okta, google, onelogin, ping, or other. Absent for other providers and when it is not known.",
+            "type": "string"
+          },
+          "linked_at": {
+            "description": "When the identity was linked to the person, as an RFC 3339 timestamp in UTC; absent in local mode.",
+            "type": "string"
+          },
+          "login": {
+            "description": "The GitHub login of a github identity, absent for other providers and when it is not recorded.",
+            "type": "string"
+          },
+          "provider": {
+            "description": "How the person signs in with this identity: github, saml for single sign-on, or local for the one local-mode user.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "email_verified",
+          "current"
+        ],
+        "type": "object"
+      },
+      "MeIdentitiesResponse": {
+        "properties": {
+          "methods": {
+            "description": "Every identity linked to the caller, oldest first.",
+            "items": {
+              "$ref": "#/components/schemas/LoginMethod"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "methods"
+        ],
+        "type": "object"
+      },
+      "MeOrgRow": {
+        "properties": {
+          "id": {
+            "description": "The organization's id.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The organization's display name.",
+            "type": "string"
+          },
+          "role": {
+            "description": "The caller's role in the organization: owner, admin, or member.",
+            "type": "string"
+          },
+          "sso_required": {
+            "description": "Whether the organization requires its own single sign-on and this request's credential did not come through it, in which case every request about the organization is refused with SSO_REQUIRED.",
+            "type": "boolean"
+          },
+          "sso_start_url": {
+            "description": "Where the organization's single sign-on begins, present only when sso_required is true.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "role",
+          "sso_required"
+        ],
+        "type": "object"
+      },
+      "MeResponse": {
+        "properties": {
+          "active_org_id": {
+            "description": "The id of the organization this request acts in: the session's current organization, or the one an API token was created for. Absent when there is none, or the caller no longer belongs to it.",
+            "type": "string"
+          },
+          "avatar_url": {
+            "description": "The URL of the caller's avatar image, absent when none is recorded.",
+            "type": "string"
+          },
+          "can_create_org": {
+            "description": "Whether this caller may create an organization: the deployment allows it, the request comes from a session rather than an API token, and the session signed in with GitHub rather than single sign-on.",
+            "type": "boolean"
+          },
+          "display_name": {
+            "description": "The caller's display name, absent when none is recorded.",
+            "type": "string"
+          },
+          "email": {
+            "description": "The email address the caller's sign-in carries, empty in local mode.",
+            "type": "string"
+          },
+          "github_user_id": {
+            "description": "GitHub's id for the account github_username names, the value event handler filters such as author_id_in take, absent when none is recorded.",
+            "type": "string"
+          },
+          "github_username": {
+            "description": "The caller's GitHub login on the current organization's GitHub host, or on the GitHub they verified most recently, absent when they have none.",
+            "type": "string"
+          },
+          "id": {
+            "description": "The caller's user id.",
+            "type": "string"
+          },
+          "is_operator": {
+            "description": "Whether the caller is one of the deployment's operators; always true in local mode.",
+            "type": "boolean"
+          },
+          "jira_account_id": {
+            "description": "The caller's Jira account id on the current organization's Jira site, or on the site they verified most recently, absent when they have none.",
+            "type": "string"
+          },
+          "jira_display_name": {
+            "description": "The name Jira gives the account jira_account_id names, absent when none is recorded.",
+            "type": "string"
+          },
+          "linear_display_name": {
+            "description": "The name Linear gives the user linear_user_id names, absent when none is recorded.",
+            "type": "string"
+          },
+          "linear_user_id": {
+            "description": "The caller's Linear user id in the current organization's Linear workspace, absent when there is no current organization, it has no Linear workspace, or the caller has no account bound in it.",
+            "type": "string"
+          },
+          "org_creation_enabled": {
+            "description": "Whether this deployment allows anyone to create an organization.",
+            "type": "boolean"
+          },
+          "orgs": {
+            "description": "Every organization the caller belongs to, ordered by name; empty when they belong to none.",
+            "items": {
+              "$ref": "#/components/schemas/MeOrgRow"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "teams": {
+            "description": "Every active team the caller is a member of, in every organization they belong to, ordered by organization id and then team name; empty when they are on none.",
+            "items": {
+              "$ref": "#/components/schemas/MeTeamRow"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "email",
+          "orgs",
+          "teams",
+          "org_creation_enabled",
+          "can_create_org",
+          "is_operator"
+        ],
+        "type": "object"
+      },
+      "MeTeamRow": {
+        "properties": {
+          "id": {
+            "description": "The team's id.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The team's display name.",
+            "type": "string"
+          },
+          "org_id": {
+            "description": "The id of the organization the team belongs to.",
+            "type": "string"
+          },
+          "role": {
+            "description": "The caller's role on the team: admin, member, or viewer.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "org_id",
+          "role"
+        ],
+        "type": "object"
+      },
       "MemoryAttemptJSON": {
         "properties": {
           "error_kind": {
@@ -153,6 +875,278 @@
         },
         "required": [
           "started_at"
+        ],
+        "type": "object"
+      },
+      "OrgCreateRequest": {
+        "properties": {
+          "name": {
+            "description": "The new organization's display name, at most 200 characters, with at least one letter or number. Multi mode only; local mode reads no body.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "OrgCreateResponse": {
+        "properties": {
+          "already_provisioned": {
+            "description": "Whether the organization already existed, so this call created nothing; only local mode answers true.",
+            "type": "boolean"
+          },
+          "id": {
+            "description": "The organization's id.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The organization's display name.",
+            "type": "string"
+          },
+          "slug": {
+            "description": "The organization's slug, derived from its name.",
+            "type": "string"
+          },
+          "team_id": {
+            "description": "The id of the organization's first team, which the caller is an admin of.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "slug",
+          "team_id",
+          "already_provisioned"
+        ],
+        "type": "object"
+      },
+      "OrgJSON": {
+        "properties": {
+          "id": {
+            "description": "The organization's id.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The organization's display name.",
+            "type": "string"
+          },
+          "role": {
+            "description": "The caller's role in the organization: owner, admin, or member.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "role"
+        ],
+        "type": "object"
+      },
+      "OrgMemberListRequest": {
+        "properties": {
+          "excluding_team_id": {
+            "description": "Keeps only the members who are not on this team, which must be one of the organization's teams; empty keeps every member.",
+            "type": "string"
+          },
+          "page_size": {
+            "description": "How many rows to return, 50 when absent; 0 returns no rows and only total_count, and a value above the list's maximum, 200 unless the route says otherwise, is refused.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "page_token": {
+            "description": "The next_page_token of the previous page, which reads the page after it; it is refused for a request with different filters.",
+            "type": "string"
+          },
+          "search": {
+            "description": "Keeps a member when it is a case-insensitive substring of their display name or of one of their verified email addresses, at most 200 characters; empty keeps every member.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "OrgMemberRoleRequest": {
+        "properties": {
+          "role": {
+            "description": "The member's new role in the organization: owner, admin, or member.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "OrgMemberRow": {
+        "properties": {
+          "display_name": {
+            "description": "The member's display name.",
+            "type": "string"
+          },
+          "github_username": {
+            "description": "The member's GitHub login on the organization's GitHub host, or null when they have none there.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "is_current_user": {
+            "description": "Whether the member is the caller.",
+            "type": "boolean"
+          },
+          "jira_account_id": {
+            "description": "The member's Jira account id on the organization's Jira site, or null when they have none there.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "linear_user_id": {
+            "description": "The member's Linear user id in the organization's Linear workspace, or null when they have none there.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "role": {
+            "description": "The member's role in the organization: owner, admin, or member.",
+            "type": "string"
+          },
+          "user_id": {
+            "description": "The member's user id.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id",
+          "display_name",
+          "github_username",
+          "jira_account_id",
+          "linear_user_id",
+          "role",
+          "is_current_user"
+        ],
+        "type": "object"
+      },
+      "OrgSourcePatch": {
+        "properties": {
+          "disabled": {
+            "description": "Whether the source is turned off for the organization: true turns it off, and false or null turns it back on.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "OrgSourcesResponse": {
+        "properties": {
+          "sources": {
+            "description": "Every event source this deployment carries, each with its state for the organization.",
+            "items": {
+              "$ref": "#/components/schemas/Source"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "sources"
+        ],
+        "type": "object"
+      },
+      "RateLimitReadingView": {
+        "properties": {
+          "bucket": {
+            "description": "The budget the service meters separately for the credential, such as core or graphql on GitHub, or a Slack method.",
+            "type": "string"
+          },
+          "credential": {
+            "description": "The id of the credential the budget is metered against, such as pat or installation:123; never a token, a login, or a user id.",
+            "type": "string"
+          },
+          "credential_name": {
+            "description": "What a person calls the credential, such as the GitHub account an App installation is on or the Slack workspace a bot token is in; null when credential is the credential's kind or the name cannot be read.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "limit": {
+            "description": "The budget's size, or null when the service did not say.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "near_limit": {
+            "description": "Whether the service said the budget is close to its limit, on a reading that states no count, such as Jira Cloud's hourly quota; null on every other reading.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "observed_at": {
+            "description": "When the reading was taken, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "remaining": {
+            "description": "How many requests the budget had left, or null when the service did not say.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "reset_at": {
+            "description": "When the budget refills, as an RFC 3339 timestamp, or null when the service did not say.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "upstream": {
+            "description": "The service the budget is on, such as github, jira, linear, or slack.",
+            "type": "string"
+          },
+          "used": {
+            "description": "How many requests Triage Factory counted itself making against the budget in its window, on a service that states no budget, such as Slack; null on a reading the service stated.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "upstream",
+          "credential",
+          "credential_name",
+          "bucket",
+          "remaining",
+          "limit",
+          "used",
+          "near_limit",
+          "reset_at",
+          "observed_at"
+        ],
+        "type": "object"
+      },
+      "RateLimitsResponse": {
+        "properties": {
+          "readings": {
+            "description": "The latest reading of each rate-limit budget of each of the organization's credentials, leaving out a reading past its reset time, or with no reset time and taken more than an hour ago.",
+            "items": {
+              "$ref": "#/components/schemas/RateLimitReadingView"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "readings"
         ],
         "type": "object"
       },
@@ -260,6 +1254,28 @@
             ]
           }
         },
+        "type": "object"
+      },
+      "Source": {
+        "properties": {
+          "disableable": {
+            "description": "Whether an organization admin may turn the source off; GitHub cannot be turned off.",
+            "type": "boolean"
+          },
+          "kind": {
+            "description": "The event source, such as github, jira, linear, or slack.",
+            "type": "string"
+          },
+          "state": {
+            "description": "Whether the organization can receive events from the source: available; unconfigured when it lacks the setup the source needs; disabled when an organization admin turned it off; unlicensed when the deployment's licence does not include it; or wip when Triage Factory does not support it yet.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "state",
+          "disableable"
+        ],
         "type": "object"
       },
       "TaskJSON": {
@@ -557,6 +1573,324 @@
               "array",
               "null"
             ]
+          }
+        },
+        "type": "object"
+      },
+      "TeamArchivePreviewJSON": {
+        "properties": {
+          "active_runs": {
+            "description": "How many of the team's agent runs are in progress, which archiving the team would stop.",
+            "type": "integer"
+          },
+          "archived": {
+            "description": "Whether the team is already archived.",
+            "type": "boolean"
+          },
+          "name": {
+            "description": "The team's display name.",
+            "type": "string"
+          },
+          "team_id": {
+            "description": "The team's id.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "team_id",
+          "name",
+          "archived",
+          "active_runs"
+        ],
+        "type": "object"
+      },
+      "TeamArchiveResultJSON": {
+        "properties": {
+          "cancelled_runs": {
+            "description": "How many of the team's in-progress agent runs the archive stopped.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "cancelled_runs"
+        ],
+        "type": "object"
+      },
+      "TeamCreateRequest": {
+        "properties": {
+          "name": {
+            "description": "The team's display name, at most 100 characters, with at least one letter or number.",
+            "type": "string"
+          },
+          "slug": {
+            "description": "The team's slug, rewritten into slug form, which must keep at least one letter or number; absent or empty derives it from name.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "TeamJSON": {
+        "properties": {
+          "archived_at": {
+            "description": "When the team was archived, as an RFC 3339 timestamp in UTC, present only on an archived team.",
+            "type": "string"
+          },
+          "description": {
+            "description": "The team's description, empty when it has none.",
+            "type": "string"
+          },
+          "id": {
+            "description": "The team's id.",
+            "type": "string"
+          },
+          "is_last_acting": {
+            "description": "Present and true on the team the caller last acted as, which a client offers first; at most one team in a response carries it.",
+            "type": "boolean"
+          },
+          "name": {
+            "description": "The team's display name.",
+            "type": "string"
+          },
+          "role": {
+            "description": "The caller's role on the team: admin, member, or viewer. Absent when the caller is not on the team, on the archived teams list, and on the responses of an update or a restore.",
+            "type": "string"
+          },
+          "slug": {
+            "description": "The team's slug, unique within its organization.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "slug",
+          "description"
+        ],
+        "type": "object"
+      },
+      "TeamListRequest": {
+        "properties": {
+          "page_size": {
+            "description": "How many rows to return, 50 when absent; 0 returns no rows and only total_count, and a value above the list's maximum, 200 unless the route says otherwise, is refused.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "page_token": {
+            "description": "The next_page_token of the previous page, which reads the page after it; it is refused for a request with different filters.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "TeamMemberAddRequest": {
+        "properties": {
+          "role": {
+            "description": "The role the person takes on the team: admin, member, or viewer.",
+            "type": "string"
+          },
+          "user_id": {
+            "description": "The user id of the organization member to add.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "TeamMemberRoleRequest": {
+        "properties": {
+          "role": {
+            "description": "The member's new role on the team: admin, member, or viewer.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "TeamRosterBotRow": {
+        "properties": {
+          "agent_id": {
+            "description": "The organization's agent's id.",
+            "type": "string"
+          },
+          "autonomy": {
+            "description": "The autonomy suitability the agent uses for this team, or the organization's default for the agent when the team sets none; null when neither is set.",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "display_name": {
+            "description": "The agent's display name.",
+            "type": "string"
+          },
+          "enabled": {
+            "description": "Whether the agent works for this team.",
+            "type": "boolean"
+          },
+          "model": {
+            "description": "The model the agent uses for this team, or the organization's default for the agent when the team sets none; empty when neither is set.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent_id",
+          "display_name",
+          "enabled",
+          "model",
+          "autonomy"
+        ],
+        "type": "object"
+      },
+      "TeamRosterListRequest": {
+        "properties": {
+          "page_size": {
+            "description": "How many rows to return, 50 when absent; 0 returns no rows and only total_count, and a value above the list's maximum, 200 unless the route says otherwise, is refused.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "page_token": {
+            "description": "The next_page_token of the previous page, which reads the page after it; it is refused for a request with different filters.",
+            "type": "string"
+          },
+          "search": {
+            "description": "Keeps a member when it is a case-insensitive substring of their display name, their GitHub login on the organization's GitHub host, their Jira account id on its Jira site, or their Linear display name in its workspace, at most 200 characters; empty keeps every member.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "TeamRosterListResponse": {
+        "properties": {
+          "bot": {
+            "description": "The organization's agent as this team has it configured, whatever the search; null when the organization has no agent.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/TeamRosterBotRow"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "items": {
+            "description": "The page's members, ordered by display name and then user id.",
+            "items": {
+              "$ref": "#/components/schemas/TeamRosterRow"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "next_page_token": {
+            "description": "The page_token that reads the next page, absent on the last page.",
+            "type": "string"
+          },
+          "total_count": {
+            "description": "How many members match the filters, across every page.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total_count",
+          "bot"
+        ],
+        "type": "object"
+      },
+      "TeamRosterRow": {
+        "properties": {
+          "display_name": {
+            "description": "The member's display name.",
+            "type": "string"
+          },
+          "github_user_id": {
+            "description": "GitHub's id for the account github_username names, the value event handler filters such as author_id_in take, or null when none is recorded.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "github_username": {
+            "description": "The member's GitHub login on the organization's GitHub host, or null when they have none there.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "is_current_user": {
+            "description": "Whether the member is the caller.",
+            "type": "boolean"
+          },
+          "jira_account_id": {
+            "description": "The member's Jira account id on the organization's Jira site, or null when they have none there.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "linear_display_name": {
+            "description": "The name Linear gave the member when they connected, or null when none is recorded.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "linear_user_id": {
+            "description": "The member's Linear user id in the organization's Linear workspace, or null when they have none there.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "role": {
+            "description": "The member's role on the team: admin, member, or viewer.",
+            "type": "string"
+          },
+          "user_id": {
+            "description": "The member's user id.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id",
+          "display_name",
+          "github_username",
+          "github_user_id",
+          "jira_account_id",
+          "linear_user_id",
+          "linear_display_name",
+          "role",
+          "is_current_user"
+        ],
+        "type": "object"
+      },
+      "TeamUpdateRequest": {
+        "properties": {
+          "description": {
+            "description": "The team's new description, at most 500 characters; an empty string clears it, and absent or null leaves it unchanged.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "description": "The team's new display name, at most 100 characters, with at least one letter or number; the slug is derived from it again. Absent or null leaves the name unchanged.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "TransferOwnershipRequest": {
+        "properties": {
+          "new_owner_user_id": {
+            "description": "The user id of the member who becomes the organization's owner.",
+            "type": "string"
           }
         },
         "type": "object"
@@ -1177,6 +2511,57 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/auth/logout": {
+      "post": {
+        "description": "Ends the session the request's cookie names, closes that session's event streams, and clears the cookie. A request with no live session changes nothing and still succeeds, and an API token is refused because it has no session to end. Multi mode only.",
+        "operationId": "logout",
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [],
+        "summary": "Sign out of this session",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/auth/logout/all": {
+      "post": {
+        "description": "Ends every session the caller holds, on every device, closes all of their event streams, and clears this request's cookie. API tokens are not sessions: a token request is refused, and the caller's tokens keep working. Multi mode only.",
+        "operationId": "logout_all",
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Sign out of every session",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
     "/api/avatars/{user_id}": {
       "get": {
         "description": "Returns the avatar image of a person in the caller's organization. The image is fetched from the address the person's sign-in provider gave and cached for a short time.",
@@ -1241,6 +2626,67 @@
         }
       }
     },
+    "/api/config": {
+      "get": {
+        "description": "Returns the deployment facts a client needs before anyone signs in: whether it runs in local or multi mode, and which GitHub its sign-in uses. It needs no credential and says nothing about any person or organization.",
+        "operationId": "get_config",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [],
+        "summary": "Get the deployment's configuration",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/entitlements": {
+      "get": {
+        "description": "Returns the Enterprise features licensed for the caller's current organization, as one unpaged list. A build with no licence answers an empty list.",
+        "operationId": "list_entitlements",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntitlementsResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List the licensed Enterprise features",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
     "/api/health": {
       "get": {
         "description": "Reports status ok once the server accepts requests. It needs no credential and checks no database or integration, so it says only that the process is serving.",
@@ -1265,6 +2711,653 @@
         "x-hints": {
           "openWorldHint": false,
           "readOnlyHint": true
+        }
+      }
+    },
+    "/api/integrations/status": {
+      "get": {
+        "description": "Reports which of GitHub, Jira, and Linear the caller's current organization has credentials for, how many repositories its teams track, and whether setup is complete and where it resumes. It reads stored state and calls none of those services.",
+        "operationId": "get_integrations_status",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IntegrationsStatusResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get the organization's setup status",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/invites": {
+      "post": {
+        "description": "Creates an invite to the caller's current organization for an email address and returns its accept link, which is shown only in this response. It sends no email; the caller passes the link on. Only an organization admin may call it, and an address with an invite pending or that belongs to a member is refused. Multi mode only.",
+        "operationId": "create_invite",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateInviteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateInviteResponse"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Invite someone to the organization",
+        "x-hints": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/invites/accept": {
+      "post": {
+        "description": "Redeems an invite's token: the caller joins its organization with its role, and its team when it names one, and the organization becomes the session's current one. The caller must hold the invited email address verified, and an API token is refused. A caller who is already a member is not given the invite's role. Multi mode only.",
+        "operationId": "accept_invite",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InviteAcceptRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InviteAcceptResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Accept an invite",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/invites/list": {
+      "post": {
+        "description": "Returns one page of the caller's current organization's invites that can still be accepted: not accepted, revoked, or expired. No row carries an invite's token or accept link. Only an organization admin may call it. Multi mode only.",
+        "operationId": "list_invites",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InviteListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "items": {
+                      "description": "The rows of this page, as an empty array when it has none.",
+                      "items": {
+                        "$ref": "#/components/schemas/InviteListItem"
+                      },
+                      "type": "array"
+                    },
+                    "next_page_token": {
+                      "description": "The page_token that reads the next page, absent on the last page.",
+                      "type": "string"
+                    },
+                    "total_count": {
+                      "description": "How many rows match the request's filters across every page, or null for a list whose upstream cannot count them.",
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "total_count"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List pending invites",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/invites/preview": {
+      "get": {
+        "description": "Returns the organization, role, and inviter of the invite a token belongs to, and whether it can still be accepted. It needs no credential, because the token is the invite's secret, and an unknown token answers status not_found. Multi mode only.",
+        "operationId": "get_invite_preview",
+        "parameters": [
+          {
+            "description": "The token from the invite's accept link.",
+            "in": "query",
+            "name": "token",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvitePreviewResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [],
+        "summary": "Preview an invite by its token",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/invites/{id}": {
+      "get": {
+        "description": "Returns one of the caller's current organization's invites that can still be accepted, without its token or accept link. An accepted, revoked, or expired invite is not found. Only an organization admin may call it. Multi mode only.",
+        "operationId": "get_invite",
+        "parameters": [
+          {
+            "description": "The invite's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InviteListItem"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get a pending invite",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/invites/{id}/revoke": {
+      "post": {
+        "description": "Revokes an invite so its accept link stops working; revoking it again succeeds. An invite that was already accepted is refused. Only an organization admin may call it. Multi mode only.",
+        "operationId": "revoke_invite",
+        "parameters": [
+          {
+            "description": "The invite's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InviteRevokeResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Revoke an invite",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/me": {
+      "get": {
+        "description": "Returns the caller's user id, their GitHub, Jira, and Linear identities, the organizations and teams they belong to with their role in each, the organization this request acts in, and whether they may create an organization. In local mode it describes the one local user.",
+        "operationId": "get_me",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get the caller's identity and memberships",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/me/active-org": {
+      "post": {
+        "description": "Makes the named organization the current one for the caller's session, so the session's later requests act in it, and answers an empty object. An API token is refused, because its organization is fixed when it is created. Multi mode only.",
+        "operationId": "set_active_org",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ActiveOrgRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActiveOrgResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Switch the session's current organization",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/me/identities": {
+      "get": {
+        "description": "Returns every identity the caller can sign in with, such as a GitHub account or a single sign-on login, oldest first, and marks the one this session signed in with. The list is not paged. In local mode it holds one identity with the provider local.",
+        "operationId": "list_identities",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeIdentitiesResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List the caller's sign-in identities",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/me/tokens": {
+      "post": {
+        "description": "Creates an API token that acts as the caller in one organization they belong to, and returns it with its secret, which is shown only in this response. A request made with an API token may create one only in that token's own organization. Multi mode only.",
+        "operationId": "create_api_token",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApiTokenCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiTokenCreateResponse"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Create an API token",
+        "x-hints": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/me/tokens/list": {
+      "post": {
+        "description": "Returns one page of the caller's API tokens, expired ones included and revoked ones left out, without their secrets. A request made with an API token reads only its own organization's tokens. Multi mode only.",
+        "operationId": "list_api_tokens",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApiTokenListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "items": {
+                      "description": "The rows of this page, as an empty array when it has none.",
+                      "items": {
+                        "$ref": "#/components/schemas/ApiTokenJSON"
+                      },
+                      "type": "array"
+                    },
+                    "next_page_token": {
+                      "description": "The page_token that reads the next page, absent on the last page.",
+                      "type": "string"
+                    },
+                    "total_count": {
+                      "description": "How many rows match the request's filters across every page, or null for a list whose upstream cannot count them.",
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "total_count"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List the caller's API tokens",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/me/tokens/{id}": {
+      "delete": {
+        "description": "Revokes one of the caller's API tokens so it stops working at once, including the token that makes the request. A request made with an API token may revoke only tokens in its own organization. Multi mode only.",
+        "operationId": "delete_api_token",
+        "parameters": [
+          {
+            "description": "The API token's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Revoke an API token",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      },
+      "patch": {
+        "description": "Sets one of the caller's API tokens' display name and returns the token. A request made with an API token may rename only tokens in its own organization. Multi mode only.",
+        "operationId": "update_api_token",
+        "parameters": [
+          {
+            "description": "The API token's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApiTokenRenameRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiTokenJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Rename an API token",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
         }
       }
     },
@@ -1319,6 +3412,382 @@
         "x-hints": {
           "openWorldHint": false,
           "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs": {
+      "post": {
+        "description": "In multi mode, creates an organization with its first team, makes the caller its owner and the team's admin, and makes it the session's current organization; it needs a session signed in with GitHub. In local mode it reads no body and creates the one local organization, answering 201 when it created it and 200 with already_provisioned true when it already existed.",
+        "operationId": "create_org",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OrgCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgCreateResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgCreateResponse"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Create an organization",
+        "x-hints": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/orgs/{org_id}": {
+      "get": {
+        "description": "Returns the organization's id and name, and the caller's role in it.",
+        "operationId": "get_org",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get an organization",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/api-token-policy": {
+      "get": {
+        "description": "Returns the organization's cap on how long its API tokens may live, which binds every member's tokens. Multi mode only.",
+        "operationId": "get_api_token_policy",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiTokenPolicyJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get an organization's API token policy",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/integrations/rate-limits": {
+      "get": {
+        "description": "Returns, as one unpaged list, the latest reading of each rate-limit budget the organization's GitHub, Jira, Linear, and Slack credentials are metered against, taken from the responses to Triage Factory's own requests. It reads stored readings and calls none of those services.",
+        "operationId": "list_rate_limits",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RateLimitsResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List the organization's rate-limit readings",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/members/list": {
+      "post": {
+        "description": "Returns one page of the organization's members with their role and their GitHub, Jira, and Linear identities, ordered by display name, narrowed by search and excluding_team_id. Multi mode only.",
+        "operationId": "list_org_members",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OrgMemberListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "items": {
+                      "description": "The rows of this page, as an empty array when it has none.",
+                      "items": {
+                        "$ref": "#/components/schemas/OrgMemberRow"
+                      },
+                      "type": "array"
+                    },
+                    "next_page_token": {
+                      "description": "The page_token that reads the next page, absent on the last page.",
+                      "type": "string"
+                    },
+                    "total_count": {
+                      "description": "How many rows match the request's filters across every page, or null for a list whose upstream cannot count them.",
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "total_count"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List an organization's members",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/members/{user_id}": {
+      "delete": {
+        "description": "Removes a person from the organization, ends their sessions and event streams in it, revokes their API tokens for it, and removes their Linear credential for its workspace, revoking it at Linear when it is an OAuth grant. A caller who names their own id leaves the organization, and its last owner cannot be removed. Multi mode only.",
+        "operationId": "delete_org_member",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The id of the person to remove.",
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Remove an organization member",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      },
+      "patch": {
+        "description": "Sets the member's role in the organization. The organization's last owner cannot be demoted. Multi mode only.",
+        "operationId": "update_org_member",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The member's user id.",
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OrgMemberRoleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Change an organization member's role",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
         }
       }
     },
@@ -1398,6 +3867,298 @@
         "x-hints": {
           "openWorldHint": false,
           "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/sources": {
+      "get": {
+        "description": "Returns, as one unpaged list, every event source this deployment carries, such as GitHub, Jira, and Linear, with whether the organization can receive events from it and, when it cannot, why. It says nothing about the organization's credentials.",
+        "operationId": "list_org_sources",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgSourcesResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List the organization's event sources",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/sources/{kind}": {
+      "get": {
+        "description": "Returns one event source with whether the organization can receive events from it and, when it cannot, why. A kind this deployment does not carry is not found.",
+        "operationId": "get_org_source",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The event source, such as github, jira, linear, or slack.",
+            "in": "path",
+            "name": "kind",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Source"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get one of the organization's event sources",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      },
+      "patch": {
+        "description": "Turns the source off or back on for the whole organization and returns its state. While it is off it is not polled, its events create no tasks, and no credential for it is used, but nothing is deleted: credentials, tasks, and event handlers stay as they are. Only an organization admin may call it, and GitHub cannot be turned off.",
+        "operationId": "update_org_source",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The event source, such as jira, linear, or slack.",
+            "in": "path",
+            "name": "kind",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OrgSourcePatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Source"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Turn an event source off or on",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/orgs/{org_id}/teams/list": {
+      "post": {
+        "description": "Returns one page of every active team in the organization, including teams the caller is not on, with the caller's role on the teams they belong to.",
+        "operationId": "list_org_teams",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TeamListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "items": {
+                      "description": "The rows of this page, as an empty array when it has none.",
+                      "items": {
+                        "$ref": "#/components/schemas/TeamJSON"
+                      },
+                      "type": "array"
+                    },
+                    "next_page_token": {
+                      "description": "The page_token that reads the next page, absent on the last page.",
+                      "type": "string"
+                    },
+                    "total_count": {
+                      "description": "How many rows match the request's filters across every page, or null for a list whose upstream cannot count them.",
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "total_count"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List an organization's teams",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/transfer-ownership": {
+      "post": {
+        "description": "Makes another member the organization's owner and makes the caller, its current owner, an admin. Only the owner may call it. Multi mode only.",
+        "operationId": "transfer_org_ownership",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TransferOwnershipRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Transfer an organization's ownership",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
         }
       }
     },
@@ -1589,6 +4350,485 @@
         }
       }
     },
+    "/api/teams": {
+      "post": {
+        "description": "Creates a team in the caller's current organization, gives it the shipped prompts, blueprints, and event handlers, makes the caller its admin, and returns it. Only an organization admin may call it. Multi mode only.",
+        "operationId": "create_team",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TeamCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeamJSON"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Create a team",
+        "x-hints": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/teams/archived/list": {
+      "post": {
+        "description": "Returns one page of the archived teams in the caller's current organization. Only an organization admin may call it. Multi mode only.",
+        "operationId": "list_archived_teams",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ArchivedTeamListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "items": {
+                      "description": "The rows of this page, as an empty array when it has none.",
+                      "items": {
+                        "$ref": "#/components/schemas/TeamJSON"
+                      },
+                      "type": "array"
+                    },
+                    "next_page_token": {
+                      "description": "The page_token that reads the next page, absent on the last page.",
+                      "type": "string"
+                    },
+                    "total_count": {
+                      "description": "How many rows match the request's filters across every page, or null for a list whose upstream cannot count them.",
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "total_count"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List archived teams",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/teams/list": {
+      "post": {
+        "description": "Returns one page of the active teams the caller belongs to in their current organization, each with the caller's role. In local mode it returns the one local team.",
+        "operationId": "list_teams",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TeamListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "items": {
+                      "description": "The rows of this page, as an empty array when it has none.",
+                      "items": {
+                        "$ref": "#/components/schemas/TeamJSON"
+                      },
+                      "type": "array"
+                    },
+                    "next_page_token": {
+                      "description": "The page_token that reads the next page, absent on the last page.",
+                      "type": "string"
+                    },
+                    "total_count": {
+                      "description": "How many rows match the request's filters across every page, or null for a list whose upstream cannot count them.",
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "total_count"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List the caller's teams",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/teams/{team_id}": {
+      "get": {
+        "description": "Returns one of the caller's organization's teams, archived or not, with the caller's role on it when they belong to it.",
+        "operationId": "get_team",
+        "parameters": [
+          {
+            "description": "The team's id, or default for the one team in local mode.",
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeamJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get a team",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      },
+      "patch": {
+        "description": "Sets the team's name, its description, or both, and returns the team with the change applied. Renaming derives a new slug from the name. A team admin or an organization admin may call it, and an archived team is refused. Multi mode only.",
+        "operationId": "update_team",
+        "parameters": [
+          {
+            "description": "The team's id.",
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TeamUpdateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeamJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Rename a team or change its description",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/teams/{team_id}/archive": {
+      "post": {
+        "description": "Archives the team, which hides it and refuses further changes to it, stops its agent runs in progress, and ends its conversations. It returns how many runs it stopped. Only an organization admin may call it, the organization's only active team cannot be archived, and an archived team is refused. Multi mode only.",
+        "operationId": "archive_team",
+        "parameters": [
+          {
+            "description": "The team's id.",
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeamArchiveResultJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Archive a team",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/teams/{team_id}/archive/preview": {
+      "get": {
+        "description": "Returns how many of the team's agent runs are in progress, which archiving it would stop, and whether it is already archived. Only an organization admin may call it. Multi mode only.",
+        "operationId": "get_team_archive_preview",
+        "parameters": [
+          {
+            "description": "The team's id.",
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeamArchivePreviewJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Preview what archiving a team stops",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/teams/{team_id}/members": {
+      "post": {
+        "description": "Adds a member of the organization to the team with the given role. A person already on the team is refused. Multi mode only.",
+        "operationId": "create_team_member",
+        "parameters": [
+          {
+            "description": "The team's id.",
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TeamMemberAddRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Add a team member",
+        "x-hints": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/teams/{team_id}/members/list": {
+      "post": {
+        "description": "Returns one page of the team's members with their role and their GitHub, Jira, and Linear identities, ordered by display name and narrowed by search, and beside the page the organization's agent as the team has it configured. A page_token resumes after the page that returned it, and is refused for a different search.",
+        "operationId": "list_team_members",
+        "parameters": [
+          {
+            "description": "The team's id, or default for the one team in local mode.",
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TeamRosterListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeamRosterListResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List a team's members",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
     "/api/teams/{team_id}/members/{user_id}": {
       "delete": {
         "description": "Removes a person from the team. A caller who names their own id leaves the team, and the team's last admin cannot be removed.",
@@ -1630,6 +4870,110 @@
           }
         ],
         "summary": "Remove a team member",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      },
+      "patch": {
+        "description": "Sets the member's role on the team. The team's last admin cannot be demoted. Multi mode only.",
+        "operationId": "update_team_member",
+        "parameters": [
+          {
+            "description": "The team's id.",
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The member's user id.",
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TeamMemberRoleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Change a team member's role",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/teams/{team_id}/restore": {
+      "post": {
+        "description": "Restores an archived team so it can be seen and changed again, and returns it. The agent runs and conversations the archive ended stay ended. Only an organization admin may call it, and a team that is not archived is refused. Multi mode only.",
+        "operationId": "restore_team",
+        "parameters": [
+          {
+            "description": "The team's id.",
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeamJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Restore an archived team",
         "x-hints": {
           "destructiveHint": true,
           "idempotentHint": true,

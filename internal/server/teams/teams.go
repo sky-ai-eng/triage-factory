@@ -69,16 +69,16 @@ func New(tx db.TxRunner, az *authz.Checker, allStores db.Stores, spawner func() 
 //     a result carries it, and a stale default carries it nowhere — so the
 //     frontend never seeds a selector to a team that isn't offered.
 type teamJSON struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Slug        string `json:"slug"`
-	Role        string `json:"role,omitempty"`
-	Description string `json:"description"`
+	ID          string `json:"id" doc:"The team's id."`
+	Name        string `json:"name" doc:"The team's display name."`
+	Slug        string `json:"slug" doc:"The team's slug, unique within its organization."`
+	Role        string `json:"role,omitempty" doc:"The caller's role on the team: admin, member, or viewer. Absent when the caller is not on the team, on the archived teams list, and on the responses of an update or a restore."`
+	Description string `json:"description" doc:"The team's description, empty when it has none."`
 	// ArchivedAt is the soft-delete timestamp (RFC3339 UTC), present only on
 	// an archived team. The active list filters archived teams out, so this is
 	// empty there and populated on the archived list and the single read.
-	ArchivedAt   string `json:"archived_at,omitempty"`
-	IsLastActing bool   `json:"is_last_acting,omitempty"`
+	ArchivedAt   string `json:"archived_at,omitempty" doc:"When the team was archived, as an RFC 3339 timestamp in UTC, present only on an archived team."`
+	IsLastActing bool   `json:"is_last_acting,omitempty" doc:"Present and true on the team the caller last acted as, which a client offers first; at most one team in a response carries it."`
 }
 
 // teamToJSON renders a stored team. lastActing is the caller's sticky default
@@ -116,6 +116,14 @@ type teamListRequest struct {
 	httpx.PageRequest
 }
 
+var opTeamsList = httpx.NewListOp[teamListRequest, teamJSON](httpx.OpSpec{
+	Pattern:     "POST /api/teams/list",
+	ID:          "list_teams",
+	Summary:     "List the caller's teams",
+	Description: "Returns one page of the active teams the caller belongs to in their current organization, each with the caller's role. In local mode it returns the one local team.",
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
+
 // handleTeamsList returns the caller's active teams in the org. The single
 // data source for both selectors: the per-page read filter and the write-time
 // picker. Renders in both modes — local returns the one local team (so the
@@ -135,8 +143,8 @@ func (th *Handler) handleTeamsList(w http.ResponseWriter, r *http.Request) {
 	}
 	userID := httpx.ClaimsFrom(r.Context()).Subject
 
-	var req teamListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opTeamsList.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -167,7 +175,7 @@ func (th *Handler) handleTeamsList(w http.ResponseWriter, r *http.Request) {
 	for i, t := range teams {
 		out[i] = teamToJSON(t, lastActing)
 	}
-	httpx.WriteList(w, page, out, total)
+	opTeamsList.Write(w, page, out, total)
 }
 
 // orgTeamsListKey is the org list's page-token fingerprint. It names the list
@@ -177,6 +185,15 @@ type orgTeamsListKey struct {
 	List  string `json:"list"`
 	OrgID string `json:"org_id"`
 }
+
+var opOrgTeamsList = httpx.NewListOp[teamListRequest, teamJSON](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/teams/list",
+	ID:          "list_org_teams",
+	Summary:     "List an organization's teams",
+	Description: "Returns one page of every active team in the organization, including teams the caller is not on, with the caller's role on the teams they belong to.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleOrgTeamsList returns every active team in the org the path names, for
 // a caller who has to name teams they may not be on: an org admin's views
@@ -191,8 +208,8 @@ func (th *Handler) handleOrgTeamsList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req teamListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opOrgTeamsList.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -223,8 +240,17 @@ func (th *Handler) handleOrgTeamsList(w http.ResponseWriter, r *http.Request) {
 	for i, t := range teams {
 		out[i] = teamToJSON(t, lastActing)
 	}
-	httpx.WriteList(w, page, out, total)
+	opOrgTeamsList.Write(w, page, out, total)
 }
+
+var opTeamGet = httpx.NewJSONOp[httpx.NoBody, teamJSON](httpx.OpSpec{
+	Pattern:     "GET /api/teams/{team_id}",
+	ID:          "get_team",
+	Summary:     "Get a team",
+	Description: "Returns one of the caller's organization's teams, archived or not, with the caller's role on it when they belong to it.",
+	PathParams:  map[string]string{"team_id": "The team's id, or default for the one team in local mode."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleTeamGet is the canonical single read. It is the only reader of a
 // team's description — before it, the column was writable through PATCH and
@@ -269,7 +295,7 @@ func (th *Handler) handleTeamGet(w http.ResponseWriter, r *http.Request) {
 		httpx.NotFound(w, "team")
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, teamToJSON(*team, lastActing))
+	opTeamGet.Write(w, teamToJSON(*team, lastActing))
 }
 
 // maxTeamNameLen caps a team name's length (in runes). A generous bound that
@@ -301,6 +327,23 @@ func validateTeamName(v *httpx.Validation, name string) string {
 	}
 	return slug
 }
+
+// teamUpdateRequest is the body of PATCH /api/teams/{team_id}. Both fields are
+// pointers, so an explicit null reads as absent, and the description is
+// cleared with an empty string.
+type teamUpdateRequest struct {
+	Name        *string `json:"name" doc:"The team's new display name, at most 100 characters, with at least one letter or number; the slug is derived from it again. Absent or null leaves the name unchanged."`
+	Description *string `json:"description" doc:"The team's new description, at most 500 characters; an empty string clears it, and absent or null leaves it unchanged."`
+}
+
+var opTeamUpdate = httpx.NewJSONOp[teamUpdateRequest, teamJSON](httpx.OpSpec{
+	Pattern:     "PATCH /api/teams/{team_id}",
+	ID:          "update_team",
+	Summary:     "Rename a team or change its description",
+	Description: "Sets the team's name, its description, or both, and returns the team with the change applied. Renaming derives a new slug from the name. A team admin or an organization admin may call it, and an archived team is refused. Multi mode only.",
+	PathParams:  map[string]string{"team_id": "The team's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleTeamUpdate renames a team and/or rewrites its description. Multi-mode
 // only (local is N=1; 404 matches the create affordance's posture). Gated
@@ -347,11 +390,8 @@ func (th *Handler) handleTeamUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var body struct {
-		Name        *string `json:"name"`
-		Description *string `json:"description"`
-	}
-	if !httpx.DecodeJSONStrict(w, r, &body) {
+	body, ok := opTeamUpdate.Decode(w, r)
+	if !ok {
 		return
 	}
 
@@ -390,7 +430,7 @@ func (th *Handler) handleTeamUpdate(w http.ResponseWriter, r *http.Request) {
 		// The list row shape, with role left empty: the write carries no
 		// membership lookup, and the caller already knows their relationship
 		// to a team they just had the role to edit.
-		httpx.WriteJSON(w, http.StatusOK, teamToJSON(updated, ""))
+		opTeamUpdate.Write(w, teamToJSON(updated, ""))
 	case errors.Is(err, db.ErrTeamNotFound):
 		// Raced past VerifyTeamInOrg (deleted between gate and write) — 404.
 		httpx.NotFound(w, "team")
@@ -429,6 +469,21 @@ func (th *Handler) requireTeamAdminOrOrgAdmin(w http.ResponseWriter, r *http.Req
 	return true
 }
 
+// teamCreateRequest is the body of POST /api/teams.
+type teamCreateRequest struct {
+	Name string `json:"name" doc:"The team's display name, at most 100 characters, with at least one letter or number."`
+	Slug string `json:"slug" doc:"The team's slug, rewritten into slug form, which must keep at least one letter or number; absent or empty derives it from name."`
+}
+
+var opTeamCreate = httpx.NewJSONOp[teamCreateRequest, teamJSON](httpx.OpSpec{
+	Pattern:     "POST /api/teams",
+	ID:          "create_team",
+	Summary:     "Create a team",
+	Description: "Creates a team in the caller's current organization, gives it the shipped prompts, blueprints, and event handlers, makes the caller its admin, and returns it. Only an organization admin may call it. Multi mode only.",
+	Status:      http.StatusCreated,
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintNo, Idempotent: httpx.HintNo, OpenWorld: httpx.HintNo},
+})
+
 // handleTeamCreate is the org-admin "add team" affordance — the multi-
 // only path a solo user takes to grow past one team, at which point the
 // count-gated selectors begin rendering. Multi-mode only (local is N=1);
@@ -463,11 +518,8 @@ func (th *Handler) handleTeamCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var body struct {
-		Name string `json:"name"`
-		Slug string `json:"slug"`
-	}
-	if !httpx.DecodeJSONStrict(w, r, &body) {
+	body, ok := opTeamCreate.Decode(w, r)
+	if !ok {
 		return
 	}
 	name := strings.TrimSpace(body.Name)
@@ -522,7 +574,7 @@ func (th *Handler) handleTeamCreate(w http.ResponseWriter, r *http.Request) {
 	// the response — the settings Team selector lists admin'd teams, and this
 	// lets a freshly-created team surface there without waiting on a refetch.
 	created.Role = "admin"
-	httpx.WriteJSON(w, http.StatusCreated, teamToJSON(created, ""))
+	opTeamCreate.Write(w, teamToJSON(created, ""))
 }
 
 // Register mounts the teams routes.
@@ -533,28 +585,28 @@ func (th *Handler) Register(m httpx.Mounts) {
 	// server-side on each write — a recency signal, not a user preference, so
 	// there is no endpoint to set it explicitly. POST /api/teams is the
 	// org-admin "add team" affordance (multi-only; 404 in local).
-	m.APIMutating("POST /api/teams/list", th.handleTeamsList)
+	m.Op(opTeamsList, th.handleTeamsList)
 	// Every active team in the org, for any of its members, with the caller's
 	// role on the ones they are on: the names an org-wide view needs for the
 	// teams the caller's own list leaves out.
-	m.APIMutating("POST /api/orgs/{org_id}/teams/list", th.handleOrgTeamsList)
-	m.APIMutating("POST /api/teams", th.handleTeamCreate)
+	m.Op(opOrgTeamsList, th.handleOrgTeamsList)
+	m.Op(opTeamCreate, th.handleTeamCreate)
 	// The canonical single read, and the only reader of a team's description.
 	// Any org member may read any team in their org; a cross-org id 404s under
 	// RLS. {team_id} takes the literal "default" in local mode
 	// (authz.ResolveTeamID).
-	m.API("GET /api/teams/{team_id}", th.handleTeamGet)
+	m.Op(opTeamGet, th.handleTeamGet)
 	// PATCH /api/teams/{team_id} renames a team / edits its description
 	// (multi-only; 404 in local). Gated team-admin-or-org-admin; a plain
 	// member 403s, a cross-org team_id 404s (VerifyTeamInOrg).
-	m.APIMutating("PATCH /api/teams/{team_id}", th.handleTeamUpdate)
+	m.Op(opTeamUpdate, th.handleTeamUpdate)
 	// Team archive/restore lifecycle, org-admin only, multi-mode. Archive
 	// soft-deletes + force-stops the team's in-flight delegations and blocks
 	// further writes; restore flips it back, and dead conversations stay dead.
 	// The preview + archived-list back the confirm modal and the org-admin
 	// restore surface.
-	m.APIMutating("POST /api/teams/archived/list", th.handleTeamArchivedList)
-	m.API("GET /api/teams/{team_id}/archive/preview", th.handleTeamArchivePreview)
-	m.APIMutating("POST /api/teams/{team_id}/archive", th.handleTeamArchive)
-	m.APIMutating("POST /api/teams/{team_id}/restore", th.handleTeamRestore)
+	m.Op(opTeamArchivedList, th.handleTeamArchivedList)
+	m.Op(opTeamArchivePreview, th.handleTeamArchivePreview)
+	m.Op(opTeamArchive, th.handleTeamArchive)
+	m.Op(opTeamRestore, th.handleTeamRestore)
 }

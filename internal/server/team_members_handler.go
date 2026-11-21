@@ -52,15 +52,15 @@ var teamRoles = map[string]bool{"admin": true, "member": true, "viewer": true}
 // is_current_user lets the frontend swap the Remove control for Leave on the
 // caller's own row.
 type teamRosterRow struct {
-	UserID            string  `json:"user_id"`
-	DisplayName       string  `json:"display_name"`
-	GitHubUsername    *string `json:"github_username"`
-	GitHubUserID      *string `json:"github_user_id"`
-	JiraAccountID     *string `json:"jira_account_id"`
-	LinearUserID      *string `json:"linear_user_id"`
-	LinearDisplayName *string `json:"linear_display_name"`
-	Role              string  `json:"role"`
-	IsCurrentUser     bool    `json:"is_current_user"`
+	UserID            string  `json:"user_id" doc:"The member's user id."`
+	DisplayName       string  `json:"display_name" doc:"The member's display name."`
+	GitHubUsername    *string `json:"github_username" doc:"The member's GitHub login on the organization's GitHub host, or null when they have none there."`
+	GitHubUserID      *string `json:"github_user_id" doc:"GitHub's id for the account github_username names, the value event handler filters such as author_id_in take, or null when none is recorded."`
+	JiraAccountID     *string `json:"jira_account_id" doc:"The member's Jira account id on the organization's Jira site, or null when they have none there."`
+	LinearUserID      *string `json:"linear_user_id" doc:"The member's Linear user id in the organization's Linear workspace, or null when they have none there."`
+	LinearDisplayName *string `json:"linear_display_name" doc:"The name Linear gave the member when they connected, or null when none is recorded."`
+	Role              string  `json:"role" doc:"The member's role on the team: admin, member, or viewer."`
+	IsCurrentUser     bool    `json:"is_current_user" doc:"Whether the member is the caller."`
 }
 
 // teamRosterBotRow is the team's agent (team_agents) surfaced as an extra
@@ -72,11 +72,11 @@ type teamRosterRow struct {
 // and the management roster renders both. Null when the org has no
 // bootstrapped agent.
 type teamRosterBotRow struct {
-	AgentID     string   `json:"agent_id"`
-	DisplayName string   `json:"display_name"`
-	Enabled     bool     `json:"enabled"`
-	Model       string   `json:"model"`
-	Autonomy    *float64 `json:"autonomy"`
+	AgentID     string   `json:"agent_id" doc:"The organization's agent's id."`
+	DisplayName string   `json:"display_name" doc:"The agent's display name."`
+	Enabled     bool     `json:"enabled" doc:"Whether the agent works for this team."`
+	Model       string   `json:"model" doc:"The model the agent uses for this team, or the organization's default for the agent when the team sets none; empty when neither is set."`
+	Autonomy    *float64 `json:"autonomy" doc:"The autonomy suitability the agent uses for this team, or the organization's default for the agent when the team sets none; null when neither is set."`
 }
 
 // teamRosterListRequest is the list body: paging and a search. The rows come
@@ -90,7 +90,7 @@ type teamRosterListRequest struct {
 	// the Linear display name in its workspace (db.TeamMemberFilter.Search).
 	// It matches what the row shows and nothing else, so a binding on another
 	// host finds nobody.
-	Search string `json:"search"`
+	Search string `json:"search" doc:"Keeps a member when it is a case-insensitive substring of their display name, their GitHub login on the organization's GitHub host, their Jira account id on its Jira site, or their Linear display name in its workspace, at most 200 characters; empty keeps every member."`
 }
 
 // teamRosterListFilterKey is the filter set the roster's page token is
@@ -108,11 +108,20 @@ type teamRosterListFilterKey struct {
 // from this one payload — the management roster shows the bot's enabled/model/
 // autonomy, and a picker reads `enabled` to decide whether to offer it at all.
 type teamRosterListResponse struct {
-	Items         []teamRosterRow   `json:"items"`
-	NextPageToken string            `json:"next_page_token,omitempty"`
-	TotalCount    int               `json:"total_count"`
-	Bot           *teamRosterBotRow `json:"bot"`
+	Items         []teamRosterRow   `json:"items" doc:"The page's members, ordered by display name and then user id."`
+	NextPageToken string            `json:"next_page_token,omitempty" doc:"The page_token that reads the next page, absent on the last page."`
+	TotalCount    int               `json:"total_count" doc:"How many members match the filters, across every page."`
+	Bot           *teamRosterBotRow `json:"bot" doc:"The organization's agent as this team has it configured, whatever the search; null when the organization has no agent."`
 }
+
+var opTeamRosterList = httpx.NewJSONOp[teamRosterListRequest, teamRosterListResponse](httpx.OpSpec{
+	Pattern:     "POST /api/teams/{team_id}/members/list",
+	ID:          "list_team_members",
+	Summary:     "List a team's members",
+	Description: "Returns one page of the team's members with their role and their GitHub, Jira, and Linear identities, ordered by display name and narrowed by search, and beside the page the organization's agent as the team has it configured. A page_token resumes after the page that returned it, and is refused for a different search.",
+	PathParams:  map[string]string{"team_id": "The team's id, or default for the one team in local mode."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleTeamRosterList returns one page of the team's members with their role
 // and identity readiness, narrowed by the body's `search`, plus the team bot
@@ -134,8 +143,8 @@ func (h *teamMembersHandler) handleTeamRosterList(w http.ResponseWriter, r *http
 		return
 	}
 
-	var req teamRosterListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opTeamRosterList.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -198,13 +207,28 @@ func (h *teamMembersHandler) handleTeamRosterList(w http.ResponseWriter, r *http
 		})
 	}
 
-	writeJSON(w, http.StatusOK, teamRosterListResponse{
+	opTeamRosterList.Write(w, teamRosterListResponse{
 		Items:         items,
 		NextPageToken: httpx.NextPageToken(page, len(items), total),
 		TotalCount:    total,
 		Bot:           teamBotFromAgent(agent, ta),
 	})
 }
+
+// teamMemberAddRequest is the body of POST /api/teams/{team_id}/members.
+type teamMemberAddRequest struct {
+	UserID string `json:"user_id" doc:"The user id of the organization member to add."`
+	Role   string `json:"role" doc:"The role the person takes on the team: admin, member, or viewer."`
+}
+
+var opTeamMemberAdd = httpx.NewNoContentOp[teamMemberAddRequest](httpx.OpSpec{
+	Pattern:     "POST /api/teams/{team_id}/members",
+	ID:          "create_team_member",
+	Summary:     "Add a team member",
+	Description: "Adds a member of the organization to the team with the given role. A person already on the team is refused. Multi mode only.",
+	PathParams:  map[string]string{"team_id": "The team's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintNo, Idempotent: httpx.HintNo, OpenWorld: httpx.HintNo},
+})
 
 // handleTeamMemberAdd enrolls an existing org member on the team with a role.
 // Team-admin-or-org-admin only (404 otherwise, non-disclosure). The target must
@@ -231,11 +255,8 @@ func (h *teamMembersHandler) handleTeamMemberAdd(w http.ResponseWriter, r *http.
 		return
 	}
 
-	var body struct {
-		UserID string `json:"user_id"`
-		Role   string `json:"role"`
-	}
-	if !httpx.DecodeJSONStrict(w, r, &body) {
+	body, ok := opTeamMemberAdd.Decode(w, r)
+	if !ok {
 		return
 	}
 	target := strings.TrimSpace(body.UserID)
@@ -281,13 +302,30 @@ func (h *teamMembersHandler) handleTeamMemberAdd(w http.ResponseWriter, r *http.
 	})
 	switch {
 	case err == nil:
-		w.WriteHeader(http.StatusCreated)
+		opTeamMemberAdd.Write(w)
 	case errors.Is(err, db.ErrTeamMemberExists):
 		conflict(w, "that user is already on this team")
 	default:
 		internalError(w, "team-members", err)
 	}
 }
+
+// teamMemberRoleRequest is the body of PATCH /api/teams/{team_id}/members/{user_id}.
+type teamMemberRoleRequest struct {
+	Role string `json:"role" doc:"The member's new role on the team: admin, member, or viewer."`
+}
+
+var opTeamMemberRoleChange = httpx.NewNoContentOp[teamMemberRoleRequest](httpx.OpSpec{
+	Pattern:     "PATCH /api/teams/{team_id}/members/{user_id}",
+	ID:          "update_team_member",
+	Summary:     "Change a team member's role",
+	Description: "Sets the member's role on the team. The team's last admin cannot be demoted. Multi mode only.",
+	PathParams: map[string]string{
+		"team_id": "The team's id.",
+		"user_id": "The member's user id.",
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleTeamMemberRoleChange changes a member's team role. Team-admin-or-org-
 // admin only (404 otherwise). Demoting the team's last admin is rejected by the
@@ -316,10 +354,8 @@ func (h *teamMembersHandler) handleTeamMemberRoleChange(w http.ResponseWriter, r
 		return
 	}
 
-	var body struct {
-		Role string `json:"role"`
-	}
-	if !httpx.DecodeJSONStrict(w, r, &body) {
+	body, ok := opTeamMemberRoleChange.Decode(w, r)
+	if !ok {
 		return
 	}
 	role := strings.TrimSpace(body.Role)
@@ -347,7 +383,7 @@ func (h *teamMembersHandler) handleTeamMemberRoleChange(w http.ResponseWriter, r
 	if !writeTeamMemberMutationResult(w, err) {
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	opTeamMemberRoleChange.Write(w)
 }
 
 var opTeamMemberRemove = httpx.NewNoContentOp[httpx.NoBody](httpx.OpSpec{
@@ -535,8 +571,8 @@ func (s *Server) registerTeamMemberRoutes() {
 	// VerifyTeamInOrg 404s a cross-org team_id; the last-admin guard is a DB
 	// trigger surfaced as a 409.
 	tmh := &teamMembersHandler{tx: s.tx, az: s.az}
-	s.apiMutating("POST /api/teams/{team_id}/members/list", tmh.handleTeamRosterList)
-	s.apiMutating("POST /api/teams/{team_id}/members", tmh.handleTeamMemberAdd)
-	s.apiMutating("PATCH /api/teams/{team_id}/members/{user_id}", tmh.handleTeamMemberRoleChange)
+	s.op(opTeamRosterList, tmh.handleTeamRosterList)
+	s.op(opTeamMemberAdd, tmh.handleTeamMemberAdd)
+	s.op(opTeamMemberRoleChange, tmh.handleTeamMemberRoleChange)
 	s.op(opTeamMemberRemove, tmh.handleTeamMemberRemove)
 }

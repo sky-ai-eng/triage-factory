@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // entitlementsResponse is the FE-facing shape of GET /api/entitlements: the
@@ -14,8 +15,16 @@ import (
 type entitlementsResponse struct {
 	// Features is always a non-nil slice so the JSON encodes as [] (never
 	// null) for the unlicensed default — the frontend treats it as a set.
-	Features []string `json:"features"`
+	Features []string `json:"features" doc:"The Enterprise features licensed for the caller's current organization, such as governance; empty when none is."`
 }
+
+var opEntitlements = httpx.NewJSONOp[httpx.NoBody, entitlementsResponse](httpx.OpSpec{
+	Pattern:     "GET /api/entitlements",
+	ID:          "list_entitlements",
+	Summary:     "List the licensed Enterprise features",
+	Description: "Returns the Enterprise features licensed for the caller's current organization, as one unpaged list. A build with no licence answers an empty list.",
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleEntitlements reports which gated Enterprise features are licensed for
 // the session's active org. It is a CORE route: it reports the entitlements
@@ -59,5 +68,5 @@ func (s *Server) handleEntitlements(w http.ResponseWriter, r *http.Request) {
 			features = append(features, string(f))
 		}
 	}
-	writeJSON(w, http.StatusOK, entitlementsResponse{Features: features})
+	opEntitlements.Write(w, entitlementsResponse{Features: features})
 }
