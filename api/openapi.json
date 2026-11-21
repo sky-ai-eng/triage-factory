@@ -1,0 +1,1732 @@
+{
+  "components": {
+    "responses": {
+      "Error": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorEnvelope"
+            }
+          }
+        },
+        "description": "The request was refused or failed. The body lists every fault found."
+      }
+    },
+    "schemas": {
+      "ConnectionsListRequest": {
+        "properties": {
+          "page_size": {
+            "description": "How many rows to return, 50 when absent; 0 returns no rows and only total_count, and a value above the list's maximum, 200 unless the route says otherwise, is refused.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "page_token": {
+            "description": "The next_page_token of the previous page, which reads the page after it; it is refused for a request with different filters.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "DependabotAlertJSON": {
+        "properties": {
+          "cve_id": {
+            "description": "The advisory's CVE id, absent when it has none.",
+            "type": "string"
+          },
+          "first_patched_version": {
+            "description": "The first version that fixes the advisory, absent when none has been released.",
+            "type": "string"
+          },
+          "ghsa_id": {
+            "description": "The advisory's GitHub Security Advisory id.",
+            "type": "string"
+          },
+          "manifest_path": {
+            "description": "The path of the manifest file that declares the package.",
+            "type": "string"
+          },
+          "number": {
+            "description": "The alert's number in its repository.",
+            "type": "integer"
+          },
+          "scope": {
+            "description": "Whether the dependency is runtime or development, absent when GitHub does not know.",
+            "type": "string"
+          },
+          "severity": {
+            "description": "The advisory's severity: low, medium, high, or critical.",
+            "type": "string"
+          },
+          "summary": {
+            "description": "The advisory's summary, to be shown as plain text, absent when the advisory has none.",
+            "type": "string"
+          },
+          "url": {
+            "description": "The alert's page on GitHub.",
+            "type": "string"
+          },
+          "vulnerable_version_range": {
+            "description": "The range of versions the advisory affects, absent when GitHub reports none.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "number",
+          "url",
+          "ghsa_id",
+          "severity",
+          "manifest_path"
+        ],
+        "type": "object"
+      },
+      "ErrorEnvelope": {
+        "properties": {
+          "errors": {
+            "description": "Every fault found in the request, at least one.",
+            "items": {
+              "$ref": "#/components/schemas/ErrorItem"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "errors"
+        ],
+        "type": "object"
+      },
+      "ErrorItem": {
+        "properties": {
+          "field": {
+            "description": "The request field at fault, present only when the fault is in one field.",
+            "type": "string"
+          },
+          "message": {
+            "description": "A description of the fault for a person to read.",
+            "type": "string"
+          },
+          "reason": {
+            "description": "A stable machine code for the fault, in upper snake case, such as INVALID_FIELD.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason",
+          "message"
+        ],
+        "type": "object"
+      },
+      "HealthResponse": {
+        "properties": {
+          "status": {
+            "description": "Always ok.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
+      "MemoryAttemptJSON": {
+        "properties": {
+          "error_kind": {
+            "description": "Why the attempt failed, present only when outcome is failed.",
+            "type": "string"
+          },
+          "error_message": {
+            "description": "A description of the failure, present only when outcome is failed.",
+            "type": "string"
+          },
+          "outcome": {
+            "description": "What the attempt came to: generated, empty, or failed, absent while it is running.",
+            "type": "string"
+          },
+          "started_at": {
+            "description": "When the attempt started, as an RFC 3339 timestamp.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "started_at"
+        ],
+        "type": "object"
+      },
+      "RepoJSON": {
+        "properties": {
+          "base_branch": {
+            "description": "The branch agents base their work on, absent when they use the default branch.",
+            "type": "string"
+          },
+          "can_edit": {
+            "description": "Whether the caller may change the repository's settings.",
+            "type": "boolean"
+          },
+          "clone_error": {
+            "description": "The output of the failed clone, present only when clone_status is failed.",
+            "type": "string"
+          },
+          "clone_error_kind": {
+            "description": "What kind of failure the clone hit, ssh or other, present only when clone_status is failed.",
+            "type": "string"
+          },
+          "clone_status": {
+            "description": "The state of the repository's clone: pending until a clone attempt finishes, then ok or failed.",
+            "type": "string"
+          },
+          "default_branch": {
+            "description": "The repository's default branch on GitHub, absent before it is profiled.",
+            "type": "string"
+          },
+          "description": {
+            "description": "The repository's description on GitHub, absent when it has none.",
+            "type": "string"
+          },
+          "github_id": {
+            "description": "GitHub's id for the repository, empty while it is not yet known.",
+            "type": "string"
+          },
+          "has_agents_md": {
+            "description": "Whether the repository has an AGENTS.md.",
+            "type": "boolean"
+          },
+          "has_claude_md": {
+            "description": "Whether the repository has a CLAUDE.md.",
+            "type": "boolean"
+          },
+          "has_readme": {
+            "description": "Whether the repository has a README.",
+            "type": "boolean"
+          },
+          "id": {
+            "description": "The repository's id in Triage Factory.",
+            "type": "string"
+          },
+          "owner": {
+            "description": "The account that owns the repository on GitHub.",
+            "type": "string"
+          },
+          "profile_text": {
+            "description": "A description of the repository written when it was profiled, absent before then.",
+            "type": "string"
+          },
+          "profiled_at": {
+            "description": "When the repository was last profiled, as an RFC 3339 timestamp, absent before then.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "repo": {
+            "description": "The repository's name without its owner.",
+            "type": "string"
+          },
+          "retired_at": {
+            "description": "When the repository was retired because GitHub no longer answers for it, as an RFC 3339 timestamp, absent on a repository that is not retired.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "slug": {
+            "description": "The repository's full name, as owner/name.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "github_id",
+          "slug",
+          "owner",
+          "repo",
+          "has_readme",
+          "has_claude_md",
+          "has_agents_md",
+          "can_edit"
+        ],
+        "type": "object"
+      },
+      "RepoUpdateRequest": {
+        "properties": {
+          "base_branch": {
+            "description": "The branch agents base their work on in this repository, or null to clear it so they use the repository's default branch.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "TaskJSON": {
+        "properties": {
+          "ai_summary": {
+            "description": "A summary of the task written when it was scored, absent before then.",
+            "type": "string"
+          },
+          "autonomy_suitability": {
+            "description": "How suitable the task is for an agent to work without a person, from 0 to 1, or null before the task is scored.",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "can_write": {
+            "description": "Whether the caller may update, claim, delegate, or requeue the task, present on the task reads and absent from a write's response or when the check fails.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "claim_team_ids": {
+            "description": "The ids of the teams the caller's claim or delegation may put the task on, in order, present on the single-task read only and absent when that read fails.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "claimed_by_agent_id": {
+            "description": "The id of the agent that holds the task, absent when no agent does.",
+            "type": "string"
+          },
+          "claimed_by_user_id": {
+            "description": "The id of the person who holds the task, absent when no person does.",
+            "type": "string"
+          },
+          "close_reason": {
+            "description": "Why the task closed, such as run_completed, user_completed, user_dismissed, or auto_closed_by_event, absent while it is open.",
+            "type": "string"
+          },
+          "conversation_id": {
+            "description": "The id of the task's current conversation, absent when nobody holds the task or its run has not started.",
+            "type": "string"
+          },
+          "created_at": {
+            "description": "When the task was created, as an RFC 3339 timestamp.",
+            "type": "string"
+          },
+          "dedup_key": {
+            "description": "The value that tells apart tasks of one event type on one entity, such as a label name, absent for most event types.",
+            "type": "string"
+          },
+          "entity_id": {
+            "description": "The id of the entity the task is about: a pull request, an issue, a vulnerable package, or a Slack thread or message.",
+            "type": "string"
+          },
+          "entity_kind": {
+            "description": "The kind of entity the task is about: pr, issue, vulnerable_package, thread, or message.",
+            "type": "string"
+          },
+          "event_type": {
+            "description": "The event type that created the task, such as github:pr:review_requested.",
+            "type": "string"
+          },
+          "id": {
+            "description": "The task's id.",
+            "type": "string"
+          },
+          "memory_attempt": {
+            "description": "The newest attempt to write that memory, absent when none has run.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/MemoryAttemptJSON"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "memory_pending": {
+            "description": "Whether a conversation on the task ended without the memory the next conversation needs, in which case no further conversation on the task starts until that memory exists.",
+            "type": "boolean"
+          },
+          "open_subtask_count": {
+            "description": "How many open subtasks the task's Jira issue has, 0 for any other entity.",
+            "type": "integer"
+          },
+          "priority_reasoning": {
+            "description": "The reasoning behind priority_score, absent before the task is scored.",
+            "type": "string"
+          },
+          "priority_score": {
+            "description": "How urgently the task needs a person's attention, from 0 to 1, or null before the task is scored.",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "relevance_reason": {
+            "description": "Why the task concerns the person it was routed to, one of review_requested, authored, mentioned, and assigned, absent when none applies.",
+            "type": "string"
+          },
+          "requested_reviewer": {
+            "description": "On a github:pr:review_requested task, the requested user's login or the requested team's org/slug, absent on every other task.",
+            "type": "string"
+          },
+          "scoring_status": {
+            "description": "Where the task is in priority scoring: pending, in_progress, or scored.",
+            "type": "string"
+          },
+          "severity": {
+            "description": "The task's severity, absent when none is recorded.",
+            "type": "string"
+          },
+          "snooze_until": {
+            "description": "When a snoozed task returns to the queue, as an RFC 3339 timestamp, absent when the task is not snoozed.",
+            "type": "string"
+          },
+          "source": {
+            "description": "The system the task's entity comes from, such as github or jira.",
+            "type": "string"
+          },
+          "source_id": {
+            "description": "The entity's key in its source, such as owner/repo#42 for a pull request or PROJ-123 for a Jira issue.",
+            "type": "string"
+          },
+          "source_url": {
+            "description": "The entity's page in its source.",
+            "type": "string"
+          },
+          "status": {
+            "description": "The task's lane: queued, in_progress, done, dismissed, or snoozed.",
+            "type": "string"
+          },
+          "team_id": {
+            "description": "The id of the team that owns the task, absent while no single team owns it.",
+            "type": "string"
+          },
+          "title": {
+            "description": "The entity's title.",
+            "type": "string"
+          },
+          "version": {
+            "description": "The task's version, which a write to the task must send and which each write raises.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "vulnerable_package": {
+            "description": "The package and its open Dependabot alerts on a task whose entity_kind is vulnerable_package, absent on every other task.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/VulnerablePackageJSON"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "entity_id",
+          "source",
+          "source_id",
+          "source_url",
+          "title",
+          "entity_kind",
+          "event_type",
+          "scoring_status",
+          "created_at",
+          "status",
+          "priority_score",
+          "autonomy_suitability",
+          "open_subtask_count",
+          "version",
+          "memory_pending"
+        ],
+        "type": "object"
+      },
+      "TaskListRequest": {
+        "properties": {
+          "closed_since": {
+            "description": "An RFC 3339 timestamp that limits done and dismissed tasks to those closed at or after it.",
+            "type": "string"
+          },
+          "created_before": {
+            "description": "An RFC 3339 timestamp that limits the result to tasks created at or before it.",
+            "type": "string"
+          },
+          "created_since": {
+            "description": "An RFC 3339 timestamp that limits the result to tasks created at or after it.",
+            "type": "string"
+          },
+          "entity_ids": {
+            "description": "Ids of the entities whose tasks to include, at most 200, each a UUID in lowercase hyphenated form; empty includes every entity.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "entity_kinds": {
+            "description": "Entity kinds whose tasks to include, such as pr or vulnerable_package; empty includes every kind.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "event_types": {
+            "description": "Event types whose tasks to include, from the catalog GET /api/event-types returns; empty includes every event type.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "ids": {
+            "description": "Ids of the tasks to include, at most 200, each a UUID in lowercase hyphenated form; empty includes every task.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "include_snoozed": {
+            "description": "Whether to include tasks still inside their snooze window.",
+            "type": "boolean"
+          },
+          "only_unclaimed": {
+            "description": "Whether to include only tasks nobody holds.",
+            "type": "boolean"
+          },
+          "page_size": {
+            "description": "How many rows to return, 50 when absent; 0 returns no rows and only total_count, and a value above the list's maximum, 200 unless the route says otherwise, is refused.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "page_token": {
+            "description": "The next_page_token of the previous page, which reads the page after it; it is refused for a request with different filters.",
+            "type": "string"
+          },
+          "search": {
+            "description": "Text the task's title, source id, summary, or event type must contain, matched without regard to case.",
+            "type": "string"
+          },
+          "sort_dir": {
+            "description": "The direction of sort_key, asc or desc, desc when absent; it is refused without sort_key.",
+            "type": "string"
+          },
+          "sort_key": {
+            "description": "Orders the result by title, created, event_type, or claimee; absent orders it by the default, open tasks needing attention first and then by priority.",
+            "type": "string"
+          },
+          "sources": {
+            "description": "Sources whose tasks to include, such as github or jira; empty includes every source.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "statuses": {
+            "description": "Lanes to include, from queued, in_progress, done, dismissed, and snoozed; empty includes every lane.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "team_ids": {
+            "description": "Ids of the teams whose tasks to include; empty includes every team the caller belongs to.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "UsageCategoryBucket": {
+        "properties": {
+          "cache_creation_tokens": {
+            "description": "Input tokens written to the prompt cache in the category.",
+            "type": "integer"
+          },
+          "cache_read_tokens": {
+            "description": "Input tokens read from the prompt cache in the category.",
+            "type": "integer"
+          },
+          "category": {
+            "description": "The spend category: manual for runs a person started, autonomous for runs an event handler started, or system_overhead for background jobs.",
+            "type": "string"
+          },
+          "cost": {
+            "description": "Spend in the category in USD.",
+            "type": "number"
+          },
+          "input_tokens": {
+            "description": "Input tokens billed in the category.",
+            "type": "integer"
+          },
+          "output_tokens": {
+            "description": "Output tokens billed in the category.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "category",
+          "cost",
+          "input_tokens",
+          "output_tokens",
+          "cache_read_tokens",
+          "cache_creation_tokens"
+        ],
+        "type": "object"
+      },
+      "UsageDayBucket": {
+        "properties": {
+          "cost": {
+            "description": "Spend on the day in USD.",
+            "type": "number"
+          },
+          "date": {
+            "description": "The UTC calendar day, as YYYY-MM-DD.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "date",
+          "cost"
+        ],
+        "type": "object"
+      },
+      "UsageDayModelBucket": {
+        "properties": {
+          "cost": {
+            "description": "Spend on the model on the day in USD.",
+            "type": "number"
+          },
+          "date": {
+            "description": "The UTC calendar day, as YYYY-MM-DD.",
+            "type": "string"
+          },
+          "model": {
+            "description": "The model's id.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "date",
+          "model",
+          "cost"
+        ],
+        "type": "object"
+      },
+      "UsageMeResponse": {
+        "properties": {
+          "by_category": {
+            "description": "The caller's spend by category.",
+            "items": {
+              "$ref": "#/components/schemas/UsageCategoryBucket"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "by_day": {
+            "description": "The caller's spend by UTC day.",
+            "items": {
+              "$ref": "#/components/schemas/UsageDayBucket"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "by_day_model": {
+            "description": "The caller's spend by UTC day and model, leaving out spend attributed to no single model.",
+            "items": {
+              "$ref": "#/components/schemas/UsageDayModelBucket"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "by_model": {
+            "description": "The caller's spend by model, leaving out spend attributed to no single model.",
+            "items": {
+              "$ref": "#/components/schemas/UsageModelBucket"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "total_cost_usd": {
+            "description": "The caller's total spend in the window in USD.",
+            "type": "number"
+          }
+        },
+        "required": [
+          "total_cost_usd",
+          "by_category",
+          "by_model",
+          "by_day",
+          "by_day_model"
+        ],
+        "type": "object"
+      },
+      "UsageModelBucket": {
+        "properties": {
+          "cost": {
+            "description": "Spend on the model in USD.",
+            "type": "number"
+          },
+          "model": {
+            "description": "The model's id.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "model",
+          "cost"
+        ],
+        "type": "object"
+      },
+      "UsageOrgLevelBucket": {
+        "properties": {
+          "category": {
+            "description": "The spend category of spend attributed to no team, such as system_overhead.",
+            "type": "string"
+          },
+          "cost": {
+            "description": "Spend in the category in USD.",
+            "type": "number"
+          }
+        },
+        "required": [
+          "category",
+          "cost"
+        ],
+        "type": "object"
+      },
+      "UsageOrgResponse": {
+        "properties": {
+          "by_category": {
+            "description": "The organization's spend by category.",
+            "items": {
+              "$ref": "#/components/schemas/UsageCategoryBucket"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "by_day": {
+            "description": "The organization's spend by UTC day.",
+            "items": {
+              "$ref": "#/components/schemas/UsageDayBucket"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "by_day_model": {
+            "description": "The organization's spend by UTC day and model, leaving out spend attributed to no single model.",
+            "items": {
+              "$ref": "#/components/schemas/UsageDayModelBucket"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "by_model": {
+            "description": "The organization's spend by model, leaving out spend attributed to no single model.",
+            "items": {
+              "$ref": "#/components/schemas/UsageModelBucket"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "by_rule": {
+            "description": "Spend by the event handler that started each run, present only in local mode.",
+            "items": {
+              "$ref": "#/components/schemas/UsageRuleBucket"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "by_team": {
+            "description": "Spend attributed to each team.",
+            "items": {
+              "$ref": "#/components/schemas/UsageTeamBucket"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "by_user": {
+            "description": "Spend by the person who started each run, across every team.",
+            "items": {
+              "$ref": "#/components/schemas/UsageUserBucket"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "org_level": {
+            "description": "Spend attributed to no team, by category.",
+            "items": {
+              "$ref": "#/components/schemas/UsageOrgLevelBucket"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "total_cost_usd": {
+            "description": "The organization's total spend in the window in USD, which equals the sum of by_team and org_level.",
+            "type": "number"
+          }
+        },
+        "required": [
+          "total_cost_usd",
+          "by_team",
+          "by_user",
+          "org_level",
+          "by_category",
+          "by_model",
+          "by_day",
+          "by_day_model"
+        ],
+        "type": "object"
+      },
+      "UsageRuleBucket": {
+        "properties": {
+          "cost": {
+            "description": "Spend on the handler's runs in USD.",
+            "type": "number"
+          },
+          "rule_name": {
+            "description": "The event handler's name, empty when the caller cannot read the handler.",
+            "type": "string"
+          },
+          "trigger_id": {
+            "description": "The id of the event handler whose runs spent it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trigger_id",
+          "rule_name",
+          "cost"
+        ],
+        "type": "object"
+      },
+      "UsageTeamBucket": {
+        "properties": {
+          "cost": {
+            "description": "Spend attributed to the team in USD.",
+            "type": "number"
+          },
+          "team_id": {
+            "description": "The team's id.",
+            "type": "string"
+          },
+          "team_name": {
+            "description": "The team's name.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "team_id",
+          "team_name",
+          "cost"
+        ],
+        "type": "object"
+      },
+      "UsageTeamResponse": {
+        "properties": {
+          "by_category": {
+            "description": "The team's spend by category.",
+            "items": {
+              "$ref": "#/components/schemas/UsageCategoryBucket"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "by_day": {
+            "description": "The team's spend by UTC day.",
+            "items": {
+              "$ref": "#/components/schemas/UsageDayBucket"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "by_day_model": {
+            "description": "The team's spend by UTC day and model, leaving out spend attributed to no single model.",
+            "items": {
+              "$ref": "#/components/schemas/UsageDayModelBucket"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "by_model": {
+            "description": "The team's spend by model, leaving out spend attributed to no single model.",
+            "items": {
+              "$ref": "#/components/schemas/UsageModelBucket"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "by_rule": {
+            "description": "The team's spend by the event handler that started each run.",
+            "items": {
+              "$ref": "#/components/schemas/UsageRuleBucket"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "by_user": {
+            "description": "The team's spend by the person who started each run, present only for a team admin, and an empty array when no person has spend in the window.",
+            "items": {
+              "$ref": "#/components/schemas/UsageUserBucket"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "team_id": {
+            "description": "The team's id.",
+            "type": "string"
+          },
+          "team_name": {
+            "description": "The team's name.",
+            "type": "string"
+          },
+          "total_cost_usd": {
+            "description": "The team's total spend in the window in USD.",
+            "type": "number"
+          }
+        },
+        "required": [
+          "team_id",
+          "team_name",
+          "total_cost_usd",
+          "by_category",
+          "by_rule",
+          "by_model",
+          "by_day",
+          "by_day_model"
+        ],
+        "type": "object"
+      },
+      "UsageUserBucket": {
+        "properties": {
+          "avatar_url": {
+            "description": "The URL of the person's avatar, absent when they have none.",
+            "type": "string"
+          },
+          "cost": {
+            "description": "Spend on the person's runs in USD.",
+            "type": "number"
+          },
+          "display_name": {
+            "description": "The person's display name.",
+            "type": "string"
+          },
+          "user_id": {
+            "description": "The id of the person who started the runs.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id",
+          "display_name",
+          "cost"
+        ],
+        "type": "object"
+      },
+      "VulnerablePackageJSON": {
+        "properties": {
+          "alerts": {
+            "description": "The open alerts, highest severity first and then by number.",
+            "items": {
+              "$ref": "#/components/schemas/DependabotAlertJSON"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "ecosystem": {
+            "description": "The package's ecosystem, such as npm or pip.",
+            "type": "string"
+          },
+          "highest_severity": {
+            "description": "The highest severity among the open alerts, one of low, medium, high, and critical, absent when no open alert has one of those.",
+            "type": "string"
+          },
+          "open_alert_count": {
+            "description": "How many alerts are open on the package.",
+            "type": "integer"
+          },
+          "package": {
+            "description": "The package's name.",
+            "type": "string"
+          },
+          "repo": {
+            "description": "The repository, as owner/name.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo",
+          "ecosystem",
+          "package",
+          "open_alert_count",
+          "alerts"
+        ],
+        "type": "object"
+      },
+      "WorkspaceView": {
+        "properties": {
+          "active": {
+            "description": "Whether this is the connection the organization uses in the workspace, which is the one whose events are processed.",
+            "type": "boolean"
+          },
+          "api_app_id": {
+            "description": "The Slack app's id.",
+            "type": "string"
+          },
+          "app_name": {
+            "description": "The Slack app's bot name, empty when Slack gave none.",
+            "type": "string"
+          },
+          "bot_user_id": {
+            "description": "The Slack user id of the app's bot.",
+            "type": "string"
+          },
+          "connection": {
+            "description": "The app's live Socket Mode connection status, absent for an app that receives events over HTTP and before the first connection attempt.",
+            "properties": {
+              "connected_at": {
+                "description": "When the connection last opened, as an RFC 3339 timestamp, absent when it has not.",
+                "format": "date-time",
+                "type": "string"
+              },
+              "consecutive_failures": {
+                "description": "How many connection attempts in a row have failed.",
+                "type": "integer"
+              },
+              "last_error": {
+                "description": "The error of the last failed attempt, absent when there is none.",
+                "type": "string"
+              },
+              "last_event_at": {
+                "description": "When the connection last received an event, as an RFC 3339 timestamp, absent when it has not.",
+                "format": "date-time",
+                "type": "string"
+              },
+              "sightings": {
+                "description": "Workspaces the app received events from that have no connection in the organization, absent when there are none.",
+                "items": {
+                  "properties": {
+                    "count": {
+                      "description": "How many events arrived from the workspace.",
+                      "type": "integer"
+                    },
+                    "last_seen": {
+                      "description": "When the last of them arrived, as an RFC 3339 timestamp.",
+                      "format": "date-time",
+                      "type": "string"
+                    },
+                    "team_id": {
+                      "description": "The Slack workspace's id.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "team_id",
+                    "count",
+                    "last_seen"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "state": {
+                "description": "The connection's state: dialing, open, draining, backing_off, or auth_failed.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "created_at": {
+            "description": "When the connection was created, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "enterprise_id": {
+            "description": "The id of the Enterprise Grid organization the workspace belongs to, absent for a standalone workspace.",
+            "type": "string"
+          },
+          "registered_by_user_id": {
+            "description": "The id of the person who connected the app, absent when that person has since been removed.",
+            "type": "string"
+          },
+          "source": {
+            "description": "Whose Slack app the connection is through: org for an app the organization created, or deployment for the deployment's own app.",
+            "type": "string"
+          },
+          "transport": {
+            "description": "How Slack delivers the app's events, socket or events_api, or null on a deployment connection, which uses the transport the deployment configures.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "updated_at": {
+            "description": "When the connection was last changed, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "workspace_id": {
+            "description": "The Slack workspace's id.",
+            "type": "string"
+          },
+          "workspace_name": {
+            "description": "The Slack workspace's name.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspace_id",
+          "api_app_id",
+          "source",
+          "active",
+          "workspace_name",
+          "app_name",
+          "transport",
+          "bot_user_id",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "session": {
+        "description": "The session cookie a browser sign-in sets. A deployment served over plain HTTP names it sid.",
+        "in": "cookie",
+        "name": "__Host-sid",
+        "type": "apiKey"
+      },
+      "token": {
+        "description": "An API token, sent as Authorization: Bearer tf_….",
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "title": "Triage Factory API",
+    "version": "unstable"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/avatars/{user_id}": {
+      "get": {
+        "description": "Returns the avatar image of a person in the caller's organization. The image is fetched from the address the person's sign-in provider gave and cached for a short time.",
+        "operationId": "get_avatar",
+        "parameters": [
+          {
+            "description": "The person's id.",
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "image/gif": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "image/jpeg": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "image/png": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "image/webp": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get a person's avatar",
+        "x-hints": {
+          "openWorldHint": true,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/health": {
+      "get": {
+        "description": "Reports status ok once the server accepts requests. It needs no credential and checks no database or integration, so it says only that the process is serving.",
+        "operationId": "get_health",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [],
+        "summary": "Check that the server is up",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/me/usage": {
+      "get": {
+        "description": "Returns the LLM spend of the runs the caller started in their current organization over the window, in USD, with its totals by category, model, and UTC day.",
+        "operationId": "get_my_usage",
+        "parameters": [
+          {
+            "description": "Start of the window, inclusive, as an RFC 3339 timestamp or a YYYY-MM-DD date read as UTC midnight; with since and until both absent the window is the current UTC calendar month up to now, and with only one of them given the other end is open.",
+            "in": "query",
+            "name": "since",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "End of the window, exclusive, as an RFC 3339 timestamp or a YYYY-MM-DD date read as UTC midnight, which must be after since when both are given.",
+            "in": "query",
+            "name": "until",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageMeResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get your LLM spend",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/slack/connections/list": {
+      "post": {
+        "description": "Returns one page of the organization's Slack connections, active and inactive, ordered by workspace name, then workspace id, then app id. Each connection carries its Socket Mode status when it has one.",
+        "operationId": "list_slack_connections",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectionsListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "items": {
+                      "description": "The rows of this page, as an empty array when it has none.",
+                      "items": {
+                        "$ref": "#/components/schemas/WorkspaceView"
+                      },
+                      "type": "array"
+                    },
+                    "next_page_token": {
+                      "description": "The page_token that reads the next page, absent on the last page.",
+                      "type": "string"
+                    },
+                    "total_count": {
+                      "description": "How many rows match the request's filters across every page, or null for a list whose upstream cannot count them.",
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "total_count"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List Slack connections",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/usage": {
+      "get": {
+        "description": "Returns the organization's LLM spend over the window, in USD, with its totals by team, person, category, model, and UTC day, and the spend attributed to no team.",
+        "operationId": "get_org_usage",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Start of the window, inclusive, as an RFC 3339 timestamp or a YYYY-MM-DD date read as UTC midnight; with since and until both absent the window is the current UTC calendar month up to now, and with only one of them given the other end is open.",
+            "in": "query",
+            "name": "since",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "End of the window, exclusive, as an RFC 3339 timestamp or a YYYY-MM-DD date read as UTC midnight, which must be after since when both are given.",
+            "in": "query",
+            "name": "until",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageOrgResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get an organization's LLM spend",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/repos/{id}": {
+      "patch": {
+        "description": "Sets or clears the branch agents base their work on in the repository, and returns the repository with the change applied.",
+        "operationId": "update_repository",
+        "parameters": [
+          {
+            "description": "The repository's id in Triage Factory.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RepoUpdateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepoJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Update a repository's settings",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/tasks/list": {
+      "post": {
+        "description": "Returns one page of the tasks the caller can see, narrowed by the body's filters and ordered by sort_key, or without one by attention and then priority. Each task says whether the caller may write it. A page_token resumes after the last task of the page that returned it, and is refused for different filters.",
+        "operationId": "list_tasks",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TaskListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "items": {
+                      "description": "The rows of this page, as an empty array when it has none.",
+                      "items": {
+                        "$ref": "#/components/schemas/TaskJSON"
+                      },
+                      "type": "array"
+                    },
+                    "next_page_token": {
+                      "description": "The page_token that reads the next page, absent on the last page.",
+                      "type": "string"
+                    },
+                    "total_count": {
+                      "description": "How many rows match the request's filters across every page, or null for a list whose upstream cannot count them.",
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "total_count"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List tasks",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/teams/{team_id}/members/{user_id}": {
+      "delete": {
+        "description": "Removes a person from the team. A caller who names their own id leaves the team, and the team's last admin cannot be removed.",
+        "operationId": "delete_team_member",
+        "parameters": [
+          {
+            "description": "The team's id.",
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The id of the person to remove.",
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Remove a team member",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/teams/{team_id}/usage": {
+      "get": {
+        "description": "Returns the team's LLM spend over the window, in USD, with its totals by category, event handler, model, and UTC day. The totals by person are included only for a team admin.",
+        "operationId": "get_team_usage",
+        "parameters": [
+          {
+            "description": "The team's id, or default for the one team in local mode.",
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Start of the window, inclusive, as an RFC 3339 timestamp or a YYYY-MM-DD date read as UTC midnight; with since and until both absent the window is the current UTC calendar month up to now, and with only one of them given the other end is open.",
+            "in": "query",
+            "name": "since",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "End of the window, exclusive, as an RFC 3339 timestamp or a YYYY-MM-DD date read as UTC midnight, which must be after since when both are given.",
+            "in": "query",
+            "name": "until",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageTeamResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get a team's LLM spend",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/ws": {
+      "get": {
+        "description": "Upgrades the connection to a websocket that streams events for the caller in their current organization, such as a changed task list or a run's new messages. Most events say only that a resource changed, and the client reads it again through its route.",
+        "operationId": "open_event_stream",
+        "responses": {
+          "101": {
+            "description": "Switching Protocols"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Open the event stream",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    }
+  }
+}

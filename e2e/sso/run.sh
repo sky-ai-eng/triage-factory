@@ -186,7 +186,7 @@ log "building the frontend and the binary"
 if [ "${SSO_E2E_SKIP_FRONTEND:-}" = 1 ] && [ -f "$ROOT/frontend/dist/index.html" ]; then
   echo "SSO_E2E_SKIP_FRONTEND=1: reusing frontend/dist"
 else
-  (cd "$ROOT/frontend" && pnpm install --frozen-lockfile && pnpm run build)
+  (cd "$ROOT" && pnpm install --frozen-lockfile && cd frontend && pnpm run build)
 fi
 go build -ldflags "-X github.com/sky-ai-eng/triage-factory/ee.publicKeyB64=$(cat "$STATE/license-pub.b64")" -o "$BIN" .
 
@@ -239,8 +239,8 @@ log "adding the deployment operator"
 
 # 10. The suite.
 log "running playwright"
+(cd "$ROOT" && pnpm install --frozen-lockfile)
 cd "$SUITE"
-pnpm install --frozen-lockfile
 set +e
 SSO_E2E_STATE="$STATE" pnpm exec playwright test
 status=$?

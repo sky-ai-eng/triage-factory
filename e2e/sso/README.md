@@ -88,8 +88,9 @@ SSO_E2E_SKIP_FRONTEND=1 e2e/sso/run.sh    # reuse an existing frontend/dist
 SSO_E2E_KEEP_UP=1 e2e/sso/run.sh          # leave the stack up afterwards
 ```
 
-The first run needs Playwright's Chromium:
-`cd e2e/sso && pnpm install && pnpm exec playwright install chromium`.
+The first run needs Playwright's Chromium. Install the dependencies at the
+repository root, then install the browser in `e2e/sso`:
+`pnpm install && (cd e2e/sso && pnpm exec playwright install chromium)`.
 
 Everything the run generates (certificates, the licence and its key, the SAML
 signing key, the env file, the binary, Orrery's world and the logs `tf.log`,

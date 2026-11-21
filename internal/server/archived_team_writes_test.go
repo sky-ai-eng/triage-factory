@@ -52,7 +52,7 @@ func (r *archivedTeamRig) archive(t *testing.T) {
 	t.Helper()
 	mux := http.NewServeMux()
 	direct := func(pattern string, h http.HandlerFunc) { mux.HandleFunc(pattern, h) }
-	teams.New(r.s.tx, r.s.az, r.s.allStores, nil, nil).Register(httpx.Mounts{API: direct, APIMutating: direct})
+	teams.New(r.s.tx, r.s.az, r.s.allStores, nil, nil).Register(httpx.Mounts{API: direct, APIMutating: direct, Op: func(op httpx.Operation, h http.HandlerFunc) { direct(op.Spec().Pattern, h) }})
 
 	req := httptest.NewRequest(http.MethodPost, "/api/teams/"+r.teamID+"/archive", nil)
 	ctx := httpx.WithClaims(req.Context(), &verify.Claims{Subject: r.owner})

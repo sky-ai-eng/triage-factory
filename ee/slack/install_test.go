@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // muxMounter mounts the route table on a plain mux, with every handler
@@ -20,6 +22,14 @@ func (m muxMounter) APIMutating(pattern string, _ http.HandlerFunc) {
 }
 
 func (m muxMounter) Raw(pattern string, _ http.Handler) { m.mux.HandleFunc(pattern, m.matched) }
+
+func (m muxMounter) Op(op httpx.Operation, _ http.HandlerFunc) {
+	m.mux.HandleFunc(op.Spec().Pattern, m.matched)
+}
+
+func (m muxMounter) RawOp(op httpx.Operation, _ http.Handler) {
+	m.mux.HandleFunc(op.Spec().Pattern, m.matched)
+}
 
 func (m muxMounter) SignedWebhookRateLimit(h http.Handler) http.Handler { return h }
 

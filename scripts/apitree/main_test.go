@@ -16,6 +16,12 @@ import (
 const fixture = `package server
 
 // Not a route: GET /api/from-a-comment
+var (
+	opThingGet    = httpx.NewJSONOp[httpx.NoBody, thing](httpx.OpSpec{Pattern: "GET /api/op-things/{id}"})
+	opThingDelete = httpx.NewNoContentOp[httpx.NoBody](httpx.OpSpec{ID: "delete_thing", Pattern: "DELETE /api/op-things/{id}"})
+	opPing        = httpx.NewWebSocketOp(httpx.OpSpec{Pattern: "GET /api/ping"})
+)
+
 func routes() {
 	s.api("GET /api/things/{id}", nil)
 	s.apiMutating("POST /api/things/list", nil)
@@ -31,6 +37,14 @@ func routes() {
 	)
 	// A prefix mount, and the catch-all under it.
 	s.mux.HandleFunc("/api/", nil)
+	// A handler subpackage's mounts.
+	m.API("GET /api/sub/{id}", nil)
+	m.APIMutating("POST /api/sub/list", nil)
+	// Declared operations: the pattern is in the op's spec, and the class
+	// follows the method unless the mount is raw.
+	s.op(opThingGet, nil)
+	api.Op(opThingDelete, nil)
+	s.rawOp(opPing, nil)
 	// Same name, different receiver — and a string first arg that is not a
 	// mux pattern. Neither is a route.
 	log.Printf("GET /api/not-a-route")
@@ -64,11 +78,22 @@ func TestParseFileFindsEveryIdiomAndNothingElse(t *testing.T) {
 		// whole reason it has to be found.
 		"/api/webhooks/thing/{org_id}": classRaw,
 		"/api/":                        classRaw,
+		"/api/sub/{id}":                classSession,
+		"/api/sub/list":                classMutating,
+		"/api/ping":                    classRaw,
 	}
-	if len(got) != len(want) {
-		t.Fatalf("found %d routes, want %d: %+v", len(got), len(want), got)
+	// The two op routes share a path, so they are told apart by method.
+	opClasses := map[string]authClass{"GET": classSession, "DELETE": classMutating}
+	if len(got) != len(want)+len(opClasses) {
+		t.Fatalf("found %d routes, want %d: %+v", len(got), len(want)+len(opClasses), got)
 	}
 	for _, r := range got {
+		if r.Path == "/api/op-things/{id}" {
+			if class, ok := opClasses[r.Method]; !ok || r.Class != class {
+				t.Errorf("%s %s: class %v, want %v", r.Method, r.Path, r.Class, class)
+			}
+			continue
+		}
 		class, ok := want[r.Path]
 		if !ok {
 			t.Errorf("unexpected route %q — a comment or a non-mux call was read as a registration", r.Path)
@@ -201,8 +226,9 @@ func TestDescribeReadsBeforeWritesAndNamesOnlyForeignPackages(t *testing.T) {
 // — so two ee routes (SSO discovery, the Slack webhook receiver) were missing
 // from the surface with nothing to say so. Read the interface itself and
 // require every mounting method to be listed: a method whose first parameter
-// is the mux pattern and whose second is an http handler mounts routes, and if
-// this tool cannot see it the output is a quiet lie rather than an error.
+// is the mux pattern or a declared operation and whose second is an http
+// handler mounts routes, and if this tool cannot see it the output is a quiet
+// lie rather than an error.
 func TestRegistrarsCoverExtensionAPI(t *testing.T) {
 	const decl = "../../internal/server/extension.go"
 	fset := token.NewFileSet()
@@ -230,28 +256,35 @@ func TestRegistrarsCoverExtensionAPI(t *testing.T) {
 		if !ok || len(m.Names) != 1 || fn.Params == nil || len(fn.Params.List) != 2 {
 			continue
 		}
-		if !isIdent(fn.Params.List[0].Type, "string") {
-			continue
-		}
 		if !isHTTPHandler(fn.Params.List[1].Type) {
 			continue
 		}
-		found++
 		name := "api." + m.Names[0].Name
-		if _, ok := registrars[name]; !ok {
-			t.Errorf("ExtensionAPI.%s mounts routes but %q is not in registrars — every route it registers is silently absent from the output",
-				m.Names[0].Name, name)
+		switch {
+		case isIdent(fn.Params.List[0].Type, "string"):
+			found++
+			if _, ok := registrars[name]; !ok {
+				t.Errorf("ExtensionAPI.%s mounts routes but %q is not in registrars — every route it registers is silently absent from the output",
+					m.Names[0].Name, name)
+			}
+		case isOperation(fn.Params.List[0].Type):
+			found++
+			if _, ok := opRegistrars[name]; !ok {
+				t.Errorf("ExtensionAPI.%s mounts operations but %q is not in opRegistrars — every route it registers is silently absent from the output",
+					m.Names[0].Name, name)
+			}
 		}
 	}
 	// If the shape check ever stops matching, the loop above passes vacuously.
-	if found < 3 {
-		t.Fatalf("matched %d mounting methods, expected at least 3 (API, APIMutating, Raw) — the signature check has drifted", found)
+	if found < 5 {
+		t.Fatalf("matched %d mounting methods, expected at least 5 (API, APIMutating, Raw, Op, RawOp) — the signature check has drifted", found)
 	}
 }
 
-func isIdent(e ast.Expr, name string) bool {
-	id, ok := e.(*ast.Ident)
-	return ok && id.Name == name
+// isOperation matches httpx.Operation, the first parameter an op mount takes.
+func isOperation(e ast.Expr) bool {
+	sel, ok := e.(*ast.SelectorExpr)
+	return ok && isIdent(sel.X, "httpx") && sel.Sel.Name == "Operation"
 }
 
 // isHTTPHandler matches http.Handler and http.HandlerFunc, the two second

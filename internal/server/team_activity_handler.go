@@ -171,9 +171,13 @@ type activityRead struct {
 // answers false when the read cannot be served.
 func (s *Server) activityCuts(w http.ResponseWriter, r *http.Request, orgID, userID string, teamsOf func(db.TxStores) ([]string, error)) (activityRead, bool) {
 	now := time.Now().UTC()
-	since, until, errMsg := httpx.ParseWindow(r.URL.Query(), now)
-	if errMsg != "" {
-		badRequest(w, errMsg)
+	q, ok := httpx.StrictQuery(w, r)
+	if !ok {
+		return activityRead{}, false
+	}
+	var v httpx.Validation
+	since, until := httpx.ParseWindow(&v, q, now)
+	if v.Flush(w, http.StatusBadRequest) {
 		return activityRead{}, false
 	}
 	// The store takes concrete bounds. An open upper side means "through

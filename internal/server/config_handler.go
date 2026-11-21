@@ -5,6 +5,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // configResponse is the FE-facing shape exposed by GET /api/config: the
@@ -35,11 +36,24 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// healthResponse is the body of GET /api/health.
+type healthResponse struct {
+	Status string `json:"status" doc:"Always ok."`
+}
+
+var opHealth = httpx.NewJSONOp[httpx.NoBody, healthResponse](httpx.OpSpec{
+	Pattern:     "GET /api/health",
+	ID:          "get_health",
+	Summary:     "Check that the server is up",
+	Description: "Reports status ok once the server accepts requests. It needs no credential and checks no database or integration, so it says only that the process is serving.",
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
+
 // handleHealth is the liveness probe target. Returns 200 once the
 // server is accepting requests; platform restart logic uses this to
 // decide when a Machine/container has come up. Deliberately does NOT
 // reach into the DB or integrations — a flapping Postgres shouldn't
 // recycle the whole TF process via the platform's auto-restart.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	opHealth.Write(w, healthResponse{Status: "ok"})
 }

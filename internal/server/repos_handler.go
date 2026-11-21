@@ -2,11 +2,11 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
@@ -475,28 +475,28 @@ func repoMutationAccess(ctx context.Context, tx db.TxStores, orgID, host string,
 // and Slug rather than a client-side join keeps exactly one renderer per side,
 // domain.Repository.Slug() here and this field there.
 type repoJSON struct {
-	ID string `json:"id"`
+	ID string `json:"id" doc:"The repository's id in Triage Factory."`
 	// GitHubID is GitHub's own id for the repository, "" while TF has not
 	// learned it.
-	GitHubID       string  `json:"github_id"`
-	Slug           string  `json:"slug"`
-	Owner          string  `json:"owner"`
-	Repo           string  `json:"repo"`
-	Description    string  `json:"description,omitempty"`
-	HasReadme      bool    `json:"has_readme"`
-	HasClaudeMd    bool    `json:"has_claude_md"`
-	HasAgentsMd    bool    `json:"has_agents_md"`
-	ProfileText    string  `json:"profile_text,omitempty"`
-	DefaultBranch  string  `json:"default_branch,omitempty"`
-	BaseBranch     string  `json:"base_branch,omitempty"`
-	ProfiledAt     *string `json:"profiled_at,omitempty"`
-	CloneStatus    string  `json:"clone_status,omitempty"`
-	CloneError     string  `json:"clone_error,omitempty"`
-	CloneErrorKind string  `json:"clone_error_kind,omitempty"`
-	CanEdit        bool    `json:"can_edit"`
+	GitHubID       string  `json:"github_id" doc:"GitHub's id for the repository, empty while it is not yet known."`
+	Slug           string  `json:"slug" doc:"The repository's full name, as owner/name."`
+	Owner          string  `json:"owner" doc:"The account that owns the repository on GitHub."`
+	Repo           string  `json:"repo" doc:"The repository's name without its owner."`
+	Description    string  `json:"description,omitempty" doc:"The repository's description on GitHub, absent when it has none."`
+	HasReadme      bool    `json:"has_readme" doc:"Whether the repository has a README."`
+	HasClaudeMd    bool    `json:"has_claude_md" doc:"Whether the repository has a CLAUDE.md."`
+	HasAgentsMd    bool    `json:"has_agents_md" doc:"Whether the repository has an AGENTS.md."`
+	ProfileText    string  `json:"profile_text,omitempty" doc:"A description of the repository written when it was profiled, absent before then."`
+	DefaultBranch  string  `json:"default_branch,omitempty" doc:"The repository's default branch on GitHub, absent before it is profiled."`
+	BaseBranch     string  `json:"base_branch,omitempty" doc:"The branch agents base their work on, absent when they use the default branch."`
+	ProfiledAt     *string `json:"profiled_at,omitempty" doc:"When the repository was last profiled, as an RFC 3339 timestamp, absent before then."`
+	CloneStatus    string  `json:"clone_status,omitempty" doc:"The state of the repository's clone: pending until a clone attempt finishes, then ok or failed."`
+	CloneError     string  `json:"clone_error,omitempty" doc:"The output of the failed clone, present only when clone_status is failed."`
+	CloneErrorKind string  `json:"clone_error_kind,omitempty" doc:"What kind of failure the clone hit, ssh or other, present only when clone_status is failed."`
+	CanEdit        bool    `json:"can_edit" doc:"Whether the caller may change the repository's settings."`
 	// RetiredAt is set on a retired row (domain.Repository.RetiredAt), which
 	// only a read by id returns.
-	RetiredAt *string `json:"retired_at,omitempty"`
+	RetiredAt *string `json:"retired_at,omitempty" doc:"When the repository was retired because GitHub no longer answers for it, as an RFC 3339 timestamp, absent on a repository that is not retired."`
 }
 
 func repoToJSON(row domain.Repository, canEdit bool) repoJSON {
@@ -1023,6 +1023,20 @@ func repoSlugPath(w http.ResponseWriter, r *http.Request) (owner, repo string, o
 	return owner, repo, true
 }
 
+// repoUpdateRequest is the body of PATCH /api/repos/{id}.
+type repoUpdateRequest struct {
+	BaseBranch httpx.Patch[string] `json:"base_branch" doc:"The branch agents base their work on in this repository, or null to clear it so they use the repository's default branch."`
+}
+
+var opRepoUpdate = httpx.NewJSONOp[repoUpdateRequest, repoJSON](httpx.OpSpec{
+	Pattern:     "PATCH /api/repos/{id}",
+	ID:          "update_repository",
+	Summary:     "Update a repository's settings",
+	Description: "Sets or clears the branch agents base their work on in the repository, and returns the repository with the change applied.",
+	PathParams:  map[string]string{"id": "The repository's id in Triage Factory."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
+
 // handleRepoUpdate updates per-repo settings like base_branch. The write
 // gate is narrower than the read gate: a repository row is org-wide, so
 // changing one changes behaviour for every team tracking it, and that takes
@@ -1103,18 +1117,21 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Use json.RawMessage to distinguish null (clear) from omitted (no change).
-	// *string can't tell them apart — both decode to nil.
-	var req struct {
-		BaseBranch json.RawMessage `json:"base_branch,omitempty"`
-	}
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opRepoUpdate.Decode(w, r)
+	if !ok {
 		return
 	}
 
+	// An explicit null reads as the empty branch, which clears it.
+	var v httpx.Validation
+	branch, state := req.BaseBranch.Read(&v, "base_branch")
+	// null is the one way to clear it: an empty value would be a second.
+	if state == httpx.PatchSet && strings.TrimSpace(branch) == "" {
+		v.Invalid("base_branch", "base_branch must name a branch, or be null to clear it")
+	}
 	// A PATCH that names no field wrote nothing, so it must not answer
 	// "updated" — the one response a client cannot tell from a real write.
-	if req.BaseBranch == nil {
+	if state == httpx.PatchAbsent {
 		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
 			Reason:  httpx.ReasonMissingField,
 			Message: "no fields to update: provide base_branch (null clears it)",
@@ -1122,13 +1139,7 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	var branch string
-	if string(req.BaseBranch) == "null" {
-		branch = "" // explicit null → clear
-	} else if err := json.Unmarshal(req.BaseBranch, &branch); err != nil {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-			Reason: httpx.ReasonInvalidField, Message: "base_branch must be a string, or null", Field: "base_branch",
-		})
+	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
 	// Write by the id the caller addressed. The row resolved a moment ago to
@@ -1154,7 +1165,7 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 	// back. can_edit is true by construction: the switch above only reaches
 	// here on repoWriteAllowed, which is the same predicate the annotation
 	// reports.
-	writeJSON(w, http.StatusOK, repoToJSON(updated, true))
+	opRepoUpdate.Write(w, repoToJSON(updated, true))
 }
 
 // maxBranchPageSize is the branch list's declared page ceiling. It replaces
@@ -1339,6 +1350,6 @@ func (s *Server) registerRepoRoutes() {
 	// they were served, so a rename cannot repoint a save.
 	s.api("GET /api/repos/by-name/{owner}/{repo}", s.handleRepoGetByName)
 	s.api("GET /api/repos/{id}", s.handleRepoGet)
-	s.apiMutating("PATCH /api/repos/{id}", s.handleRepoUpdate)
+	s.op(opRepoUpdate, s.handleRepoUpdate)
 	s.apiMutating("POST /api/repos/{id}/branches/list", s.handleRepoBranches)
 }

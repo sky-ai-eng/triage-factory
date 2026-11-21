@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -310,6 +311,21 @@ func TestUsageEndpoints_Local(t *testing.T) {
 		}
 	})
 
+	t.Run("malformed_query_400", func(t *testing.T) {
+		// A pair that does not parse is refused rather than dropped: a dropped
+		// until would leave the window open-ended and widen the read.
+		for _, path := range []string{
+			"/api/me/usage?since=2000-01-01&until=2026-01-01;x",
+			"/api/teams/" + runmode.LocalDefaultTeamID + "/usage?since=2000-01-01&until=%zz",
+			"/api/orgs/" + runmode.LocalDefaultOrgID + "/usage?since=2000-01-01&until=2026-01-01;x",
+		} {
+			rec := doJSON(t, s, "GET", path, nil)
+			if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), `"reason":"INVALID_PARAM","message":"until`) {
+				t.Errorf("%s = %d %s, want 400 INVALID_PARAM on until", path, rec.Code, rec.Body.String())
+			}
+		}
+	})
+
 	t.Run("inverted_window_400", func(t *testing.T) {
 		// since >= until is a non-positive window — reject rather than return an
 		// empty 200 that masks the client bug.
@@ -399,7 +415,7 @@ func newLocalRig(t *testing.T) *localRig {
 		})
 	}
 	New(stores.Tx, authz.New(database, stores.Tx), stores.ConversationQueue).
-		Register(httpx.Mounts{API: mount, APIMutating: mount})
+		Register(httpx.Mounts{API: mount, APIMutating: mount, Op: func(op httpx.Operation, h http.HandlerFunc) { mount(op.Spec().Pattern, h) }})
 	return &localRig{db: database, mux: mux}
 }
 

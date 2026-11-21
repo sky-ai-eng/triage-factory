@@ -39,6 +39,8 @@ var (
 		"_generated.go", ".snap",
 	}
 	generatedDirs = []string{"vendor", "node_modules", "dist", "third_party"}
+	// generatedPaths are whole repo paths a generator writes.
+	generatedPaths = []string{"api/openapi.json"}
 
 	docExts  = []string{".md", ".mdx"}
 	docBases = []string{"LICENSE", "NOTICE", "AUTHORS"}
@@ -71,6 +73,11 @@ func classifyPath(p string) fileClass {
 	}
 	for _, d := range generatedDirs {
 		if hasSegment(p, d) {
+			return classGenerated
+		}
+	}
+	for _, g := range generatedPaths {
+		if p == g {
 			return classGenerated
 		}
 	}

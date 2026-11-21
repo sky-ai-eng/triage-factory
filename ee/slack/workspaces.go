@@ -52,25 +52,25 @@ type workspacesHandler struct {
 }
 
 type workspaceView struct {
-	WorkspaceID   string `json:"workspace_id"`
-	APIAppID      string `json:"api_app_id"`
-	Source        string `json:"source"`
-	Active        bool   `json:"active"`
-	WorkspaceName string `json:"workspace_name"`
-	AppName       string `json:"app_name"`
-	EnterpriseID  string `json:"enterprise_id,omitempty"`
+	WorkspaceID   string `json:"workspace_id" doc:"The Slack workspace's id."`
+	APIAppID      string `json:"api_app_id" doc:"The Slack app's id."`
+	Source        string `json:"source" doc:"Whose Slack app the connection is through: org for an app the organization created, or deployment for the deployment's own app."`
+	Active        bool   `json:"active" doc:"Whether this is the connection the organization uses in the workspace, which is the one whose events are processed."`
+	WorkspaceName string `json:"workspace_name" doc:"The Slack workspace's name."`
+	AppName       string `json:"app_name" doc:"The Slack app's bot name, empty when Slack gave none."`
+	EnterpriseID  string `json:"enterprise_id,omitempty" doc:"The id of the Enterprise Grid organization the workspace belongs to, absent for a standalone workspace."`
 	// Transport is null on a deployment connection, which receives through
 	// the transport the operator's environment configures.
-	Transport          *string   `json:"transport"`
-	BotUserID          string    `json:"bot_user_id"`
-	RegisteredByUserID string    `json:"registered_by_user_id,omitempty"`
-	CreatedAt          time.Time `json:"created_at"`
-	UpdatedAt          time.Time `json:"updated_at"`
+	Transport          *string   `json:"transport" doc:"How Slack delivers the app's events, socket or events_api, or null on a deployment connection, which uses the transport the deployment configures."`
+	BotUserID          string    `json:"bot_user_id" doc:"The Slack user id of the app's bot."`
+	RegisteredByUserID string    `json:"registered_by_user_id,omitempty" doc:"The id of the person who connected the app, absent when that person has since been removed."`
+	CreatedAt          time.Time `json:"created_at" doc:"When the connection was created, as an RFC 3339 timestamp."`
+	UpdatedAt          time.Time `json:"updated_at" doc:"When the connection was last changed, as an RFC 3339 timestamp."`
 	// Connection is the app's live Socket Mode status, when one exists —
 	// omitted for a webhook-only app or before the reconciler's first pass.
 	// Rows sharing an app report the same
 	// connection (socket_conn.go's connections are per-app, not per-row).
-	Connection *connectionView `json:"connection,omitempty"`
+	Connection *connectionView `json:"connection,omitempty" doc:"The app's live Socket Mode connection status, absent for an app that receives events over HTTP and before the first connection attempt."`
 }
 
 // connectionView is a Socket Mode connection's status as the connection reads
@@ -89,6 +89,42 @@ func (v connectionView) MarshalJSON() ([]byte, error) {
 		}{v.status.State})
 	}
 	return json.Marshal(v.status)
+}
+
+// OpenAPISchema describes both shapes MarshalJSON writes. A deployment
+// connection's socket carries every organization's events, so its view holds
+// the state alone.
+func (connectionView) OpenAPISchema() map[string]any {
+	timestamp := func(doc string) map[string]any {
+		return map[string]any{"type": "string", "format": "date-time", "description": doc}
+	}
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"state": map[string]any{"type": "string",
+				"description": "The connection's state: dialing, open, draining, backing_off, or auth_failed."},
+			"connected_at":  timestamp("When the connection last opened, as an RFC 3339 timestamp, absent when it has not."),
+			"last_event_at": timestamp("When the connection last received an event, as an RFC 3339 timestamp, absent when it has not."),
+			"consecutive_failures": map[string]any{"type": "integer",
+				"description": "How many connection attempts in a row have failed."},
+			"last_error": map[string]any{"type": "string",
+				"description": "The error of the last failed attempt, absent when there is none."},
+			"sightings": map[string]any{
+				"type":        "array",
+				"description": "Workspaces the app received events from that have no connection in the organization, absent when there are none.",
+				"items": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"team_id":   map[string]any{"type": "string", "description": "The Slack workspace's id."},
+						"count":     map[string]any{"type": "integer", "description": "How many events arrived from the workspace."},
+						"last_seen": timestamp("When the last of them arrived, as an RFC 3339 timestamp."),
+					},
+					"required": []string{"team_id", "count", "last_seen"},
+				},
+			},
+		},
+		"required": []string{"state"},
+	}
 }
 
 func toWorkspaceView(w *slackstore.Connection, sockets *socketManager) workspaceView {
@@ -163,6 +199,15 @@ type connectionsListKey struct {
 	OrgID string `json:"org_id"`
 }
 
+var opList = httpx.NewListOp[connectionsListRequest, workspaceView](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/slack/connections/list",
+	ID:          "list_slack_connections",
+	Summary:     "List Slack connections",
+	Description: "Returns one page of the organization's Slack connections, active and inactive, ordered by workspace name, then workspace id, then app id. Each connection carries its Socket Mode status when it has one.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
+
 // handleList answers one page of the org's connections, active and inactive,
 // ordered by workspace name, then workspace id, then app id. Any member of the
 // org may read it.
@@ -174,8 +219,8 @@ func (h *workspacesHandler) handleList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req connectionsListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opList.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -202,7 +247,7 @@ func (h *workspacesHandler) handleList(w http.ResponseWriter, r *http.Request) {
 	for i := range list {
 		out[i] = toWorkspaceView(&list[i], h.sockets)
 	}
-	httpx.WriteList(w, page, out, total)
+	opList.Write(w, page, out, total)
 }
 
 // handleGet reads one of the org's connections, by the workspace and the app

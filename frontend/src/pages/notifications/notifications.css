@@ -52,6 +52,9 @@
   border-radius: 2px;
 }
 .nt-tab-tail {
+  /* Two digits wide, so the placeholder and any count under 100 take the same
+     room and the toolbar beside them does not move as the count changes. */
+  min-width: 2ch;
   font: var(--font-weight-regular) 10.5px / 1 var(--font-mono);
   color: var(--color-ink-4);
 }

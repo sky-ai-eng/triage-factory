@@ -117,6 +117,8 @@ let markReadFails: boolean
 // What a facets node answers; unset, it counts the rows the status and
 // dismissed filters match, and nothing narrower.
 let facetsAnswer: { by_priority: Facet[]; by_audience: Facet[] } | null
+// Holds every facets read.
+let facetsGate: Promise<void>
 let dismissFails: boolean
 type Call = { url: string; method: string; body: Record<string, unknown> | null }
 let calls: Call[]
@@ -195,6 +197,7 @@ const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
     })
   }
   if (url === '/api/me/notifications/facets' || url === '/api/orgs/org-1/notifications/facets') {
+    await facetsGate
     if (facetsAnswer) return ok(facetsAnswer)
     const from = url.startsWith('/api/orgs') ? orgRows : rows
     const items = from.filter((n) => matches(n, body))
@@ -318,6 +321,7 @@ beforeEach(() => {
   orgId.v = 'org-1'
   markReadFails = false
   facetsAnswer = null
+  facetsGate = Promise.resolve()
   dismissFails = false
   ws.dispatch = null
   actionAnswer = () => ({ status: 200, body: { notification: null, outcome: 'Done.' } })
@@ -590,6 +594,28 @@ describe('filters', () => {
     expect(within(rowOf('title old')).getByText('Old')).toBeInTheDocument()
   })
 
+  it('keeps the options while a switch to the other list is out', async () => {
+    viewer.orgAdmin = true
+    rows = [note('a', { priority: 'urgent' })]
+    orgRows = [note('b', { priority: 'urgent' }), note('c', { priority: 'urgent' })]
+    await mount()
+    const urgent = () =>
+      within(screen.getByRole('group', { name: 'Priority' })).getByRole('button', {
+        name: /Urgent/,
+      })
+    expect(urgent()).toHaveTextContent('Urgent1')
+
+    let faceted!: () => void
+    facetsGate = new Promise((r) => (faceted = r))
+    fireEvent.click(screen.getByRole('radio', { name: 'All teams' }))
+    await settle()
+    expect(urgent()).toHaveTextContent('Urgent1')
+
+    await act(async () => faceted())
+    await settle()
+    expect(urgent()).toHaveTextContent('Urgent2')
+  })
+
   it('leaves dismissed rows out until asked for them', async () => {
     rows = [note('a'), note('d', { dismissed: true })]
     await mount()
@@ -794,6 +820,7 @@ describe('switching orgs', () => {
 
 describe('rereads', () => {
   it('does not call a view loaded on a read a later one replaced', async () => {
+    rows = [note('d', { dismissed: true })]
     let first!: () => void
     let second!: () => void
     openGates = [new Promise((r) => (first = r)), new Promise((r) => (second = r))]
@@ -804,12 +831,12 @@ describe('rereads', () => {
 
     await act(async () => first())
     await settle()
-    expect(screen.queryByText('Nothing needs you')).toBeNull()
+    expect(screen.queryByText('Everything open here is dismissed.')).toBeNull()
     expect(screen.getByText('Loading…')).toBeInTheDocument()
 
     await act(async () => second())
     await settle()
-    expect(screen.getByText('Nothing needs you')).toBeInTheDocument()
+    expect(screen.getByText('Everything open here is dismissed.')).toBeInTheDocument()
   })
 })
 
@@ -891,16 +918,76 @@ describe('nothing open', () => {
     expect(screen.getByText('title d')).toBeInTheDocument()
   })
 
-  it('says what nothing open means only once the counts have answered', async () => {
+  it('draws neither the table nor the empty state until the counts have answered', async () => {
     let counted!: () => void
     countGate = new Promise((r) => (counted = r))
     await mount()
-    expect(screen.queryByText('Everything open here is dismissed.')).toBeNull()
-    expect(screen.getByText('Loading…')).toBeInTheDocument()
+    expect(screen.queryByRole('searchbox', { name: 'Search notifications' })).toBeNull()
+    expect(screen.queryByText('Loading…')).toBeNull()
+    expect(screen.queryByText('Nothing needs you')).toBeNull()
 
     await act(async () => counted())
     await settle()
     expect(screen.getByText('Nothing needs you')).toBeInTheDocument()
+    expect(screen.queryByRole('searchbox', { name: 'Search notifications' })).toBeNull()
+  })
+
+  it('goes from one empty list to the other with nothing drawn between them', async () => {
+    viewer.orgAdmin = true
+    const day = 24 * 3600_000
+    orgRows = [
+      note('r', {
+        title: 'Team row',
+        resolved_at: new Date(Date.now() - day).toISOString(),
+        resolution: 'Fixed.',
+      }),
+    ]
+    await mount()
+    expect(screen.getByText(/When something stops working for you/)).toBeInTheDocument()
+
+    let counted!: () => void
+    countGate = new Promise((r) => (counted = r))
+    fireEvent.click(screen.getByRole('radio', { name: 'All teams' }))
+    await settle()
+    // The list it left stands until the one it switched to answers.
+    expect(screen.getByText(/When something stops working for you/)).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: /Open/ })).toHaveTextContent('Open0')
+    expect(screen.queryByText('Loading…')).toBeNull()
+
+    await act(async () => counted())
+    await settle()
+    expect(
+      screen.getByText('No team in this organization has an open notification.'),
+    ).toBeInTheDocument()
+    expect(screen.getByText(/Last resolved 1d ago · Team row · Fixed\./)).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: /Open/ })).toHaveTextContent('Open0')
+  })
+
+  it('stands in no list for one whose counts failed', async () => {
+    viewer.orgAdmin = true
+    orgRows = [note('t', { title: 'Team row' })]
+    await mount()
+    expect(screen.getByText('Nothing needs you')).toBeInTheDocument()
+
+    countFails = true
+    fireEvent.click(screen.getByRole('radio', { name: 'All teams' }))
+    await settle()
+    expect(screen.getByText('Team row')).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: /Open/ })).toHaveTextContent('Open--')
+
+    // A search goes out; while it does, the list left behind says nothing.
+    let open!: () => void
+    openGates = [new Promise((r) => (open = r))]
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search notifications' }), {
+      target: { value: 'team' },
+    })
+    await settle(300)
+    expect(screen.queryByText('Nothing needs you')).toBeNull()
+    expect(screen.getByRole('searchbox', { name: 'Search notifications' })).toHaveValue('team')
+
+    await act(async () => open())
+    await settle()
+    expect(screen.getByText('Team row')).toBeInTheDocument()
   })
 
   it('claims no dismissed rows when the counts do not answer', async () => {
