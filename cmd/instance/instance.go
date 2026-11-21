@@ -206,18 +206,18 @@ func runDrain(args []string) {
 	defer func() { _ = closeFn() }()
 
 	var (
-		matched bool
-		err     error
+		inst *domain.Instance
+		err  error
 	)
 	if *untilRestart {
-		matched, err = store.SetDrainUntilRestart(context.Background(), id)
+		inst, err = store.SetDrainUntilRestart(context.Background(), id)
 	} else {
-		matched, err = store.SetDraining(context.Background(), id, true)
+		inst, err = store.SetDraining(context.Background(), id, true)
 	}
 	if err != nil {
 		fail("drain %s: %v", id, err)
 	}
-	if !matched {
+	if inst == nil {
 		failUnknown(id)
 	}
 	if *untilRestart {
@@ -236,11 +236,11 @@ func runUndrain(args []string) {
 	store, closeFn := openInstanceStore()
 	defer func() { _ = closeFn() }()
 
-	matched, err := store.SetDraining(context.Background(), id, false)
+	inst, err := store.SetDraining(context.Background(), id, false)
 	if err != nil {
 		fail("undrain %s: %v", id, err)
 	}
-	if !matched {
+	if inst == nil {
 		failUnknown(id)
 	}
 	fmt.Printf("instance %s is no longer draining: it will resume claiming new runs on its next heartbeat.\n", id)

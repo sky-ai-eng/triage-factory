@@ -52,8 +52,9 @@ func init() {
 
 // install mounts the Slack connection, install and channel surfaces plus both
 // ingest transports on the core server through the extension API
-// (mountRoutes). The connection and channel routes go through
-// API/APIMutating (session + CSRF, like core's own routes); the two webhook
+// (mountRoutes). The connection and channel routes are declared operations
+// mounted through Op (session, plus CSRF on every method but GET, like core's
+// own routes); the two webhook
 // routes are pre-auth (Slack has no session) so they mount through Raw +
 // SignedWebhookRateLimit and authorize themselves per-request: an org's own
 // app's by the workspace's signing secret, the deployment app's by the one in
@@ -159,7 +160,6 @@ func install(api server.ExtensionAPI) {
 // through.
 type routeMounter interface {
 	API(pattern string, h http.HandlerFunc)
-	APIMutating(pattern string, h http.HandlerFunc)
 	Raw(pattern string, h http.Handler)
 	Op(op httpx.Operation, h http.HandlerFunc)
 	RawOp(op httpx.Operation, h http.Handler)
@@ -169,18 +169,18 @@ type routeMounter interface {
 // mountRoutes is the Slack route table. An org's connections, manifest and
 // install start are addressed by the org in the path; a team's channels are
 // the team's resource, under its own path, with the org the credential's as on
-// every core team route. The list and facets reads mount through APIMutating
-// because they are POSTs, and CSRF follows the method.
+// every core team route. The list and facets reads are POSTs, so Op gives
+// them the CSRF check, which follows the method.
 func mountRoutes(api routeMounter, h *workspacesHandler, dh *deploymentAppHandler, ih *installHandler, ch *channelsHandler, wh *webhookHandler) {
-	api.API("GET /api/orgs/{org_id}/slack/manifest", h.handleManifest)
-	api.APIMutating("POST /api/orgs/{org_id}/slack/connections/import", h.handleConnect)
+	api.Op(opManifest, h.handleManifest)
+	api.Op(opConnect, h.handleConnect)
 	api.Op(opList, h.handleList)
-	api.API("GET /api/orgs/{org_id}/slack/connections/{workspace_id}/{api_app_id}", h.handleGet)
-	api.APIMutating("DELETE /api/orgs/{org_id}/slack/connections/{workspace_id}/{api_app_id}", h.handleDelete)
-	api.API("GET /api/orgs/{org_id}/slack/connections/{workspace_id}/{api_app_id}/activation-preview", h.handleActivationPreview)
-	api.APIMutating("POST /api/orgs/{org_id}/slack/connections/{workspace_id}/{api_app_id}/activate", h.handleActivate)
+	api.Op(opGet, h.handleGet)
+	api.Op(opDelete, h.handleDelete)
+	api.Op(opActivationPreview, h.handleActivationPreview)
+	api.Op(opActivate, h.handleActivate)
 
-	api.API("GET /api/slack/deployment-app", dh.handleGet)
+	api.Op(opDeploymentApp, dh.handleGet)
 
 	// The deployment app's install ceremony (deployment_install.go). Both legs
 	// are top-level navigations, the start from Settings and the callback from
@@ -191,11 +191,11 @@ func mountRoutes(api routeMounter, h *workspacesHandler, dh *deploymentAppHandle
 	api.API("GET /api/orgs/{org_id}/slack/install/start", ih.handleStart)
 	api.API("GET "+installCallbackPath, ih.handleCallback)
 
-	api.APIMutating("PUT /api/teams/{team_id}/slack-channels", ch.handlePut)
-	api.APIMutating("POST /api/teams/{team_id}/slack-channels/list", ch.handleList)
-	api.APIMutating("POST /api/teams/{team_id}/slack-channels/facets", ch.handleFacets)
-	api.API("GET /api/teams/{team_id}/slack-channels/{channel_id}", ch.handleGet)
-	api.APIMutating("PATCH /api/teams/{team_id}/slack-channels/{channel_id}", ch.handlePatch)
+	api.Op(opPut, ch.handlePut)
+	api.Op(opListChannels, ch.handleList)
+	api.Op(opFacetsChannels, ch.handleFacets)
+	api.Op(opGetChannel, ch.handleGet)
+	api.Op(opPatchChannel, ch.handlePatch)
 
 	api.Raw("POST /api/webhooks/slack/{org_id}", api.SignedWebhookRateLimit(http.HandlerFunc(wh.handleWebhook)))
 	api.Raw("POST /api/webhooks/slack", api.SignedWebhookRateLimit(http.HandlerFunc(wh.handleDeploymentWebhook)))

@@ -76,26 +76,30 @@ func (h *ssoConnectionHandler) regMutex(orgID string) *sync.Mutex {
 	return v.(*sync.Mutex)
 }
 
+// ssoAccess is the sentence every org-admin SSO route's description ends
+// with.
+const ssoAccess = " It acts on the caller's active organization, needs an Enterprise licence that includes SSO, and is available only in multi mode."
+
 type ssoConnectionView struct {
-	ID          string `json:"id"`
-	Kind        string `json:"kind"`
-	ProviderID  string `json:"provider_id"`
-	DefaultRole string `json:"default_role"`
-	Enabled     bool   `json:"enabled"`
-	Enforced    bool   `json:"enforced"`
-	Tested      bool   `json:"tested"`
+	ID          string `json:"id" doc:"The connection's id."`
+	Kind        string `json:"kind" doc:"The connection's protocol: saml or oidc."`
+	ProviderID  string `json:"provider_id" doc:"The identity provider's id in the deployment's sign-in service, which an SSO sign-in URL names."`
+	DefaultRole string `json:"default_role" doc:"The organization role, admin or member, given to a person who joins the organization by signing in through the connection."`
+	Enabled     bool   `json:"enabled" doc:"Whether people can sign in through the connection."`
+	Enforced    bool   `json:"enforced" doc:"Whether the organization requires SSO, so that only sign-ins through the connection and break-glass principals reach it."`
+	Tested      bool   `json:"tested" doc:"Whether a test sign-in through the connection has succeeded."`
 	// IdP is the identity-provider product behind the connection, one of
 	// ssostore.IdPValues; omitted when not known. Derived at registration,
 	// correctable through the PATCH.
-	IdP       string    `json:"idp,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	IdP       string    `json:"idp,omitempty" doc:"The identity provider's product (entra, okta, google, onelogin, ping, or other), absent when it is not known."`
+	CreatedAt time.Time `json:"created_at" doc:"When the connection was registered, as an RFC 3339 timestamp."`
+	UpdatedAt time.Time `json:"updated_at" doc:"When the connection was last changed, as an RFC 3339 timestamp."`
 }
 
 type ssoConnectionResponse struct {
-	Connection *ssoConnectionView `json:"connection"`
-	EntityID   string             `json:"entity_id"`
-	ACSURL     string             `json:"acs_url"`
+	Connection *ssoConnectionView `json:"connection" doc:"The organization's SSO connection, or null when none is registered."`
+	EntityID   string             `json:"entity_id" doc:"The deployment's SAML service provider entity ID, to enter in the identity provider's settings."`
+	ACSURL     string             `json:"acs_url" doc:"The deployment's SAML assertion consumer service URL, to enter in the identity provider's settings."`
 }
 
 func toSSOConnectionView(c *ssostore.SSOConnection) *ssoConnectionView {
@@ -212,6 +216,14 @@ func (h *ssoConnectionHandler) adminGate(w http.ResponseWriter, r *http.Request)
 	return orgID, userID, true
 }
 
+var opConnectionGet = httpx.NewJSONOp[httpx.NoBody, ssoConnectionResponse](httpx.OpSpec{
+	Pattern:     "GET /api/sso/connection",
+	ID:          "get_sso_connection",
+	Summary:     "Get the SSO connection",
+	Description: "Returns the organization's SSO connection, or null when none is registered, with the service provider values to enter in the identity provider's settings." + ssoAccess,
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
+
 // GET /api/sso/connection
 func (h *ssoConnectionHandler) handleSSOConnectionGet(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := h.adminGate(w, r)
@@ -227,12 +239,27 @@ func (h *ssoConnectionHandler) handleSSOConnectionGet(w http.ResponseWriter, r *
 		httpx.InternalError(w, "sso", err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, ssoConnectionResponse{
+	opConnectionGet.Write(w, ssoConnectionResponse{
 		Connection: toSSOConnectionView(conn),
 		EntityID:   entityID,
 		ACSURL:     acsURL,
 	})
 }
+
+// ssoConnectionCreateRequest is the body of POST /api/sso/connection.
+type ssoConnectionCreateRequest struct {
+	MetadataURL string `json:"metadata_url" doc:"The https URL of the identity provider's SAML metadata, which the deployment fetches to register the connection. Required."`
+}
+
+var opConnectionCreate = httpx.NewJSONOp[ssoConnectionCreateRequest, ssoConnectionResponse](httpx.OpSpec{
+	Pattern:       "POST /api/sso/connection",
+	ID:            "create_sso_connection",
+	Summary:       "Register an SSO connection",
+	Description:   "Registers a SAML connection, enabled but not required, from the identity provider's metadata URL, which the deployment fetches, and returns it with the service provider values. An organization that already has a connection gets that one back unchanged, with status 200." + ssoAccess,
+	Status:        http.StatusCreated,
+	OtherStatuses: []int{http.StatusOK},
+	Hints:         httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintNo, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // POST /api/sso/connection  body: { "metadata_url": "<Entra metadata URL>" }
 func (h *ssoConnectionHandler) handleSSOConnectionCreate(w http.ResponseWriter, r *http.Request) {
@@ -241,21 +268,19 @@ func (h *ssoConnectionHandler) handleSSOConnectionCreate(w http.ResponseWriter, 
 		return
 	}
 
-	var body struct {
-		MetadataURL string `json:"metadata_url"`
-	}
-	if !httpx.DecodeJSONStrict(w, r, &body) {
+	body, ok := opConnectionCreate.Decode(w, r)
+	if !ok {
 		return
 	}
 	metadataURL := strings.TrimSpace(body.MetadataURL)
 	if metadataURL == "" {
-		httpx.BadRequest(w, "metadata_url is required")
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "metadata_url is required", Field: "metadata_url"})
 		return
 	}
 	// Defense-in-depth against SSRF: GoTrue fetches this URL server-side, so
 	// constrain it to a well-formed https URL.
 	if u, err := url.Parse(metadataURL); err != nil || u.Scheme != "https" || u.Host == "" {
-		httpx.BadRequest(w, "metadata_url must be a valid https URL")
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: "metadata_url must be a valid https URL", Field: "metadata_url"})
 		return
 	}
 
@@ -274,7 +299,7 @@ func (h *ssoConnectionHandler) handleSSOConnectionCreate(w http.ResponseWriter, 
 		return
 	}
 	if existing != nil {
-		httpx.WriteJSON(w, http.StatusOK, ssoConnectionResponse{
+		opConnectionCreate.WriteStatus(w, http.StatusOK, ssoConnectionResponse{
 			Connection: toSSOConnectionView(existing),
 			EntityID:   entityID,
 			ACSURL:     acsURL,
@@ -328,12 +353,28 @@ func (h *ssoConnectionHandler) handleSSOConnectionCreate(w http.ResponseWriter, 
 		return
 	}
 
-	httpx.WriteJSON(w, http.StatusCreated, ssoConnectionResponse{
+	opConnectionCreate.Write(w, ssoConnectionResponse{
 		Connection: toSSOConnectionView(created),
 		EntityID:   entityID,
 		ACSURL:     acsURL,
 	})
 }
+
+// ssoConnectionUpdateRequest is the body of PATCH /api/sso/connection.
+// Enabled keeps its raw bytes so a null reads apart from an absent field: the
+// flag has no unset state, so a null is refused rather than kept or cleared.
+type ssoConnectionUpdateRequest struct {
+	Enabled httpx.Patch[bool]   `json:"enabled" doc:"Whether people can sign in through the connection; absent keeps it, and null is refused, since the flag has no unset state. It cannot be turned off while the organization requires SSO."`
+	IdP     httpx.Patch[string] `json:"idp" doc:"The identity provider's product (entra, okta, google, onelogin, ping, or other), or null to clear it to not known; absent keeps it."`
+}
+
+var opConnectionUpdate = httpx.NewJSONOp[ssoConnectionUpdateRequest, ssoConnectionResponse](httpx.OpSpec{
+	Pattern:     "PATCH /api/sso/connection",
+	ID:          "update_sso_connection",
+	Summary:     "Update the SSO connection",
+	Description: "Turns the organization's SSO connection on or off, or sets or clears which identity provider product it is, and returns the connection as changed. A body that names neither field is refused." + ssoAccess,
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // PATCH /api/sso/connection  body: { "enabled": <bool>, "idp": <string|null> }
 //
@@ -346,41 +387,37 @@ func (h *ssoConnectionHandler) handleSSOConnectionUpdate(w http.ResponseWriter, 
 		return
 	}
 
-	// json.RawMessage for idp so null (clear) and omitted (keep) stay
-	// distinguishable — a *string decodes both to nil.
-	var body struct {
-		Enabled *bool           `json:"enabled"`
-		IdP     json.RawMessage `json:"idp"`
-	}
-	if !httpx.DecodeJSONStrict(w, r, &body) {
+	body, ok := opConnectionUpdate.Decode(w, r)
+	if !ok {
 		return
 	}
-	if body.Enabled == nil && body.IdP == nil {
+	var v httpx.Validation
+	enabledValue, enabledState := body.Enabled.ReadNonNull(&v, "enabled")
+	idpValue, idpState := body.IdP.Read(&v, "idp")
+	if enabledState == httpx.PatchAbsent && idpState == httpx.PatchAbsent {
 		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
 			Reason:  httpx.ReasonMissingField,
 			Message: "no fields to update: provide enabled and/or idp (null clears idp)",
 		})
 		return
 	}
+	if enabledState == httpx.PatchClear {
+		v.Invalid("enabled", "enabled must be true or false; it has no unset state for null to clear it to")
+	}
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+	// A null reads as the empty product, which clears it to not known.
 	var idp *string
-	if body.IdP != nil {
-		v := ""
-		if string(body.IdP) != "null" {
-			if err := json.Unmarshal(body.IdP, &v); err != nil {
-				httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-					Reason: httpx.ReasonInvalidField, Message: "idp must be a string, or null", Field: "idp",
-				})
-				return
-			}
-			if !ssostore.ValidIdP(v) {
-				httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
-					Reason: httpx.ReasonInvalidField, Field: "idp",
-					Message: "idp must be one of " + strings.Join(ssostore.IdPValues, ", "),
-				})
-				return
-			}
+	if idpState != httpx.PatchAbsent {
+		if idpState == httpx.PatchSet && !ssostore.ValidIdP(idpValue) {
+			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
+				Reason: httpx.ReasonInvalidField, Field: "idp",
+				Message: "idp must be one of " + strings.Join(ssostore.IdPValues, ", "),
+			})
+			return
 		}
-		idp = &v
+		idp = &idpValue
 	}
 
 	entityID, acsURL, ok := h.spValuesOr500(w)
@@ -422,13 +459,13 @@ func (h *ssoConnectionHandler) handleSSOConnectionUpdate(w http.ResponseWriter, 
 		// Update writes the whole mutable set, so "absent" is spelled by
 		// passing what is already there.
 		enabled := before.Enabled
-		if body.Enabled != nil {
-			enabled = *body.Enabled
+		if enabledState == httpx.PatchSet {
+			enabled = enabledValue
 		}
 		// A disabled connection is one nobody can sign in through, so while it
 		// is required that would leave only break-glass accounts able to act in
 		// the org. Requirement first, then the connection.
-		if body.Enabled != nil && !enabled && before.Enforced {
+		if enabledState == httpx.PatchSet && !enabled && before.Enforced {
 			return errTurnOffEnforcementFirst
 		}
 		if e := sso.Connections.Update(r.Context(), orgID, existing.ID, ssostore.UpdateSSOConnectionParams{
@@ -468,12 +505,26 @@ func (h *ssoConnectionHandler) handleSSOConnectionUpdate(w http.ResponseWriter, 
 		return
 	}
 
-	httpx.WriteJSON(w, http.StatusOK, ssoConnectionResponse{
+	opConnectionUpdate.Write(w, ssoConnectionResponse{
 		Connection: toSSOConnectionView(updated),
 		EntityID:   entityID,
 		ACSURL:     acsURL,
 	})
 }
+
+// ssoEnforcementUpdateRequest is the body of PATCH
+// /api/sso/connection/enforcement.
+type ssoEnforcementUpdateRequest struct {
+	Enforced *bool `json:"enforced" doc:"Whether the organization requires SSO. Required. Turning it on needs an enabled connection, a successful test sign-in, a verified domain, and a caller who signed in through the connection or is a break-glass principal."`
+}
+
+var opEnforcementUpdate = httpx.NewJSONOp[ssoEnforcementUpdateRequest, ssoConnectionResponse](httpx.OpSpec{
+	Pattern:     "PATCH /api/sso/connection/enforcement",
+	ID:          "update_sso_connection_enforcement",
+	Summary:     "Require or stop requiring SSO",
+	Description: "Sets whether the organization requires SSO, which while on lets members other than break-glass principals reach the organization only by signing in through its connection, and returns the connection as changed." + ssoAccess,
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // PATCH /api/sso/connection/enforcement  body: { "enforced": <bool> }
 func (h *ssoConnectionHandler) handleSSOEnforcementUpdate(w http.ResponseWriter, r *http.Request) {
@@ -482,14 +533,12 @@ func (h *ssoConnectionHandler) handleSSOEnforcementUpdate(w http.ResponseWriter,
 		return
 	}
 
-	var body struct {
-		Enforced *bool `json:"enforced"`
-	}
-	if !httpx.DecodeJSONStrict(w, r, &body) {
+	body, ok := opEnforcementUpdate.Decode(w, r)
+	if !ok {
 		return
 	}
 	if body.Enforced == nil {
-		httpx.BadRequest(w, "enforced is required")
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "enforced is required", Field: "enforced"})
 		return
 	}
 
@@ -601,7 +650,7 @@ func (h *ssoConnectionHandler) handleSSOEnforcementUpdate(w http.ResponseWriter,
 		return
 	}
 
-	httpx.WriteJSON(w, http.StatusOK, ssoConnectionResponse{
+	opEnforcementUpdate.Write(w, ssoConnectionResponse{
 		Connection: toSSOConnectionView(updated),
 		EntityID:   entityID,
 		ACSURL:     acsURL,

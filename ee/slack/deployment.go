@@ -156,9 +156,17 @@ type deploymentAppHandler struct {
 }
 
 type deploymentAppView struct {
-	AppID     string `json:"app_id"`
-	Transport string `json:"transport"`
+	AppID     string `json:"app_id" doc:"The deployment's Slack app id."`
+	Transport string `json:"transport" doc:"How the deployment's app receives events: socket or events_api."`
 }
+
+var opDeploymentApp = httpx.NewJSONOp[httpx.NoBody, deploymentAppView](httpx.OpSpec{
+	Pattern:     "GET /api/slack/deployment-app",
+	ID:          "get_slack_deployment_app",
+	Summary:     "Get the deployment's Slack app",
+	Description: "Returns the deployment's own Slack app, which an organization can install instead of creating its own. A deployment has none to return when no app is configured or its public URL is not HTTPS. It is available only in multi mode.",
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // GET /api/slack/deployment-app
 //
@@ -179,5 +187,5 @@ func (h *deploymentAppHandler) handleGet(w http.ResponseWriter, r *http.Request)
 		httpx.NotFound(w, "deployment Slack app")
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, deploymentAppView{AppID: h.app.AppID, Transport: h.app.Transport})
+	opDeploymentApp.Write(w, deploymentAppView{AppID: h.app.AppID, Transport: h.app.Transport})
 }

@@ -307,6 +307,22 @@ func TestSSOConnectionIdP_DerivedThenOverridable(t *testing.T) {
 		t.Errorf("empty PATCH status = %d; want 400 (body=%s)", empty.StatusCode, readBody(empty))
 	}
 
+	// enabled has no unset state, so a null is refused by name, alone or
+	// beside a valid idp, and the idp beside it is not written.
+	for _, b := range []map[string]any{{"enabled": nil}, {"enabled": nil, "idp": "okta"}} {
+		nullEnabled := doReq(r, http.MethodPatch, "/api/sso/connection", sid, b)
+		raw = readBody(nullEnabled)
+		if nullEnabled.StatusCode != http.StatusBadRequest ||
+			!strings.Contains(raw, `"reason":"INVALID_FIELD"`) || !strings.Contains(raw, `"field":"enabled"`) {
+			t.Errorf("PATCH %v = %d %s; want 400 INVALID_FIELD on enabled", b, nullEnabled.StatusCode, raw)
+		}
+	}
+	var afterRefused ssoConnectionResponse
+	_ = json.Unmarshal([]byte(readBody(doReq(r, http.MethodGet, "/api/sso/connection", sid, nil))), &afterRefused)
+	if afterRefused.Connection == nil || afterRefused.Connection.IdP != "" || !afterRefused.Connection.Enabled {
+		t.Errorf("a refused PATCH wrote: %+v; want idp still cleared and enabled", afterRefused.Connection)
+	}
+
 	// The store answers the read seam for the provider the connection binds,
 	// and only when an IdP is known — cleared above, so nothing now; set
 	// again, and it answers.
@@ -398,6 +414,35 @@ func TestSSOConnectionGet_NoPublicURL_500(t *testing.T) {
 	resp := doReq(r, http.MethodGet, "/api/sso/connection", sid, nil)
 	if resp.StatusCode != http.StatusInternalServerError {
 		t.Fatalf("status = %d; want 500 when public URL unconfigured (body=%s)", resp.StatusCode, readBody(resp))
+	}
+}
+
+// TestSSO_FieldFaultsNameTheField: each SSO route's refusal of a missing or
+// unusable body field carries the field it is about.
+func TestSSO_FieldFaultsNameTheField(t *testing.T) {
+	r, _ := newSSORig(t)
+	owner := r.seedUser()
+	r.seedOrg(owner, "sso-field-faults")
+	sid := r.signInAs(owner)
+
+	for _, tc := range []struct {
+		method, path string
+		body         any
+		reason       string
+		field        string
+	}{
+		{http.MethodPost, "/api/sso/connection", map[string]string{}, "MISSING_FIELD", "metadata_url"},
+		{http.MethodPost, "/api/sso/connection", map[string]string{"metadata_url": "http://idp/metadata.xml"}, "INVALID_FIELD", "metadata_url"},
+		{http.MethodPatch, "/api/sso/connection/enforcement", map[string]any{}, "MISSING_FIELD", "enforced"},
+		{http.MethodPost, "/api/sso/break-glass", map[string]string{"email": " "}, "MISSING_FIELD", "email"},
+		{http.MethodPost, "/api/sso/domains", map[string]string{"domain": "not a domain"}, "INVALID_FIELD", "domain"},
+	} {
+		resp := doReq(r, tc.method, tc.path, sid, tc.body)
+		raw := readBody(resp)
+		if resp.StatusCode != http.StatusBadRequest ||
+			!strings.Contains(raw, `"reason":"`+tc.reason+`"`) || !strings.Contains(raw, `"field":"`+tc.field+`"`) {
+			t.Errorf("%s %s %v = %d %s; want 400 %s on %s", tc.method, tc.path, tc.body, resp.StatusCode, raw, tc.reason, tc.field)
+		}
 	}
 }
 

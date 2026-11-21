@@ -165,11 +165,11 @@ func (f *fakeInstanceStore) Get(_ context.Context, id string) (*domain.Instance,
 func (f *fakeInstanceStore) List(context.Context) ([]domain.Instance, error) {
 	return nil, nil
 }
-func (f *fakeInstanceStore) SetDraining(context.Context, string, bool) (bool, error) {
-	return false, nil
+func (f *fakeInstanceStore) SetDraining(context.Context, string, bool) (*domain.Instance, error) {
+	return nil, nil
 }
-func (f *fakeInstanceStore) SetDrainUntilRestart(context.Context, string) (bool, error) {
-	return false, nil
+func (f *fakeInstanceStore) SetDrainUntilRestart(context.Context, string) (*domain.Instance, error) {
+	return nil, nil
 }
 func (f *fakeInstanceStore) DeleteStaleSystem(context.Context, time.Duration) (int, error) {
 	return 0, nil

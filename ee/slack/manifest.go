@@ -44,17 +44,17 @@ var slackBotScopes = []string{
 // interpolation) so every field is properly escaped — a template would
 // otherwise need to hand-roll JSON-string escaping for the org display name.
 type slackManifest struct {
-	DisplayInformation slackManifestDisplayInfo `json:"display_information"`
-	Features           slackManifestFeatures    `json:"features"`
-	OAuthConfig        slackManifestOAuth       `json:"oauth_config"`
-	Settings           slackManifestSettings    `json:"settings"`
+	DisplayInformation slackManifestDisplayInfo `json:"display_information" doc:"How Slack shows the app: its name, descriptions, and color."`
+	Features           slackManifestFeatures    `json:"features" doc:"The app's bot user."`
+	OAuthConfig        slackManifestOAuth       `json:"oauth_config" doc:"The app's OAuth settings."`
+	Settings           slackManifestSettings    `json:"settings" doc:"The events the app subscribes to, and how it receives them."`
 }
 
 type slackManifestDisplayInfo struct {
-	Name            string `json:"name"`
-	Description     string `json:"description"`
-	LongDescription string `json:"long_description"`
-	BackgroundColor string `json:"background_color"`
+	Name            string `json:"name" doc:"The app's name: Triage Factory, followed by the organization's name in parentheses for an organization's own app."`
+	Description     string `json:"description" doc:"The app's short description."`
+	LongDescription string `json:"long_description" doc:"The app's long description."`
+	BackgroundColor string `json:"background_color" doc:"The app's background color, as a hex color."`
 }
 
 // slackManifestDescription and slackManifestLongDescription are the app's
@@ -79,41 +79,41 @@ The bot responds only to @mentions and to replies in threads it is already worki
 const slackManifestBackgroundColor = "#d15700"
 
 type slackManifestFeatures struct {
-	BotUser slackManifestBotUser `json:"bot_user"`
+	BotUser slackManifestBotUser `json:"bot_user" doc:"The app's bot user."`
 }
 
 type slackManifestBotUser struct {
-	DisplayName  string `json:"display_name"`
-	AlwaysOnline bool   `json:"always_online"`
+	DisplayName  string `json:"display_name" doc:"The bot user's display name."`
+	AlwaysOnline bool   `json:"always_online" doc:"Whether Slack always shows the bot user as online."`
 }
 
 type slackManifestOAuth struct {
 	// RedirectURLs is set only for the deployment's app, which installs
 	// through OAuth; an org's own app is connected with pasted tokens.
-	RedirectURLs []string            `json:"redirect_urls,omitempty"`
-	Scopes       slackManifestScopes `json:"scopes"`
+	RedirectURLs []string            `json:"redirect_urls,omitempty" doc:"The URLs Slack may return to after installing the app, absent for an app connected with its tokens instead."`
+	Scopes       slackManifestScopes `json:"scopes" doc:"The OAuth scopes the app requests."`
 }
 
 type slackManifestScopes struct {
-	Bot []string `json:"bot"`
+	Bot []string `json:"bot" doc:"The scopes the app's bot token requests."`
 }
 
 type slackManifestSettings struct {
-	EventSubscriptions slackManifestEventSubs `json:"event_subscriptions"`
+	EventSubscriptions slackManifestEventSubs `json:"event_subscriptions" doc:"The events the app's bot subscribes to, and where Slack sends them."`
 	// SocketModeEnabled is a pointer so transport=events_api omits the key
 	// entirely (Slack treats absence as false) rather than emitting an
 	// explicit "socket_mode_enabled": false alongside a request_url — the
 	// two are mutually exclusive by construction, not just by convention.
-	SocketModeEnabled    *bool `json:"socket_mode_enabled,omitempty"`
-	OrgDeployEnabled     bool  `json:"org_deploy_enabled"`
-	TokenRotationEnabled bool  `json:"token_rotation_enabled"`
+	SocketModeEnabled    *bool `json:"socket_mode_enabled,omitempty" doc:"true when the app receives events over Socket Mode, absent when it receives them as HTTP requests."`
+	OrgDeployEnabled     bool  `json:"org_deploy_enabled" doc:"Whether the app can be installed across an Enterprise Grid organization."`
+	TokenRotationEnabled bool  `json:"token_rotation_enabled" doc:"Whether the app's tokens expire and are rotated, which is always false: Triage Factory stores a token once and never refreshes it."`
 }
 
 type slackManifestEventSubs struct {
 	// RequestURL is omitted (empty) for transport=socket — Socket Mode
 	// carries events over the websocket, not an inbound webhook.
-	RequestURL string   `json:"request_url,omitempty"`
-	BotEvents  []string `json:"bot_events"`
+	RequestURL string   `json:"request_url,omitempty" doc:"The URL Slack sends events to, absent when the app receives them over Socket Mode."`
+	BotEvents  []string `json:"bot_events" doc:"The events the app's bot subscribes to."`
 }
 
 // slackManifestName builds the manifest's display name from the org's

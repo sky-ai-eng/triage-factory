@@ -10,7 +10,6 @@ package slack
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -140,9 +139,9 @@ func (h *channelsHandler) cachedSlackCandidates(ctx context.Context, orgID strin
 // "slack_unreachable"); PUT's auto-join step only ever populates ChannelID
 // + Reason (a per-channel outcome, "invite_required" | "join_failed").
 type channelsWarning struct {
-	Code      string `json:"code,omitempty"`
-	ChannelID string `json:"channel_id,omitempty"`
-	Reason    string `json:"reason,omitempty"`
+	Code      string `json:"code,omitempty" doc:"What is wrong with the whole read: slack_unreachable when a workspace's channels could not be read from Slack, or slack_channels_truncated when a workspace has more channels than one read of Slack collects; absent on a warning about one channel."`
+	ChannelID string `json:"channel_id,omitempty" doc:"Slack's id for the channel a warning about one channel concerns, absent on a warning about the whole read."`
+	Reason    string `json:"reason,omitempty" doc:"Why the bot did not join the channel: invite_required when the channel is private and someone must invite the bot in Slack, or join_failed; absent on a warning about the whole read."`
 }
 
 // trackerView is one team's tracking claim on a channel, as disclosed on
@@ -150,9 +149,9 @@ type channelsWarning struct {
 // ratified cross-team disclosure line — see TeamChannelStore.
 // ListTrackersForOrgSystem's doc).
 type trackerView struct {
-	TeamID    string `json:"team_id"`
-	TeamName  string `json:"team_name"`
-	IsPrimary bool   `json:"is_primary"`
+	TeamID    string `json:"team_id" doc:"The team's id."`
+	TeamName  string `json:"team_name" doc:"The team's name."`
+	IsPrimary bool   `json:"is_primary" doc:"Whether the team is the channel's primary, the team the channel's mentions are routed to."`
 }
 
 // channelView is one merged row of the list's items and of PUT's channels
@@ -161,25 +160,25 @@ type trackerView struct {
 // registry row, what a slack:message handler's channel_in names; it is empty
 // for a live Slack channel TF holds no row for yet.
 type channelView struct {
-	ID            string        `json:"id,omitempty"`
-	ChannelID     string        `json:"channel_id"`
-	Name          string        `json:"name"`
-	WorkspaceID   string        `json:"workspace_id"`
-	IsPrivate     bool          `json:"is_private"`
-	BotIsMember   bool          `json:"bot_is_member"`
-	Tracked       bool          `json:"tracked"`
-	IsPrimary     bool          `json:"is_primary"`
-	TrackedBy     []trackerView `json:"tracked_by"`
-	LastMentionAt *time.Time    `json:"last_mention_at,omitempty"`
-	Source        string        `json:"source"` // "tracked" | "sighting" | "slack"
+	ID            string        `json:"id,omitempty" doc:"The channel's registry id, which an event handler's channel filter names; absent for a channel Slack lists that Triage Factory holds no row for yet."`
+	ChannelID     string        `json:"channel_id" doc:"Slack's id for the channel."`
+	Name          string        `json:"name" doc:"The channel's name, empty when it is not known."`
+	WorkspaceID   string        `json:"workspace_id" doc:"The id of the Slack workspace the channel is in."`
+	IsPrivate     bool          `json:"is_private" doc:"Whether the channel is private, false when the read of Slack did not list it."`
+	BotIsMember   bool          `json:"bot_is_member" doc:"Whether the app's bot is in the channel, false when the read of Slack did not list it."`
+	Tracked       bool          `json:"tracked" doc:"Whether the team tracks the channel."`
+	IsPrimary     bool          `json:"is_primary" doc:"Whether the team is the channel's primary, the team the channel's mentions are routed to."`
+	TrackedBy     []trackerView `json:"tracked_by" doc:"Every team that tracks the channel."`
+	LastMentionAt *time.Time    `json:"last_mention_at,omitempty" doc:"When the app last saw a mention in the channel, as an RFC 3339 timestamp, absent when it has seen none."`
+	Source        string        `json:"source" doc:"Where the row comes from: tracked when the team tracks the channel, sighting when the team does not track it but Triage Factory holds a registry row for it, such as one a mention the app saw or another team tracking it made, or slack when only the read of Slack lists it."` // "tracked" | "sighting" | "slack"
 }
 
 // channelsResponse is PUT's answer: the team's whole merged set after the
 // save, with the auto-join outcomes appended to the warnings.
 type channelsResponse struct {
-	Role     string            `json:"role"`
-	Warnings []channelsWarning `json:"warnings"`
-	Channels []channelView     `json:"channels"`
+	Role     string            `json:"role" doc:"The caller's role on the team, which is admin."`
+	Warnings []channelsWarning `json:"warnings" doc:"What is wrong with the read of Slack, and each added channel the bot did not join."`
+	Channels []channelView     `json:"channels" doc:"Every channel of the team's list after the change, in Slack channel id order."`
 }
 
 // memberTeam runs the gates every read of a team's channels runs: the Slack
@@ -215,8 +214,17 @@ func (h *channelsHandler) memberTeam(w http.ResponseWriter, r *http.Request) (or
 
 // putChannelsRequest is PUT's full-set replace body.
 type putChannelsRequest struct {
-	ChannelIDs []string `json:"channel_ids"`
+	ChannelIDs []string `json:"channel_ids" doc:"Slack's ids for every channel the team is to track; the set replaces the one the team tracks, and an empty array stops it tracking any. Required."`
 }
+
+var opPut = httpx.NewJSONOp[putChannelsRequest, channelsResponse](httpx.OpSpec{
+	Pattern:     "PUT /api/teams/{team_id}/slack-channels",
+	ID:          "replace_team_slack_channels",
+	Summary:     "Set the Slack channels a team tracks",
+	Description: "Replaces the set of Slack channels the team tracks, each of which the organization's Slack connections must be able to see, joins the app's bot to each added public channel it is not in, and returns every channel of the team's list. A team's first tracked channel also gives it a default handler for Slack mentions when it has none." + slackAccess,
+	PathParams:  map[string]string{"team_id": "The team's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // PUT /api/teams/{team_id}/slack-channels — team admin, full-set replace.
 func (h *channelsHandler) handlePut(w http.ResponseWriter, r *http.Request) {
@@ -240,8 +248,8 @@ func (h *channelsHandler) handlePut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req putChannelsRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opPut.Decode(w, r)
+	if !ok {
 		return
 	}
 	// Validate the shape of the whole set before any store or Slack work,
@@ -289,6 +297,10 @@ func (h *channelsHandler) handlePut(w http.ResponseWriter, r *http.Request) {
 	// write resolves each id under the move lock.
 	var prior []slackstore.TeamChannel
 	var tracked []string
+	// slackIDs maps each tracked registry row to its Slack channel id, as the
+	// write left them, so a channel the auto-join cannot read back is still
+	// named by the id the caller knows it by.
+	slackIDs := map[string]string{}
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		bundle := slackstore.FromTx(tx)
 		var e error
@@ -297,6 +309,13 @@ func (h *channelsHandler) handlePut(w http.ResponseWriter, r *http.Request) {
 		}
 		if tracked, e = bundle.TeamChannels.ReplaceForTeam(r.Context(), orgID, teamID, req.ChannelIDs); e != nil {
 			return e
+		}
+		after, e := bundle.TeamChannels.ListForTeam(r.Context(), orgID, teamID)
+		if e != nil {
+			return e
+		}
+		for _, tc := range after {
+			slackIDs[tc.SlackChannelID] = tc.ChannelID
 		}
 		// Default blueprint, first-track only: the prior set was empty, the
 		// new set isn't, and the team hasn't already configured its own
@@ -337,7 +356,7 @@ func (h *channelsHandler) handlePut(w http.ResponseWriter, r *http.Request) {
 			ch, err := registry.GetSystem(r.Context(), orgID, id)
 			if err != nil || ch == nil {
 				slackLog.Warn("channels: read added channel for auto-join failed", "org_id", orgID, "channel_row", id, "error", err)
-				joinWarnings = append(joinWarnings, channelsWarning{ChannelID: id, Reason: "join_failed"})
+				joinWarnings = append(joinWarnings, channelsWarning{ChannelID: slackIDs[id], Reason: "join_failed"})
 				continue
 			}
 			addedChannels = append(addedChannels, *ch)
@@ -354,7 +373,7 @@ func (h *channelsHandler) handlePut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp.Warnings = append(resp.Warnings, joinWarnings...)
-	httpx.WriteJSON(w, http.StatusOK, resp)
+	opPut.Write(w, *resp)
 }
 
 // channelIDFromPath reads {channel_id}, Slack's id for a channel, and answers
@@ -367,6 +386,18 @@ func channelIDFromPath(w http.ResponseWriter, r *http.Request) (string, bool) {
 	}
 	return channelID, true
 }
+
+var opGetChannel = httpx.NewJSONOp[httpx.NoBody, channelView](httpx.OpSpec{
+	Pattern:     "GET /api/teams/{team_id}/slack-channels/{channel_id}",
+	ID:          "get_team_slack_channel",
+	Summary:     "Get a channel of a team's Slack channel list",
+	Description: "Returns one channel of the team's Slack channel list, as the list would return it, reading Slack's channels to build it." + slackAccess,
+	PathParams: map[string]string{
+		"team_id":    "The team's id.",
+		"channel_id": "Slack's id for the channel. An id Slack has since replaced reads the channel under its current id.",
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // handleGet reads one channel of the team's list: the row the list would
 // answer for it, or 404 when the list holds none, which is a channel the team
@@ -392,14 +423,26 @@ func (h *channelsHandler) handleGet(w http.ResponseWriter, r *http.Request) {
 		httpx.NotFound(w, "channel")
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, view)
+	opGetChannel.Write(w, *view)
 }
 
-// patchChannelRequest is PATCH's body. IsPrimary is raw so that an absent
-// field and an explicit null read differently.
+// patchChannelRequest is PATCH's body. IsPrimary keeps its raw bytes so that
+// an absent field and an explicit null read differently.
 type patchChannelRequest struct {
-	IsPrimary json.RawMessage `json:"is_primary"`
+	IsPrimary httpx.Patch[bool] `json:"is_primary" doc:"true makes the team the channel's primary, the team its mentions are routed to; false and null are refused, since a watched channel always has a primary and it moves by setting it on another team. Absent writes nothing."`
 }
+
+var opPatchChannel = httpx.NewJSONOp[patchChannelRequest, channelView](httpx.OpSpec{
+	Pattern:     "PATCH /api/teams/{team_id}/slack-channels/{channel_id}",
+	ID:          "update_team_slack_channel",
+	Summary:     "Update a team's tracking of a Slack channel",
+	Description: "Makes the team the primary of a channel it tracks, so the channel's mentions are routed to it, and returns the channel as the team's list shows it; the team must not be archived. An empty body writes nothing and returns the channel." + slackAccess,
+	PathParams: map[string]string{
+		"team_id":    "The team's id.",
+		"channel_id": "Slack's id for the channel. An id Slack has since replaced reads the channel under its current id.",
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // handlePatch writes the team's tracking row of a channel. Its one field,
 // is_primary, takes only true, which makes the team the channel's primary: a
@@ -434,12 +477,12 @@ func (h *channelsHandler) handlePatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req patchChannelRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opPatchChannel.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
-	isPrimary, state := httpx.PatchBool(&v, req.IsPrimary, "is_primary")
+	isPrimary, state := req.IsPrimary.ReadNonNull(&v, "is_primary")
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
@@ -490,7 +533,7 @@ func (h *channelsHandler) handlePatch(w http.ResponseWriter, r *http.Request) {
 		httpx.NotFound(w, "channel")
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, view)
+	opPatchChannel.Write(w, *view)
 }
 
 // findChannel returns channelID's row of the team's list, or nil when the list

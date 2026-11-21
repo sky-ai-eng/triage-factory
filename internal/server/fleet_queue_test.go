@@ -49,6 +49,19 @@ func TestHandleFleetQueue_ReturnsOrgShare(t *testing.T) {
 	}
 }
 
+// A missing org is refused by name, as the placement read refuses one.
+func TestHandleFleetQueue_MissingOrgNamesIt(t *testing.T) {
+	s := &Server{az: &authz.Checker{}, fleetQueue: &fakeFleetQueue{}}
+
+	rec := httptest.NewRecorder()
+	s.handleFleetQueue(rec, localModeReq("/api/fleet/queue"))
+
+	if rec.Code != http.StatusBadRequest ||
+		!strings.Contains(rec.Body.String(), `"reason":"INVALID_PARAM"`) || !strings.Contains(rec.Body.String(), `"field":"org"`) {
+		t.Fatalf("status = %d, body=%s; want 400 INVALID_PARAM on org", rec.Code, rec.Body.String())
+	}
+}
+
 // A quiet org (no active/queued runs, so absent from the fleet-wide result)
 // reports an all-zero share rather than 404 — a stable shape for pollers.
 func TestHandleFleetQueue_QuietOrgReturnsZeroShare(t *testing.T) {

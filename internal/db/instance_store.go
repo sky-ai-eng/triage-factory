@@ -56,10 +56,9 @@ type InstanceStore interface {
 	// write the heartbeat deliberately never performs (see
 	// domain.InstanceHeartbeat). This drain survives restarts. Undraining
 	// also ends a drain SetDrainUntilRestart set, so it ends either kind.
-	// matched is false when id is unknown. It returns matched rather than
-	// the row: no caller reads the row back, and the drain in effect is
-	// List's and Get's to report.
-	SetDraining(ctx context.Context, id string, draining bool) (matched bool, err error)
+	// It returns the row as the write left it, with the drain in effect, or
+	// nil when id is unknown.
+	SetDraining(ctx context.Context, id string, draining bool) (*domain.Instance, error)
 
 	// SetDrainUntilRestart drains the instance until it next registers: it
 	// records the row's current boot_epoch in drain_until_epoch, and the
@@ -68,9 +67,9 @@ type InstanceStore interface {
 	// written at boot, and a value left behind is inert because epochs only
 	// increase. `deploy upgrade` drains executors this way before it
 	// recreates them, so an upgrade interrupted at any point leaves no
-	// executor drained past its next start. matched is false when id is
-	// unknown. It returns matched rather than the row, as SetDraining does.
-	SetDrainUntilRestart(ctx context.Context, id string) (matched bool, err error)
+	// executor drained past its next start. It returns the row as the write
+	// left it, with the drain in effect, or nil when id is unknown.
+	SetDrainUntilRestart(ctx context.Context, id string) (*domain.Instance, error)
 
 	// DeleteStaleSystem deletes every instance row whose last heartbeat is
 	// older than olderThan, and returns how many went. claims.executor_id

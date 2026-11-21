@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -40,9 +41,10 @@ func drainingSQL(qual string) string {
 	return "(" + qual + "draining OR " + qual + "drain_until_epoch IS NOT DISTINCT FROM " + qual + "boot_epoch)"
 }
 
-// instanceColumns is the column list List and Get scan. The two drain
-// columns are the drain in effect, not the stored ones: whether the instance
-// is draining, and whether only the drain until restart holds.
+// instanceColumns is the column list List and Get read and the drain writes
+// return. The two drain columns are the drain in effect, not the stored ones:
+// whether the instance is draining, and whether only the drain until restart
+// holds.
 var instanceColumns = `id, role, version, boot_epoch, started_at, last_heartbeat_at,
 		       ` + drainingSQL("") + `,
 		       (NOT draining AND drain_until_epoch IS NOT DISTINCT FROM boot_epoch),
@@ -125,51 +127,40 @@ func (s *instanceStore) List(ctx context.Context) ([]domain.Instance, error) {
 
 	var out []domain.Instance
 	for rows.Next() {
-		var inst domain.Instance
-		var maxRuns, activeRuns, memTotal, memAvail sql.NullInt64
-		var dispatchGated sql.NullBool
-		var labels, pubkey string
-		if err := rows.Scan(
-			&inst.ID, &inst.Role, &inst.Version, &inst.BootEpoch, &inst.StartedAt, &inst.LastHeartbeatAt, &inst.Draining, &inst.DrainUntilRestart,
-			&maxRuns, &activeRuns, &memTotal, &memAvail, &dispatchGated, &labels, &pubkey,
-		); err != nil {
+		inst, err := scanInstance(rows)
+		if err != nil {
 			return nil, err
 		}
-		inst.MaxRuns = intPtrFromNull(maxRuns)
-		inst.ActiveRuns = intPtrFromNull(activeRuns)
-		inst.MemTotalMB = intPtrFromNull(memTotal)
-		inst.MemAvailableMB = intPtrFromNull(memAvail)
-		if dispatchGated.Valid {
-			v := dispatchGated.Bool
-			inst.DispatchGated = &v
-		}
-		inst.LabelsJSON = labels
-		inst.PubKey = pubkey
 		out = append(out, inst)
 	}
 	return out, rows.Err()
 }
 
-func (s *instanceStore) SetDraining(ctx context.Context, id string, draining bool) (bool, error) {
-	query := `UPDATE instances SET draining = true WHERE id = $1`
+func (s *instanceStore) SetDraining(ctx context.Context, id string, draining bool) (*domain.Instance, error) {
+	set := `draining = true`
 	if !draining {
-		query = `UPDATE instances SET draining = false, drain_until_epoch = NULL WHERE id = $1`
+		set = `draining = false, drain_until_epoch = NULL`
 	}
-	res, err := s.admin.ExecContext(ctx, query, id)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	return n > 0, err
+	return s.updateReturning(ctx, set, id)
 }
 
-func (s *instanceStore) SetDrainUntilRestart(ctx context.Context, id string) (bool, error) {
-	res, err := s.admin.ExecContext(ctx, `UPDATE instances SET drain_until_epoch = boot_epoch WHERE id = $1`, id)
-	if err != nil {
-		return false, err
+func (s *instanceStore) SetDrainUntilRestart(ctx context.Context, id string) (*domain.Instance, error) {
+	return s.updateReturning(ctx, `drain_until_epoch = boot_epoch`, id)
+}
+
+// updateReturning applies set to id's row and returns the row as the write
+// left it, through the column list and scan Get uses, or nil when id names
+// no row.
+func (s *instanceStore) updateReturning(ctx context.Context, set, id string) (*domain.Instance, error) {
+	inst, err := scanInstance(s.admin.QueryRowContext(ctx,
+		`UPDATE instances SET `+set+` WHERE id = $1 RETURNING `+instanceColumns, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
 	}
-	n, err := res.RowsAffected()
-	return n > 0, err
+	if err != nil {
+		return nil, err
+	}
+	return &inst, nil
 }
 
 // DeleteStaleSystem measures staleness on database time, the clock every
@@ -186,23 +177,31 @@ func (s *instanceStore) DeleteStaleSystem(ctx context.Context, olderThan time.Du
 }
 
 func (s *instanceStore) Get(ctx context.Context, id string) (*domain.Instance, error) {
-	var inst domain.Instance
-	var maxRuns, activeRuns, memTotal, memAvail sql.NullInt64
-	var dispatchGated sql.NullBool
-	var labels, pubkey string
-
-	err := s.admin.QueryRowContext(ctx, `
+	inst, err := scanInstance(s.admin.QueryRowContext(ctx, `
 		SELECT `+instanceColumns+`
 		FROM instances WHERE id = $1
-	`, id).Scan(
-		&inst.ID, &inst.Role, &inst.Version, &inst.BootEpoch, &inst.StartedAt, &inst.LastHeartbeatAt, &inst.Draining, &inst.DrainUntilRestart,
-		&maxRuns, &activeRuns, &memTotal, &memAvail, &dispatchGated, &labels, &pubkey,
-	)
-	if err == sql.ErrNoRows {
+	`, id))
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
+	}
+	return &inst, nil
+}
+
+// scanInstance scans one row of instanceColumns, the one scan every read of
+// an instance row and every write that returns one goes through.
+func scanInstance(row interface{ Scan(dest ...any) error }) (domain.Instance, error) {
+	var inst domain.Instance
+	var maxRuns, activeRuns, memTotal, memAvail sql.NullInt64
+	var dispatchGated sql.NullBool
+	var labels, pubkey string
+	if err := row.Scan(
+		&inst.ID, &inst.Role, &inst.Version, &inst.BootEpoch, &inst.StartedAt, &inst.LastHeartbeatAt, &inst.Draining, &inst.DrainUntilRestart,
+		&maxRuns, &activeRuns, &memTotal, &memAvail, &dispatchGated, &labels, &pubkey,
+	); err != nil {
+		return domain.Instance{}, err
 	}
 	inst.MaxRuns = intPtrFromNull(maxRuns)
 	inst.ActiveRuns = intPtrFromNull(activeRuns)
@@ -214,7 +213,7 @@ func (s *instanceStore) Get(ctx context.Context, id string) (*domain.Instance, e
 	}
 	inst.LabelsJSON = labels
 	inst.PubKey = pubkey
-	return &inst, nil
+	return inst, nil
 }
 
 // --- Helpers ---

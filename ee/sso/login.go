@@ -284,22 +284,20 @@ func ssoAuthDetail(dom string) string {
 // Pre-auth, no side effect: resolves a typed work email to a SAML start URL
 // or signals "use GitHub". Every non-match collapses to {sso:false}.
 func (le *loginExt) handleDiscover(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, ssoDiscoverMaxBody)
-
-	var body ssoDiscoverRequest
-	if !httpx.DecodeJSONStrict(w, r, &body) {
+	body, ok := opDiscover.Decode(w, r)
+	if !ok {
 		return
 	}
 
 	// Multi-mode only: local registers no IdP. Answer {sso:false} (→ GitHub).
 	if runmode.Current() == runmode.ModeLocal {
-		httpx.WriteJSON(w, http.StatusOK, ssoDiscoverResponse{SSO: false})
+		opDiscover.Write(w, ssoDiscoverResponse{SSO: false})
 		return
 	}
 
 	domainName, ok := le.api.EmailDomain(body.Email)
 	if !ok {
-		httpx.WriteJSON(w, http.StatusOK, ssoDiscoverResponse{SSO: false})
+		opDiscover.Write(w, ssoDiscoverResponse{SSO: false})
 		return
 	}
 
@@ -310,15 +308,15 @@ func (le *loginExt) handleDiscover(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if route == nil || !route.Enabled {
-		httpx.WriteJSON(w, http.StatusOK, ssoDiscoverResponse{SSO: false})
+		opDiscover.Write(w, ssoDiscoverResponse{SSO: false})
 		return
 	}
 	if !entitlements.For(route.OrgID).Has(entitlements.FeatureSSO) {
-		httpx.WriteJSON(w, http.StatusOK, ssoDiscoverResponse{SSO: false})
+		opDiscover.Write(w, ssoDiscoverResponse{SSO: false})
 		return
 	}
 
-	httpx.WriteJSON(w, http.StatusOK, ssoDiscoverResponse{
+	opDiscover.Write(w, ssoDiscoverResponse{
 		SSO:      true,
 		StartURL: ssoStartURL(route.ProviderID, le.api.NormalizeReturnTo(body.ReturnTo)),
 	})
@@ -327,14 +325,23 @@ func (le *loginExt) handleDiscover(w http.ResponseWriter, r *http.Request) {
 const ssoDiscoverMaxBody = 4 << 10
 
 type ssoDiscoverRequest struct {
-	Email    string `json:"email"`
-	ReturnTo string `json:"return_to"`
+	Email    string `json:"email" doc:"The email address the person is signing in with."`
+	ReturnTo string `json:"return_to" doc:"The path on this deployment to return to after signing in, such as /tasks; an empty value, or anything that is not a path on this deployment, is read as /."`
 }
 
 type ssoDiscoverResponse struct {
-	SSO      bool   `json:"sso"`
-	StartURL string `json:"start_url,omitempty"`
+	SSO      bool   `json:"sso" doc:"Whether the email address signs in through SSO; when false, the person signs in another way."`
+	StartURL string `json:"start_url,omitempty" doc:"The path that starts the SSO sign-in, present only when sso is true."`
 }
+
+var opDiscover = httpx.NewJSONOp[ssoDiscoverRequest, ssoDiscoverResponse](httpx.OpSpec{
+	Pattern:     "POST /api/sso/discover",
+	ID:          "discover_sso",
+	Summary:     "Find the SSO sign-in for an email address",
+	Description: "Returns whether an email address's domain is verified for an organization's enabled SSO connection, and if it is, the path that starts the sign-in through it. It needs no session, and it answers sso false in local mode and for an organization whose Enterprise licence does not include SSO.",
+	BodyLimit:   ssoDiscoverMaxBody,
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // ssoStartURL builds the SP-initiated SAML start URL the discovery response
 // hands back (the same /api/auth/oauth/saml endpoint StartSSO serves).

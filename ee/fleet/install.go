@@ -31,25 +31,26 @@ func init() {
 
 // install mounts the operator-gated fleet console surfaces on the core server
 // through the extension API, with the same withSession/CSRF discipline as
-// core's own routes. Reads go through api.API (session-wrapped GETs); the drain
-// control is a mutating POST (CSRF-guarded).
+// core's own routes. Each is a declared operation, so api.Op mounts the reads
+// (GETs) behind the session check and the drain control (a PATCH) behind CSRF
+// as well.
 func install(api server.ExtensionAPI) {
 	h := &handler{stores: api.Stores()}
-	api.API("GET /api/fleet/overview", h.handleOverview)
-	api.API("GET /api/fleet/instances", h.handleInstances)
-	api.APIMutating("POST /api/fleet/instances/{id}/drain", h.handleDrain)
-	api.API("GET /api/fleet/timeseries", h.handleTimeseries)
+	api.Op(opOverview, h.handleOverview)
+	api.Op(opInstances, h.handleInstances)
+	api.Op(opInstanceUpdate, h.handleInstanceUpdate)
+	api.Op(opTimeseries, h.handleTimeseries)
 	// The per-executor sandbox breakdown, one engagement by claim id, and one
 	// sandbox's in-run series — the operator lens whole-host telemetry can't
 	// provide (instance_stats samples the box, these read per-run cgroups and
 	// the engagement's source manifest). All are cross-org reads authorized by
 	// the same operator + FeatureFleet gate as their siblings.
-	api.API("GET /api/fleet/instances/{id}/sandboxes", h.handleInstanceSandboxes)
-	api.API("GET /api/fleet/claims/{id}", h.handleClaim)
-	api.API("GET /api/fleet/claims/{id}/series", h.handleClaimSeries)
+	api.Op(opInstanceSandboxes, h.handleInstanceSandboxes)
+	api.Op(opClaim, h.handleClaim)
+	api.Op(opClaimSeries, h.handleClaimSeries)
 	// The operator backlog (fleet-wide oldest-waiting + per-org shares) is a
 	// distinct surface from core's org-facing GET /api/fleet/queue (the per-org
 	// cap read-out, internal/server/fleet_queue.go) — hence /api/fleet/backlog,
 	// not /api/fleet/queue.
-	api.API("GET /api/fleet/backlog", h.handleBacklog)
+	api.Op(opBacklog, h.handleBacklog)
 }

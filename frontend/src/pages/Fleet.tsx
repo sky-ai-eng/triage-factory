@@ -1022,8 +1022,8 @@ export default function Fleet() {
   const onDrain = useCallback(async (id: string, draining: boolean) => {
     setDrainBusy(id)
     try {
-      await apiFetch(`/api/fleet/instances/${encodeURIComponent(id)}/drain`, {
-        method: 'POST',
+      await apiFetch(`/api/fleet/instances/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ draining }),
       })

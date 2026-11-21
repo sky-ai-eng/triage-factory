@@ -373,11 +373,11 @@ func (f *toggleableInstanceStore) Get(context.Context, string) (*domain.Instance
 	return nil, nil
 }
 func (f *toggleableInstanceStore) List(context.Context) ([]domain.Instance, error) { return nil, nil }
-func (f *toggleableInstanceStore) SetDraining(context.Context, string, bool) (bool, error) {
-	return false, nil
+func (f *toggleableInstanceStore) SetDraining(context.Context, string, bool) (*domain.Instance, error) {
+	return nil, nil
 }
-func (f *toggleableInstanceStore) SetDrainUntilRestart(context.Context, string) (bool, error) {
-	return false, nil
+func (f *toggleableInstanceStore) SetDrainUntilRestart(context.Context, string) (*domain.Instance, error) {
+	return nil, nil
 }
 func (f *toggleableInstanceStore) DeleteStaleSystem(context.Context, time.Duration) (int, error) {
 	return 0, nil
@@ -421,11 +421,11 @@ func (f *delayedInstanceStore) Get(context.Context, string) (*domain.Instance, e
 	return nil, nil
 }
 func (f *delayedInstanceStore) List(context.Context) ([]domain.Instance, error) { return nil, nil }
-func (f *delayedInstanceStore) SetDraining(context.Context, string, bool) (bool, error) {
-	return false, nil
+func (f *delayedInstanceStore) SetDraining(context.Context, string, bool) (*domain.Instance, error) {
+	return nil, nil
 }
-func (f *delayedInstanceStore) SetDrainUntilRestart(context.Context, string) (bool, error) {
-	return false, nil
+func (f *delayedInstanceStore) SetDrainUntilRestart(context.Context, string) (*domain.Instance, error) {
+	return nil, nil
 }
 func (f *delayedInstanceStore) DeleteStaleSystem(context.Context, time.Duration) (int, error) {
 	return 0, nil

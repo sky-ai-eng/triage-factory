@@ -52,12 +52,17 @@ func newSSODomainsHandler(tx db.TxRunner, az *authz.Checker) *ssoDomainsHandler 
 }
 
 type ssoDomainJSON struct {
-	ID         string     `json:"id"`
-	Domain     string     `json:"domain"`
-	TXTHost    string     `json:"txt_host"`
-	TXTValue   string     `json:"txt_value"`
-	Status     string     `json:"status"`
-	VerifiedAt *time.Time `json:"verified_at,omitempty"`
+	ID         string     `json:"id" doc:"The domain claim's id."`
+	Domain     string     `json:"domain" doc:"The claimed domain, in lowercase."`
+	TXTHost    string     `json:"txt_host" doc:"The DNS name the verification TXT record goes under."`
+	TXTValue   string     `json:"txt_value" doc:"The value the verification TXT record must hold."`
+	Status     string     `json:"status" doc:"pending until the domain is verified, then verified."`
+	VerifiedAt *time.Time `json:"verified_at,omitempty" doc:"When the domain was verified, as an RFC 3339 timestamp, absent while it is pending."`
+}
+
+// ssoDomainDeleteResponse is the body of DELETE /api/sso/domains/{id}.
+type ssoDomainDeleteResponse struct {
+	Status string `json:"status" doc:"Always deleted."`
 }
 
 func (h *ssoDomainsHandler) gate(w http.ResponseWriter, r *http.Request) (orgID, userID string, ok bool) {
@@ -90,6 +95,21 @@ func (h *ssoDomainsHandler) gate(w http.ResponseWriter, r *http.Request) (orgID,
 	return orgID, userID, true
 }
 
+// ssoDomainClaimRequest is the body of POST /api/sso/domains.
+type ssoDomainClaimRequest struct {
+	Domain string `json:"domain" doc:"The domain to claim, a bare domain such as example.com, compared without regard to case. Required."`
+}
+
+var opDomainClaim = httpx.NewJSONOp[ssoDomainClaimRequest, ssoDomainJSON](httpx.OpSpec{
+	Pattern:       "POST /api/sso/domains",
+	ID:            "create_sso_domain",
+	Summary:       "Claim an email domain for SSO",
+	Description:   "Claims an email domain for the organization's SSO connection and returns it pending, with the DNS TXT record that verifies it; a domain the organization has already claimed is returned as it is, with status 200. The organization must have a connection." + ssoAccess,
+	Status:        http.StatusCreated,
+	OtherStatuses: []int{http.StatusOK},
+	Hints:         httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintNo, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
+
 // POST /api/sso/domains  body: { "domain": "<domain>" }
 func (h *ssoDomainsHandler) handleDomainClaim(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := h.gate(w, r)
@@ -97,15 +117,13 @@ func (h *ssoDomainsHandler) handleDomainClaim(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	var body struct {
-		Domain string `json:"domain"`
-	}
-	if !httpx.DecodeJSONStrict(w, r, &body) {
+	body, ok := opDomainClaim.Decode(w, r)
+	if !ok {
 		return
 	}
 	domainName, valid := normalizeSSODomain(body.Domain)
 	if !valid {
-		httpx.BadRequest(w, "domain must be a bare domain like example.com")
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: "domain must be a bare domain like example.com", Field: "domain"})
 		return
 	}
 
@@ -184,7 +202,7 @@ func (h *ssoDomainsHandler) handleDomainClaim(w http.ResponseWriter, r *http.Req
 				return
 			}
 			if raced.ID != "" {
-				httpx.WriteJSON(w, http.StatusOK, raced)
+				opDomainClaim.WriteStatus(w, http.StatusOK, raced)
 				return
 			}
 		}
@@ -200,8 +218,16 @@ func (h *ssoDomainsHandler) handleDomainClaim(w http.ResponseWriter, r *http.Req
 	if created {
 		status = http.StatusCreated
 	}
-	httpx.WriteJSON(w, status, resp)
+	opDomainClaim.WriteStatus(w, status, resp)
 }
+
+var opDomainList = httpx.NewJSONOp[httpx.NoBody, []ssoDomainJSON](httpx.OpSpec{
+	Pattern:     "GET /api/sso/domains",
+	ID:          "list_sso_domains",
+	Summary:     "List claimed SSO domains",
+	Description: "Returns every email domain the organization has claimed for SSO, pending or verified, with the DNS TXT record that verifies each." + ssoAccess,
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // GET /api/sso/domains
 func (h *ssoDomainsHandler) handleDomainList(w http.ResponseWriter, r *http.Request) {
@@ -224,8 +250,17 @@ func (h *ssoDomainsHandler) handleDomainList(w http.ResponseWriter, r *http.Requ
 	for i := range domains {
 		out[i] = ssoDomainToJSON(&domains[i])
 	}
-	httpx.WriteJSON(w, http.StatusOK, out)
+	opDomainList.Write(w, out)
 }
+
+var opDomainVerify = httpx.NewJSONOp[httpx.NoBody, ssoDomainJSON](httpx.OpSpec{
+	Pattern:     "POST /api/sso/domains/{id}/verify",
+	ID:          "verify_sso_domain",
+	Summary:     "Verify a claimed SSO domain",
+	Description: "Looks up the domain's verification TXT record in DNS and, when it holds the expected value, marks the domain verified, so people with an address at it can join the organization by signing in through SSO. Returns the domain; one already verified is returned without a lookup." + ssoAccess,
+	PathParams:  map[string]string{"id": "The domain claim's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintNo, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // POST /api/sso/domains/{id}/verify
 func (h *ssoDomainsHandler) handleDomainVerify(w http.ResponseWriter, r *http.Request) {
@@ -235,7 +270,7 @@ func (h *ssoDomainsHandler) handleDomainVerify(w http.ResponseWriter, r *http.Re
 	}
 	id := r.PathValue("id")
 	if _, err := uuid.Parse(id); err != nil {
-		httpx.NotFound(w, "sso connection")
+		httpx.NotFound(w, "sso domain")
 		return
 	}
 
@@ -249,11 +284,11 @@ func (h *ssoDomainsHandler) handleDomainVerify(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if claim == nil {
-		httpx.NotFound(w, "sso connection")
+		httpx.NotFound(w, "sso domain")
 		return
 	}
 	if claim.VerifiedAt != nil {
-		httpx.WriteJSON(w, http.StatusOK, ssoDomainToJSON(claim))
+		opDomainVerify.Write(w, ssoDomainToJSON(claim))
 		return
 	}
 
@@ -314,12 +349,21 @@ func (h *ssoDomainsHandler) handleDomainVerify(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if verified == nil {
-		httpx.NotFound(w, "sso connection")
+		httpx.NotFound(w, "sso domain")
 		return
 	}
 	ssoLog.Info("sso domain verified", "org", orgID, "domain", verified.Domain, "id", verified.ID)
-	httpx.WriteJSON(w, http.StatusOK, ssoDomainToJSON(verified))
+	opDomainVerify.Write(w, ssoDomainToJSON(verified))
 }
+
+var opDomainDelete = httpx.NewJSONOp[httpx.NoBody, ssoDomainDeleteResponse](httpx.OpSpec{
+	Pattern:     "DELETE /api/sso/domains/{id}",
+	ID:          "delete_sso_domain",
+	Summary:     "Remove a claimed SSO domain",
+	Description: "Removes one of the organization's claimed domains. The last verified domain cannot be removed while the organization requires SSO." + ssoAccess,
+	PathParams:  map[string]string{"id": "The domain claim's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // DELETE /api/sso/domains/{id}
 func (h *ssoDomainsHandler) handleDomainDelete(w http.ResponseWriter, r *http.Request) {
@@ -329,7 +373,7 @@ func (h *ssoDomainsHandler) handleDomainDelete(w http.ResponseWriter, r *http.Re
 	}
 	id := r.PathValue("id")
 	if _, err := uuid.Parse(id); err != nil {
-		httpx.NotFound(w, "sso connection")
+		httpx.NotFound(w, "sso domain")
 		return
 	}
 
@@ -383,10 +427,10 @@ func (h *ssoDomainsHandler) handleDomainDelete(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if !existed {
-		httpx.NotFound(w, "sso connection")
+		httpx.NotFound(w, "sso domain")
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+	opDomainDelete.Write(w, ssoDomainDeleteResponse{Status: "deleted"})
 }
 
 // lastVerifiedWhileEnforced reports whether domainID is the org's only

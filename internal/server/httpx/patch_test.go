@@ -7,13 +7,21 @@ import (
 )
 
 // TestPatchValue_TypeFaultMessages pins that a PATCH reader words a type
-// fault as the strict body decode does, with null offered as well, so a
-// refused number names the rule it broke here too.
+// fault as the strict body decode does, with null offered as well unless the
+// field has no unset state, so a refused number names the rule it broke here
+// too.
 func TestPatchValue_TypeFaultMessages(t *testing.T) {
 	readInt := func(v *Validation, raw json.RawMessage) { PatchInt(v, raw, "n") }
 	readFloat := func(v *Validation, raw json.RawMessage) { PatchFloat(v, raw, "n") }
 	readBool := func(v *Validation, raw json.RawMessage) { PatchBool(v, raw, "n") }
 	readStrings := func(v *Validation, raw json.RawMessage) { PatchStrings(v, raw, "n") }
+	readNonNullBool := func(v *Validation, raw json.RawMessage) {
+		var p Patch[bool]
+		if err := json.Unmarshal(raw, &p); err != nil {
+			t.Fatal(err)
+		}
+		p.ReadNonNull(v, "n")
+	}
 	cases := []struct {
 		name string
 		read func(*Validation, json.RawMessage)
@@ -27,6 +35,7 @@ func TestPatchValue_TypeFaultMessages(t *testing.T) {
 		{"float out of range", readFloat, `1e400`, "n must be a number from -1.7976931348623157e+308 to 1.7976931348623157e+308, or null"},
 		{"bool given a string", readBool, `"yes"`, "n must be true or false, or null"},
 		{"strings given a bad element", readStrings, `["a", 1]`, "n must be an array of strings, or null"},
+		{"non-null bool given a string", readNonNullBool, `"yes"`, "n must be true or false"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
