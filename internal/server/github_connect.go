@@ -764,7 +764,7 @@ func (s *Server) handleGitHubIdentityPAT(w http.ResponseWriter, r *http.Request)
 	}
 	ghWeb, okHost := resolveGitHubHost(orgSet.GitHubBaseURL)
 	if !okHost {
-		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonNotConfigured, Message: "Your organization's GitHub URL looks misconfigured. Ask your admin to fix it in organization settings.", Field: "github_pat"})
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonNotConfigured, Message: "Your organization's GitHub URL looks misconfigured. Ask your admin to fix it in organization settings."})
 		return
 	}
 
@@ -773,22 +773,22 @@ func (s *Server) handleGitHubIdentityPAT(w http.ResponseWriter, r *http.Request)
 		// Keep the two failure shapes distinct, like the Connect flow: a host we
 		// couldn't reach (infra) vs. a token the host rejected (your action).
 		if errors.Is(err, auth.ErrGitHubHostUnreachable) {
-			httpx.WriteErrors(w, http.StatusBadGateway, httpx.ErrorItem{Reason: httpx.ReasonUpstreamUnavailable, Message: fmt.Sprintf("Couldn't reach %s. This is a connectivity issue between Triage Factory and your GitHub server, not the token — try again.", ghWeb), Field: "github_pat"})
+			httpx.WriteErrors(w, http.StatusBadGateway, httpx.ErrorItem{Reason: httpx.ReasonUpstreamUnavailable, Message: fmt.Sprintf("Couldn't reach %s. This is a connectivity issue between Triage Factory and your GitHub server, not the token — try again.", ghWeb)})
 			return
 		}
 		if errors.Is(err, errGitHubNoLogin) {
-			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "GitHub didn't return a username for that token.", Field: "github_pat"})
+			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "GitHub didn't return a username for that token.", Field: "pat"})
 			return
 		}
 		if errors.Is(err, auth.ErrGitHubEmailPermission) {
-			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "That token needs read access to your GitHub email addresses. For a classic token, add the user:email scope.", Field: "github_pat"})
+			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "That token needs read access to your GitHub email addresses. For a classic token, add the user:email scope.", Field: "pat"})
 			return
 		}
 		if errors.Is(err, auth.ErrGitHubPrimaryEmailUnavailable) {
-			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "GitHub did not return a verified primary email for that account.", Field: "github_pat"})
+			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "GitHub did not return a verified primary email for that account.", Field: "pat"})
 			return
 		}
-		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "That token didn't validate against " + ghWeb + ". Double-check it and try again.", Field: "github_pat"})
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "That token didn't validate against " + ghWeb + ". Double-check it and try again.", Field: "pat"})
 		return
 	}
 

@@ -763,29 +763,32 @@ func TestGitHubIdentityPAT_BindsIdentityAndDiscardsToken(t *testing.T) {
 }
 
 // TestGitHubIdentityPAT_Refusals: an empty token is a 400 before any host call,
-// a token the host rejects is the caller's 422, an unreachable host is a 502,
-// and none of them writes an identity.
+// an org whose GitHub URL is malformed is a 409, a token the host rejects is the caller's
+// 422, an unreachable host is a 502, and none of them writes an identity. Only
+// the faults that are the token's name it as the field.
 func TestGitHubIdentityPAT_Refusals(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		host   func(t *testing.T) string
 		pat    string
 		status int
+		field  string
 	}{
-		{"empty token", func(t *testing.T) string { return "" }, "   ", http.StatusBadRequest},
+		{"empty token", func(t *testing.T) string { return "" }, "   ", http.StatusBadRequest, "pat"},
+		{"malformed GitHub URL", func(t *testing.T) string { return "ftp://github.example" }, "ghp_whatever", http.StatusConflict, ""},
 		{"token rejected", func(t *testing.T) string {
 			ghStub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)
 			}))
 			t.Cleanup(ghStub.Close)
 			return ghStub.URL
-		}, "ghp_bad", http.StatusUnprocessableEntity},
+		}, "ghp_bad", http.StatusUnprocessableEntity, "pat"},
 		{"host unreachable", func(t *testing.T) string {
 			// Claim a port, then close it so dials are refused.
 			dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 			dead.Close()
 			return dead.URL
-		}, "ghp_whatever", http.StatusBadGateway},
+		}, "ghp_whatever", http.StatusBadGateway, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			runmode.SetForTest(t, runmode.ModeLocal)
@@ -801,6 +804,9 @@ func TestGitHubIdentityPAT_Refusals(t *testing.T) {
 				map[string]any{"pat": tc.pat})
 			if rec.Code != tc.status {
 				t.Fatalf("status=%d body=%s, want %d", rec.Code, rec.Body.String(), tc.status)
+			}
+			if got := errorItems(t, rec)[0].Field; got != tc.field {
+				t.Errorf("field = %q, want %q", got, tc.field)
 			}
 			if host == "" {
 				return
