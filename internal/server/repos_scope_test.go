@@ -516,7 +516,7 @@ func TestHandleRepoRegister_GateAndTrack_Postgres(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("team admin PUT = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
-	var saved teamReposPutResponse
+	var saved teamReposResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &saved); err != nil {
 		t.Fatalf("decode: %v", err)
 	}

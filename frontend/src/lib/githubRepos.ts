@@ -86,6 +86,13 @@ export async function refreshReachableRepos(): Promise<void> {
   await apiFetch('/api/github/repos/refresh', { method: 'POST' })
 }
 
+/** profileRepositories asks the server to profile every repository the org
+ *  tracks again, fresh profiles included. It returns as soon as the pass is
+ *  accepted; the profiles land out of band. */
+export async function profileRepositories(): Promise<void> {
+  await apiFetch('/api/repos/profile', { method: 'POST' })
+}
+
 /** A repository as a team's tracked set names it. GET and PUT
  *  /api/teams/{id}/github-repos answer in this shape: `id` is the registry row
  *  id the PUT takes, `github_id` is GitHub's id ('' while TF has not learned

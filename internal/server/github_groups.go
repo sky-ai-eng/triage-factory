@@ -66,19 +66,16 @@ type gitHubGroupCandidateJSON struct {
 }
 
 // teamGitHubGroupsResponse is the team's stored mapping set, the resource the
-// PUT replaces.
+// PUT replaces, which the PUT echoes as stored.
 type teamGitHubGroupsResponse struct {
 	Groups []gitHubGroupJSON `json:"groups" doc:"The GitHub teams this team is mapped to on the organization's GitHub host."`
-	// Role is the caller's role in this team ("admin"/"member"/""), so
-	// the editor can disable Save for non-admins without a second call.
-	Role string `json:"role" doc:"The caller's role in the team: admin, member, or empty when the caller is not on it."`
 }
 
 var opTeamGitHubGroupsGet = httpx.NewJSONOp[httpx.NoBody, teamGitHubGroupsResponse](httpx.OpSpec{
 	Pattern:     "GET /api/teams/{team_id}/github-groups",
 	ID:          "get_team_github_groups",
 	Summary:     "Get a team's GitHub team mappings",
-	Description: "Returns the GitHub teams this team is mapped to on the organization's GitHub host, with the caller's role in the team. A caller who is not on the team gets no mappings.",
+	Description: "Returns the GitHub teams this team is mapped to on the organization's GitHub host. A caller who is not on the team gets no mappings.",
 	PathParams:  map[string]string{"team_id": teamIDPathDoc},
 	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
 })
@@ -103,11 +100,6 @@ func (s *Server) handleTeamGitHubGroupsGet(w http.ResponseWriter, r *http.Reques
 	if !s.az.VerifyTeamInOrg(w, r, orgID, userID, teamID) {
 		return
 	}
-	_, role, err := s.az.TeamMemberCountAndRole(r.Context(), orgID, userID, teamID)
-	if err != nil {
-		internalError(w, "teams/github-groups", err)
-		return
-	}
 	// The team's mappings are read on the org's current GitHub host: an org
 	// login on a host the org has left names another organization.
 	host, err := s.orgGitHubHost(r.Context(), orgID)
@@ -120,7 +112,7 @@ func (s *Server) handleTeamGitHubGroupsGet(w http.ResponseWriter, r *http.Reques
 		internalError(w, "teams/github-groups", err)
 		return
 	}
-	opTeamGitHubGroupsGet.Write(w, teamGitHubGroupsResponse{Groups: toGitHubGroupJSON(groups), Role: role})
+	opTeamGitHubGroupsGet.Write(w, teamGitHubGroupsResponse{Groups: toGitHubGroupJSON(groups)})
 }
 
 // teamGitHubGroupsOnHost reads the team's stored mappings on host through RLS,
@@ -498,7 +490,7 @@ func (s *Server) handleTeamGitHubGroupsPut(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	opTeamGitHubGroupsPut.Write(w, teamGitHubGroupsPutResponse{Groups: toGitHubGroupJSON(stored)})
+	opTeamGitHubGroupsPut.Write(w, teamGitHubGroupsResponse{Groups: toGitHubGroupJSON(stored)})
 }
 
 // teamGitHubGroupsPutRequest is the desired set. GitHubTeamIDs is a pointer
@@ -508,12 +500,7 @@ type teamGitHubGroupsPutRequest struct {
 	GitHubTeamIDs *[]string `json:"github_team_ids" doc:"GitHub's ids for every GitHub team this team is to be mapped to, each named once; an empty array removes every mapping, and the field is required."`
 }
 
-// teamGitHubGroupsPutResponse echoes the set as stored, in the GET's shape.
-type teamGitHubGroupsPutResponse struct {
-	Groups []gitHubGroupJSON `json:"groups" doc:"The GitHub teams this team is mapped to, as stored."`
-}
-
-var opTeamGitHubGroupsPut = httpx.NewJSONOp[teamGitHubGroupsPutRequest, teamGitHubGroupsPutResponse](httpx.OpSpec{
+var opTeamGitHubGroupsPut = httpx.NewJSONOp[teamGitHubGroupsPutRequest, teamGitHubGroupsResponse](httpx.OpSpec{
 	Pattern:     "PUT /api/teams/{team_id}/github-groups",
 	ID:          "replace_team_github_groups",
 	Summary:     "Replace a team's GitHub team mappings",

@@ -94,15 +94,11 @@ type githubRepoJSON struct {
 }
 
 // githubRepoListResponse is the list envelope plus the readiness discriminator.
-//
-// next_page_token carries no omitempty, unlike httpx's shared envelope: this
-// route promises the same keys in both readiness states, and a discovering
-// response has no next page by construction. "" and absent mean the same thing
-// to every client (the API client normalizes a missing token to ""), so the
-// only difference is that a reader can tell the two states apart field-for-field.
+// next_page_token is omitted on the last page, as httpx's shared envelope
+// omits it, and a discovering response is a last page by construction.
 type githubRepoListResponse struct {
 	Items         []githubRepoJSON `json:"items" doc:"The repositories of this page, as an empty array when it has none."`
-	NextPageToken string           `json:"next_page_token" doc:"The page_token that reads the next page, empty on the last page."`
+	NextPageToken string           `json:"next_page_token,omitempty" doc:"The page_token that reads the next page, absent on the last page."`
 	// TotalCount is what the filter matches across every page — a real number
 	// on both credential classes, which is the whole point of sourcing this
 	// locally. It is never null here; a proxy list's "this resource cannot count
@@ -270,6 +266,72 @@ func (s *Server) handleGitHubReposRefresh(w http.ResponseWriter, r *http.Request
 	}
 	s.kickReachRefresh(orgID, true)
 	opGitHubRepoRefresh.Write(w, githubRepoRefreshResponse{Status: "refreshing"})
+}
+
+// repoProfileResponse is the body of POST /api/repos/profile.
+type repoProfileResponse struct {
+	Status string `json:"status" doc:"Always profiling: the pass has been asked for and runs after the response."`
+}
+
+var opRepoProfile = httpx.NewJSONOp[httpx.NoBody, repoProfileResponse](httpx.OpSpec{
+	Pattern:     "POST /api/repos/profile",
+	ID:          "profile_repositories",
+	Summary:     "Profile the tracked repositories again",
+	Description: "Starts a pass that profiles every repository a team in the organization tracks on its GitHub host, those profiled in the last three days included, and answers before the pass runs; calls made while a pass is waiting to start add no second one. Each profile is written from the repository's files on GitHub by the organization's background-jobs model, and replaces the stored one.",
+	Status:      http.StatusAccepted,
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintNo, OpenWorld: httpx.HintYes},
+})
+
+// handleRepoProfile forces a profiling pass past the TTL over every repository
+// the org tracks.
+//
+// A verb route, because it is process control over a background pass that
+// calls GitHub and the org's model: there is no field whose write means "run
+// it again". Profiling is per org, so the route is addressed at the org's
+// repositories rather than at one team's tracked set, and gated to who may
+// track anything at all (an org admin or the admin of a team), the audience
+// registering a repository has.
+//
+// POST /api/repos/profile
+func (s *Server) handleRepoProfile(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := s.requireOrg(w, r)
+	if !ok {
+		return
+	}
+	userID := ClaimsFrom(r.Context()).Subject
+
+	isAdmin, err := s.isOrgAdmin(r.Context(), orgID, userID)
+	if err != nil {
+		internalError(w, "repos", err)
+		return
+	}
+	if !isAdmin {
+		teamAdmin, err := s.az.UserAdministersATeam(r.Context(), userID, orgID)
+		if err != nil {
+			internalError(w, "repos", err)
+			return
+		}
+		if !teamAdmin {
+			forbidden(w, "profiling repositories requires an org admin or the admin of a team")
+			return
+		}
+	}
+	// An org with no GitHub URL tracks nothing to profile, so asking is
+	// answered as the other writes that need a host answer it.
+	if _, ok := s.requireOrgGitHubHost(r.Context(), w, orgID, "repos"); !ok {
+		return
+	}
+	if s.profilerTrigger == nil {
+		// No profiler wired: this process cannot ask for a pass and must not
+		// report that it did.
+		httpx.WriteErrors(w, http.StatusServiceUnavailable, httpx.ErrorItem{
+			Reason:  httpx.ReasonNotConfigured,
+			Message: "repository profiling is not configured on this server",
+		})
+		return
+	}
+	s.profilerTrigger(orgID, true)
+	opRepoProfile.Write(w, repoProfileResponse{Status: "profiling"})
 }
 
 // pickerPreflight is what the configuration check established. class is the
@@ -1404,6 +1466,7 @@ func (s *Server) registerRepoRoutes() {
 	// Registration by GitHub id: how a repository the picker offers gets the
 	// registry id a team's tracked set is written with.
 	s.op(opRepoRegister, s.handleRepoRegister)
+	s.op(opRepoProfile, s.handleRepoProfile)
 	// Addressed by the registry row id, which is what every repo payload
 	// carries. by-name is the slug-accepting read the API rules give a
 	// resource with a unique name, and the only one: the writes take the id

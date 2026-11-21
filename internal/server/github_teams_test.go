@@ -312,7 +312,7 @@ func groupsCandidateServer(t *testing.T, srv *Server, calls *int) {
 func putGitHubGroups(t *testing.T, srv *Server, ids ...string) []gitHubGroupJSON {
 	t.Helper()
 	rec := doJSON(t, srv, http.MethodPut, "/api/teams/default/github-groups", map[string]any{"github_team_ids": ids})
-	var out teamGitHubGroupsPutResponse
+	var out teamGitHubGroupsResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil || rec.Code != http.StatusOK {
 		t.Fatalf("github-groups PUT %v = %d, want 200; body=%s", ids, rec.Code, rec.Body.String())
 	}

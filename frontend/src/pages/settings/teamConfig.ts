@@ -151,7 +151,6 @@ export interface TeamSettingsData {
 // TeamReposData mirrors GET /api/teams/{id}/github-repos.
 export interface TeamReposData {
   repos: RepoRef[]
-  role: string
 }
 
 // TeamGitHubGroupsData mirrors GET /api/teams/{id}/github-groups — the saved
@@ -159,7 +158,6 @@ export interface TeamReposData {
 // are a list route of their own (listGitHubTeams).
 export interface TeamGitHubGroupsData {
   groups: GitHubGroup[]
-  role: string
 }
 
 /** watchedProject is a catalog candidate just added to the tracked set: named
@@ -707,9 +705,7 @@ export type TeamReposSaveResult = { ok: true; repos: RepoRef[] } | { ok: false; 
 // saveTeamRepos persists the tracked-repo set via
 // PUT /api/teams/{id}/github-repos, which names repositories by registry id.
 // A ref picked from the reachable list has none yet, so it is registered by
-// its GitHub id first (POST /api/repos). Re-PUTting the same set re-triggers
-// profiling, so callers that save unconditionally (vs. only-on-change) should
-// be aware.
+// its GitHub id first (POST /api/repos).
 export async function saveTeamRepos(
   teamId: string,
   repos: RepoRef[],

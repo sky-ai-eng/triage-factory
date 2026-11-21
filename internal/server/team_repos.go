@@ -62,11 +62,11 @@ type trackedRepoJSON struct {
 	RetiredAt *string `json:"retired_at" doc:"When the repository was retired because GitHub no longer serves it to the organization, as an RFC 3339 timestamp, or null; a retired repository stays tracked until a save leaves it out, and is not polled."`
 }
 
+// teamReposResponse is the tracked set, in the shape the GET serves and the PUT
+// echoes as stored, so a client renders the current names rather than what it
+// last read.
 type teamReposResponse struct {
 	Repos []trackedRepoJSON `json:"repos" doc:"The repositories the team tracks on the organization's GitHub host."`
-	// Role is the caller's role in this team ("admin"/"member"/""), so
-	// the picker can disable Save for non-admins without a second call.
-	Role string `json:"role" doc:"The caller's role in the team: admin, member, or empty when the caller is not on it."`
 }
 
 // teamReposPutRequest is the desired set. RepositoryIDs is a pointer because
@@ -76,12 +76,6 @@ type teamReposPutRequest struct {
 	RepositoryIDs *[]string `json:"repository_ids" doc:"The ids in Triage Factory of every repository the team is to track, each named once; an empty array untracks them all, and the field is required."`
 }
 
-// teamReposPutResponse echoes the set as stored, in the GET's shape, so a
-// client renders the current names rather than what it last read.
-type teamReposPutResponse struct {
-	Repos []trackedRepoJSON `json:"repos" doc:"The repositories the team tracks, as stored."`
-}
-
 // teamIDPathDoc documents {team_id} on every tracked-set route.
 const teamIDPathDoc = "The team's id, or default for the one team in local mode."
 
@@ -89,18 +83,18 @@ var opTeamReposGet = httpx.NewJSONOp[httpx.NoBody, teamReposResponse](httpx.OpSp
 	Pattern:     "GET /api/teams/{team_id}/github-repos",
 	ID:          "get_team_github_repositories",
 	Summary:     "Get a team's tracked GitHub repositories",
-	Description: "Returns the repositories the team tracks on the organization's GitHub host, retired ones included, with the caller's role in the team. A caller who is not on the team gets no repositories.",
+	Description: "Returns the repositories the team tracks on the organization's GitHub host, retired ones included. A caller who is not on the team gets no repositories.",
 	PathParams:  map[string]string{"team_id": teamIDPathDoc},
 	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
 })
 
-var opTeamReposPut = httpx.NewJSONOp[teamReposPutRequest, teamReposPutResponse](httpx.OpSpec{
+var opTeamReposPut = httpx.NewJSONOp[teamReposPutRequest, teamReposResponse](httpx.OpSpec{
 	Pattern:     "PUT /api/teams/{team_id}/github-repos",
 	ID:          "replace_team_github_repositories",
 	Summary:     "Replace a team's tracked GitHub repositories",
-	Description: "Replaces the repositories the team tracks on the organization's GitHub host with the ones the body names, and returns them as stored. A repository being added must be one the organization's GitHub credentials can reach, checked against the recorded list of reachable repositories or, when that list is older than six hours, with GitHub. Every call also starts polling the organization's tracked repositories again and profiling each of them, which reads them from GitHub and describes them with the organization's background-jobs model.",
+	Description: "Replaces the repositories the team tracks on the organization's GitHub host with the ones the body names, and returns them as stored. A repository being added must be one the organization's GitHub credentials can reach, checked against the recorded list of reachable repositories or, when that list is older than six hours, with GitHub. A save also starts polling the organization's tracked repositories again, and profiles each one that has no profile or one older than three days.",
 	PathParams:  map[string]string{"team_id": teamIDPathDoc},
-	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintNo, OpenWorld: httpx.HintYes},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
 })
 
 func (s *Server) handleTeamReposGet(w http.ResponseWriter, r *http.Request) {
@@ -115,12 +109,6 @@ func (s *Server) handleTeamReposGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.az.VerifyTeamInOrg(w, r, orgID, userID, teamID) {
-		return
-	}
-
-	_, role, err := s.az.TeamMemberCountAndRole(r.Context(), orgID, userID, teamID)
-	if err != nil {
-		internalError(w, "teams/github-repos", err)
 		return
 	}
 
@@ -144,10 +132,7 @@ func (s *Server) handleTeamReposGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	opTeamReposGet.Write(w, teamReposResponse{
-		Repos: trackedReposJSON(repos),
-		Role:  role,
-	})
+	opTeamReposGet.Write(w, teamReposResponse{Repos: trackedReposJSON(repos)})
 }
 
 func (s *Server) handleTeamReposPut(w http.ResponseWriter, r *http.Request) {
@@ -263,10 +248,10 @@ func (s *Server) handleTeamReposPut(w http.ResponseWriter, r *http.Request) {
 
 	// Repo set changed → re-due polling so the poller picks up the
 	// reconciled tracked set now (onGitHubChanged evicts the reachable-repo
-	// cache + PollSoon), and force a profiling pass so newly-tracked repos
-	// are profiled immediately rather than after one poll interval. This is
-	// also the path the "Re-profile" button takes (it re-PUTs the current
-	// selection), so the force is what makes that button bypass the TTL.
+	// cache + PollSoon), and ask for a profiling pass so newly-tracked repos
+	// are profiled immediately rather than after one poll interval. The pass
+	// is TTL-gated, so a repeated save re-profiles nothing that is fresh; a
+	// forced pass is its own route (handleRepoProfile).
 	//
 	// This is GitHub-only and no longer touches the Jira poller: onGitHubChanged
 	// shed its old RestartAll (which used to bounce Jira too), so there's no
@@ -276,13 +261,13 @@ func (s *Server) handleTeamReposPut(w http.ResponseWriter, r *http.Request) {
 		go s.onGitHubChanged(orgID)
 	}
 	if s.profilerTrigger != nil {
-		s.profilerTrigger(orgID, true)
+		s.profilerTrigger(orgID, false)
 	}
 	// The tracked set's owners are whose GitHub teams the team checklist
 	// offers, so its next read lists them again.
 	s.gitHubGroupListings.Forget(gitHubGroupListingKey(orgID, host))
 
-	opTeamReposPut.Write(w, teamReposPutResponse{Repos: trackedReposJSON(stored)})
+	opTeamReposPut.Write(w, teamReposResponse{Repos: trackedReposJSON(stored)})
 }
 
 // parseRepositoryIDs validates the PUT body's shape: the field present, and

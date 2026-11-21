@@ -304,7 +304,7 @@
             ]
           },
           "next_page_token": {
-            "description": "The page_token that reads the next page, empty on the last page.",
+            "description": "The page_token that reads the next page, absent on the last page.",
             "type": "string"
           },
           "status": {
@@ -318,7 +318,6 @@
         },
         "required": [
           "items",
-          "next_page_token",
           "total_count",
           "status"
         ],
@@ -993,6 +992,18 @@
         },
         "type": "object"
       },
+      "RepoProfileResponse": {
+        "properties": {
+          "status": {
+            "description": "Always profiling: the pass has been asked for and runs after the response.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
       "RepoRegisterRequest": {
         "properties": {
           "github_id": {
@@ -1433,24 +1444,6 @@
         },
         "type": "object"
       },
-      "TeamGitHubGroupsPutResponse": {
-        "properties": {
-          "groups": {
-            "description": "The GitHub teams this team is mapped to, as stored.",
-            "items": {
-              "$ref": "#/components/schemas/GitHubGroupJSON"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "groups"
-        ],
-        "type": "object"
-      },
       "TeamGitHubGroupsResponse": {
         "properties": {
           "groups": {
@@ -1462,15 +1455,10 @@
               "array",
               "null"
             ]
-          },
-          "role": {
-            "description": "The caller's role in the team: admin, member, or empty when the caller is not on it.",
-            "type": "string"
           }
         },
         "required": [
-          "groups",
-          "role"
+          "groups"
         ],
         "type": "object"
       },
@@ -1555,24 +1543,6 @@
         },
         "type": "object"
       },
-      "TeamReposPutResponse": {
-        "properties": {
-          "repos": {
-            "description": "The repositories the team tracks, as stored.",
-            "items": {
-              "$ref": "#/components/schemas/TrackedRepoJSON"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "repos"
-        ],
-        "type": "object"
-      },
       "TeamReposResponse": {
         "properties": {
           "repos": {
@@ -1584,15 +1554,10 @@
               "array",
               "null"
             ]
-          },
-          "role": {
-            "description": "The caller's role in the team: admin, member, or empty when the caller is not on it.",
-            "type": "string"
           }
         },
         "required": [
-          "repos",
-          "role"
+          "repos"
         ],
         "type": "object"
       },
@@ -2868,6 +2833,42 @@
         }
       }
     },
+    "/api/repos/profile": {
+      "post": {
+        "description": "Starts a pass that profiles every repository a team in the organization tracks on its GitHub host, those profiled in the last three days included, and answers before the pass runs; calls made while a pass is waiting to start add no second one. Each profile is written from the repository's files on GitHub by the organization's background-jobs model, and replaces the stored one.",
+        "operationId": "profile_repositories",
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepoProfileResponse"
+                }
+              }
+            },
+            "description": "Accepted"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Profile the tracked repositories again",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": false,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      }
+    },
     "/api/repos/{id}": {
       "get": {
         "description": "Returns the repository with this id, retired or not, when it is on the organization's GitHub host and the caller can see it: an org admin sees every registered repository there, and anyone else only those their own teams track.",
@@ -3117,7 +3118,7 @@
     },
     "/api/teams/{team_id}/github-groups": {
       "get": {
-        "description": "Returns the GitHub teams this team is mapped to on the organization's GitHub host, with the caller's role in the team. A caller who is not on the team gets no mappings.",
+        "description": "Returns the GitHub teams this team is mapped to on the organization's GitHub host. A caller who is not on the team gets no mappings.",
         "operationId": "get_team_github_groups",
         "parameters": [
           {
@@ -3188,7 +3189,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/TeamGitHubGroupsPutResponse"
+                  "$ref": "#/components/schemas/TeamGitHubGroupsResponse"
                 }
               }
             },
@@ -3272,7 +3273,7 @@
     },
     "/api/teams/{team_id}/github-repos": {
       "get": {
-        "description": "Returns the repositories the team tracks on the organization's GitHub host, retired ones included, with the caller's role in the team. A caller who is not on the team gets no repositories.",
+        "description": "Returns the repositories the team tracks on the organization's GitHub host, retired ones included. A caller who is not on the team gets no repositories.",
         "operationId": "get_team_github_repositories",
         "parameters": [
           {
@@ -3315,7 +3316,7 @@
         }
       },
       "put": {
-        "description": "Replaces the repositories the team tracks on the organization's GitHub host with the ones the body names, and returns them as stored. A repository being added must be one the organization's GitHub credentials can reach, checked against the recorded list of reachable repositories or, when that list is older than six hours, with GitHub. Every call also starts polling the organization's tracked repositories again and profiling each of them, which reads them from GitHub and describes them with the organization's background-jobs model.",
+        "description": "Replaces the repositories the team tracks on the organization's GitHub host with the ones the body names, and returns them as stored. A repository being added must be one the organization's GitHub credentials can reach, checked against the recorded list of reachable repositories or, when that list is older than six hours, with GitHub. A save also starts polling the organization's tracked repositories again, and profiles each one that has no profile or one older than three days.",
         "operationId": "replace_team_github_repositories",
         "parameters": [
           {
@@ -3343,7 +3344,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/TeamReposPutResponse"
+                  "$ref": "#/components/schemas/TeamReposResponse"
                 }
               }
             },
@@ -3364,7 +3365,7 @@
         "summary": "Replace a team's tracked GitHub repositories",
         "x-hints": {
           "destructiveHint": true,
-          "idempotentHint": false,
+          "idempotentHint": true,
           "openWorldHint": true,
           "readOnlyHint": false
         }

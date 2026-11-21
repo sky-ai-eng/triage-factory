@@ -44,7 +44,7 @@ function stub(saved: GitHubGroup[], list: (body: Record<string, unknown>) => Pag
       return Promise.resolve({
         ok: true,
         status: 200,
-        ...jsonBody({ groups: saved, role: 'admin' }),
+        ...jsonBody({ groups: saved }),
       })
     }
     if (path === '/api/teams/t1/github-groups/list') {
