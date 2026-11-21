@@ -243,11 +243,11 @@ func TestInstanceStore_Postgres_SetDrainingAndList(t *testing.T) {
 		t.Fatalf("Register B: %v", err)
 	}
 
-	matched, err := stores.Instances.SetDraining(ctx, idA, true)
+	inst, err := stores.Instances.SetDraining(ctx, idA, true)
 	if err != nil {
 		t.Fatalf("SetDraining(true): %v", err)
 	}
-	if !matched {
+	if inst == nil {
 		t.Fatal("SetDraining should match a registered id")
 	}
 
@@ -269,11 +269,11 @@ func TestInstanceStore_Postgres_SetDrainingAndList(t *testing.T) {
 		t.Errorf("instance %s: Draining = true, want false (never drained)", idB)
 	}
 
-	matched, err = stores.Instances.SetDraining(ctx, idA, false)
+	inst, err = stores.Instances.SetDraining(ctx, idA, false)
 	if err != nil {
 		t.Fatalf("SetDraining(false): %v", err)
 	}
-	if !matched {
+	if inst == nil {
 		t.Fatal("SetDraining(false) should match a registered id")
 	}
 	after, err := stores.Instances.Get(ctx, idA)
@@ -284,12 +284,12 @@ func TestInstanceStore_Postgres_SetDrainingAndList(t *testing.T) {
 		t.Error("expected Draining=false after SetDraining(false)")
 	}
 
-	matched, err = stores.Instances.SetDraining(ctx, "unknown-id", true)
+	inst, err = stores.Instances.SetDraining(ctx, "unknown-id", true)
 	if err != nil {
 		t.Fatalf("SetDraining(unknown): %v", err)
 	}
-	if matched {
-		t.Error("SetDraining against an unregistered id must report matched=false")
+	if inst != nil {
+		t.Errorf("SetDraining against an unregistered id must return no row, got %+v", inst)
 	}
 }
 

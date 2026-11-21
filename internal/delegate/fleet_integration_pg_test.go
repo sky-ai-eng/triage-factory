@@ -341,8 +341,8 @@ func TestFleet_Drain_DrainedInstanceStopsClaimingSurvivorDoesNot(t *testing.T) {
 	sA := newFleetSpawner(t, h, fx, idA)
 	sB := newFleetSpawner(t, h, fx, idB)
 
-	if matched, err := fx.stores.Instances.SetDraining(ctx, idA, true); err != nil || !matched {
-		t.Fatalf("SetDraining(A, true): matched=%v err=%v", matched, err)
+	if inst, err := fx.stores.Instances.SetDraining(ctx, idA, true); err != nil || inst == nil {
+		t.Fatalf("SetDraining(A, true): inst=%+v err=%v", inst, err)
 	}
 
 	if !sA.heartbeatOnce(ctx) {

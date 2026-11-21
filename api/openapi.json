@@ -1042,23 +1042,6 @@
         ],
         "type": "object"
       },
-      "InstanceDrainState": {
-        "properties": {
-          "draining": {
-            "description": "Whether the instance is now draining.",
-            "type": "boolean"
-          },
-          "id": {
-            "description": "The instance's id.",
-            "type": "string"
-          }
-        },
-        "required": [
-          "id",
-          "draining"
-        ],
-        "type": "object"
-      },
       "InstanceUpdateRequest": {
         "properties": {
           "draining": {
@@ -3449,7 +3432,7 @@
     },
     "/api/fleet/instances/{id}": {
       "patch": {
-        "description": "Sets whether an instance is draining, and returns the drain state it set. A draining instance starts no new work and lets its running work finish, and the drain lasts across restarts until it is undrained. It answers only the deployment's operators, needs an Enterprise licence that includes fleet administration, and refuses API tokens.",
+        "description": "Sets whether an instance is draining, and returns the instance as the instance list shows it. A draining instance starts no new work and lets its running work finish, and the drain lasts across restarts until it is undrained. It answers only the deployment's operators, needs an Enterprise licence that includes fleet administration, and refuses API tokens.",
         "operationId": "update_fleet_instance",
         "parameters": [
           {
@@ -3477,7 +3460,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/InstanceDrainState"
+                  "$ref": "#/components/schemas/InstanceDTO"
                 }
               }
             },

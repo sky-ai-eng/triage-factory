@@ -715,8 +715,8 @@ func TestFleet_CrossExecutorResume_WaitsOutTheLiveWriter(t *testing.T) {
 	// X is draining, so placement spills the resume to Y at once; the
 	// writer's heartbeat stays live, so the persist is still coming.
 	xID, _ := f.x.executorIdentity()
-	if matched, err := f.stores.Instances.SetDraining(context.Background(), xID, true); err != nil || !matched {
-		t.Fatalf("drain X: matched=%v err=%v", matched, err)
+	if inst, err := f.stores.Instances.SetDraining(context.Background(), xID, true); err != nil || inst == nil {
+		t.Fatalf("drain X: inst=%+v err=%v", inst, err)
 	}
 	next := f.claim(t, f.y)
 	if next == nil {

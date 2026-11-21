@@ -269,11 +269,11 @@ func TestInstanceStore_SQLite_SetDrainingAndList(t *testing.T) {
 		t.Fatalf("Register: %v", err)
 	}
 
-	matched, err := stores.Instances.SetDraining(ctx, id, true)
+	inst, err := stores.Instances.SetDraining(ctx, id, true)
 	if err != nil {
 		t.Fatalf("SetDraining(true): %v", err)
 	}
-	if !matched {
+	if inst == nil {
 		t.Fatal("SetDraining should match a registered id")
 	}
 
@@ -285,12 +285,12 @@ func TestInstanceStore_SQLite_SetDrainingAndList(t *testing.T) {
 		t.Fatalf("List = %+v, want exactly one drained row", rows)
 	}
 
-	matched, err = stores.Instances.SetDraining(ctx, "unknown-id", true)
+	inst, err = stores.Instances.SetDraining(ctx, "unknown-id", true)
 	if err != nil {
 		t.Fatalf("SetDraining(unknown): %v", err)
 	}
-	if matched {
-		t.Error("SetDraining against an unregistered id must report matched=false")
+	if inst != nil {
+		t.Errorf("SetDraining against an unregistered id must return no row, got %+v", inst)
 	}
 }
 

@@ -310,41 +310,50 @@ func (h *handler) handleInstances(w http.ResponseWriter, r *http.Request) {
 		httpx.InternalError(w, "fleet-instances", err)
 		return
 	}
-	// Latest telemetry sample per instance from the last few minutes.
-	latest := h.latestSamples(ctx, now.Add(-5*time.Minute))
+	latest := h.latestSamples(ctx, now.Add(-latestSampleWindow))
 
 	out := make([]instanceDTO, 0, len(instances))
 	for _, inst := range instances {
-		age := now.Sub(inst.LastHeartbeatAt)
-		d := instanceDTO{
-			ID:            inst.ID,
-			Role:          inst.Role,
-			Version:       inst.Version,
-			BootEpoch:     inst.BootEpoch,
-			StartedAt:     inst.StartedAt,
-			LastHeartbeat: inst.LastHeartbeatAt,
-			HeartbeatAgeS: age.Seconds(),
-			Stale:         age > staleAfter,
-			Draining:      inst.Draining,
-			DispatchGated: inst.DispatchGated,
-			MaxRuns:       inst.MaxRuns,
-			ActiveRuns:    inst.ActiveRuns,
-			MemTotalMB:    inst.MemTotalMB,
-			MemAvailMB:    inst.MemAvailableMB,
-		}
-		if s, ok := latest[inst.ID]; ok {
-			d.CPUPct = s.CPUPct
-			d.Load1 = s.Load1
-			d.ClaimsMin = s.Claims
-			d.SpawnP50MS = s.SpawnP50MS
-		}
-		out = append(out, d)
+		out = append(out, toInstanceDTO(inst, latest, now))
 	}
 	opInstances.Write(w, instancesDTO{
 		GeneratedAt: now,
 		StaleAfterS: staleAfter.Seconds(),
 		Instances:   out,
 	})
+}
+
+// latestSampleWindow is how far back an instance's view looks for its latest
+// telemetry sample; the instance fields' docs name it.
+const latestSampleWindow = 5 * time.Minute
+
+// toInstanceDTO renders one registry row with its latest telemetry sample,
+// when latest holds one for it.
+func toInstanceDTO(inst domain.Instance, latest map[string]domain.InstanceStat, now time.Time) instanceDTO {
+	age := now.Sub(inst.LastHeartbeatAt)
+	d := instanceDTO{
+		ID:            inst.ID,
+		Role:          inst.Role,
+		Version:       inst.Version,
+		BootEpoch:     inst.BootEpoch,
+		StartedAt:     inst.StartedAt,
+		LastHeartbeat: inst.LastHeartbeatAt,
+		HeartbeatAgeS: age.Seconds(),
+		Stale:         age > staleAfter,
+		Draining:      inst.Draining,
+		DispatchGated: inst.DispatchGated,
+		MaxRuns:       inst.MaxRuns,
+		ActiveRuns:    inst.ActiveRuns,
+		MemTotalMB:    inst.MemTotalMB,
+		MemAvailMB:    inst.MemAvailableMB,
+	}
+	if s, ok := latest[inst.ID]; ok {
+		d.CPUPct = s.CPUPct
+		d.Load1 = s.Load1
+		d.ClaimsMin = s.Claims
+		d.SpawnP50MS = s.SpawnP50MS
+	}
+	return d
 }
 
 // latestSamples returns the most recent sample per instance since `since`. A
@@ -375,18 +384,11 @@ type instanceUpdateRequest struct {
 	Draining httpx.Patch[bool] `json:"draining" doc:"Whether the instance is draining: true stops it starting new work until it is undrained, and false ends any drain, including one that would last until its next restart. Required; null is refused, since the flag has no unset state."`
 }
 
-// instanceDrainState is the drain state the write left the instance in. The
-// write sets the flag outright, so the value written is the value stored.
-type instanceDrainState struct {
-	ID       string `json:"id" doc:"The instance's id."`
-	Draining bool   `json:"draining" doc:"Whether the instance is now draining."`
-}
-
-var opInstanceUpdate = httpx.NewJSONOp[instanceUpdateRequest, instanceDrainState](httpx.OpSpec{
+var opInstanceUpdate = httpx.NewJSONOp[instanceUpdateRequest, instanceDTO](httpx.OpSpec{
 	Pattern:     "PATCH /api/fleet/instances/{id}",
 	ID:          "update_fleet_instance",
 	Summary:     "Drain or undrain an instance",
-	Description: "Sets whether an instance is draining, and returns the drain state it set. A draining instance starts no new work and lets its running work finish, and the drain lasts across restarts until it is undrained." + fleetAccess,
+	Description: "Sets whether an instance is draining, and returns the instance as the instance list shows it. A draining instance starts no new work and lets its running work finish, and the drain lasts across restarts until it is undrained." + fleetAccess,
 	PathParams:  map[string]string{"id": "The instance's id."},
 	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
 })
@@ -422,16 +424,17 @@ func (h *handler) handleInstanceUpdate(w http.ResponseWriter, r *http.Request) {
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
-	matched, err := h.stores.Instances.SetDraining(r.Context(), id, draining)
+	inst, err := h.stores.Instances.SetDraining(r.Context(), id, draining)
 	if err != nil {
 		httpx.InternalError(w, "fleet-drain", err)
 		return
 	}
-	if !matched {
+	if inst == nil {
 		httpx.NotFound(w, "instance")
 		return
 	}
-	opInstanceUpdate.Write(w, instanceDrainState{ID: id, Draining: draining})
+	now := time.Now().UTC()
+	opInstanceUpdate.Write(w, toInstanceDTO(*inst, h.latestSamples(r.Context(), now.Add(-latestSampleWindow)), now))
 }
 
 // --- GET /api/fleet/instances/{id}/sandboxes ---

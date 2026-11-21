@@ -64,15 +64,26 @@ func RunInstanceDrainConformance(t *testing.T, mk InstanceDrainFactory) {
 		}
 	}
 
+	// wrote asserts a drain write found its row and returned it as stored:
+	// the same row, through the same columns, a point read finds.
+	wrote := func(t *testing.T, s db.InstanceStore, what, id string, inst *domain.Instance, err error) {
+		t.Helper()
+		if err != nil || inst == nil {
+			t.Fatalf("%s = (%+v, %v); want the row", what, inst, err)
+		}
+		AssertWriteReturnedStoredRow(t, what, *inst, func() (*domain.Instance, error) { return s.Get(ctx, id) })
+	}
+
 	t.Run("ADrainUntilRestartLapsesAtTheNextRegister", func(t *testing.T) {
 		s := mk(t)
 		const id = "drain-until-restart"
 		epoch := register(t, s, id)
 		wantDrain(t, s, id, epoch, false, false)
 
-		matched, err := s.SetDrainUntilRestart(ctx, id)
-		if err != nil || !matched {
-			t.Fatalf("SetDrainUntilRestart = (%t, %v); want (true, nil)", matched, err)
+		inst, err := s.SetDrainUntilRestart(ctx, id)
+		wrote(t, s, "SetDrainUntilRestart", id, inst, err)
+		if !inst.Draining || !inst.DrainUntilRestart {
+			t.Errorf("SetDrainUntilRestart returned Draining=%t DrainUntilRestart=%t; want true, true", inst.Draining, inst.DrainUntilRestart)
 		}
 		wantDrain(t, s, id, epoch, true, true)
 
@@ -84,12 +95,15 @@ func RunInstanceDrainConformance(t *testing.T, mk InstanceDrainFactory) {
 		wantDrain(t, s, id, epoch, false, false)
 		// An unknown id matches nothing.
 		{
-			matched, err := s.SetDrainUntilRestart(ctx, "never-registered")
+			inst, err := s.SetDrainUntilRestart(ctx, "never-registered")
 			if err != nil {
 				t.Fatalf("SetDrainUntilRestart: %v", err)
 			}
-			if matched {
-				t.Error("SetDrainUntilRestart on an unregistered id reported a match")
+			if inst != nil {
+				t.Errorf("SetDrainUntilRestart on an unregistered id returned %+v", inst)
+			}
+			if inst, err := s.SetDraining(ctx, "never-registered", true); err != nil || inst != nil {
+				t.Errorf("SetDraining on an unregistered id = (%+v, %v); want (nil, nil)", inst, err)
 			}
 		}
 	})
@@ -98,8 +112,10 @@ func RunInstanceDrainConformance(t *testing.T, mk InstanceDrainFactory) {
 		s := mk(t)
 		const id = "drain-persistent"
 		register(t, s, id)
-		if matched, err := s.SetDraining(ctx, id, true); err != nil || !matched {
-			t.Fatalf("SetDraining(true) = (%t, %v); want (true, nil)", matched, err)
+		inst, err := s.SetDraining(ctx, id, true)
+		wrote(t, s, "SetDraining(true)", id, inst, err)
+		if !inst.Draining || inst.DrainUntilRestart {
+			t.Errorf("SetDraining(true) returned Draining=%t DrainUntilRestart=%t; want true, false", inst.Draining, inst.DrainUntilRestart)
 		}
 		epoch := register(t, s, id)
 		wantDrain(t, s, id, epoch, true, false)
@@ -111,8 +127,8 @@ func RunInstanceDrainConformance(t *testing.T, mk InstanceDrainFactory) {
 		restartEpoch := register(t, s, restartOnly)
 		bothEpoch := register(t, s, both)
 
-		if matched, err := s.SetDrainUntilRestart(ctx, restartOnly); err != nil || !matched {
-			t.Fatalf("SetDrainUntilRestart = (%t, %v)", matched, err)
+		if inst, err := s.SetDrainUntilRestart(ctx, restartOnly); err != nil || inst == nil {
+			t.Fatalf("SetDrainUntilRestart = (%+v, %v)", inst, err)
 		}
 		if _, err := s.SetDraining(ctx, both, true); err != nil {
 			t.Fatalf("SetDraining(true): %v", err)
@@ -125,8 +141,10 @@ func RunInstanceDrainConformance(t *testing.T, mk InstanceDrainFactory) {
 		wantDrain(t, s, both, bothEpoch, true, false)
 
 		for id, epoch := range map[string]int64{restartOnly: restartEpoch, both: bothEpoch} {
-			if matched, err := s.SetDraining(ctx, id, false); err != nil || !matched {
-				t.Fatalf("SetDraining(%s, false) = (%t, %v)", id, matched, err)
+			inst, err := s.SetDraining(ctx, id, false)
+			wrote(t, s, "SetDraining(false)", id, inst, err)
+			if inst.Draining || inst.DrainUntilRestart {
+				t.Errorf("SetDraining(%s, false) returned Draining=%t DrainUntilRestart=%t; want false, false", id, inst.Draining, inst.DrainUntilRestart)
 			}
 			wantDrain(t, s, id, epoch, false, false)
 		}

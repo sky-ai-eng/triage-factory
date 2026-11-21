@@ -177,6 +177,15 @@ func TestDrainEndpoint_Integration(t *testing.T) {
 	if !inst.Draining {
 		t.Fatalf("instance should be draining after the PATCH")
 	}
+	// The answer is the instance as the list shows it, read off the row the
+	// write returned.
+	var got instanceDTO
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v (%s)", err, rec.Body.String())
+	}
+	if got.ID != "exec-1" || !got.Draining || got.Role != domain.InstanceRoleExecutor || got.Version != "v9" || got.BootEpoch != inst.BootEpoch {
+		t.Errorf("PATCH answered %+v; want exec-1, draining, executor, v9, epoch %d", got, inst.BootEpoch)
+	}
 
 	// Unknown id → 404.
 	rec2 := httptest.NewRecorder()
