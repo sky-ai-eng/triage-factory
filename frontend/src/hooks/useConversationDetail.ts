@@ -246,6 +246,10 @@ export function useConversationDetail(conversationID: string | undefined): Conve
   // transcript the ids inside the SUM aren't known yet, so a row already counted
   // there would be folded a second time. Holding costs at worst under-reporting
   // until the next read, which is the bounded drift the rest of this accepts.
+  //
+  // TODO(TFAC-1542): a fold that lands after a conversation read whose sums
+  // already count the row adds it a second time; the read has to say which
+  // message id its sums run through for a fold to skip what it counted.
   const foldMessageUsage = useCallback((msg: Message) => {
     const cost = msg.cost_usd
     const costSeen = costBaseline.current
