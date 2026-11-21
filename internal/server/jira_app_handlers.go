@@ -4,13 +4,11 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
-	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
@@ -59,9 +57,9 @@ func (s *Server) jiraConnectCallbackURLSafe(orgID string) string {
 // public half (client_id) is surfaced; the client_secret never leaves the
 // secret store.
 type jiraAppInfo struct {
-	ClientID                string `json:"client_id"`
-	RegisteredAt            string `json:"registered_at"`
-	RegisteredByDisplayName string `json:"registered_by_display_name"`
+	ClientID                string `json:"client_id" doc:"The Atlassian OAuth app's client id."`
+	RegisteredAt            string `json:"registered_at" doc:"When the app was first stored for the organization, as an RFC 3339 timestamp."`
+	RegisteredByDisplayName string `json:"registered_by_display_name" doc:"The display name of the person who last stored the app, empty when it cannot be read."`
 }
 
 // jiraAppStatusResponse is the read-only shape the settings card polls.
@@ -74,10 +72,10 @@ type jiraAppInfo struct {
 //     deployment app" rather than offering nothing.
 //   - ConnectCallbackURL is the redirect_uri the app owner must register.
 type jiraAppStatusResponse struct {
-	App                    *jiraAppInfo `json:"app"`
-	ConnectAvailable       bool         `json:"connect_available"`
-	UsingDeploymentDefault bool         `json:"using_deployment_default"`
-	ConnectCallbackURL     string       `json:"connect_callback_url"`
+	App                    *jiraAppInfo `json:"app" doc:"The organization's own Atlassian OAuth app, or null when the organization uses the deployment's app or has none."`
+	ConnectAvailable       bool         `json:"connect_available" doc:"Whether an Atlassian OAuth app is available to the organization, the organization's own or the deployment's, so that people can connect Jira Cloud with one click."`
+	UsingDeploymentDefault bool         `json:"using_deployment_default" doc:"Whether the app available to the organization is the deployment's rather than its own."`
+	ConnectCallbackURL     string       `json:"connect_callback_url" doc:"The redirect URL to register on the Atlassian OAuth app."`
 }
 
 // newJiraAppStatusResponse assembles the status payload from the loaded per-org
@@ -151,6 +149,15 @@ func (s *Server) connectAvailableForOrg(r *http.Request, orgID string) bool {
 	return s.resolveOAuthAppSource(r, orgID) != jira.SourceNone
 }
 
+var opJiraAppStatus = httpx.NewJSONOp[httpx.NoBody, jiraAppStatusResponse](httpx.OpSpec{
+	Pattern:     "GET /api/orgs/{org_id}/jira/app",
+	ID:          "get_jira_app",
+	Summary:     "Get the organization's Atlassian OAuth app",
+	Description: "Returns which Atlassian OAuth app the organization's one-click Jira Cloud connection runs against, the organization's own or the deployment's, and the redirect URL to register on it. The client secret is never returned.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
+
 // handleJiraAppStatus returns the org's Atlassian OAuth app config state. Read-
 // only; any org member (the card renders for everyone, the import/delete are
 // admin-gated).
@@ -172,7 +179,7 @@ func (s *Server) handleJiraAppStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, s.jiraAppStatusPayload(r, orgID, userID, app))
+	opJiraAppStatus.Write(w, s.jiraAppStatusPayload(r, orgID, userID, app))
 }
 
 // jiraAppStatusPayload builds the status response for a loaded per-org row,
@@ -191,9 +198,18 @@ func (s *Server) jiraAppStatusPayload(r *http.Request, orgID, userID string, app
 // jiraAppImportRequest is the import endpoint body — a bring-your-own
 // Atlassian OAuth app's client credentials.
 type jiraAppImportRequest struct {
-	ClientID     string `json:"client_id"`
-	ClientSecret string `json:"client_secret"`
+	ClientID     string `json:"client_id" doc:"The Atlassian OAuth app's client id, at most 256 characters."`
+	ClientSecret string `json:"client_secret" doc:"The Atlassian OAuth app's client secret, at most 256 characters."`
 }
+
+var opJiraAppImport = httpx.NewJSONOp[jiraAppImportRequest, jiraAppStatusResponse](httpx.OpSpec{
+	Pattern:     "PUT /api/orgs/{org_id}/jira/app",
+	ID:          "replace_jira_app",
+	Summary:     "Store the organization's Atlassian OAuth app",
+	Description: "Stores an Atlassian OAuth app's client id and secret as the organization's own app, replacing any it had, and returns the app status. The credentials are stored without being checked against Atlassian.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleJiraAppImport stores (or replaces) the org's bring-your-own Atlassian
 // OAuth app. Org-admin only; works in both modes — multi writes a per-org
@@ -202,29 +218,36 @@ type jiraAppImportRequest struct {
 // exposes no way to verify an OAuth app's client credentials without running the
 // authorize/token flow itself (a separate ticket), so this only stores them.
 //
-// POST /api/orgs/{org_id}/jira/app
+// PUT /api/orgs/{org_id}/jira/app
 func (s *Server) handleJiraAppImport(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := s.az.RequireOrgAdmin(w, r)
 	if !ok {
 		return
 	}
-	var req jiraAppImportRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opJiraAppImport.Decode(w, r)
+	if !ok {
 		return
 	}
-	clientID := strings.TrimSpace(req.ClientID)
-	clientSecret := strings.TrimSpace(req.ClientSecret)
-	if clientID == "" {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "An Atlassian OAuth app client ID is required.", Field: "client_id"})
-		return
-	}
-	if clientSecret == "" {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "An Atlassian OAuth app client secret is required.", Field: "client_secret"})
+	var v httpx.Validation
+	clientID, clientSecret := oauthAppCredentials(&v, "An Atlassian OAuth app", req.ClientID, req.ClientSecret)
+	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
 
+	// In local mode the secret lands in the keychain outside the transaction,
+	// so a failed import puts back the secret that was there before rather
+	// than leaving the org's app without one.
+	restore, unlock, err := s.guardLocalJiraAppWrite(r.Context(), orgID)
+	if err != nil {
+		internalError(w, "jira-app", err)
+		return
+	}
+	defer unlock()
+
+	var stored domain.OrgJiraApp
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		if _, err := tx.JiraApps.UpsertForOrg(r.Context(), domain.OrgJiraApp{
+		var err error
+		if stored, err = tx.JiraApps.UpsertForOrg(r.Context(), domain.OrgJiraApp{
 			OrgID:              orgID,
 			ClientID:           clientID,
 			ClientSecretRef:    jiraOAuthClientSecretKey,
@@ -245,31 +268,25 @@ func (s *Server) handleJiraAppImport(w http.ResponseWriter, r *http.Request) {
 			DetailJSON:  accessDetailCredentialNamed(domain.CredentialKindJiraOAuthApp, "", clientID),
 		})
 	}); err != nil {
-		// Local-mode SecretStore writes hit the OS keychain outside the SQLite
-		// tx; clean up a secret that landed before a later failure so a failed
-		// import leaves no orphan credential. Mirrors the GitHub App import.
-		if runmode.Current() == runmode.ModeLocal {
-			_, _ = s.secrets.Delete(r.Context(), orgID, jiraOAuthClientSecretKey)
+		if restore != nil {
+			restore()
 		}
 		internalError(w, "jira-app", err)
 		return
 	}
 
 	jiraAppLog.Info("stored atlassian oauth app", "client_id", clientID, "org", orgID, "user", userID)
-
-	// Re-read so the response reflects the freshly-persisted row, in the same
-	// shape the status GET serves. connect_available is now necessarily true.
-	var app *domain.OrgJiraApp
-	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		var lerr error
-		app, lerr = tx.JiraApps.GetForOrg(r.Context(), orgID)
-		return lerr
-	}); err != nil {
-		internalError(w, "jira-app", err)
-		return
-	}
-	writeJSON(w, http.StatusOK, s.jiraAppStatusPayload(r, orgID, userID, app))
+	opJiraAppImport.Write(w, s.jiraAppStatusPayload(r, orgID, userID, &stored))
 }
+
+var opJiraAppDelete = httpx.NewJSONOp[httpx.NoBody, jiraAppStatusResponse](httpx.OpSpec{
+	Pattern:     "DELETE /api/orgs/{org_id}/jira/app",
+	ID:          "delete_jira_app",
+	Summary:     "Remove the organization's Atlassian OAuth app",
+	Description: "Removes the organization's own Atlassian OAuth app and its client secret, and returns the app status, which then names the deployment's app when there is one. Removing an app the organization does not have succeeds and changes nothing.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleJiraAppDelete removes the org's bring-your-own Atlassian OAuth app —
 // the per-org override row AND its stored client_secret. Org-admin only.
@@ -282,6 +299,10 @@ func (s *Server) handleJiraAppDelete(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// Held so a local-mode import's restore cannot put back a secret this
+	// delete removes.
+	s.jiraAppMu.Lock()
+	defer s.jiraAppMu.Unlock()
 
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		// Read first: the delete is idempotent, so without knowing whether an
@@ -318,5 +339,5 @@ func (s *Server) handleJiraAppDelete(w http.ResponseWriter, r *http.Request) {
 
 	// The row is gone; the payload now reflects whatever still resolves (the
 	// deployment app, or nothing).
-	writeJSON(w, http.StatusOK, s.jiraAppStatusPayload(r, orgID, userID, nil))
+	opJiraAppDelete.Write(w, s.jiraAppStatusPayload(r, orgID, userID, nil))
 }

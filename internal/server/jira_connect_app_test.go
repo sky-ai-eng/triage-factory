@@ -61,7 +61,7 @@ func fakeAtlassian(t *testing.T, s *Server) {
 // saveJiraApp stores the org's own Atlassian app, as an admin does.
 func saveJiraApp(t *testing.T, s *Server, clientID string) {
 	t.Helper()
-	rec := doJSON(t, s, http.MethodPost, jiraAppPath(), map[string]string{"client_id": clientID, "client_secret": clientID + "-secret"})
+	rec := doJSON(t, s, http.MethodPut, jiraAppPath(), map[string]string{"client_id": clientID, "client_secret": clientID + "-secret"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("save jira app: %d: %s", rec.Code, rec.Body.String())
 	}
@@ -242,7 +242,7 @@ func TestJiraIdentityStatus_RefusedMarker(t *testing.T) {
 		t.Fatalf("status over a refused marker = %+v, want not connected, reason %q", got, jiraDisconnectedRefused)
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/jira/identity/pat",
+	rec := doJSON(t, s, http.MethodPost, jiraIdentityAPITokenRoute,
 		map[string]any{"email": "me@acme.com", "token": "cloud-tok"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("bind over the marker: %d: %s", rec.Code, rec.Body.String())

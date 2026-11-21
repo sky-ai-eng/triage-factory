@@ -378,8 +378,8 @@ func TestLinearCredentialPut_RefusesOverInstalledApp(t *testing.T) {
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409: %s", rec.Code, rec.Body.String())
 	}
-	if got := firstError(t, rec); got.Reason != "CONFLICT" {
-		t.Errorf("reason = %q, want CONFLICT", got.Reason)
+	if got := firstError(t, rec); got.Reason != "CONFLICT" || got.Field != "" {
+		t.Errorf("error = %+v, want CONFLICT naming no field: the org's credential is at fault, not the key", got)
 	}
 	if v := r.secret(t, integrations.KeyLinearAuthMethod); v != string(linear.AuthMethodAppInstall) {
 		t.Errorf("marker = %q, want app_install left alone", v)

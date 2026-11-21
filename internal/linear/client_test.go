@@ -616,6 +616,58 @@ func TestGetTeam_NotFound(t *testing.T) {
 	}
 }
 
+// TestGetByName: a lookup by a name Linear keeps unique answers its one row,
+// sends the name as given, is ErrNotFound with no row, and refuses to pick
+// when Linear answers with two.
+func TestGetByName(t *testing.T) {
+	const team = `{"id":"team-1","key":"TFAC","name":"Triage Factory","private":false}`
+	const user = `{"id":"user-1","name":"Ada Lovelace","displayName":"ada","active":false}`
+	cases := []struct {
+		name, body, variable, want string
+		lookup                     func(*Client) (any, error)
+		wantErr                    func(error) bool
+	}{
+		{"team found", `{"data":{"teams":{"nodes":[` + team + `]}}}`, "key", `"TFAC"`,
+			func(c *Client) (any, error) { return c.GetTeamByKey(context.Background(), "TFAC") }, nil},
+		{"team none", `{"data":{"teams":{"nodes":[]}}}`, "key", `"TFAC"`,
+			func(c *Client) (any, error) { return c.GetTeamByKey(context.Background(), "TFAC") },
+			func(err error) bool { return errors.Is(err, ErrNotFound) }},
+		{"team twice", `{"data":{"teams":{"nodes":[` + team + `,` + team + `]}}}`, "key", `"TFAC"`,
+			func(c *Client) (any, error) { return c.GetTeamByKey(context.Background(), "TFAC") },
+			func(err error) bool { return errors.Is(err, ErrAmbiguous) }},
+		{"user found", `{"data":{"users":{"nodes":[` + user + `]}}}`, "displayName", `"ada"`,
+			func(c *Client) (any, error) { return c.GetUserByDisplayName(context.Background(), "ada") }, nil},
+		{"user none", `{"data":{"users":{"nodes":[]}}}`, "displayName", `"ada"`,
+			func(c *Client) (any, error) { return c.GetUserByDisplayName(context.Background(), "ada") },
+			func(err error) bool { return errors.Is(err, ErrNotFound) }},
+		{"user twice", `{"data":{"users":{"nodes":[` + user + `,` + user + `]}}}`, "displayName", `"ada"`,
+			func(c *Client) (any, error) { return c.GetUserByDisplayName(context.Background(), "ada") },
+			func(err error) bool { return errors.Is(err, ErrAmbiguous) }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newStub(t, scripted(reply{body: tc.body}))
+			got, err := tc.lookup(s.client())
+			switch {
+			case tc.wantErr != nil && !tc.wantErr(err):
+				t.Fatalf("err = %v, want the refusal this case names", err)
+			case tc.wantErr == nil && err != nil:
+				t.Fatalf("lookup: %v", err)
+			case tc.wantErr == nil:
+				if team, ok := got.(Team); ok && team.ID != "team-1" {
+					t.Errorf("team = %+v, want team-1", team)
+				}
+				if user, ok := got.(User); ok && (user.ID != "user-1" || user.Active) {
+					t.Errorf("user = %+v, want the deactivated user-1", user)
+				}
+			}
+			if v := string(s.requests()[0].Variables[tc.variable]); v != tc.want {
+				t.Errorf("%s variable = %s, want %s", tc.variable, v, tc.want)
+			}
+		})
+	}
+}
+
 func TestGetTeams_ReturnsTheTeamsTheCredentialReads(t *testing.T) {
 	s := newStub(t, scripted(reply{body: `{"data":{"teams":{"nodes":[{"id":"team-1","key":"TFAC","name":"Triage Factory","private":true}]}}}`}))
 	got, err := s.client().GetTeams(context.Background(), []string{"team-1", "team-2"})

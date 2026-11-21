@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"slices"
 	"strconv"
+	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
@@ -40,7 +41,7 @@ type jiraIssueFieldListRequest struct {
 	// case-insensitive literal substring (httpx.Search). Neither Jira read
 	// takes a filter, so it is applied to the list in hand, before the window.
 	// Absent matches every row.
-	Search string `json:"search"`
+	Search string `json:"search" doc:"Text the name must contain, matched without regard to case; absent matches every row."`
 	httpx.PageRequest
 }
 
@@ -63,21 +64,30 @@ type jiraIssueTypeListFilterKey struct {
 // jiraPriorityJSON is one priority. The id is what a predicate names it by;
 // the name is what a person recognizes it by.
 type jiraPriorityJSON struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID   string `json:"id" doc:"Jira's id for the priority."`
+	Name string `json:"name" doc:"The priority's name."`
 }
 
 // jiraIssueTypeJSON is one issue type of a project. Subtask says issues of
 // this type are subtasks.
 type jiraIssueTypeJSON struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Subtask bool   `json:"subtask"`
+	ID      string `json:"id" doc:"Jira's id for the issue type."`
+	Name    string `json:"name" doc:"The issue type's name."`
+	Subtask bool   `json:"subtask" doc:"Whether issues of this type are subtasks."`
 }
 
 // jiraNumericIDRe is a Jira priority or issue type id as both deployments
 // write one: a decimal integer, carried as a string.
 var jiraNumericIDRe = regexp.MustCompile(`^[0-9]+$`)
+
+var opJiraPrioritiesList = httpx.NewListOp[jiraIssueFieldListRequest, jiraPriorityJSON](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/jira/priorities/list",
+	ID:          "list_jira_priorities",
+	Summary:     "List the Jira instance's priorities",
+	Description: "Reads one page of the priorities of the organization's Jira instance, live from Jira, in Jira's order from highest to lowest. total_count is always null, and page_size 0 is refused.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // POST /api/orgs/{org_id}/jira/priorities/list
 //
@@ -88,8 +98,8 @@ func (s *Server) handleJiraPrioritiesList(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
-	var req jiraIssueFieldListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opJiraPrioritiesList.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -114,8 +124,20 @@ func (s *Server) handleJiraPrioritiesList(w http.ResponseWriter, r *http.Request
 	items, next := jiraWindow(priorities, startAt, page.Limit, func(p jira.Priority) jiraPriorityJSON {
 		return jiraPriorityJSON{ID: p.ID, Name: p.Name}
 	})
-	httpx.WriteProxyList(w, page, items, next)
+	opJiraPrioritiesList.WriteProxy(w, page, items, next)
 }
+
+var opJiraPriorityGet = httpx.NewJSONOp[httpx.NoBody, jiraPriorityJSON](httpx.OpSpec{
+	Pattern:     "GET /api/orgs/{org_id}/jira/priorities/{priority_id}",
+	ID:          "get_jira_priority",
+	Summary:     "Get a Jira priority",
+	Description: "Reads one priority of the organization's Jira instance, live from Jira.",
+	PathParams: map[string]string{
+		"org_id":      "The organization's id.",
+		"priority_id": "Jira's id for the priority, a decimal number.",
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // GET /api/orgs/{org_id}/jira/priorities/{priority_id}
 //
@@ -145,8 +167,89 @@ func (s *Server) handleJiraPriorityGet(w http.ResponseWriter, r *http.Request) {
 		httpx.NotFound(w, "jira priority")
 		return
 	}
-	writeJSON(w, http.StatusOK, jiraPriorityJSON{ID: priorities[i].ID, Name: priorities[i].Name})
+	opJiraPriorityGet.Write(w, jiraPriorityJSON{ID: priorities[i].ID, Name: priorities[i].Name})
 }
+
+var opJiraPriorityGetByName = httpx.NewJSONOp[httpx.NoBody, jiraPriorityJSON](httpx.OpSpec{
+	Pattern:     "GET /api/orgs/{org_id}/jira/priorities/by-name/{name}",
+	ID:          "get_jira_priority_by_name",
+	Summary:     "Get a Jira priority by its name",
+	Description: "Reads the priority of the organization's Jira instance whose name is exactly the one given, matched with case, live from Jira. Jira keeps priority names unique; a name it answers for more than one priority is a 409.",
+	PathParams: map[string]string{
+		"org_id": "The organization's id.",
+		"name":   "The priority's name, such as High.",
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
+
+// GET /api/orgs/{org_id}/jira/priorities/by-name/{name}
+func (s *Server) handleJiraPriorityGetByName(w http.ResponseWriter, r *http.Request) {
+	orgID, _, ok := s.az.RequireOrgMember(w, r)
+	if !ok {
+		return
+	}
+	name := r.PathValue("name")
+	if strings.TrimSpace(name) == "" {
+		httpx.NotFound(w, "jira priority")
+		return
+	}
+	client, ok := s.jiraSystemClient(w, r, orgID, "jira/priority", "Jira is not connected for this organization")
+	if !ok {
+		return
+	}
+	priorities, err := client.ListPriorities(r.Context())
+	if err != nil {
+		writeJiraUpstream(w, orgID, "the organization's Jira priorities", err)
+		return
+	}
+	p, n := jiraOneNamed(priorities, func(p jira.Priority) string { return p.Name }, name)
+	switch n {
+	case 0:
+		httpx.NotFound(w, "jira priority")
+	case 1:
+		opJiraPriorityGetByName.Write(w, jiraPriorityJSON{ID: p.ID, Name: p.Name})
+	default:
+		writeJiraAmbiguous(w, "More than one Jira priority is named "+name+"; read the priority by its id.")
+	}
+}
+
+// jiraOneNamed is the row of rows whose name is exactly name, and how many
+// rows carry it. Jira keeps these names unique, so a caller refuses a second
+// match rather than picking one: either could be the row the caller means.
+func jiraOneNamed[T any](rows []T, nameOf func(T) string, name string) (T, int) {
+	var (
+		found T
+		n     int
+	)
+	for _, row := range rows {
+		if nameOf(row) == name {
+			if n == 0 {
+				found = row
+			}
+			n++
+		}
+	}
+	return found, n
+}
+
+// writeJiraAmbiguous answers a by-name read whose name Jira matched to more
+// than one row: a 409, since Jira's answer is what conflicts with the name
+// being unique, and retrying cannot change it.
+func writeJiraAmbiguous(w http.ResponseWriter, message string) {
+	httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: message})
+}
+
+var opJiraIssueTypesList = httpx.NewListOp[jiraIssueFieldListRequest, jiraIssueTypeJSON](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/jira/projects/{jira_id}/issue-types/list",
+	ID:          "list_jira_project_issue_types",
+	Summary:     "List a Jira project's issue types",
+	Description: "Reads one page of the issue types of a Jira project, live from Jira, ordered by name and then id. total_count is always null, and page_size 0 is refused.",
+	PathParams: map[string]string{
+		"org_id":  "The organization's id.",
+		"jira_id": "Jira's id for the project, a decimal number; a project key is not accepted.",
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // POST /api/orgs/{org_id}/jira/projects/{jira_id}/issue-types/list
 //
@@ -161,8 +264,8 @@ func (s *Server) handleJiraIssueTypesList(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
-	var req jiraIssueFieldListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opJiraIssueTypesList.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -192,8 +295,21 @@ func (s *Server) handleJiraIssueTypesList(w http.ResponseWriter, r *http.Request
 		return cmp.Or(cmp.Compare(a.Name, b.Name), cmp.Compare(a.ID, b.ID))
 	})
 	items, next := jiraWindow(types, startAt, page.Limit, toJiraIssueTypeJSON)
-	httpx.WriteProxyList(w, page, items, next)
+	opJiraIssueTypesList.WriteProxy(w, page, items, next)
 }
+
+var opJiraIssueTypeGet = httpx.NewJSONOp[httpx.NoBody, jiraIssueTypeJSON](httpx.OpSpec{
+	Pattern:     "GET /api/orgs/{org_id}/jira/projects/{jira_id}/issue-types/{issue_type_id}",
+	ID:          "get_jira_project_issue_type",
+	Summary:     "Get a Jira project's issue type",
+	Description: "Reads one issue type of a Jira project live from Jira. An issue type that exists in Jira but is not one of this project's is not found.",
+	PathParams: map[string]string{
+		"org_id":        "The organization's id.",
+		"jira_id":       "Jira's id for the project, a decimal number; a project key is not accepted.",
+		"issue_type_id": "Jira's id for the issue type, a decimal number.",
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // GET /api/orgs/{org_id}/jira/projects/{jira_id}/issue-types/{issue_type_id}
 //
@@ -232,7 +348,59 @@ func (s *Server) handleJiraIssueTypeGet(w http.ResponseWriter, r *http.Request) 
 		httpx.NotFound(w, "jira issue type")
 		return
 	}
-	writeJSON(w, http.StatusOK, toJiraIssueTypeJSON(types[i]))
+	opJiraIssueTypeGet.Write(w, toJiraIssueTypeJSON(types[i]))
+}
+
+var opJiraIssueTypeGetByName = httpx.NewJSONOp[httpx.NoBody, jiraIssueTypeJSON](httpx.OpSpec{
+	Pattern:     "GET /api/orgs/{org_id}/jira/projects/{jira_id}/issue-types/by-name/{name}",
+	ID:          "get_jira_project_issue_type_by_name",
+	Summary:     "Get a Jira project's issue type by its name",
+	Description: "Reads the issue type of a Jira project whose name is exactly the one given, matched with case, live from Jira. Jira keeps issue type names unique within a project; a name it answers for more than one of the project's issue types is a 409.",
+	PathParams: map[string]string{
+		"org_id":  "The organization's id.",
+		"jira_id": "Jira's id for the project, a decimal number; a project key is not accepted.",
+		"name":    "The issue type's name, such as Bug.",
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
+
+// GET /api/orgs/{org_id}/jira/projects/{jira_id}/issue-types/by-name/{name}
+func (s *Server) handleJiraIssueTypeGetByName(w http.ResponseWriter, r *http.Request) {
+	orgID, _, ok := s.az.RequireOrgMember(w, r)
+	if !ok {
+		return
+	}
+	jiraID, ok := jiraPathProjectID(w, r)
+	if !ok {
+		return
+	}
+	name := r.PathValue("name")
+	if strings.TrimSpace(name) == "" {
+		httpx.NotFound(w, "jira issue type")
+		return
+	}
+	client, ok := s.jiraSystemClient(w, r, orgID, "jira/issue-type", "Jira is not connected for this organization")
+	if !ok {
+		return
+	}
+	types, err := client.ListIssueTypes(r.Context(), jiraID)
+	if jira.IsNotFound(err) {
+		httpx.NotFound(w, "jira project")
+		return
+	}
+	if err != nil {
+		writeJiraUpstream(w, orgID, "the issue types of Jira project "+jiraID, err)
+		return
+	}
+	it, n := jiraOneNamed(types, func(it jira.IssueType) string { return it.Name }, name)
+	switch n {
+	case 0:
+		httpx.NotFound(w, "jira issue type")
+	case 1:
+		opJiraIssueTypeGetByName.Write(w, toJiraIssueTypeJSON(it))
+	default:
+		writeJiraAmbiguous(w, "More than one of Jira project "+jiraID+"'s issue types is named "+name+"; read the issue type by its id.")
+	}
 }
 
 func toJiraIssueTypeJSON(it jira.IssueType) jiraIssueTypeJSON {

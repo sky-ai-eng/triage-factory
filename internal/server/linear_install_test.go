@@ -156,9 +156,9 @@ func linearInstallStartPath() string {
 
 func (r *linearInstallRig) registerApp(t *testing.T, clientID string) linearAppStatusResponse {
 	t.Helper()
-	rec := doJSON(t, r.s, http.MethodPost, linearAppPath(), map[string]any{"client_id": clientID, "client_secret": "lin-secret"})
+	rec := doJSON(t, r.s, http.MethodPut, linearAppPath(), map[string]any{"client_id": clientID, "client_secret": "lin-secret"})
 	if rec.Code != http.StatusOK {
-		t.Fatalf("POST linear app: %d: %s", rec.Code, rec.Body.String())
+		t.Fatalf("PUT linear app: %d: %s", rec.Code, rec.Body.String())
 	}
 	var got linearAppStatusResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
@@ -689,7 +689,7 @@ func TestLinearDeveloperName(t *testing.T) {
 
 func TestLinearApp_ImportValidatesEveryField(t *testing.T) {
 	r := newLinearInstallRig(t)
-	rec := doJSON(t, r.s, http.MethodPost, linearAppPath(), map[string]any{"client_id": " ", "client_secret": ""})
+	rec := doJSON(t, r.s, http.MethodPut, linearAppPath(), map[string]any{"client_id": " ", "client_secret": ""})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
 	}
@@ -698,8 +698,8 @@ func TestLinearApp_ImportValidatesEveryField(t *testing.T) {
 		t.Errorf("errors = %+v, want both fields named", items)
 	}
 
-	long := strings.Repeat("x", linearAppCredentialMaxLen+1)
-	rec = doJSON(t, r.s, http.MethodPost, linearAppPath(), map[string]any{"client_id": long, "client_secret": long})
+	long := strings.Repeat("x", oauthAppCredentialMaxLen+1)
+	rec = doJSON(t, r.s, http.MethodPut, linearAppPath(), map[string]any{"client_id": long, "client_secret": long})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("over-long credentials: status = %d, want 400", rec.Code)
 	}
@@ -709,8 +709,8 @@ func TestLinearApp_ImportValidatesEveryField(t *testing.T) {
 	}
 
 	// The cap counts characters, as its message says, not bytes.
-	wide := strings.Repeat("é", linearAppCredentialMaxLen)
-	if rec := doJSON(t, r.s, http.MethodPost, linearAppPath(), map[string]any{"client_id": wide, "client_secret": wide}); rec.Code != http.StatusOK {
+	wide := strings.Repeat("é", oauthAppCredentialMaxLen)
+	if rec := doJSON(t, r.s, http.MethodPut, linearAppPath(), map[string]any{"client_id": wide, "client_secret": wide}); rec.Code != http.StatusOK {
 		t.Errorf("credentials of exactly the cap in two-byte characters: %d %s, want 200", rec.Code, rec.Body.String())
 	}
 }
@@ -726,9 +726,9 @@ func TestLinearApp_ChangesThatStrandTheInstallAreRefused(t *testing.T) {
 	if rec.Code != http.StatusConflict || firstError(t, rec).Reason != "CONFLICT" {
 		t.Fatalf("DELETE with a live install = %d %s, want 409 CONFLICT", rec.Code, rec.Body.String())
 	}
-	rec = doJSON(t, r.s, http.MethodPost, linearAppPath(), map[string]any{"client_id": "lin-client-2", "client_secret": "s"})
+	rec = doJSON(t, r.s, http.MethodPut, linearAppPath(), map[string]any{"client_id": "lin-client-2", "client_secret": "s"})
 	if rec.Code != http.StatusConflict {
-		t.Fatalf("POST of another app with a live install = %d, want 409", rec.Code)
+		t.Fatalf("PUT of another app with a live install = %d, want 409", rec.Code)
 	}
 	if v := r.secret(t, linearOAuthClientSecretKey); v != "lin-secret" {
 		t.Errorf("client secret = %q, want the original kept", v)
@@ -781,11 +781,11 @@ func TestLinearInstall_MultiMode(t *testing.T) {
 		org uuid.UUID
 		sid string
 	}{{orgA, sidA}, {orgB, sidB}} {
-		if rec := rig.tokensJSON(http.MethodPost, appPath(reg.org), map[string]any{"client_id": "lin-client-1", "client_secret": "s"}, reg.sid, ""); rec.Code != http.StatusOK {
+		if rec := rig.tokensJSON(http.MethodPut, appPath(reg.org), map[string]any{"client_id": "lin-client-1", "client_secret": "s"}, reg.sid, ""); rec.Code != http.StatusOK {
 			t.Fatalf("register app: %d: %s", rec.Code, rec.Body.String())
 		}
 	}
-	if rec := rig.tokensJSON(http.MethodPost, appPath(orgA), map[string]any{"client_id": "x", "client_secret": "y"}, sidC, ""); rec.Code != http.StatusForbidden {
+	if rec := rig.tokensJSON(http.MethodPut, appPath(orgA), map[string]any{"client_id": "x", "client_secret": "y"}, sidC, ""); rec.Code != http.StatusForbidden {
 		t.Errorf("member registering an app = %d, want 403", rec.Code)
 	}
 

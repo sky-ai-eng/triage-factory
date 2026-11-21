@@ -170,10 +170,13 @@ export default function UserSettingsPage() {
   // The token path is Jira's alone: GitHub's band offers Connect only.
   const onVerify = async (_id: string, f: { token: string; email?: string }) => {
     if (!orgId) throw new Error('No active organization.')
-    const cloud = jira.state.status === 'ready' && jira.state.data.deployment !== 'data_center'
-    const got = cloud
-      ? await captureJiraIdentityApiToken(orgId, f.email ?? '', f.token)
-      : await captureJiraIdentityPat(orgId, f.token)
+    // The route follows the org's deployment, so a bind waits for the read
+    // that names it rather than guessing one.
+    if (jira.state.status !== 'ready') throw new Error('Your Jira settings are still loading.')
+    const got =
+      jira.state.data.deployment !== 'data_center'
+        ? await captureJiraIdentityApiToken(orgId, f.email ?? '', f.token)
+        : await captureJiraIdentityPat(orgId, f.token)
     jira.refresh()
     void refreshMe()
     return got.account

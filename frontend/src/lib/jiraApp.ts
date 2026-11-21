@@ -63,7 +63,7 @@ export type JiraAppImportOutcome =
 // app. Returns a structured outcome rather than throwing so the form can map a
 // field-level rejection to the right input.
 //
-// POST /api/orgs/{org_id}/jira/app
+// PUT /api/orgs/{org_id}/jira/app
 export async function importJiraApp(
   orgId: string,
   input: JiraAppImportInput,
@@ -71,7 +71,7 @@ export async function importJiraApp(
   const fallback = 'Could not save the Atlassian app.'
   try {
     const result = await apiJSON<JiraAppStatus>(`/api/orgs/${encodeURIComponent(orgId)}/jira/app`, {
-      method: 'POST',
+      method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
     })

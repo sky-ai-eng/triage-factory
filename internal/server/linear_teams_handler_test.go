@@ -303,6 +303,38 @@ func TestLinearTeamGet(t *testing.T) {
 	}
 }
 
+// TestLinearTeamGetByName: a team is read by its key, matched with case, so
+// another spelling of it and a key no team holds are a 404; a blank key is a
+// 404 without asking Linear.
+func TestLinearTeamGetByName(t *testing.T) {
+	s, fake := newServerWithLinearCatalog(t, linearFixtureEng, linearFixtureOps)
+	byName := func(key string) string { return linearOrgPath(runmode.LocalDefaultOrgID) + "/teams/by-name/" + key }
+
+	rec := doJSON(t, s, http.MethodGet, byName("OPS"), nil)
+	var got linearTeamJSON
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil || rec.Code != http.StatusOK {
+		t.Fatalf("GET by key = %d; body=%s", rec.Code, rec.Body.String())
+	}
+	if want := (linearTeamJSON{ID: linearTeamOps, Key: "OPS", Name: "Operations", Private: true}); got != want {
+		t.Errorf("team = %+v, want %+v", got, want)
+	}
+
+	for _, key := range []string{"ops", "NOPE"} {
+		assertOneFault(t, doJSON(t, s, http.MethodGet, byName(key), nil), http.StatusNotFound, "NOT_FOUND", "")
+	}
+	before := fake.Calls()
+	assertOneFault(t, doJSON(t, s, http.MethodGet, byName("%20"), nil), http.StatusNotFound, "NOT_FOUND", "")
+	if fake.Calls() != before {
+		t.Error("a blank key reached Linear")
+	}
+
+	// Two teams Linear answers for one key are a 409, not a pick.
+	dup := linearFixtureEng
+	dup.ID = linearTeamOps
+	s, _ = newServerWithLinearCatalog(t, linearFixtureEng, dup)
+	assertOneFault(t, doJSON(t, s, http.MethodGet, byName(linearFixtureEng.Key), nil), http.StatusConflict, "CONFLICT", "")
+}
+
 // TestLinearStatesList_TokenIsBoundToTheTeam: a team's whole workflow pages in
 // board order, though Linear serves it in another, with each state's position,
 // total_count null, under a token that wraps an offset into that team's

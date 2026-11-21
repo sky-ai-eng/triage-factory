@@ -39,7 +39,7 @@ import (
 
 // linearCredentialRequest is the PUT body: the key, and nothing else.
 type linearCredentialRequest struct {
-	APIKey string `json:"api_key"`
+	APIKey string `json:"api_key" doc:"A personal Linear API key, which decides the Linear workspace the organization is connected to."`
 }
 
 // linearBinding is who the org's Linear credential validated as, and the name
@@ -54,8 +54,8 @@ type linearBinding struct {
 
 // linearBoundAsJSON is the viewer half of linearBinding on the wire.
 type linearBoundAsJSON struct {
-	Name        string `json:"name"`
-	DisplayName string `json:"display_name"`
+	Name        string `json:"name" doc:"The full name of the Linear user the credential acts as."`
+	DisplayName string `json:"display_name" doc:"That user's display name."`
 }
 
 // linearAccessStatus is the GET body, and what a successful bind answers with.
@@ -66,15 +66,47 @@ type linearBoundAsJSON struct {
 // disconnection the org did not ask for: "install_revoked" when the app was
 // removed from the workspace in Linear and its refresh token refused.
 type linearAccessStatus struct {
-	Connected              bool               `json:"connected"`
-	AuthMethod             string             `json:"auth_method"`
-	WorkspaceURLKey        string             `json:"workspace_url_key"`
-	WorkspaceName          string             `json:"workspace_name,omitempty"`
-	BoundAs                *linearBoundAsJSON `json:"bound_as"`
-	ConnectAvailable       bool               `json:"connect_available"`
-	UsingDeploymentDefault bool               `json:"using_deployment_default"`
-	LastError              string             `json:"last_error,omitempty"`
+	Connected              bool               `json:"connected" doc:"Whether the organization has a Linear credential."`
+	AuthMethod             string             `json:"auth_method" doc:"What the credential is: api_key for a personal API key, or app_install for an installed Linear app; empty when connected is false."`
+	WorkspaceURLKey        string             `json:"workspace_url_key" doc:"The URL key of the organization's Linear workspace, as in linear.app/<key>; empty when connected is false."`
+	WorkspaceName          string             `json:"workspace_name,omitempty" doc:"The Linear workspace's name, absent when it is not known."`
+	BoundAs                *linearBoundAsJSON `json:"bound_as" doc:"The Linear user the credential acts as, or null when connected is false or it is not known."`
+	ConnectAvailable       bool               `json:"connect_available" doc:"Whether a Linear OAuth app is available to the organization, so Triage Factory can be installed in the workspace."`
+	UsingDeploymentDefault bool               `json:"using_deployment_default" doc:"Whether the Linear OAuth app available to the organization is the deployment's rather than its own."`
+	LastError              string             `json:"last_error,omitempty" doc:"Why the organization lost a connection it did not remove: install_revoked when the app was removed from the workspace in Linear. Absent otherwise."`
 }
+
+var opLinearAccessGet = httpx.NewJSONOp[httpx.NoBody, linearAccessStatus](httpx.OpSpec{
+	Pattern:     "GET /api/orgs/{org_id}/linear/access",
+	ID:          "get_linear_access",
+	Summary:     "Get the organization's Linear connection",
+	Description: "Reports whether the organization has a Linear credential, what kind it is, the workspace and the Linear user it belongs to, and whether a Linear OAuth app is available to install. No credential is returned.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
+
+var opLinearCredentialPut = httpx.NewJSONOp[linearCredentialRequest, linearAccessStatus](httpx.OpSpec{
+	Pattern:     "PUT /api/orgs/{org_id}/linear/access/credential",
+	ID:          "replace_linear_access_credential",
+	Summary:     "Set the organization's Linear API key",
+	Description: "Checks a personal Linear API key against Linear, stores it as the organization's Linear credential in place of any API key it had, connects the organization to the key's workspace, and returns the connection status. A key cannot replace an installed Linear app: the app is disconnected first, or the key is refused with a 409.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
+
+// linearDisconnectResponse is what a Linear disconnect answers with.
+type linearDisconnectResponse struct {
+	Status string `json:"status" doc:"Always disconnected."`
+}
+
+var opLinearCredentialDelete = httpx.NewJSONOp[httpx.NoBody, linearDisconnectResponse](httpx.OpSpec{
+	Pattern:     "DELETE /api/orgs/{org_id}/linear/access/credential",
+	ID:          "delete_linear_access_credential",
+	Summary:     "Disconnect the organization's Linear",
+	Description: "Removes the organization's Linear credential and its workspace, whether an API key or an installed app; for an installed app it also revokes the app's access in Linear. People's own Linear credentials are kept. Disconnecting an organization with no credential succeeds and changes nothing.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // errLinearAppInstalled is the bind finding the org's Linear credential is a
 // live installed app. Binding a key over it would leave the install's tokens
@@ -100,8 +132,8 @@ func (s *Server) handleLinearCredentialPut(w http.ResponseWriter, r *http.Reques
 	}
 	ctx := r.Context()
 
-	var req linearCredentialRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opLinearCredentialPut.Decode(w, r)
+	if !ok {
 		return
 	}
 	key := strings.TrimSpace(req.APIKey)
@@ -200,7 +232,7 @@ func (s *Server) handleLinearCredentialPut(w http.ResponseWriter, r *http.Reques
 			restore()
 		}
 		if errors.Is(err, errLinearAppInstalled) {
-			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this organization's Linear access is an installed app — disconnect the installed app first", Field: "api_key"})
+			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this organization's Linear access is an installed app — disconnect the installed app first"})
 			return
 		}
 		internalError(w, "linear-access", fmt.Errorf("persist linear credential: %w", err))
@@ -214,7 +246,7 @@ func (s *Server) handleLinearCredentialPut(w http.ResponseWriter, r *http.Reques
 		internalError(w, "linear-access", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, status)
+	opLinearCredentialPut.Write(w, status)
 }
 
 // handleLinearCredentialDelete unbinds the org's Linear credential — the
@@ -329,7 +361,7 @@ func (s *Server) handleLinearCredentialDelete(w http.ResponseWriter, r *http.Req
 		internalError(w, "linear-access", releaseErr)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "disconnected"})
+	opLinearCredentialDelete.Write(w, linearDisconnectResponse{Status: "disconnected"})
 }
 
 // releaseLinearInstall marks the org's live install row removed as
@@ -389,14 +421,14 @@ func (s *Server) handleLinearAccessGet(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "linear-access", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, status)
+	opLinearAccessGet.Write(w, status)
 }
 
 // linearTrackedTeamJSON names one Linear team the org tracks.
 type linearTrackedTeamJSON struct {
-	ID   string `json:"id"`
-	Key  string `json:"key"`
-	Name string `json:"name"`
+	ID   string `json:"id" doc:"Linear's id for the team, a UUID."`
+	Key  string `json:"key" doc:"The team's key."`
+	Name string `json:"name" doc:"The team's name."`
 }
 
 // linearTeamVisibility is the team-visibility body: the org's tracked Linear
@@ -408,13 +440,22 @@ type linearTeamVisibility struct {
 	// a personal key reads one only when its owner is a member, and an
 	// installed app only once the team is shared with it. Key and name are
 	// Linear's own, read now.
-	Private []linearTrackedTeamJSON `json:"private"`
+	Private []linearTrackedTeamJSON `json:"private" doc:"The tracked teams the credential can read that are visible only to their members in Linear, which another credential may not be able to read, with their key and name as Linear gives them now."`
 	// Unreadable are the tracked teams the credential cannot read at all. The
 	// tracker leaves their issues tracked and unrefreshed rather than retiring
 	// them, and discovery finds nothing new in them. Key and name are as
 	// stored when the team was tracked, since Linear will not say.
-	Unreadable []linearTrackedTeamJSON `json:"unreadable"`
+	Unreadable []linearTrackedTeamJSON `json:"unreadable" doc:"The tracked teams the credential cannot read, whose issues are not refreshed and in which no new issues are found, with their key and name as recorded when the team was tracked."`
 }
+
+var opLinearTeamVisibility = httpx.NewJSONOp[httpx.NoBody, linearTeamVisibility](httpx.OpSpec{
+	Pattern:     "GET /api/orgs/{org_id}/linear/access/team-visibility",
+	ID:          "get_linear_team_visibility",
+	Summary:     "Get which tracked Linear teams the credential reads",
+	Description: "Reads, live from Linear, which of the Linear teams the organization's teams track its Linear credential can read, and returns the readable ones that are private and the ones it cannot read. Both lists are complete and unpaginated, bounded by the tracked teams.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // handleLinearTeamVisibility reports which of the org's tracked Linear teams
 // its current credential can read, and which of those are private. The
@@ -488,7 +529,7 @@ func (s *Server) handleLinearTeamVisibility(w http.ResponseWriter, r *http.Reque
 			out.Private = append(out.Private, linearTrackedTeamJSON{ID: team.ID, Key: team.Key, Name: team.Name})
 		}
 	}
-	writeJSON(w, http.StatusOK, out)
+	opLinearTeamVisibility.Write(w, out)
 }
 
 // readLinearAccess derives the status body. connected is the same derivation

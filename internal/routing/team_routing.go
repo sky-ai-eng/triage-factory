@@ -897,7 +897,8 @@ func (r *Router) jiraAssigneeUsers(ctx context.Context, orgID string, evt domain
 	// the identities bound under the canonical host.
 	//
 	// org_settings.jira_base_url is the org's Jira site and the only host key:
-	// Jira identity capture (handleJiraIdentityPAT) refuses to bind unless
+	// Jira identity capture (server.jiraIdentityHost, ahead of both paste
+	// routes, and the Connect callback) refuses to bind unless
 	// jira_base_url resolves to a valid host (jira.CanonicalHost), so every
 	// user_jira_identities row is keyed under NormalizeJiraHost(jira_base_url).
 	// An empty host (Jira not configured for identity) therefore resolves

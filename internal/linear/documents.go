@@ -71,6 +71,17 @@ query User($id: String!) {
   user(id: $id) { ` + userFields + ` }
 }`
 
+// userByDisplayNameQuery reads the user, deactivated or not, whose display
+// name is exactly the one given. Linear keeps display names unique within a
+// workspace, so a second row would be Linear breaking that; two are asked for
+// so the client can tell.
+const userByDisplayNameQuery = `
+query UserByDisplayName($displayName: String!) {
+  users(filter: { displayName: { eq: $displayName } }, first: 2, includeDisabled: true) {
+    nodes { ` + userFields + ` }
+  }
+}`
+
 const teamsQuery = `
 query Teams($filter: TeamFilter, $first: Int!, $after: String) {
   teams(filter: $filter, first: $first, after: $after) {
@@ -82,6 +93,19 @@ query Teams($filter: TeamFilter, $first: Int!, $after: String) {
 const teamQuery = `
 query Team($id: String!) {
   team(id: $id) { id key name private }
+}`
+
+// teamByKeyQuery reads the team the credential can see whose key is exactly
+// the one given. Linear keeps team keys unique within a workspace; two are
+// asked for so the client can tell if it ever does not. Archived teams are
+// left out, as teamsQuery leaves them out: the key is the name a caller finds
+// in the list, and whether Linear frees an archived team's key for reuse is
+// not something this read relies on.
+const teamByKeyQuery = `
+query TeamByKey($key: String!) {
+  teams(filter: { key: { eq: $key } }, first: 2) {
+    nodes { id key name private }
+  }
 }`
 
 // teamsByIDQuery reads teams by UUID. Linear's teams connection holds only the

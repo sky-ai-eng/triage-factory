@@ -127,7 +127,7 @@ describe('LinearOAuthAppCard', () => {
     expect(fetchMock).toHaveBeenLastCalledWith(
       '/api/orgs/org-1/linear/app',
       expect.objectContaining({
-        method: 'POST',
+        method: 'PUT',
         body: JSON.stringify({ client_id: 'lin-client', client_secret: 'secret' }),
       }),
     )

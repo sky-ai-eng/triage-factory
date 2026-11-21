@@ -112,6 +112,24 @@ func (c *Client) GetUser(ctx context.Context, id string) (User, error) {
 	return *data.User, nil
 }
 
+// GetUserByDisplayName returns the user of the workspace, deactivated or not,
+// whose display name is exactly displayName, compared without folding case.
+// No such user is an error matching ErrNotFound.
+func (c *Client) GetUserByDisplayName(ctx context.Context, displayName string) (User, error) {
+	if err := requireID("user display name", displayName); err != nil {
+		return User{}, err
+	}
+	var data struct {
+		Users struct {
+			Nodes []User `json:"nodes"`
+		} `json:"users"`
+	}
+	if err := c.query(ctx, userByDisplayNameQuery, map[string]any{"displayName": displayName}, &data); err != nil {
+		return User{}, err
+	}
+	return onlyMatch(data.Users.Nodes, "user", "display name", displayName)
+}
+
 // ListTeams returns one page of the teams the credential can see, at most
 // first of them, narrowed by q: a case-insensitive substring of the key or
 // the name. An empty q lists every team; after is the previous page's
@@ -163,6 +181,39 @@ func (c *Client) GetTeam(ctx context.Context, id string) (Team, error) {
 		return Team{}, fmt.Errorf("%w: team %s", ErrNotFound, id)
 	}
 	return *data.Team, nil
+}
+
+// GetTeamByKey returns the team the credential can see whose key is exactly
+// key, compared without folding case. No such team, or one the credential
+// cannot see, is an error matching ErrNotFound.
+func (c *Client) GetTeamByKey(ctx context.Context, key string) (Team, error) {
+	if err := requireID("team key", key); err != nil {
+		return Team{}, err
+	}
+	var data struct {
+		Teams struct {
+			Nodes []Team `json:"nodes"`
+		} `json:"teams"`
+	}
+	if err := c.query(ctx, teamByKeyQuery, map[string]any{"key": key}, &data); err != nil {
+		return Team{}, err
+	}
+	return onlyMatch(data.Teams.Nodes, "team", "key", key)
+}
+
+// onlyMatch is the one row a lookup by a name Linear keeps unique returned: no
+// row is ErrNotFound, and more than one is ErrAmbiguous rather than a pick,
+// since either row could be the one the caller means.
+func onlyMatch[T any](rows []T, what, by, value string) (T, error) {
+	var zero T
+	switch len(rows) {
+	case 0:
+		return zero, fmt.Errorf("%w: %s with %s %q", ErrNotFound, what, by, value)
+	case 1:
+		return rows[0], nil
+	default:
+		return zero, fmt.Errorf("%w: %s with %s %q", ErrAmbiguous, what, by, value)
+	}
 }
 
 // GetTeams returns the teams with the given UUIDs that the credential can

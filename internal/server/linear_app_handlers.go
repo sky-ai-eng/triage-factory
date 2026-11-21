@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -22,7 +21,7 @@ import (
 // ceremony (linear_install.go) then runs against it.
 //
 //   GET    /api/orgs/{org_id}/linear/app
-//   POST   /api/orgs/{org_id}/linear/app
+//   PUT    /api/orgs/{org_id}/linear/app
 //   DELETE /api/orgs/{org_id}/linear/app
 //
 // The row is the per-org override in linear.OAuthAppResolver's precedence; the
@@ -40,10 +39,6 @@ const (
 	linearConnectCallbackPath = "/api/linear/connect/callback"
 )
 
-// linearAppCredentialMaxLen caps the client ID and the client secret. Linear's
-// are 32 characters; the cap only refuses a value no OAuth app would issue.
-const linearAppCredentialMaxLen = 256
-
 // linearAppCreateURL is Linear's app-creation page, which pre-fills its form
 // from these query parameters. It does not hand the credentials back, so the
 // admin copies them from the created app's page.
@@ -55,12 +50,12 @@ const linearDeveloperNameFallback = "Triage Factory organization"
 
 // linearAppInfo is the org's own app, public half only.
 type linearAppInfo struct {
-	ClientID                string `json:"client_id"`
-	RegisteredAt            string `json:"registered_at"`
-	RegisteredByDisplayName string `json:"registered_by_display_name"`
+	ClientID                string `json:"client_id" doc:"The Linear OAuth app's client id."`
+	RegisteredAt            string `json:"registered_at" doc:"When the app was first stored for the organization, as an RFC 3339 timestamp."`
+	RegisteredByDisplayName string `json:"registered_by_display_name" doc:"The display name of the person who last stored the app, empty when it cannot be read."`
 }
 
-// linearAppStatusResponse is the GET body, and what a successful POST or
+// linearAppStatusResponse is the GET body, and what a successful PUT or
 // DELETE answers with. Like jiraAppStatusResponse it is driven by the
 // resolved source rather than the raw row: a row whose secret is gone is not
 // reported as the org's app.
@@ -69,18 +64,45 @@ type linearAppInfo struct {
 // admin has nothing to create, and an app of the org's own is an override
 // registered by hand from the redirect URIs.
 type linearAppStatusResponse struct {
-	App                    *linearAppInfo `json:"app"`
-	InstallAvailable       bool           `json:"install_available"`
-	UsingDeploymentDefault bool           `json:"using_deployment_default"`
-	CreateURL              string         `json:"create_url,omitempty"`
-	RedirectURIs           []string       `json:"redirect_uris"`
+	App                    *linearAppInfo `json:"app" doc:"The organization's own Linear OAuth app, or null when the organization uses the deployment's app or has none."`
+	InstallAvailable       bool           `json:"install_available" doc:"Whether a Linear OAuth app is available to the organization, its own or the deployment's, so Triage Factory can be installed in the workspace."`
+	UsingDeploymentDefault bool           `json:"using_deployment_default" doc:"Whether the app available to the organization is the deployment's rather than its own."`
+	CreateURL              string         `json:"create_url,omitempty" doc:"A link to Linear's app-creation page with the form filled in for this organization, absent while the deployment's app is available to the organization."`
+	RedirectURIs           []string       `json:"redirect_uris" doc:"The redirect URIs to register on the Linear OAuth app: the install callback, then the connect callback."`
 }
 
-// linearAppImportRequest is the POST body.
+// linearAppImportRequest is the PUT body.
 type linearAppImportRequest struct {
-	ClientID     string `json:"client_id"`
-	ClientSecret string `json:"client_secret"`
+	ClientID     string `json:"client_id" doc:"The Linear OAuth app's client id, at most 256 characters."`
+	ClientSecret string `json:"client_secret" doc:"The Linear OAuth app's client secret, at most 256 characters."`
 }
+
+var opLinearAppStatus = httpx.NewJSONOp[httpx.NoBody, linearAppStatusResponse](httpx.OpSpec{
+	Pattern:     "GET /api/orgs/{org_id}/linear/app",
+	ID:          "get_linear_app",
+	Summary:     "Get the organization's Linear OAuth app",
+	Description: "Returns which Linear OAuth app installing Triage Factory in the organization's Linear workspace runs against, the organization's own or the deployment's, and the redirect URIs to register on it. The client secret is never returned.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
+
+var opLinearAppImport = httpx.NewJSONOp[linearAppImportRequest, linearAppStatusResponse](httpx.OpSpec{
+	Pattern:     "PUT /api/orgs/{org_id}/linear/app",
+	ID:          "replace_linear_app",
+	Summary:     "Store the organization's Linear OAuth app",
+	Description: "Stores a Linear OAuth app's client id and secret as the organization's own app, replacing any it had, and returns the app status. The credentials are stored without being checked against Linear, and an app with another client id is refused while Triage Factory is installed in Linear with the current one.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
+
+var opLinearAppDelete = httpx.NewJSONOp[httpx.NoBody, linearAppStatusResponse](httpx.OpSpec{
+	Pattern:     "DELETE /api/orgs/{org_id}/linear/app",
+	ID:          "delete_linear_app",
+	Summary:     "Remove the organization's Linear OAuth app",
+	Description: "Removes the organization's own Linear OAuth app and its client secret, and returns the app status. It is refused while Triage Factory is installed in Linear with that app, and removing an app the organization does not have succeeds and changes nothing.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // errLinearInstallStranded is a change to the org's app that would leave a
 // live install unable to refresh: its refresh token is only accepted with the
@@ -150,19 +172,29 @@ func (s *Server) resolveLinearAppSource(ctx context.Context, orgID string) linea
 	return source
 }
 
-// linearAppStatus reads the org's app row and name and assembles the status
-// body.
+// linearAppStatus reads the org's app row and assembles the status body.
 func (s *Server) linearAppStatus(ctx context.Context, orgID, userID string) (linearAppStatusResponse, error) {
+	var app *domain.OrgLinearApp
+	if err := s.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		var err error
+		app, err = tx.LinearApps.GetForOrg(ctx, orgID)
+		return err
+	}); err != nil {
+		return linearAppStatusResponse{}, err
+	}
+	return s.linearAppStatusFor(ctx, orgID, userID, app)
+}
+
+// linearAppStatusFor assembles the status body around app, the org's row (nil
+// when it has none), reading the org's name and the registrant's. A write
+// passes the row it persisted.
+func (s *Server) linearAppStatusFor(ctx context.Context, orgID, userID string, app *domain.OrgLinearApp) (linearAppStatusResponse, error) {
 	var (
-		app          *domain.OrgLinearApp
 		org          *domain.Org
 		registeredBy string
 	)
 	if err := s.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		var err error
-		if app, err = tx.LinearApps.GetForOrg(ctx, orgID); err != nil {
-			return err
-		}
 		if org, err = tx.Orgs.GetOrg(ctx, orgID); err != nil {
 			return err
 		}
@@ -217,7 +249,7 @@ func (s *Server) handleLinearAppStatus(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "linear-app", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, resp)
+	opLinearAppStatus.Write(w, resp)
 }
 
 // liveLinearInstall is the org's install row when it is live, nil otherwise.
@@ -237,34 +269,20 @@ func (s *Server) liveLinearInstall(ctx context.Context, orgID string) (*domain.O
 // minted by another app is live is refused 409, for the reason the delete
 // gives. Rotating the secret of the same app is a replace like any other.
 //
-// POST /api/orgs/{org_id}/linear/app
+// PUT /api/orgs/{org_id}/linear/app
 func (s *Server) handleLinearAppImport(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := s.az.RequireOrgAdmin(w, r)
 	if !ok {
 		return
 	}
 	ctx := r.Context()
-	var req linearAppImportRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opLinearAppImport.Decode(w, r)
+	if !ok {
 		return
 	}
-	clientID := strings.TrimSpace(req.ClientID)
-	clientSecret := strings.TrimSpace(req.ClientSecret)
-	var faults []httpx.ErrorItem
-	if clientID == "" {
-		faults = append(faults, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "A Linear OAuth app client ID is required.", Field: "client_id"})
-	}
-	if clientSecret == "" {
-		faults = append(faults, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "A Linear OAuth app client secret is required.", Field: "client_secret"})
-	}
-	if utf8.RuneCountInString(clientID) > linearAppCredentialMaxLen {
-		faults = append(faults, httpx.ErrorItem{Reason: httpx.ReasonOutOfRange, Message: fmt.Sprintf("client_id must be at most %d characters", linearAppCredentialMaxLen), Field: "client_id"})
-	}
-	if utf8.RuneCountInString(clientSecret) > linearAppCredentialMaxLen {
-		faults = append(faults, httpx.ErrorItem{Reason: httpx.ReasonOutOfRange, Message: fmt.Sprintf("client_secret must be at most %d characters", linearAppCredentialMaxLen), Field: "client_secret"})
-	}
-	if len(faults) > 0 {
-		httpx.WriteErrors(w, http.StatusBadRequest, faults...)
+	var v httpx.Validation
+	clientID, clientSecret := oauthAppCredentials(&v, "A Linear OAuth app", req.ClientID, req.ClientSecret)
+	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
 
@@ -298,8 +316,10 @@ func (s *Server) handleLinearAppImport(w http.ResponseWriter, r *http.Request) {
 	}
 	defer unlock()
 
+	var stored domain.OrgLinearApp
 	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		if _, err := tx.LinearApps.UpsertForOrg(ctx, domain.OrgLinearApp{
+		var err error
+		if stored, err = tx.LinearApps.UpsertForOrg(ctx, domain.OrgLinearApp{
 			OrgID:              orgID,
 			ClientID:           clientID,
 			ClientSecretRef:    linearOAuthClientSecretKey,
@@ -327,12 +347,12 @@ func (s *Server) handleLinearAppImport(w http.ResponseWriter, r *http.Request) {
 	}
 	linearAppLog.Info("stored linear oauth app", "client_id", clientID, "org", orgID, "user", userID)
 
-	resp, err := s.linearAppStatus(ctx, orgID, userID)
+	resp, err := s.linearAppStatusFor(ctx, orgID, userID, &stored)
 	if err != nil {
 		internalError(w, "linear-app", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, resp)
+	opLinearAppImport.Write(w, resp)
 }
 
 // handleLinearAppDelete removes the org's Linear OAuth app — the row and its
@@ -407,12 +427,12 @@ func (s *Server) handleLinearAppDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	linearAppLog.Info("removed linear oauth app", "org", orgID, "user", userID)
 
-	resp, err := s.linearAppStatus(ctx, orgID, userID)
+	resp, err := s.linearAppStatusFor(ctx, orgID, userID, nil)
 	if err != nil {
 		internalError(w, "linear-app", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, resp)
+	opLinearAppDelete.Write(w, resp)
 }
 
 // writeLinearInstallStranded answers a change to the app that the live

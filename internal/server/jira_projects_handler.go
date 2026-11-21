@@ -19,6 +19,7 @@ import (
 //
 //   POST /api/orgs/{org_id}/jira/projects/list
 //   GET  /api/orgs/{org_id}/jira/projects/{jira_id}
+//   GET  /api/orgs/{org_id}/jira/projects/by-name/{key}
 //   POST /api/orgs/{org_id}/jira/projects/{jira_id}/statuses/list
 //   GET  /api/orgs/{org_id}/jira/projects/{jira_id}/statuses/{status_id}
 //
@@ -61,7 +62,7 @@ type jiraProjectListRequest struct {
 	// not a wildcard; Data Center, whose catalog endpoint takes no filter,
 	// applies it to the catalog in hand before the window — one contract, two
 	// implementations (jira.ListProjects).
-	Search string `json:"search"`
+	Search string `json:"search" doc:"Text the project's key or name must contain, matched without regard to case; absent matches every project."`
 	httpx.PageRequest
 }
 
@@ -80,10 +81,19 @@ type jiraProjectListFilterKey struct {
 // link, none of which the picker renders — and a proxy list that echoes
 // whatever the upstream sent is how a provider's shape becomes our contract.
 type jiraProjectJSON struct {
-	JiraID string `json:"jira_id"`
-	Key    string `json:"key"`
-	Name   string `json:"name"`
+	JiraID string `json:"jira_id" doc:"Jira's id for the project, which stays the same when the project's key changes."`
+	Key    string `json:"key" doc:"The project's key, such as PROJ."`
+	Name   string `json:"name" doc:"The project's name."`
 }
+
+var opJiraProjectsList = httpx.NewListOp[jiraProjectListRequest, jiraProjectJSON](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/jira/projects/list",
+	ID:          "list_jira_projects",
+	Summary:     "List the organization's Jira projects",
+	Description: "Reads one page of the Jira projects the organization's Jira credential can see, live from Jira. total_count is always null, and page_size 0 is refused, because Jira reports no total.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // POST /api/orgs/{org_id}/jira/projects/list
 func (s *Server) handleJiraProjectsList(w http.ResponseWriter, r *http.Request) {
@@ -92,8 +102,8 @@ func (s *Server) handleJiraProjectsList(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	var req jiraProjectListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opJiraProjectsList.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -123,8 +133,20 @@ func (s *Server) handleJiraProjectsList(w http.ResponseWriter, r *http.Request) 
 	if upstream.NextStartAt > 0 {
 		next = strconv.Itoa(upstream.NextStartAt)
 	}
-	httpx.WriteProxyList(w, page, items, next)
+	opJiraProjectsList.WriteProxy(w, page, items, next)
 }
+
+var opJiraProjectGet = httpx.NewJSONOp[httpx.NoBody, jiraProjectJSON](httpx.OpSpec{
+	Pattern:     "GET /api/orgs/{org_id}/jira/projects/{jira_id}",
+	ID:          "get_jira_project",
+	Summary:     "Get a Jira project",
+	Description: "Reads one Jira project live from Jira, under the organization's Jira credential.",
+	PathParams: map[string]string{
+		"org_id":  "The organization's id.",
+		"jira_id": "Jira's id for the project, a decimal number; a project key is not accepted.",
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // GET /api/orgs/{org_id}/jira/projects/{jira_id}
 func (s *Server) handleJiraProjectGet(w http.ResponseWriter, r *http.Request) {
@@ -149,7 +171,55 @@ func (s *Server) handleJiraProjectGet(w http.ResponseWriter, r *http.Request) {
 		writeJiraUpstream(w, orgID, "Jira project "+jiraID, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, jiraProjectJSON{JiraID: project.ID, Key: project.Key, Name: project.Name})
+	opJiraProjectGet.Write(w, jiraProjectJSON{JiraID: project.ID, Key: project.Key, Name: project.Name})
+}
+
+var opJiraProjectGetByName = httpx.NewJSONOp[httpx.NoBody, jiraProjectJSON](httpx.OpSpec{
+	Pattern:     "GET /api/orgs/{org_id}/jira/projects/by-name/{key}",
+	ID:          "get_jira_project_by_name",
+	Summary:     "Get a Jira project by its key",
+	Description: "Reads the Jira project whose current key is exactly the one given, live from Jira, under the organization's Jira credential. A key the project had before it was renamed is not found.",
+	PathParams: map[string]string{
+		"org_id": "The organization's id.",
+		"key":    "The project's key as Jira writes it, such as PROJ: an uppercase letter, then uppercase letters, digits, or underscores.",
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
+
+// jiraProjectKeyRe is a Jira project key as both deployments write one: an
+// uppercase letter, then uppercase letters, digits and underscores. The key
+// is put into Jira's URL as it stands, so nothing else may reach it, and a
+// lower-case spelling is not found rather than folded.
+var jiraProjectKeyRe = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,254}$`)
+
+// GET /api/orgs/{org_id}/jira/projects/by-name/{key}
+func (s *Server) handleJiraProjectGetByName(w http.ResponseWriter, r *http.Request) {
+	orgID, _, ok := s.az.RequireOrgMember(w, r)
+	if !ok {
+		return
+	}
+	key := r.PathValue("key")
+	if !jiraProjectKeyRe.MatchString(key) {
+		httpx.NotFound(w, "jira project")
+		return
+	}
+	client, ok := s.jiraSystemClient(w, r, orgID, "jira/project", "Jira is not connected for this organization")
+	if !ok {
+		return
+	}
+	project, err := client.GetProject(r.Context(), key)
+	// Jira answers a key the project was renamed from with the project under
+	// its current key. The route answers to the current key alone, so a key
+	// names one project at a time.
+	if jira.IsNotFound(err) || (err == nil && project.Key != key) {
+		httpx.NotFound(w, "jira project")
+		return
+	}
+	if err != nil {
+		writeJiraUpstream(w, orgID, "Jira project "+key, err)
+		return
+	}
+	opJiraProjectGetByName.Write(w, jiraProjectJSON{JiraID: project.ID, Key: project.Key, Name: project.Name})
 }
 
 // jiraStatusListRequest is the statuses list's body: a search over the status
@@ -159,7 +229,7 @@ type jiraStatusListRequest struct {
 	// substring (httpx.Search). Jira's statuses read takes no filter, so it is
 	// applied to the workflow in hand, before the window. Absent matches every
 	// status.
-	Search string `json:"search"`
+	Search string `json:"search" doc:"Text the status's name must contain, matched without regard to case; absent matches every status."`
 	httpx.PageRequest
 }
 
@@ -175,9 +245,21 @@ type jiraStatusListFilterKey struct {
 // jiraStatusJSON is one workflow status. The id is what the team write takes
 // and what a rule is keyed on; the name is what a person recognizes it by.
 type jiraStatusJSON struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID   string `json:"id" doc:"Jira's id for the status."`
+	Name string `json:"name" doc:"The status's name."`
 }
+
+var opJiraStatusesList = httpx.NewListOp[jiraStatusListRequest, jiraStatusJSON](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/jira/projects/{jira_id}/statuses/list",
+	ID:          "list_jira_project_statuses",
+	Summary:     "List a Jira project's workflow statuses",
+	Description: "Reads one page of the statuses the project's workflows use, live from Jira, ordered by name and then id. total_count is always null, and page_size 0 is refused.",
+	PathParams: map[string]string{
+		"org_id":  "The organization's id.",
+		"jira_id": "Jira's id for the project, a decimal number; a project key is not accepted.",
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // POST /api/orgs/{org_id}/jira/projects/{jira_id}/statuses/list
 //
@@ -195,8 +277,8 @@ func (s *Server) handleJiraStatusesList(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	var req jiraStatusListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opJiraStatusesList.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -229,8 +311,21 @@ func (s *Server) handleJiraStatusesList(w http.ResponseWriter, r *http.Request) 
 	items, next := jiraWindow(statuses, startAt, page.Limit, func(st jira.Status) jiraStatusJSON {
 		return jiraStatusJSON{ID: st.ID, Name: st.Name}
 	})
-	httpx.WriteProxyList(w, page, items, next)
+	opJiraStatusesList.WriteProxy(w, page, items, next)
 }
+
+var opJiraStatusGet = httpx.NewJSONOp[httpx.NoBody, jiraStatusJSON](httpx.OpSpec{
+	Pattern:     "GET /api/orgs/{org_id}/jira/projects/{jira_id}/statuses/{status_id}",
+	ID:          "get_jira_project_status",
+	Summary:     "Get a Jira project's workflow status",
+	Description: "Reads one status of the project's workflows live from Jira. A status that exists in Jira but is not in this project's workflows is not found.",
+	PathParams: map[string]string{
+		"org_id":    "The organization's id.",
+		"jira_id":   "Jira's id for the project, a decimal number; a project key is not accepted.",
+		"status_id": "Jira's id for the status, a decimal number.",
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // GET /api/orgs/{org_id}/jira/projects/{jira_id}/statuses/{status_id}
 //
@@ -273,7 +368,7 @@ func (s *Server) handleJiraStatusGet(w http.ResponseWriter, r *http.Request) {
 		httpx.NotFound(w, "jira workflow status")
 		return
 	}
-	writeJSON(w, http.StatusOK, jiraStatusJSON{ID: statuses[i].ID, Name: statuses[i].Name})
+	opJiraStatusGet.Write(w, jiraStatusJSON{ID: statuses[i].ID, Name: statuses[i].Name})
 }
 
 // jiraStatusIDRe is a Jira status id as both deployments write one: a decimal

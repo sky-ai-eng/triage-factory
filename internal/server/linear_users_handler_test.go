@@ -154,3 +154,40 @@ func TestLinearUserGet(t *testing.T) {
 		t.Error("a path id that is not a Linear id reached Linear")
 	}
 }
+
+// A user is read by display name, deactivated or not, matched with case; a
+// name no user holds, or another spelling of one, is a 404, and a blank one is
+// a 404 without asking Linear.
+func TestLinearUserGetByName(t *testing.T) {
+	s, fake := newServerWithLinearUsers(t)
+	byName := func(name string) string {
+		return linearOrgPath(runmode.LocalDefaultOrgID) + "/users/by-name/" + name
+	}
+
+	for name, want := range map[string]linearUserJSON{
+		"ada":   {ID: linearUserAda, Name: "Ada Lovelace", DisplayName: "ada", Active: true},
+		"grace": {ID: linearUserGrace, Name: "Grace Hopper", DisplayName: "grace"},
+	} {
+		rec := doJSON(t, s, http.MethodGet, byName(name), nil)
+		var got linearUserJSON
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil || rec.Code != http.StatusOK || got != want {
+			t.Errorf("GET by name %s = %d %+v, want 200 %+v; body=%s", name, rec.Code, got, want, rec.Body.String())
+		}
+	}
+
+	for _, name := range []string{"Ada", "nobody"} {
+		assertOneFault(t, doJSON(t, s, http.MethodGet, byName(name), nil), http.StatusNotFound, "NOT_FOUND", "")
+	}
+	before := fake.Calls()
+	assertOneFault(t, doJSON(t, s, http.MethodGet, byName("%20"), nil), http.StatusNotFound, "NOT_FOUND", "")
+	if fake.Calls() != before {
+		t.Error("a blank display name reached Linear")
+	}
+
+	// Two users Linear answers for one display name are a 409, not a pick.
+	fake.SetUsers(
+		linear.User{ID: linearUserAda, Name: "Ada Lovelace", DisplayName: "ada", Active: true},
+		linear.User{ID: linearUserAdam, Name: "Adam Smith", DisplayName: "ada", Active: true},
+	)
+	assertOneFault(t, doJSON(t, s, http.MethodGet, byName("ada"), nil), http.StatusConflict, "CONFLICT", "")
+}

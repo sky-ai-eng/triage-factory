@@ -3,11 +3,14 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"testing"
 
 	"github.com/zalando/go-keyring"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
@@ -52,7 +55,7 @@ func TestJiraApp_LocalMode_DeleteClearsConnectAvailable(t *testing.T) {
 	keyring.MockInit()
 	s := newTestServer(t)
 
-	rec := doJSON(t, s, "POST", jiraAppPath(), map[string]string{
+	rec := doJSON(t, s, http.MethodPut, jiraAppPath(), map[string]string{
 		"client_id":     "atl-client-xyz",
 		"client_secret": "shhh-secret",
 	})
@@ -103,7 +106,7 @@ func TestJiraApp_DeadOverrideRowNotShownAsConfigured(t *testing.T) {
 	keyring.MockInit()
 	s := newTestServer(t)
 
-	if rec := doJSON(t, s, "POST", jiraAppPath(), map[string]string{
+	if rec := doJSON(t, s, http.MethodPut, jiraAppPath(), map[string]string{
 		"client_id":     "atl-client-xyz",
 		"client_secret": "shhh-secret",
 	}); rec.Code != http.StatusOK {
@@ -136,15 +139,79 @@ func TestJiraApp_DeadOverrideRowNotShownAsConfigured(t *testing.T) {
 }
 
 // TestJiraApp_ImportRejectsMissingFields: client_id and client_secret are both
-// required, and a blank one is a 400 MISSING_FIELD naming the field.
+// required, and a blank one is a 400 MISSING_FIELD naming the field; with
+// both blank, both are named.
 func TestJiraApp_ImportRejectsMissingFields(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
 	s := newTestServer(t)
 
-	rec := doJSON(t, s, "POST", jiraAppPath(), map[string]string{"client_secret": "x"})
+	rec := doJSON(t, s, http.MethodPut, jiraAppPath(), map[string]string{"client_secret": "x"})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d body=%s, want 400", rec.Code, rec.Body.String())
 	}
 	httpxtest.AssertFirstError(t, rec, httpx.ReasonMissingField, "client_id")
+
+	rec = doJSON(t, s, http.MethodPut, jiraAppPath(), map[string]string{"client_id": " ", "client_secret": ""})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("both blank: status=%d body=%s, want 400", rec.Code, rec.Body.String())
+	}
+	items := decodeErrorItems(t, rec)
+	if len(items) != 2 || items[0].Field != "client_id" || items[1].Field != "client_secret" {
+		t.Errorf("both blank: errors = %+v, want client_id and client_secret named", items)
+	}
+}
+
+// failingAuditTx fails every transaction at its audit write, the last write
+// the app import makes.
+type failingAuditTx struct{ db.TxRunner }
+
+func (f failingAuditTx) WithTx(ctx context.Context, orgID, userID string, fn func(db.TxStores) error) error {
+	return f.TxRunner.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		tx.AccessChangeLog = failingAuditLog{AccessChangeLogStore: tx.AccessChangeLog}
+		return fn(tx)
+	})
+}
+
+type failingAuditLog struct{ db.AccessChangeLogStore }
+
+func (failingAuditLog) Record(context.Context, string, domain.AccessChange) error {
+	return errors.New("audit write failed")
+}
+
+// TestJiraApp_LocalMode_FailedReplaceKeepsApp: in local mode the client secret
+// lands in the keychain outside the transaction, so a replace that fails after
+// writing it puts the previous app's secret back, and the org keeps the app it
+// had.
+func TestJiraApp_LocalMode_FailedReplaceKeepsApp(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+
+	if rec := doJSON(t, s, http.MethodPut, jiraAppPath(), map[string]string{
+		"client_id": "atl-client-a", "client_secret": "secret-a",
+	}); rec.Code != http.StatusOK {
+		t.Fatalf("first import status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+
+	tx := s.tx
+	s.tx = failingAuditTx{TxRunner: tx}
+	if rec := doJSON(t, s, http.MethodPut, jiraAppPath(), map[string]string{
+		"client_id": "atl-client-b", "client_secret": "secret-b",
+	}); rec.Code != http.StatusInternalServerError {
+		t.Fatalf("failing replace status=%d body=%s, want 500", rec.Code, rec.Body.String())
+	}
+	s.tx = tx
+
+	if got, err := s.secrets.GetSystem(context.Background(), runmode.LocalDefaultOrgID, jiraOAuthClientSecretKey); err != nil || got != "secret-a" {
+		t.Errorf("secret after the failed replace = (%q, %v), want secret-a", got, err)
+	}
+	rec := doJSON(t, s, "GET", jiraAppPath(), nil)
+	var out jiraAppStatusResponse
+	if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	if out.App == nil || out.App.ClientID != "atl-client-a" || !out.ConnectAvailable {
+		t.Errorf("status after the failed replace = %+v, want app atl-client-a and connect_available", out)
+	}
 }
