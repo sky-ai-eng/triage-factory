@@ -468,6 +468,9 @@ func (s *blueprintStore) ReplaceSteps(ctx context.Context, orgID, blueprintID st
 				INSERT INTO blueprint_steps (org_id, team_id, blueprint_id, step_index, step_prompt_id, brief, created_at)
 				VALUES ($1, (SELECT team_id FROM blueprints WHERE id = $2 AND org_id = $1), $2, $3, $4, $5, $6)
 			`, orgID, blueprintID, i, stepID, brief, now); err != nil {
+				if isStepPromptOwned(err) {
+					return &db.StepPromptOwnedError{StepIndex: i}
+				}
 				return fmt.Errorf("insert step %d: %w", i, err)
 			}
 		}
@@ -488,6 +491,18 @@ func (s *blueprintStore) ReplaceSteps(ctx context.Context, orgID, blueprintID st
 		return domain.Blueprint{}, err
 	}
 	return stamped, nil
+}
+
+// blueprintStepsOrgStepPromptKey is the copy-only unique index: a prompt is a
+// step of at most one blueprint.
+const blueprintStepsOrgStepPromptKey = "blueprint_steps_org_step_prompt_key"
+
+// isStepPromptOwned reports whether err is the copy-only unique index
+// refusing a step insert.
+func isStepPromptOwned(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505" &&
+		pgErr.ConstraintName == blueprintStepsOrgStepPromptKey
 }
 
 // reparentBlueprintStepsPG moves the steps of fromBlueprint whose step_index
