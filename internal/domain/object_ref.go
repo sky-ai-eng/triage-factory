@@ -23,6 +23,12 @@ func (r ObjectRef) MarshalText() ([]byte, error) {
 	return []byte(objectRefEncoding.EncodeToString([]byte(r))), nil
 }
 
+// OpenAPISchema describes the wire spelling for the API spec, which cannot
+// read it off the type because the type encodes itself.
+func (ObjectRef) OpenAPISchema() map[string]any {
+	return map[string]any{"type": "string"}
+}
+
 // UnmarshalText reads the wire spelling back, refusing what ParseObjectRef
 // refuses; "" reads as "". It makes the JSON round-trip, so a response decoded
 // into a struct holds the raw id again.

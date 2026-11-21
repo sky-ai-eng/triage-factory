@@ -38,18 +38,18 @@ import (
 // the by-source cut's nullable events: every team has a defined answer for
 // both, so a zero here is a real zero.
 type teamActivityDayJSON struct {
-	Date   string `json:"date"`
-	Events int    `json:"events"`
-	Tasks  int    `json:"tasks"`
-	Merged int    `json:"merged"`
-	Failed int    `json:"failed"`
+	Date   string `json:"date" doc:"The UTC calendar day, as YYYY-MM-DD."`
+	Events int    `json:"events" doc:"How many events were recorded on the day, across every source."`
+	Tasks  int    `json:"tasks" doc:"How many tasks were created on the day."`
+	Merged int    `json:"merged" doc:"How many pull requests in the tracked repositories merged on the day, whether or not Triage Factory worked on them."`
+	Failed int    `json:"failed" doc:"How many of the teams' runs failed on the day."`
 }
 
 type teamActivityDaySourceJSON struct {
-	Date   string `json:"date"`
-	Source string `json:"source"`
-	Events int    `json:"events"`
-	Tasks  int    `json:"tasks"`
+	Date   string `json:"date" doc:"The UTC calendar day, as YYYY-MM-DD."`
+	Source string `json:"source" doc:"The source the events and tasks came from, such as github or jira."`
+	Events int    `json:"events" doc:"How many events from the source were recorded on the day."`
+	Tasks  int    `json:"tasks" doc:"How many tasks from the source were created on the day."`
 }
 
 // teamActivitySourceJSON is one source's totals. events is null — not 0 —
@@ -58,11 +58,11 @@ type teamActivityDaySourceJSON struct {
 // source with no poller or one that hasn't completed a cycle. A client
 // renders both as a dash, never as a zero.
 type teamActivitySourceJSON struct {
-	Source     string     `json:"source"`
-	Events     *int       `json:"events"`
-	Tasks      int        `json:"tasks"`
-	Runs       int        `json:"runs"`
-	LastPollAt *time.Time `json:"last_poll_at"`
+	Source     string     `json:"source" doc:"The source, such as github or jira."`
+	Events     *int       `json:"events" doc:"How many events from the source were recorded in the window, or null when the source has no tracked set to count events by."`
+	Tasks      int        `json:"tasks" doc:"How many tasks from the source were created in the window."`
+	Runs       int        `json:"runs" doc:"How many runs on tasks from the source started in the window."`
+	LastPollAt *time.Time `json:"last_poll_at" doc:"When the source's poller last completed a cycle, as an RFC 3339 timestamp, or null for a source with no poller or one that has not completed a cycle."`
 }
 
 // teamActivityTrackedJSON is one unit of the team's tracked set. unit_id is
@@ -73,43 +73,53 @@ type teamActivitySourceJSON struct {
 // a unit that has never sent an event, since it is bounded by the window's
 // end alone.
 type teamActivityTrackedJSON struct {
-	Source      string     `json:"source"`
-	UnitID      string     `json:"unit_id"`
-	Events      int        `json:"events"`
-	Tasks       int        `json:"tasks"`
-	Runs        int        `json:"runs"`
-	LastEventAt *time.Time `json:"last_event_at"`
+	Source      string     `json:"source" doc:"The source the tracked unit belongs to, such as github or jira."`
+	UnitID      string     `json:"unit_id" doc:"The tracked unit's id: a repository's id, a Jira project's id, a Linear team's id, or a Slack channel's id, as the source's own routes name it."`
+	Events      int        `json:"events" doc:"How many events from the unit were recorded in the window."`
+	Tasks       int        `json:"tasks" doc:"How many tasks on the unit were created in the window."`
+	Runs        int        `json:"runs" doc:"How many runs on the unit's tasks started in the window."`
+	LastEventAt *time.Time `json:"last_event_at" doc:"When the unit's latest event before the window's end was recorded, however long before the window's start, as an RFC 3339 timestamp, or null when it has never sent one."`
 }
 
 // teamActivityEventTypeJSON is one event type's flow: the events of the type,
 // the tasks created at it, and the distinct entities that sent such an event.
 type teamActivityEventTypeJSON struct {
-	EventType string `json:"event_type"`
-	Events    int    `json:"events"`
-	Tasks     int    `json:"tasks"`
-	Entities  int    `json:"entities"`
+	EventType string `json:"event_type" doc:"The event type, such as github:pr:review_requested."`
+	Events    int    `json:"events" doc:"How many events of the type were recorded in the window."`
+	Tasks     int    `json:"tasks" doc:"How many tasks were created for events of the type in the window."`
+	Entities  int    `json:"entities" doc:"How many distinct entities sent an event of the type in the window."`
 }
 
 // activityCutsJSON is the node's cuts, the same at every scope that mounts it.
 type activityCutsJSON struct {
-	ByDay       []teamActivityDayJSON       `json:"by_day"`
-	ByDaySource []teamActivityDaySourceJSON `json:"by_day_source"`
-	BySource    []teamActivitySourceJSON    `json:"by_source"`
-	ByTracked   []teamActivityTrackedJSON   `json:"by_tracked"`
-	ByEventType []teamActivityEventTypeJSON `json:"by_event_type"`
+	ByDay       []teamActivityDayJSON       `json:"by_day" doc:"The events, tasks, merged pull requests, and failed runs of each UTC day in the window."`
+	ByDaySource []teamActivityDaySourceJSON `json:"by_day_source" doc:"The events and tasks of each UTC day in the window, by source."`
+	BySource    []teamActivitySourceJSON    `json:"by_source" doc:"The events, tasks, and runs of each source over the window, with when its poller last completed a cycle."`
+	ByTracked   []teamActivityTrackedJSON   `json:"by_tracked" doc:"The events, tasks, and runs over the window of each repository, Jira project, Linear team, and Slack channel the teams track, including those with none."`
+	ByEventType []teamActivityEventTypeJSON `json:"by_event_type" doc:"The events, tasks, and distinct entities of each event type over the window."`
 }
 
 type teamActivityResponse struct {
-	TeamID string `json:"team_id"`
+	TeamID string `json:"team_id" doc:"The team's id."`
 	activityCutsJSON
 }
 
 // meActivityResponse names the teams whose union the cuts are, so a client
 // can tell a viewer on no team (an empty list, and zeros) from a quiet one.
 type meActivityResponse struct {
-	TeamIDs []string `json:"team_ids"`
+	TeamIDs []string `json:"team_ids" doc:"The ids of the caller's teams whose combined activity the cuts count, an empty array when the caller is on no team."`
 	activityCutsJSON
 }
+
+var opTeamActivity = httpx.NewJSONOp[httpx.NoBody, teamActivityResponse](httpx.OpSpec{
+	Pattern:     "GET /api/teams/{team_id}/activity",
+	ID:          "get_team_activity",
+	Summary:     "Get a team's activity",
+	Description: "Returns the team's events, tasks, runs, merged pull requests, and failed runs over the window, by UTC day, source, tracked unit, and event type, with when each source's poller last completed a cycle.",
+	PathParams:  map[string]string{"team_id": "The team's id, or default for the one team in local mode."},
+	Query:       httpx.WindowQuery(),
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 func (s *Server) handleTeamActivity(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := s.requireOrg(w, r)
@@ -124,14 +134,27 @@ func (s *Server) handleTeamActivity(w http.ResponseWriter, r *http.Request) {
 	if !s.az.VerifyTeamInOrg(w, r, orgID, userID, teamID) {
 		return
 	}
-	cuts, ok := s.activityCuts(w, r, orgID, userID, func(db.TxStores) ([]string, error) {
+	q, ok := opTeamActivity.Query(w, r)
+	if !ok {
+		return
+	}
+	cuts, ok := s.activityCuts(w, r, q, orgID, userID, func(db.TxStores) ([]string, error) {
 		return []string{teamID}, nil
 	})
 	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, teamActivityResponse{TeamID: teamID, activityCutsJSON: cuts.cuts})
+	opTeamActivity.Write(w, teamActivityResponse{TeamID: teamID, activityCutsJSON: cuts.cuts})
 }
+
+var opMeActivity = httpx.NewJSONOp[httpx.NoBody, meActivityResponse](httpx.OpSpec{
+	Pattern:     "GET /api/me/activity",
+	ID:          "get_my_activity",
+	Summary:     "Get the activity of your teams",
+	Description: "Returns the combined events, tasks, runs, merged pull requests, and failed runs over the window of the caller's teams in their current organization, by UTC day, source, tracked unit, and event type, counting an event once however many of the teams track it.",
+	Query:       httpx.WindowQuery(),
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleMeActivity is the node over the union of the viewer's active teams in
 // the org: an event counts once however many of them track its entity.
@@ -141,7 +164,11 @@ func (s *Server) handleMeActivity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	cuts, ok := s.activityCuts(w, r, orgID, userID, func(tx db.TxStores) ([]string, error) {
+	q, ok := opMeActivity.Query(w, r)
+	if !ok {
+		return
+	}
+	cuts, ok := s.activityCuts(w, r, q, orgID, userID, func(tx db.TxStores) ([]string, error) {
 		// The team set decides the answer rather than being served as rows, so
 		// it is read whole.
 		teams, _, err := tx.Teams.ListForUser(r.Context(), orgID, db.Unwindowed)
@@ -157,7 +184,7 @@ func (s *Server) handleMeActivity(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, meActivityResponse{TeamIDs: cuts.teamIDs, activityCutsJSON: cuts.cuts})
+	opMeActivity.Write(w, meActivityResponse{TeamIDs: cuts.teamIDs, activityCutsJSON: cuts.cuts})
 }
 
 // activityRead is one read of the node: the teams it unions and their cuts.
@@ -166,15 +193,11 @@ type activityRead struct {
 	cuts    activityCutsJSON
 }
 
-// activityCuts parses the window, reads the node for the teams teamsOf names
-// under the viewer's claims, and renders the cuts. It writes the failure and
-// answers false when the read cannot be served.
-func (s *Server) activityCuts(w http.ResponseWriter, r *http.Request, orgID, userID string, teamsOf func(db.TxStores) ([]string, error)) (activityRead, bool) {
+// activityCuts parses the window from q, the route's query, reads the node for
+// the teams teamsOf names under the viewer's claims, and renders the cuts. It
+// writes the failure and answers false when the read cannot be served.
+func (s *Server) activityCuts(w http.ResponseWriter, r *http.Request, q httpx.QueryValues, orgID, userID string, teamsOf func(db.TxStores) ([]string, error)) (activityRead, bool) {
 	now := time.Now().UTC()
-	q, ok := httpx.StrictQuery(w, r)
-	if !ok {
-		return activityRead{}, false
-	}
 	var v httpx.Validation
 	since, until := httpx.ParseWindow(&v, q, now)
 	if v.Flush(w, http.StatusBadRequest) {
@@ -252,8 +275,8 @@ func (s *Server) registerTeamActivityRoutes() {
 	// The team's flow node — events/tasks/runs cuts over a window, the
 	// spend node's sibling on the same member-level gate: both are the team
 	// page's figures, and the team page is every member's.
-	s.api("GET /api/teams/{team_id}/activity", s.handleTeamActivity)
+	s.op(opTeamActivity, s.handleTeamActivity)
 	// The same node over the viewer's own teams, viewer-relative like
 	// /api/me/usage.
-	s.api("GET /api/me/activity", s.handleMeActivity)
+	s.op(opMeActivity, s.handleMeActivity)
 }

@@ -435,8 +435,22 @@ func (h *Handler) handleUsageOrg(w http.ResponseWriter, r *http.Request) {
 // teamCapUpdate is the PUT /api/teams/{team_id}/usage/cap body. A pointer so an
 // explicit null and an omitted field both decode to nil → 0 → "clear the cap".
 type teamCapUpdate struct {
-	MaxDailyCostUSD *float64 `json:"max_daily_cost_usd"`
+	MaxDailyCostUSD *float64 `json:"max_daily_cost_usd" doc:"The most the team's runs may spend in one UTC day, in USD; null, an absent field, and 0 all clear the cap, and a negative value is refused."`
 }
+
+// teamCapResponse is what the cap PUT answers: the cap as stored.
+type teamCapResponse struct {
+	MaxDailyCostUSD *float64 `json:"max_daily_cost_usd" doc:"The team's daily spend cap as stored, in USD, or null when the team has none."`
+}
+
+var opUsageTeamCap = httpx.NewJSONOp[teamCapUpdate, teamCapResponse](httpx.OpSpec{
+	Pattern:     "PUT /api/teams/{team_id}/usage/cap",
+	ID:          "replace_team_usage_cap",
+	Summary:     "Set a team's daily spend cap",
+	Description: "Sets or clears the most the team's runs may spend on LLM calls in one UTC day, and returns the cap as stored. It needs an Enterprise licence.",
+	PathParams:  map[string]string{"team_id": "The team's id, or default for the one team in local mode."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleUsageTeamCap sets one team's per-team daily LLM spend cap (TFAC-482).
 // Gate: org admin AND the governance entitlement, in that order — a non-admin
@@ -486,8 +500,8 @@ func (h *Handler) handleUsageTeamCap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req teamCapUpdate
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opUsageTeamCap.Decode(w, r)
+	if !ok {
 		return
 	}
 	capUSD := 0.0
@@ -521,16 +535,25 @@ func (h *Handler) handleUsageTeamCap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"max_daily_cost_usd": stored})
+	opUsageTeamCap.Write(w, teamCapResponse{MaxDailyCostUSD: stored})
 }
 
 // usageTeamCapEntry is one team in the team-caps list: its id, name, and
 // configured per-team daily cap (null = no cap).
 type usageTeamCapEntry struct {
-	TeamID   string   `json:"team_id"`
-	TeamName string   `json:"team_name"`
-	Cap      *float64 `json:"cap"`
+	TeamID   string   `json:"team_id" doc:"The team's id."`
+	TeamName string   `json:"team_name" doc:"The team's name."`
+	Cap      *float64 `json:"cap" doc:"The most the team's runs may spend in one UTC day, in USD, or null when the team has no cap."`
 }
+
+var opUsageTeamCaps = httpx.NewListOp[httpx.PageRequest, usageTeamCapEntry](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/usage/team-caps/list",
+	ID:          "list_org_team_caps",
+	Summary:     "List the daily spend caps of an organization's teams",
+	Description: "Lists every team in the organization that is not archived, with its daily LLM spend cap. It needs an Enterprise licence.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleUsageTeamCaps lists EVERY active team in the org with its per-team
 // daily cap, for the governance cap editor. Gate: org admin (403) then
@@ -550,8 +573,8 @@ func (h *Handler) handleUsageTeamCaps(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req httpx.PageRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opUsageTeamCaps.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -579,7 +602,7 @@ func (h *Handler) handleUsageTeamCaps(w http.ResponseWriter, r *http.Request) {
 	for i, c := range caps {
 		entries[i] = usageTeamCapEntry{TeamID: c.TeamID, TeamName: c.TeamName, Cap: c.Cap}
 	}
-	httpx.WriteList(w, page, entries, total)
+	opUsageTeamCaps.Write(w, page, entries, total)
 }
 
 // --- gating ---
@@ -942,32 +965,32 @@ func (h *Handler) Register(m httpx.Mounts) {
 	// durations + failure rates. Org-admin gated, SaaS-safe (no cross-tenant
 	// machine truth) — the org-facing complement to the operator-only fleet
 	// console.
-	m.API("GET /api/orgs/{org_id}/usage/ops", h.handleUsageOrgOps)
+	m.Op(opUsageOrgOps, h.handleUsageOrgOps)
 	// Activity feed (EE, FeatureGovernance): the team/org Actions
 	// (external-action audit log) + Objects (artifacts across runs) lenses — same
 	// scope gates as the spend reads above, plus the entitlement (unlicensed →
 	// 404). Two resources, two routes each: the row shapes and the filter
 	// vocabularies differ, so one address cannot honestly serve both.
-	m.APIMutating("POST /api/teams/{team_id}/usage/artifacts/list", h.handleUsageTeamArtifacts)
-	m.APIMutating("POST /api/teams/{team_id}/usage/actions/list", h.handleUsageTeamActions)
-	m.APIMutating("POST /api/orgs/{org_id}/usage/artifacts/list", h.handleUsageOrgArtifacts)
-	m.APIMutating("POST /api/orgs/{org_id}/usage/actions/list", h.handleUsageOrgActions)
+	m.Op(opUsageTeamArtifacts, h.handleUsageTeamArtifacts)
+	m.Op(opUsageTeamActions, h.handleUsageTeamActions)
+	m.Op(opUsageOrgArtifacts, h.handleUsageOrgArtifacts)
+	m.Op(opUsageOrgActions, h.handleUsageOrgActions)
 	// Each list's facets node, beside it at the same scope and behind the
 	// same gates: the values its team and actor selects offer.
-	m.APIMutating("POST /api/teams/{team_id}/usage/artifacts/facets", h.handleUsageTeamArtifactFacets)
-	m.APIMutating("POST /api/teams/{team_id}/usage/actions/facets", h.handleUsageTeamActionFacets)
-	m.APIMutating("POST /api/orgs/{org_id}/usage/artifacts/facets", h.handleUsageOrgArtifactFacets)
-	m.APIMutating("POST /api/orgs/{org_id}/usage/actions/facets", h.handleUsageOrgActionFacets)
+	m.Op(opUsageTeamArtifactFacets, h.handleUsageTeamArtifactFacets)
+	m.Op(opUsageTeamActionFacets, h.handleUsageTeamActionFacets)
+	m.Op(opUsageOrgArtifactFacets, h.handleUsageOrgArtifactFacets)
+	m.Op(opUsageOrgActionFacets, h.handleUsageOrgActionFacets)
 	// Per-team daily spend cap — org-admin-set, EE/governance-gated (the
 	// handlers 404 when unlicensed). The GET lists every active team + its cap
 	// for the editor (so an idle team can be pre-capped); the PUT writes one
 	// cap and is mutating, so it runs through the CSRF + session wrap. Both
 	// write/read the admin pool: an org admin may cap a team they don't belong
 	// to.
-	m.APIMutating("POST /api/orgs/{org_id}/usage/team-caps/list", h.handleUsageTeamCaps)
-	m.APIMutating("PUT /api/teams/{team_id}/usage/cap", h.handleUsageTeamCap)
+	m.Op(opUsageTeamCaps, h.handleUsageTeamCaps)
+	m.Op(opUsageTeamCap, h.handleUsageTeamCap)
 	// EE governance audit surface: the access & credential change-log viewer.
 	// Org-admin-gated AND FeatureGovernance-gated (404 unlicensed) inside the
 	// handler — the data is core, only the cross-team lens is Enterprise.
-	m.APIMutating("POST /api/orgs/{org_id}/usage/access-log/list", h.handleUsageAccessLog)
+	m.Op(opUsageAccessLog, h.handleUsageAccessLog)
 }

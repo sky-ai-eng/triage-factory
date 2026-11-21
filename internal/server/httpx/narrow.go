@@ -124,7 +124,7 @@ func Sort(v *Validation, key, dir string, keys []SortKey) db.Sort {
 // `{value, count}` under each named key whichever list it sits beside.
 type FacetJSON struct {
 	Value string `json:"value" doc:"The value the counted rows share."`
-	Count int    `json:"count" doc:"How many of the matching rows have the value."`
+	Count int    `json:"count" doc:"How many rows have the value, counted under every filter but the cut's own."`
 }
 
 // Facets renders a store's facet rows for the wire. Never nil: a cut nothing
