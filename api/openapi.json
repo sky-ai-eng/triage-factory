@@ -297,7 +297,7 @@
             "type": "string"
           },
           "source": {
-            "description": "Where the row comes from: tracked when the team tracks the channel, sighting when the app has seen it, or slack when only the read of Slack lists it.",
+            "description": "Where the row comes from: tracked when the team tracks the channel, sighting when the team does not track it but Triage Factory holds a registry row for it, such as one a mention the app saw or another team tracking it made, or slack when only the read of Slack lists it.",
             "type": "string"
           },
           "tracked": {
