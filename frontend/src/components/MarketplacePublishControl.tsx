@@ -71,18 +71,22 @@ export default function MarketplacePublishControl({
     refresh()
   }, [refresh])
 
-  const setStatus = async (action: 'delist' | 'relist') => {
+  const setStatus = async (status: MarketplaceListing['status']) => {
     if (!listing) return
     try {
-      await apiFetch(`/api/marketplace/listings/${listing.id}/${action}`, { method: 'POST' })
+      await apiFetch(`/api/marketplace/listings/${encodeURIComponent(listing.id)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status }),
+      })
       toast.info(
-        action === 'delist' ? 'Delisted from the marketplace' : 'Relisted on the marketplace',
+        status === 'delisted' ? 'Delisted from the marketplace' : 'Relisted on the marketplace',
       )
       refresh()
     } catch (err) {
       toast.failed(
         err,
-        action === 'delist'
+        status === 'delisted'
           ? 'Could not delist from the marketplace.'
           : 'Could not relist on the marketplace.',
       )
@@ -117,7 +121,7 @@ export default function MarketplacePublishControl({
           </button>
           {published && (
             <button
-              onClick={() => void setStatus('delist')}
+              onClick={() => void setStatus('delisted')}
               className="text-reported font-medium text-ink-3 hover:text-alarm px-2 py-1 rounded-md transition-colors"
             >
               Delist
@@ -125,7 +129,7 @@ export default function MarketplacePublishControl({
           )}
           {delisted && (
             <button
-              onClick={() => void setStatus('relist')}
+              onClick={() => void setStatus('published')}
               className="text-reported font-medium text-ink-2 hover:text-ink-1 px-2 py-1 rounded-md transition-colors"
             >
               Relist

@@ -13,7 +13,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
-	"github.com/sky-ai-eng/triage-factory/internal/server/models"
 	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
 )
 
@@ -192,25 +191,9 @@ func (h *Handler) handlePromptCreate(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if req.Name == "" {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-			Reason: httpx.ReasonMissingField, Message: "name is required", Field: "name",
-		})
-		return
-	}
-	// A prompt is the step content unit — it always carries a body (the
-	// mission). Ordering prompts into a multi-step composition is the
-	// blueprint's job, not a prompt-kind discriminator.
-	if req.Body == "" {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-			Reason: httpx.ReasonMissingField, Message: "body is required", Field: "body",
-		})
-		return
-	}
-	if universe := models.DeploymentUniverse(); !ValidModel(universe, req.Model) {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-			Reason: httpx.ReasonInvalidField, Message: InvalidModelError(universe), Field: "model",
-		})
+	var v httpx.Validation
+	ValidateFields(&v, "", req.Name, req.Body, req.Model)
+	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
 
@@ -287,22 +270,9 @@ func (h *Handler) handlePromptPut(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if req.Name == "" {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-			Reason: httpx.ReasonMissingField, Message: "name is required", Field: "name",
-		})
-		return
-	}
-	if req.Body == "" {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-			Reason: httpx.ReasonMissingField, Message: "body is required", Field: "body",
-		})
-		return
-	}
-	if universe := models.DeploymentUniverse(); !ValidModel(universe, req.Model) {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-			Reason: httpx.ReasonInvalidField, Message: InvalidModelError(universe), Field: "model",
-		})
+	var v httpx.Validation
+	ValidateFields(&v, "", req.Name, req.Body, req.Model)
+	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
 

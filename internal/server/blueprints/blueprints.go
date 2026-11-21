@@ -19,7 +19,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
-	"github.com/sky-ai-eng/triage-factory/internal/server/models"
 	"github.com/sky-ai-eng/triage-factory/internal/server/prompts"
 	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
 )
@@ -225,24 +224,16 @@ func (h *Handler) handleBlueprintCreate(w http.ResponseWriter, r *http.Request) 
 	// prompt itself must carry a name + body (it's the step's mission).
 	// Name defaulting happens here (before teamscope.ResolveActing inside the tx)
 	// because it is a pure string assignment independent of team resolution.
+	var v httpx.Validation
 	if req.FirstPrompt != nil {
-		if req.FirstPrompt.Name == "" {
-			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "first_prompt.name is required", Field: "first_prompt.name"})
-			return
-		}
-		if req.FirstPrompt.Body == "" {
-			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "first_prompt.body is required", Field: "first_prompt.body"})
-			return
-		}
-		if universe := models.DeploymentUniverse(); !prompts.ValidModel(universe, req.FirstPrompt.Model) {
-			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: prompts.InvalidModelError(universe), Field: "first_prompt.model"})
-			return
-		}
+		prompts.ValidateFields(&v, "first_prompt.", req.FirstPrompt.Name, req.FirstPrompt.Body, req.FirstPrompt.Model)
 		if req.Name == "" {
 			req.Name = req.FirstPrompt.Name
 		}
 	} else if req.Name == "" {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "name is required", Field: "name"})
+		v.Missing("name")
+	}
+	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
 
@@ -1243,12 +1234,14 @@ func (h *Handler) handleBlueprintReconnect(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
+	var v httpx.Validation
 	if req.AtStepIndex == nil {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "at_step_index is required", Field: "at_step_index"})
-		return
+		v.Missing("at_step_index")
 	}
 	if req.TargetBlueprintID == "" {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "target_blueprint_id is required", Field: "target_blueprint_id"})
+		v.Missing("target_blueprint_id")
+	}
+	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
 

@@ -1,8 +1,8 @@
 // Package prompts serves the prompts API — prompt list, read, create, update,
 // delete and stats — and the event-types catalog read. It also holds the
 // prompt primitives the blueprint editor (whose steps are prompts) shares with
-// it: the model-override allow-list, the create/update request shapes, and the
-// source-aware soft delete.
+// it: the model-override allow-list, the create/update request shapes and
+// their field checks, and the source-aware soft delete.
 package prompts
 
 import (
@@ -12,6 +12,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/llm/modelcatalog"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/models"
 )
 
 // CreateRequest is the body of a prompt create.
@@ -58,6 +60,26 @@ func ValidModel(u modelcatalog.Universe, model string) bool {
 // caller's next move is picking one of them.
 func InvalidModelError(u modelcatalog.Universe) string {
 	return `model must be "" (inherit the team default) or one of: ` + strings.Join(u.Keys(), ", ")
+}
+
+// ValidateFields records on v every fault in a prompt's name, body, and
+// model, each field named with prefix ("" for a prompt body, "first_prompt."
+// for one nested in a blueprint create). It is the one place the prompt
+// writes' field rules live, so every route that writes a prompt's content
+// refuses the same value the same way.
+func ValidateFields(v *httpx.Validation, prefix, name, body, model string) {
+	if name == "" {
+		v.Missing(prefix + "name")
+	}
+	// A prompt is the step content unit — it always carries a body (the
+	// mission). Ordering prompts into a multi-step composition is the
+	// blueprint's job, not a prompt-kind discriminator.
+	if body == "" {
+		v.Missing(prefix + "body")
+	}
+	if universe := models.DeploymentUniverse(); !ValidModel(universe, model) {
+		v.Invalid(prefix+"model", InvalidModelError(universe))
+	}
 }
 
 // SoftDeleteBySource soft-deletes a prompt according to its source and

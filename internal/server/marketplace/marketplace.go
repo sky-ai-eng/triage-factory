@@ -44,8 +44,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
 )
 
-// Handler serves the /api/marketplace/listings publish/republish/
-// delist/relist/by-source family. It holds only the transactional store
+// Handler serves the /api/marketplace/listings family: publish, republish,
+// the status update that delists and relists, browse, by-source, votes, and
+// install. It holds only the transactional store
 // runner + authz checker, mirroring the blueprint and event-handler handlers.
 type Handler struct {
 	tx db.TxRunner
@@ -82,22 +83,21 @@ func (mh *Handler) gateMarketplace(w http.ResponseWriter, r *http.Request) (orgI
 // publish a duplicate) vs. a published one (republish to push an update).
 func duplicateSourceMessage(kind, status string) string {
 	if status == domain.ListingStatusDelisted {
-		return "this " + kind + " was previously published and is currently delisted — use the relist endpoint instead of publishing a duplicate"
+		return "this " + kind + " was previously published and is currently delisted — set the listing's status to published instead of publishing a duplicate"
 	}
 	return "this " + kind + " is already published — use the republish endpoint to push an update"
 }
 
-// validateMarketplaceEventTypes rejects any event type not present in the
-// events_catalog registry — the same check the event-handler create path
-// runs, reused here so a listing's facets can never reference an id the
-// catalog doesn't know.
-func validateMarketplaceEventTypes(eventTypes []string) error {
-	for _, et := range eventTypes {
+// validateMarketplaceEventTypes records each event type not present in the
+// events_catalog registry on v, under its own index — the same check the
+// event-handler create path runs, reused here so a listing's facets can never
+// reference an id the catalog doesn't know.
+func validateMarketplaceEventTypes(v *httpx.Validation, eventTypes []string) {
+	for i, et := range eventTypes {
 		if _, ok := events.Get(et); !ok {
-			return fmt.Errorf("unknown event_type: %s", et)
+			v.Invalid(fmt.Sprintf("event_types[%d]", i), "unknown event_type: "+et)
 		}
 	}
-	return nil
 }
 
 // buildListingSnapshot loads the source object (a team's blueprint or
@@ -216,20 +216,18 @@ func (mh *Handler) handleMarketplacePublish(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
+	var v httpx.Validation
 	if req.Kind != domain.ListingKindPrompt && req.Kind != domain.ListingKindBlueprint {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidParam, Message: "kind must be 'prompt' or 'blueprint'", Field: "kind"})
-		return
+		v.Invalid("kind", "kind must be 'prompt' or 'blueprint'")
 	}
 	if req.SourceID == "" {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "source_id is required", Field: "source_id"})
-		return
+		v.Missing("source_id")
 	}
 	if strings.TrimSpace(req.Name) == "" {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "name is required", Field: "name"})
-		return
+		v.Missing("name")
 	}
-	if err := validateMarketplaceEventTypes(req.EventTypes); err != nil {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: err.Error()})
+	validateMarketplaceEventTypes(&v, req.EventTypes)
+	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
 
@@ -347,12 +345,12 @@ func (mh *Handler) handleMarketplaceListingVersionCreate(w http.ResponseWriter, 
 	if !ok {
 		return
 	}
+	var v httpx.Validation
 	if strings.TrimSpace(req.Name) == "" {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "name is required", Field: "name"})
-		return
+		v.Missing("name")
 	}
-	if err := validateMarketplaceEventTypes(req.EventTypes); err != nil {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: err.Error()})
+	validateMarketplaceEventTypes(&v, req.EventTypes)
+	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
 
@@ -457,66 +455,29 @@ func (mh *Handler) gateMarketplaceListingWrite(w http.ResponseWriter, r *http.Re
 	return listing, true
 }
 
-var opListingDelist = httpx.NewNoContentOp[httpx.NoBody](httpx.OpSpec{
-	Pattern:     "POST /api/marketplace/listings/{id}/delist",
-	ID:          "delist_marketplace_listing",
-	Summary:     "Delist a marketplace listing",
-	Description: "Hides a listing from every member who may not write its publishing team, so they can no longer browse or install it. Copies already installed from it are left as they are. Works only in multi mode, and answers 404 in local mode.",
-	PathParams:  map[string]string{"id": "The listing's id."},
-	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
-})
-
-// handleMarketplaceListingDelist hides a listing from every other member's
-// browse. Publisher-team writers only. Copy-not-dependency invariant: this
-// never touches the copies other teams already installed from this listing,
-// or the votes/install history on the listing row itself — delisting is
-// purely a visibility flip (TFAC-535's marketplace_listings_select RLS:
-// published OR own-team-write).
-//
-// POST /api/marketplace/listings/{id}/delist
-func (mh *Handler) handleMarketplaceListingDelist(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := mh.gateMarketplace(w, r)
-	if !ok {
-		return
-	}
-	id, ok := marketplaceListingIDOr404(w, r)
-	if !ok {
-		return
-	}
-	if _, ok := mh.gateMarketplaceListingWrite(w, r, orgID, userID, id); !ok {
-		return
-	}
-	if err := mh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		_, e := tx.Marketplace.Delist(r.Context(), orgID, id)
-		return e
-	}); err != nil {
-		if errors.Is(err, db.ErrNoSuchListing) {
-			// Raced past gateMarketplaceListingWrite above — 404.
-			httpx.NotFound(w, "listing")
-			return
-		}
-		httpx.InternalError(w, "marketplace", err)
-		return
-	}
-	opListingDelist.Write(w)
+// listingUpdateRequest is the body of PATCH /api/marketplace/listings/{id}.
+type listingUpdateRequest struct {
+	Status httpx.Patch[string] `json:"status" doc:"published to let every member of the organization browse and install the listing, or delisted to hide it from everyone who may not write its publishing team; null is refused."`
 }
 
-var opListingRelist = httpx.NewNoContentOp[httpx.NoBody](httpx.OpSpec{
-	Pattern:     "POST /api/marketplace/listings/{id}/relist",
-	ID:          "relist_marketplace_listing",
-	Summary:     "Relist a marketplace listing",
-	Description: "Makes a delisted listing visible to every member of the organization again. Works only in multi mode, and answers 404 in local mode.",
+var opListingUpdate = httpx.NewJSONOp[listingUpdateRequest, domain.MarketplaceListing](httpx.OpSpec{
+	Pattern:     "PATCH /api/marketplace/listings/{id}",
+	ID:          "update_marketplace_listing",
+	Summary:     "Update a marketplace listing",
+	Description: "Publishes or delists a listing and returns it. A delisted listing drops out of browsing and can no longer be installed, and copies already installed from it are left as they are. Works only in multi mode, and answers 404 in local mode.",
 	PathParams:  map[string]string{"id": "The listing's id."},
 	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
 })
 
-// handleMarketplaceListingRelist reverses a delist, restoring the listing to
-// other members' browse. Publisher-team writers only. Copies + votes already
-// on the listing are untouched — same copy-not-dependency invariant as
-// delist.
+// handleMarketplaceListingUpdate sets a listing's status. Publisher-team
+// writers only. Copy-not-dependency invariant: a delist never touches the
+// copies other teams already installed from this listing, or the
+// votes/install history on the listing row itself — it is purely a
+// visibility flip (TFAC-535's marketplace_listings_select RLS: published OR
+// own-team-write), and publishing again reverses it.
 //
-// POST /api/marketplace/listings/{id}/relist
-func (mh *Handler) handleMarketplaceListingRelist(w http.ResponseWriter, r *http.Request) {
+// PATCH /api/marketplace/listings/{id}
+func (mh *Handler) handleMarketplaceListingUpdate(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := mh.gateMarketplace(w, r)
 	if !ok {
 		return
@@ -525,11 +486,40 @@ func (mh *Handler) handleMarketplaceListingRelist(w http.ResponseWriter, r *http
 	if !ok {
 		return
 	}
+	req, ok := opListingUpdate.Decode(w, r)
+	if !ok {
+		return
+	}
+	var v httpx.Validation
+	status, state := req.Status.Read(&v, "status")
+	switch state {
+	case httpx.PatchAbsent:
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason:  httpx.ReasonMissingField,
+			Message: "nothing to update: provide status",
+		})
+		return
+	case httpx.PatchClear:
+		v.Invalid("status", "status cannot be null")
+	case httpx.PatchSet:
+		if status != domain.ListingStatusPublished && status != domain.ListingStatusDelisted {
+			v.Invalid("status", "status must be 'published' or 'delisted'")
+		}
+	}
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
 	if _, ok := mh.gateMarketplaceListingWrite(w, r, orgID, userID, id); !ok {
 		return
 	}
+	var updated domain.MarketplaceListing
 	if err := mh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		_, e := tx.Marketplace.Relist(r.Context(), orgID, id)
+		var e error
+		if status == domain.ListingStatusDelisted {
+			updated, e = tx.Marketplace.Delist(r.Context(), orgID, id)
+		} else {
+			updated, e = tx.Marketplace.Relist(r.Context(), orgID, id)
+		}
 		return e
 	}); err != nil {
 		if errors.Is(err, db.ErrNoSuchListing) {
@@ -540,7 +530,7 @@ func (mh *Handler) handleMarketplaceListingRelist(w http.ResponseWriter, r *http
 		httpx.InternalError(w, "marketplace", err)
 		return
 	}
-	opListingRelist.Write(w)
+	opListingUpdate.Write(w, updated)
 }
 
 var opListingBySource = httpx.NewJSONOp[httpx.NoBody, domain.ListingSummary](httpx.OpSpec{
@@ -598,9 +588,8 @@ func (mh *Handler) handleMarketplaceListingBySource(w http.ResponseWriter, r *ht
 }
 
 // marketplaceListingIDOr404 guards the {id} path value on every listing route
-// — marketplace_listings.id is a uuid column on Postgres. See uuidPathOr404.
-// get/vote/unvote/install guarded already; versions/delist/relist did not, so
-// a malformed id reached the store as a 22P02 → 500.
+// — marketplace_listings.id is a uuid column on Postgres, so a malformed id
+// that reached the store would be a 22P02 and a 500. See uuidPathOr404.
 func marketplaceListingIDOr404(w http.ResponseWriter, r *http.Request) (string, bool) {
 	return httpx.UUIDPathOr404(w, r, "id", "listing")
 }
@@ -618,8 +607,8 @@ type marketplaceListRequest struct {
 	// description (httpx.Search: trimmed, empty is absent, at most 200
 	// characters).
 	Search    string `json:"search" doc:"Narrows to listings whose name or description contains this text, compared case-insensitively and literally; trimmed, at most 200 characters, and empty is absent."`
-	EventType string `json:"event_type" doc:"Narrows to listings suited to this event type, an id from GET /api/event-types; absent is every listing."`
-	Kind      string `json:"kind" doc:"Narrows to listings of this kind, prompt or blueprint; absent is both."`
+	EventType string `json:"event_type" doc:"Narrows to listings suited to this event type, an id from GET /api/event-types; absent or empty is every listing."`
+	Kind      string `json:"kind" doc:"Narrows to listings of this kind, prompt or blueprint; absent or empty is both."`
 	// SortKey is one of domain.ListingSortKeys; absent is installs. SortDir is
 	// asc or desc, desc when absent, and refused without a SortKey.
 	SortKey string `json:"sort_key" doc:"The order of the list: installs, votes, recent for the most recently updated, or used for the most runs; absent is installs."`
@@ -632,7 +621,7 @@ var opListingList = httpx.NewListOp[marketplaceListRequest, domain.ListingSummar
 	Pattern:     "POST /api/marketplace/listings/list",
 	ID:          "list_marketplace_listings",
 	Summary:     "List marketplace listings",
-	Description: "Returns one page of the organization's marketplace listings, narrowed by the body's filters and ordered by sort_key, the most installed first by default. A delisted listing is included only for members who may write its publishing team. Works only in multi mode, and answers 404 in local mode.",
+	Description: "Returns one page of the organization's published marketplace listings, narrowed by the body's filters and ordered by sort_key, the most installed first by default. Works only in multi mode, and answers 404 in local mode.",
 	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
 })
 
@@ -673,11 +662,16 @@ func (mh *Handler) handleMarketplaceList(w http.ResponseWriter, r *http.Request)
 	var v httpx.Validation
 	f := domain.ListingFilter{
 		Search:    httpx.Search(&v, req.Search),
-		EventType: strings.TrimSpace(req.EventType),
-		Kind:      strings.TrimSpace(req.Kind),
+		EventType: req.EventType,
+		Kind:      req.Kind,
 	}
 	if f.Kind != "" && f.Kind != domain.ListingKindPrompt && f.Kind != domain.ListingKindBlueprint {
 		v.Invalid("kind", "kind must be 'prompt' or 'blueprint'")
+	}
+	if f.EventType != "" {
+		if _, known := events.Get(f.EventType); !known {
+			v.Invalid("event_type", "unknown event_type: "+f.EventType)
+		}
 	}
 	order := httpx.Sort(&v, req.SortKey, req.SortDir, marketplaceListSortKeys)
 	if order.Key == "" {
@@ -834,16 +828,17 @@ var opListingUnvote = httpx.NewNoContentOp[httpx.NoBody](httpx.OpSpec{
 	Pattern:     "DELETE /api/marketplace/listings/{id}/vote",
 	ID:          "delete_marketplace_listing_vote",
 	Summary:     "Remove a vote for a marketplace listing",
-	Description: "Removes the caller's vote for a listing. It answers 204 when the caller has no vote there, and for a listing that does not exist. Works only in multi mode, and answers 404 in local mode.",
+	Description: "Removes the caller's vote for a listing, and answers 204 when the caller has no vote there. Works only in multi mode, and answers 404 in local mode.",
 	PathParams:  map[string]string{"id": "The listing's id."},
 	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
 })
 
 // handleMarketplaceUnvote removes the caller's vote on a listing, if any.
-// Idempotent: removing a vote that doesn't exist is a no-op, still 204 —
-// including when the listing itself doesn't exist (Unvote's DELETE carries
-// no FK, so a nonexistent well-formed id is just a zero-row no-op; no
-// existence pre-check needed here unlike handleMarketplaceVote).
+// Idempotent: removing a vote that doesn't exist is a no-op, still 204. A
+// listing the caller cannot see is 404 like on every other listing route,
+// which Unvote's DELETE would not say on its own: it carries no FK, so a
+// nonexistent id is a zero-row no-op. Hence the same pre-check
+// handleMarketplaceVote makes.
 //
 // DELETE /api/marketplace/listings/{id}/vote
 func (mh *Handler) handleMarketplaceUnvote(w http.ResponseWriter, r *http.Request) {
@@ -855,10 +850,21 @@ func (mh *Handler) handleMarketplaceUnvote(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
+	var missing bool
 	if err := mh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		if _, e := tx.Marketplace.Get(r.Context(), orgID, id, userID); errors.Is(e, sql.ErrNoRows) {
+			missing = true
+			return nil
+		} else if e != nil {
+			return e
+		}
 		return tx.Marketplace.Unvote(r.Context(), orgID, id, userID)
 	}); err != nil {
 		httpx.InternalError(w, "marketplace", err)
+		return
+	}
+	if missing {
+		httpx.NotFound(w, "listing")
 		return
 	}
 	opListingUnvote.Write(w)
@@ -1004,8 +1010,7 @@ func (mh *Handler) Register(m httpx.Mounts) {
 	m.Op(opListingPublish, mh.handleMarketplacePublish)
 	m.Op(opListingGet, mh.handleMarketplaceGet)
 	m.Op(opListingVersionCreate, mh.handleMarketplaceListingVersionCreate)
-	m.Op(opListingDelist, mh.handleMarketplaceListingDelist)
-	m.Op(opListingRelist, mh.handleMarketplaceListingRelist)
+	m.Op(opListingUpdate, mh.handleMarketplaceListingUpdate)
 	m.Op(opListingVote, mh.handleMarketplaceVote)
 	m.Op(opListingUnvote, mh.handleMarketplaceUnvote)
 	m.Op(opListingBySource, mh.handleMarketplaceListingBySource)

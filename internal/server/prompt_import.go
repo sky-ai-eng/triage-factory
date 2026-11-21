@@ -112,35 +112,35 @@ func (sk *promptImportHandler) handlePromptUpload(w http.ResponseWriter, r *http
 	if !ok {
 		return
 	}
+	var v httpx.Validation
 	content := strings.TrimSpace(req.Content)
-	if content == "" {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+	switch {
+	case content == "":
+		v.Add(httpx.ErrorItem{
 			Reason: httpx.ReasonMissingField, Message: "content is required (the SKILL.md markdown)", Field: "content",
 		})
-		return
-	}
-	if len(content) > maxPromptUploadBytes {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-			Reason: httpx.ReasonOutOfRange, Message: "skill content exceeds the 256KiB limit", Field: "content",
-		})
-		return
+	case len(content) > maxPromptUploadBytes:
+		v.OutOfRange("content", "skill content exceeds the 256KiB limit")
 	}
 
 	// ParseSkillMeta's path argument only seeds the default name (the
 	// skill's directory on disk); a paste has no directory, so the
 	// fallback chain is: explicit request name → frontmatter name: →
-	// 400.
+	// 400. Empty content parses to no name, so a body with neither is
+	// refused on both fields.
 	meta := skills.ParseSkillMeta(content, "")
 	name := strings.TrimSpace(req.Name)
 	if name == "" && meta.Name != "" && meta.Name != "." {
 		name = meta.Name
 	}
 	if name == "" || name == "." {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+		v.Add(httpx.ErrorItem{
 			Reason:  httpx.ReasonMissingField,
 			Message: "skill needs a name — set frontmatter `name:` or pass name explicitly",
 			Field:   "name",
 		})
+	}
+	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
 

@@ -1843,6 +1843,18 @@
         ],
         "type": "object"
       },
+      "ListingUpdateRequest": {
+        "properties": {
+          "status": {
+            "description": "published to let every member of the organization browse and install the listing, or delisted to hide it from everyone who may not write its publishing team; null is refused.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "ListingVersion": {
         "properties": {
           "created_at": {
@@ -1878,11 +1890,11 @@
       "MarketplaceListRequest": {
         "properties": {
           "event_type": {
-            "description": "Narrows to listings suited to this event type, an id from GET /api/event-types; absent is every listing.",
+            "description": "Narrows to listings suited to this event type, an id from GET /api/event-types; absent or empty is every listing.",
             "type": "string"
           },
           "kind": {
-            "description": "Narrows to listings of this kind, prompt or blueprint; absent is both.",
+            "description": "Narrows to listings of this kind, prompt or blueprint; absent or empty is both.",
             "type": "string"
           },
           "page_size": {
@@ -4755,7 +4767,7 @@
     },
     "/api/marketplace/listings/list": {
       "post": {
-        "description": "Returns one page of the organization's marketplace listings, narrowed by the body's filters and ordered by sort_key, the most installed first by default. A delisted listing is included only for members who may write its publishing team. Works only in multi mode, and answers 404 in local mode.",
+        "description": "Returns one page of the organization's published marketplace listings, narrowed by the body's filters and ordered by sort_key, the most installed first by default. Works only in multi mode, and answers 404 in local mode.",
         "operationId": "list_marketplace_listings",
         "requestBody": {
           "content": {
@@ -4864,12 +4876,10 @@
           "openWorldHint": false,
           "readOnlyHint": true
         }
-      }
-    },
-    "/api/marketplace/listings/{id}/delist": {
-      "post": {
-        "description": "Hides a listing from every member who may not write its publishing team, so they can no longer browse or install it. Copies already installed from it are left as they are. Works only in multi mode, and answers 404 in local mode.",
-        "operationId": "delist_marketplace_listing",
+      },
+      "patch": {
+        "description": "Publishes or delists a listing and returns it. A delisted listing drops out of browsing and can no longer be installed, and copies already installed from it are left as they are. Works only in multi mode, and answers 404 in local mode.",
+        "operationId": "update_marketplace_listing",
         "parameters": [
           {
             "description": "The listing's id.",
@@ -4881,9 +4891,26 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ListingUpdateRequest"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
-          "204": {
-            "description": "No Content"
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MarketplaceListing"
+                }
+              }
+            },
+            "description": "OK"
           },
           "default": {
             "$ref": "#/components/responses/Error"
@@ -4897,7 +4924,7 @@
             "token": []
           }
         ],
-        "summary": "Delist a marketplace listing",
+        "summary": "Update a marketplace listing",
         "x-hints": {
           "destructiveHint": true,
           "idempotentHint": true,
@@ -4963,46 +4990,6 @@
         }
       }
     },
-    "/api/marketplace/listings/{id}/relist": {
-      "post": {
-        "description": "Makes a delisted listing visible to every member of the organization again. Works only in multi mode, and answers 404 in local mode.",
-        "operationId": "relist_marketplace_listing",
-        "parameters": [
-          {
-            "description": "The listing's id.",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "No Content"
-          },
-          "default": {
-            "$ref": "#/components/responses/Error"
-          }
-        },
-        "security": [
-          {
-            "session": []
-          },
-          {
-            "token": []
-          }
-        ],
-        "summary": "Relist a marketplace listing",
-        "x-hints": {
-          "destructiveHint": true,
-          "idempotentHint": true,
-          "openWorldHint": false,
-          "readOnlyHint": false
-        }
-      }
-    },
     "/api/marketplace/listings/{id}/versions": {
       "post": {
         "description": "Adds a version holding a copy of the listing's source prompt or blueprint as it stands now, sets the listing's name, description, and event types, and returns the listing. Earlier versions are left as they are, and a listing whose source has been deleted is refused. Works only in multi mode, and answers 404 in local mode.",
@@ -5062,7 +5049,7 @@
     },
     "/api/marketplace/listings/{id}/vote": {
       "delete": {
-        "description": "Removes the caller's vote for a listing. It answers 204 when the caller has no vote there, and for a listing that does not exist. Works only in multi mode, and answers 404 in local mode.",
+        "description": "Removes the caller's vote for a listing, and answers 204 when the caller has no vote there. Works only in multi mode, and answers 404 in local mode.",
         "operationId": "delete_marketplace_listing_vote",
         "parameters": [
           {

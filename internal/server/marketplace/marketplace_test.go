@@ -187,13 +187,18 @@ func (r *marketplaceRig) publishPrompt(t *testing.T, name, body, model, tools, l
 	})
 }
 
+// setStatus PATCHes listingID's status as callerID and returns the recorder.
+func (r *marketplaceRig) setStatus(callerID, listingID string, body map[string]any) *httptest.ResponseRecorder {
+	req := r.req(http.MethodPatch, "/api/marketplace/listings/"+listingID, callerID, body)
+	req.SetPathValue("id", listingID)
+	return doMarketplaceJSON(r.mh.handleMarketplaceListingUpdate, req)
+}
+
 // delist delists listingID as the founder.
 func (r *marketplaceRig) delist(t *testing.T, listingID string) {
 	t.Helper()
-	req := r.req(http.MethodPost, "/api/marketplace/listings/"+listingID+"/delist", r.admin, nil)
-	req.SetPathValue("id", listingID)
-	if rec := doMarketplaceJSON(r.mh.handleMarketplaceListingDelist, req); rec.Code != http.StatusNoContent {
-		t.Fatalf("delist: status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+	if rec := r.setStatus(r.admin, listingID, map[string]any{"status": domain.ListingStatusDelisted}); rec.Code != http.StatusOK {
+		t.Fatalf("delist: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -271,8 +276,8 @@ func TestMarketplace_LocalIs404(t *testing.T) {
 			map[string]any{"kind": "prompt", "source_id": promptID, "name": "n"}), r.mh.handleMarketplacePublish},
 		{"versions", r.req(http.MethodPost, "/api/marketplace/listings/x/versions", r.admin,
 			map[string]any{"name": "n"}), r.mh.handleMarketplaceListingVersionCreate},
-		{"delist", r.req(http.MethodPost, "/api/marketplace/listings/x/delist", r.admin, nil), r.mh.handleMarketplaceListingDelist},
-		{"relist", r.req(http.MethodPost, "/api/marketplace/listings/x/relist", r.admin, nil), r.mh.handleMarketplaceListingRelist},
+		{"update", r.req(http.MethodPatch, "/api/marketplace/listings/x", r.admin,
+			map[string]any{"status": domain.ListingStatusDelisted}), r.mh.handleMarketplaceListingUpdate},
 		{"by-source", r.req(http.MethodGet, "/api/marketplace/listings/by-source/"+promptID, r.admin, nil), r.mh.handleMarketplaceListingBySource},
 		{"list", r.req(http.MethodGet, "/api/marketplace/listings", r.admin, nil), r.mh.handleMarketplaceList},
 		{"get", r.req(http.MethodGet, "/api/marketplace/listings/x", r.admin, nil), r.mh.handleMarketplaceGet},
@@ -379,7 +384,8 @@ func TestMarketplacePublish_DuplicateActiveSourceIs409(t *testing.T) {
 }
 
 // TestMarketplacePublish_UnknownEventTypeIs400: an event_type not present in
-// events_catalog is rejected before anything is written.
+// events_catalog is rejected before anything is written, each one under its
+// own index.
 func TestMarketplacePublish_UnknownEventTypeIs400(t *testing.T) {
 	r := newMarketplaceRig(t)
 	promptID := r.seedPrompt(t, r.teamID, "bad-event", "mission", "", "")
@@ -387,14 +393,19 @@ func TestMarketplacePublish_UnknownEventTypeIs400(t *testing.T) {
 	rec := doMarketplaceJSON(r.mh.handleMarketplacePublish,
 		r.req(http.MethodPost, "/api/marketplace/listings", r.admin, map[string]any{
 			"kind": "prompt", "source_id": promptID, "name": "n",
-			"event_types": []string{"not:a:real:event"},
+			"event_types": []string{"not:a:real:event", eventTypeFixture, "also:not:real"},
 		}))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("unknown event_type: status = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
+	assertFaults(t, marketplaceFaults(t, rec), []httpx.ErrorItem{
+		{Reason: httpx.ReasonInvalidField, Field: "event_types[0]"},
+		{Reason: httpx.ReasonInvalidField, Field: "event_types[2]"},
+	})
 }
 
-// TestMarketplacePublish_ValidationErrors covers unknown-kind and missing-field validation.
+// TestMarketplacePublish_ValidationErrors covers unknown-kind and
+// missing-field validation, and that one body's faults are all reported.
 func TestMarketplacePublish_ValidationErrors(t *testing.T) {
 	r := newMarketplaceRig(t)
 	promptID := r.seedPrompt(t, r.teamID, "validate-me", "mission", "", "")
@@ -402,10 +413,21 @@ func TestMarketplacePublish_ValidationErrors(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		body map[string]any
+		want []httpx.ErrorItem
 	}{
-		{"bad kind", map[string]any{"kind": "widget", "source_id": promptID, "name": "n"}},
-		{"missing source_id", map[string]any{"kind": "prompt", "name": "n"}},
-		{"missing name", map[string]any{"kind": "prompt", "source_id": promptID}},
+		{"bad kind", map[string]any{"kind": "widget", "source_id": promptID, "name": "n"},
+			[]httpx.ErrorItem{{Reason: httpx.ReasonInvalidField, Field: "kind"}}},
+		{"missing source_id", map[string]any{"kind": "prompt", "name": "n"},
+			[]httpx.ErrorItem{{Reason: httpx.ReasonMissingField, Field: "source_id"}}},
+		{"missing name", map[string]any{"kind": "prompt", "source_id": promptID},
+			[]httpx.ErrorItem{{Reason: httpx.ReasonMissingField, Field: "name"}}},
+		{"every field wrong", map[string]any{"kind": "widget", "event_types": []string{"not:a:real:event"}},
+			[]httpx.ErrorItem{
+				{Reason: httpx.ReasonInvalidField, Field: "kind"},
+				{Reason: httpx.ReasonMissingField, Field: "source_id"},
+				{Reason: httpx.ReasonMissingField, Field: "name"},
+				{Reason: httpx.ReasonInvalidField, Field: "event_types[0]"},
+			}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := doMarketplaceJSON(r.mh.handleMarketplacePublish,
@@ -413,7 +435,21 @@ func TestMarketplacePublish_ValidationErrors(t *testing.T) {
 			if rec.Code != http.StatusBadRequest {
 				t.Fatalf("%s: status = %d, want 400; body=%s", tc.name, rec.Code, rec.Body.String())
 			}
+			assertFaults(t, marketplaceFaults(t, rec), tc.want)
 		})
+	}
+}
+
+// assertFaults checks that got holds exactly the faults in want, in order,
+// compared by reason and field.
+func assertFaults(t *testing.T, got, want []httpx.ErrorItem) {
+	t.Helper()
+	match := len(got) == len(want)
+	for i := 0; match && i < len(want); i++ {
+		match = got[i].Reason == want[i].Reason && got[i].Field == want[i].Field
+	}
+	if !match {
+		t.Errorf("errors = %+v; want %+v (by reason and field)", got, want)
 	}
 }
 
@@ -487,6 +523,26 @@ func TestMarketplaceRepublish_BumpsVersionPreservesV1(t *testing.T) {
 	}
 }
 
+// TestMarketplaceRepublish_ReportsEveryFault: a republish body with several
+// faults answers all of them, each unknown event type under its own index.
+func TestMarketplaceRepublish_ReportsEveryFault(t *testing.T) {
+	r := newMarketplaceRig(t)
+	listingID := r.publishPrompt(t, "faults", "mission", "", "", "n")
+
+	req := r.req(http.MethodPost, "/api/marketplace/listings/"+listingID+"/versions", r.admin, map[string]any{
+		"name": " ", "event_types": []string{"not:a:real:event"},
+	})
+	req.SetPathValue("id", listingID)
+	rec := doMarketplaceJSON(r.mh.handleMarketplaceListingVersionCreate, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("republish: status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	assertFaults(t, marketplaceFaults(t, rec), []httpx.ErrorItem{
+		{Reason: httpx.ReasonMissingField, Field: "name"},
+		{Reason: httpx.ReasonInvalidField, Field: "event_types[0]"},
+	})
+}
+
 // TestMarketplaceRepublish_NonWriterIs403: only a writer on the *publisher*
 // team may republish.
 func TestMarketplaceRepublish_NonWriterIs403(t *testing.T) {
@@ -509,9 +565,7 @@ func TestMarketplaceDelistRelist_RoundTrip(t *testing.T) {
 	listingID := r.publishPrompt(t, "delist-me", "mission", "", "", "n")
 
 	// Viewer cannot delist.
-	blockedReq := r.req(http.MethodPost, "/api/marketplace/listings/"+listingID+"/delist", r.viewer, nil)
-	blockedReq.SetPathValue("id", listingID)
-	blockedRec := doMarketplaceJSON(r.mh.handleMarketplaceListingDelist, blockedReq)
+	blockedRec := r.setStatus(r.viewer, listingID, map[string]any{"status": domain.ListingStatusDelisted})
 	if blockedRec.Code != http.StatusForbidden {
 		t.Fatalf("viewer delist: status = %d, want 403; body=%s", blockedRec.Code, blockedRec.Body.String())
 	}
@@ -530,12 +584,17 @@ func TestMarketplaceDelistRelist_RoundTrip(t *testing.T) {
 		}
 	}
 
-	// Founder relists.
-	relistReq := r.req(http.MethodPost, "/api/marketplace/listings/"+listingID+"/relist", r.admin, nil)
-	relistReq.SetPathValue("id", listingID)
-	relistRec := doMarketplaceJSON(r.mh.handleMarketplaceListingRelist, relistReq)
-	if relistRec.Code != http.StatusNoContent {
-		t.Fatalf("relist: status = %d, want 204; body=%s", relistRec.Code, relistRec.Body.String())
+	// Founder relists, and the answer is the stored listing.
+	relistRec := r.setStatus(r.admin, listingID, map[string]any{"status": domain.ListingStatusPublished})
+	if relistRec.Code != http.StatusOK {
+		t.Fatalf("relist: status = %d, want 200; body=%s", relistRec.Code, relistRec.Body.String())
+	}
+	var relisted domain.MarketplaceListing
+	if err := json.Unmarshal(relistRec.Body.Bytes(), &relisted); err != nil {
+		t.Fatalf("decode relist: %v", err)
+	}
+	if relisted.ID != listingID || relisted.Status != domain.ListingStatusPublished || relisted.DelistedAt != nil {
+		t.Errorf("relist answered %+v, want the listing published with no delisted_at", relisted)
 	}
 	if err := r.h.AdminDB.QueryRow(`SELECT status FROM marketplace_listings WHERE id = $1`, listingID).Scan(&status); err != nil {
 		t.Fatalf("read status after relist: %v", err)
@@ -545,6 +604,39 @@ func TestMarketplaceDelistRelist_RoundTrip(t *testing.T) {
 	}
 	if got := r.list(t, r.member, ""); len(got) != 1 || got[0].ID != listingID {
 		t.Errorf("browse as a member after relist = %+v, want the listing back", got)
+	}
+}
+
+// TestMarketplaceUpdate_RefusesBadBodies: a status PATCH that names nothing,
+// clears the status, or names a status that does not exist is a 400 naming
+// the field, and writes nothing.
+func TestMarketplaceUpdate_RefusesBadBodies(t *testing.T) {
+	r := newMarketplaceRig(t)
+	listingID := r.publishPrompt(t, "patch-me", "mission", "", "", "n")
+	for _, tc := range []struct {
+		name string
+		body map[string]any
+		want httpx.ErrorItem
+	}{
+		{"no field", map[string]any{}, httpx.ErrorItem{Reason: httpx.ReasonMissingField}},
+		{"null status", map[string]any{"status": nil}, httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Field: "status"}},
+		{"unknown status", map[string]any{"status": "archived"}, httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Field: "status"}},
+		{"unknown field", map[string]any{"name": "renamed"}, httpx.ErrorItem{Reason: httpx.ReasonUnknownField, Field: "name"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := r.setStatus(r.admin, listingID, tc.body)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+			}
+			assertFaults(t, marketplaceFaults(t, rec), []httpx.ErrorItem{tc.want})
+		})
+	}
+	var status string
+	if err := r.h.AdminDB.QueryRow(`SELECT status FROM marketplace_listings WHERE id = $1`, listingID).Scan(&status); err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if status != domain.ListingStatusPublished {
+		t.Errorf("status after refused updates = %q, want published", status)
 	}
 }
 
@@ -684,6 +776,9 @@ func TestMarketplaceList_RefusesBadBodies(t *testing.T) {
 		field  string
 	}{
 		{"bad kind", map[string]any{"kind": "widget"}, httpx.ReasonInvalidField, "kind"},
+		{"padded kind", map[string]any{"kind": " prompt"}, httpx.ReasonInvalidField, "kind"},
+		{"unknown event_type", map[string]any{"event_type": "not:a:real:event"}, httpx.ReasonInvalidField, "event_type"},
+		{"padded event_type", map[string]any{"event_type": eventTypeFixture + " "}, httpx.ReasonInvalidField, "event_type"},
 		{"bad sort_key", map[string]any{"sort_key": "popularity"}, httpx.ReasonInvalidField, "sort_key"},
 		{"bad sort_dir", map[string]any{"sort_key": "votes", "sort_dir": "down"}, httpx.ReasonInvalidField, "sort_dir"},
 		{"lone sort_dir", map[string]any{"sort_dir": "asc"}, httpx.ReasonInvalidField, "sort_dir"},
@@ -884,7 +979,7 @@ func TestMarketplaceGet_DelistedVisibleToPublisherOnly(t *testing.T) {
 
 // TestMarketplace_UnknownAndMalformedListingIDs: a listing id that is not a
 // UUID, or names no listing, is a 404 on every listing route rather than a 500
-// from the uuid cast or a foreign key. Unvote is the one exception.
+// from the uuid cast or a foreign key.
 func TestMarketplace_UnknownAndMalformedListingIDs(t *testing.T) {
 	r := newMarketplaceRig(t)
 	const unknownID = "00000000-0000-0000-0000-000000000000"
@@ -899,9 +994,11 @@ func TestMarketplace_UnknownAndMalformedListingIDs(t *testing.T) {
 		{name: "vote unknown", method: http.MethodPut, suffix: "/vote", id: unknownID, fn: r.mh.handleMarketplaceVote, want: http.StatusNotFound},
 		{name: "vote malformed", method: http.MethodPut, suffix: "/vote", id: "not-a-uuid", fn: r.mh.handleMarketplaceVote, want: http.StatusNotFound},
 		{name: "unvote malformed", method: http.MethodDelete, suffix: "/vote", id: "not-a-uuid", fn: r.mh.handleMarketplaceUnvote, want: http.StatusNotFound},
-		// Unvote's DELETE has no foreign key to trip: an unknown id is the same
-		// no-op as removing a vote that does not exist.
-		{name: "unvote unknown", method: http.MethodDelete, suffix: "/vote", id: unknownID, fn: r.mh.handleMarketplaceUnvote, want: http.StatusNoContent},
+		{name: "unvote unknown", method: http.MethodDelete, suffix: "/vote", id: unknownID, fn: r.mh.handleMarketplaceUnvote, want: http.StatusNotFound},
+		{name: "update unknown", method: http.MethodPatch, id: unknownID, body: map[string]any{"status": domain.ListingStatusDelisted},
+			fn: r.mh.handleMarketplaceListingUpdate, want: http.StatusNotFound},
+		{name: "update malformed", method: http.MethodPatch, id: "not-a-uuid", body: map[string]any{"status": domain.ListingStatusDelisted},
+			fn: r.mh.handleMarketplaceListingUpdate, want: http.StatusNotFound},
 		{name: "install unknown", method: http.MethodPost, suffix: "/install", id: unknownID, body: map[string]any{"team_id": ""},
 			fn: r.mh.handleMarketplaceInstall, want: http.StatusNotFound},
 	} {
