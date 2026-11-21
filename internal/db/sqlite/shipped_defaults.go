@@ -476,7 +476,7 @@ func executeUnitPlan(ctx context.Context, q queryer, orgID, teamID string, b dom
 
 	if plan.Action == db.UnitApply && (plan.RenameHeader || plan.ReplaceSteps) {
 		if _, err := q.ExecContext(ctx,
-			`UPDATE blueprints SET name = ?, updated_at = ? WHERE org_id = ? AND id = ?`,
+			`UPDATE blueprints SET name = ?, updated_at = ?, version = version + 1 WHERE org_id = ? AND id = ?`,
 			plan.HeaderName, now, orgID, blueprintID,
 		); err != nil {
 			return fmt.Errorf("update blueprint header: %w", err)

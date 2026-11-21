@@ -283,6 +283,7 @@ func RunShippedSyncConformance(t *testing.T, factory ShippedSyncFactory) {
 			t.Fatalf("seed sync: %v", err)
 		}
 		pbID := promptBySlug(t, stores, orgID, teamID, "pb").ID
+		before := blueprintBySlug(t, stores, orgID, teamID, "rs").Version
 
 		promptsB := []domain.Prompt{
 			syncPrompt("pa", "PA", "pa1", "", ""),
@@ -294,6 +295,11 @@ func RunShippedSyncConformance(t *testing.T, factory ShippedSyncFactory) {
 		}
 		if slugs := stepSlugsOf(t, stores, orgID, teamID, "rs"); len(slugs) != 2 || slugs[0] != "pa" || slugs[1] != "pc" {
 			t.Errorf("restructured steps = %v, want [pa pc]", slugs)
+		}
+		// A steps PUT decided against the steps before the sync must be
+		// refused, so the sync's rewrite moves the version as a person's does.
+		if after := blueprintBySlug(t, stores, orgID, teamID, "rs").Version; after <= before {
+			t.Errorf("version across the restructuring sync = %d -> %d, want it to rise", before, after)
 		}
 		if p := promptBySlug(t, stores, orgID, teamID, "pc"); p == nil || p.Body != "pc body" {
 			t.Errorf("added step prompt not inserted: %+v", p)

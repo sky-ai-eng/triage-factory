@@ -3,6 +3,7 @@ package dbtest
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"sort"
 	"testing"
@@ -1437,6 +1438,92 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 		}
 		if got.UsageCount != 1 {
 			t.Errorf("UsageCount = %d, want 1", got.UsageCount)
+		}
+	})
+
+	t.Run("Version_RisesWithEveryNameOrStepWrite", func(t *testing.T) {
+		// The version is what a steps PUT names to say which steps it was
+		// decided against, so every write that changes the name or the steps
+		// must move it, and the usage counter, which a run bumps, must not.
+		store, orgID, teamID, seedPrompt := factory(t)
+		ctx := context.Background()
+		version := func(id string) int64 {
+			t.Helper()
+			b, err := store.Get(ctx, orgID, id)
+			if err != nil || b == nil {
+				t.Fatalf("Get(%s) = (%v, %v)", id, b, err)
+			}
+			return b.Version
+		}
+		rises := func(what, id string, write func() error) {
+			t.Helper()
+			before := version(id)
+			if err := write(); err != nil {
+				t.Fatalf("%s: %v", what, err)
+			}
+			if after := version(id); after <= before {
+				t.Errorf("%s: version %d -> %d, want it to rise", what, before, after)
+			}
+		}
+
+		bp := seedBlueprint(t, store, orgID, teamID, "Versioned")
+		if v := version(bp); v != 1 {
+			t.Errorf("a new blueprint's version = %d, want 1", v)
+		}
+		p := make([]string, 6)
+		for i := range p {
+			p[i] = seedPrompt(t, fmt.Sprintf("ver-%d", i))
+		}
+		rises("ReplaceSteps", bp, func() error {
+			_, err := store.ReplaceSteps(ctx, orgID, bp, p[:4], nil)
+			return err
+		})
+		rises("Rename", bp, func() error {
+			_, err := store.Rename(ctx, orgID, bp, "Versioned v2")
+			return err
+		})
+		rises("SplitAt, on the blueprint kept", bp, func() error {
+			_, err := store.SplitAt(ctx, orgID, bp, 3, uuid.New().String(), "Split off")
+			return err
+		})
+		rises("DeleteStep at the tail", bp, func() error {
+			_, err := store.DeleteStep(ctx, orgID, bp, 2, "")
+			return err
+		})
+		if _, err := store.ReplaceSteps(ctx, orgID, bp, []string{p[0], p[1], p[5]}, nil); err != nil {
+			t.Fatalf("ReplaceSteps before the mid delete: %v", err)
+		}
+		rises("DeleteStep in the middle", bp, func() error {
+			_, err := store.DeleteStep(ctx, orgID, bp, 1, "Downstream")
+			return err
+		})
+		source := seedBlueprint(t, store, orgID, teamID, "Absorbed")
+		if _, err := store.ReplaceSteps(ctx, orgID, source, p[4:5], nil); err != nil {
+			t.Fatalf("ReplaceSteps source: %v", err)
+		}
+		rises("MergeInto, on the host", bp, func() error {
+			return store.MergeInto(ctx, orgID, bp, source)
+		})
+
+		before := version(bp)
+		if err := store.IncrementUsage(ctx, orgID, bp); err != nil {
+			t.Fatalf("IncrementUsage: %v", err)
+		}
+		if after := version(bp); after != before {
+			t.Errorf("IncrementUsage: version %d -> %d, want it left", before, after)
+		}
+
+		steps, _, err := store.ListAllSteps(ctx, orgID, db.BlueprintStepListFilter{TeamID: teamID, BlueprintIDs: []string{bp}}, db.ListOpts{Limit: 50})
+		if err != nil {
+			t.Fatalf("ListAllSteps: %v", err)
+		}
+		if len(steps) == 0 {
+			t.Fatal("ListAllSteps returned no steps for the blueprint")
+		}
+		for _, st := range steps {
+			if st.BlueprintVersion != before {
+				t.Errorf("ListAllSteps step %d blueprint_version = %d, want the blueprint's %d", st.StepIndex, st.BlueprintVersion, before)
+			}
 		}
 	})
 }

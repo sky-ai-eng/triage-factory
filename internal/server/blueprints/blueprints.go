@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -578,11 +579,32 @@ type blueprintStepInput struct {
 
 type blueprintStepsPutRequest struct {
 	Steps []blueprintStepInput `json:"steps"`
+	// Version is the blueprint version the list was decided against: the
+	// blueprint_version the caller's read of the steps returned, or the
+	// blueprint's own version when it has no steps to carry one. Reading the
+	// two apart is safe there, because the only write that moves an empty
+	// blueprint's steps adds some, and a list that leaves them out is refused
+	// whatever version it names. Not part of the list: it cannot be cleared,
+	// and it says which steps the list replaces.
+	Version *int64 `json:"version"`
 }
 
-// handleBlueprintStepsPut replaces the blueprint's step list. Validates that
-// the blueprint exists and that every step references a prompt the blueprint's
-// own team owns (same-team guard).
+// handleBlueprintStepsPut replaces the blueprint's step list: the order of its
+// steps, their briefs, and the prompts it adds. It answers the blueprint and
+// the steps it wrote, as merge and split do, so the caller holds the version
+// its next PUT names.
+//
+// Two rules keep it from losing a write it never saw. The body names the
+// version of the steps it was decided against, and a blueprint any write has
+// moved past that version since is refused (409 VERSION_CONFLICT): the
+// caller's list was built from steps the blueprint no longer has, so the only
+// honest answer is to read them again. And the list must name every step the
+// blueprint holds (409 CONFLICT), so a PUT never leaves a prompt in no
+// blueprint, where no screen shows it. Removing a step is a prompt delete,
+// and moving one is a split and a merge.
+//
+// Validates that the blueprint exists and that every step references a
+// prompt the blueprint's own team owns (same-team guard).
 func (h *Handler) handleBlueprintStepsPut(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
@@ -618,40 +640,90 @@ func (h *Handler) handleBlueprintStepsPut(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	stepIDs := make([]string, 0, len(req.Steps))
+	briefs := make([]string, 0, len(req.Steps))
+	for _, step := range req.Steps {
+		stepIDs = append(stepIDs, step.StepPromptID)
+		briefs = append(briefs, step.Brief)
+	}
+	var shape httpx.Validation
+	switch {
+	case req.Version == nil:
+		shape.Add(httpx.ErrorItem{
+			Reason:  httpx.ReasonMissingField,
+			Message: "version is required: send the blueprint_version your read of the steps returned, or the blueprint's version if it has no steps",
+			Field:   "version",
+		})
+	case *req.Version < 1:
+		// Versions start at 1 and only rise, so anything below names no read.
+		shape.Invalid("version", "version must be the blueprint_version your read of the steps returned, or the blueprint's version if it has no steps: a positive integer")
+	}
+	if slices.Contains(stepIDs, "") {
+		shape.Add(httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "step_prompt_id is required for every step", Field: "steps"})
+	}
+	// A prompt is one step of one blueprint, so a list naming it twice could
+	// only fail at the insert.
+	for i, sid := range stepIDs {
+		if sid != "" && slices.Index(stepIDs, sid) < i {
+			shape.Invalid("steps", "step "+strconv.Itoa(i)+" names the same prompt as step "+strconv.Itoa(slices.Index(stepIDs, sid))+": a prompt is one step")
+			break
+		}
+	}
+	if shape.Flush(w, http.StatusBadRequest) {
+		return
+	}
 	if len(req.Steps) > maxBlueprintSteps {
 		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonOutOfRange, Message: "blueprint may not exceed " + strconv.Itoa(maxBlueprintSteps) + " steps", Field: "steps"})
 		return
 	}
 
-	stepIDs := make([]string, 0, len(req.Steps))
-	briefs := make([]string, 0, len(req.Steps))
-	for _, step := range req.Steps {
-		if step.StepPromptID == "" {
-			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "step_prompt_id is required for every step", Field: "steps"})
-			return
-		}
-		stepIDs = append(stepIDs, step.StepPromptID)
-		briefs = append(briefs, step.Brief)
-	}
-
 	// Validate each step's prompt exists + is same-team, then replace in one
 	// tx so all lookups and the final write share claims.
 	var (
-		fault blueprintFault
-		gone  bool
+		fault   blueprintFault
+		gone    bool
+		written blueprintWithSteps
 	)
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		// Held until commit, before the checks below read which blueprint
-		// owns each prompt, so they read what a merge, split or prompt delete
+		// Held until commit, before the checks below read the blueprint's
+		// version, its steps, and which blueprint owns each prompt, so they
+		// read what a merge, split, reconnect, prompt delete or steps PUT
 		// that held this blueprint first committed
-		// (BlueprintStore.GetAllForUpdate). A blueprint retired meanwhile is
-		// answered 404.
+		// (BlueprintStore.GetAllForUpdate). Every write that raises the
+		// version holds the row too, so the version cannot move between this
+		// check and the replace. A blueprint retired meanwhile is answered
+		// 404.
 		held, e := tx.Blueprints.GetForUpdate(r.Context(), orgID, id)
 		if e != nil {
 			return e
 		}
 		if held == nil {
 			gone = true
+			return nil
+		}
+		// First, because every check after it would judge a list decided
+		// against steps the blueprint no longer has.
+		if held.Version != *req.Version {
+			fault.raise(http.StatusConflict, httpx.ReasonVersionConflict,
+				"this blueprint changed since you read its steps; read them again and decide again", "version")
+			return nil
+		}
+		// A step the list leaves out would lose its row, and its prompt would
+		// be in no blueprint.
+		current, e := tx.Blueprints.ListSteps(r.Context(), orgID, id)
+		if e != nil {
+			return e
+		}
+		var missing []string
+		for _, st := range current {
+			if !slices.Contains(stepIDs, st.StepPromptID) {
+				missing = append(missing, st.StepPromptID)
+			}
+		}
+		if len(missing) > 0 {
+			fault.raise(http.StatusConflict, httpx.ReasonConflict,
+				"the list leaves out steps the blueprint holds (step prompts "+strings.Join(missing, ", ")+
+					"): a steps PUT may reorder, re-brief, and add steps, but must name every one. To remove a step, delete its prompt.", "steps")
 			return nil
 		}
 		for i, sid := range stepIDs {
@@ -676,6 +748,9 @@ func (h *Handler) handleBlueprintStepsPut(w http.ResponseWriter, r *http.Request
 			// prompt is already a step in a *different* blueprint, refuse with a
 			// clean 422 instead of letting the unique index 500. (Owner == this
 			// blueprint is fine — re-saving its own step list.)
+			// TODO(TFAC-1540): only this PUT's blueprint is held, so two PUTs on
+			// different blueprints that add one prompt both pass, and the
+			// second answers 500 from the unique index.
 			ownerID, owned, e := tx.Blueprints.StepPromptOwner(r.Context(), orgID, sid)
 			if e != nil {
 				return e
@@ -689,11 +764,16 @@ func (h *Handler) handleBlueprintStepsPut(w http.ResponseWriter, r *http.Request
 		if fault.status != 0 {
 			return nil
 		}
-		// TODO(TFAC-1537): the PUT takes no precondition, so a list read
-		// before another write changed the steps replaces that change, and
-		// the prompts of the steps it drops are left with no blueprint.
-		_, e = tx.Blueprints.ReplaceSteps(r.Context(), orgID, id, stepIDs, briefs)
-		return e
+		stamped, e := tx.Blueprints.ReplaceSteps(r.Context(), orgID, id, stepIDs, briefs)
+		if e != nil {
+			return e
+		}
+		steps, e := tx.Blueprints.ListSteps(r.Context(), orgID, id)
+		if e != nil {
+			return e
+		}
+		written = withSteps(&stamped, steps)
+		return nil
 	}); err != nil {
 		httpx.InternalError(w, "blueprints", err)
 		return
@@ -705,8 +785,7 @@ func (h *Handler) handleBlueprintStepsPut(w http.ResponseWriter, r *http.Request
 	if fault.write(w) {
 		return
 	}
-
-	w.WriteHeader(http.StatusNoContent)
+	httpx.WriteJSON(w, http.StatusOK, written)
 }
 
 // blueprintFault is a validation refusal raised inside a WithTx closure and
@@ -755,6 +834,20 @@ func (f *blueprintFault) write(w http.ResponseWriter) bool {
 type blueprintWithSteps struct {
 	Blueprint *domain.Blueprint      `json:"blueprint"`
 	Steps     []domain.BlueprintStep `json:"steps"`
+}
+
+// withSteps builds a blueprintWithSteps whose steps carry the blueprint's
+// version, as the step list's do, so a caller can name the version of the
+// steps it holds from either read. Steps are a list, never null.
+func withSteps(b *domain.Blueprint, steps []domain.BlueprintStep) blueprintWithSteps {
+	out := make([]domain.BlueprintStep, len(steps))
+	for i, st := range steps {
+		if b != nil {
+			st.BlueprintVersion = b.Version
+		}
+		out[i] = st
+	}
+	return blueprintWithSteps{Blueprint: b, Steps: out}
 }
 
 type mergeBlueprintRequest struct {
@@ -887,10 +980,7 @@ func (h *Handler) handleBlueprintMerge(w http.ResponseWriter, r *http.Request) {
 	if fault.write(w) {
 		return
 	}
-	if steps == nil {
-		steps = []domain.BlueprintStep{}
-	}
-	httpx.WriteJSON(w, http.StatusOK, blueprintWithSteps{Blueprint: merged, Steps: steps})
+	httpx.WriteJSON(w, http.StatusOK, withSteps(merged, steps))
 }
 
 type splitBlueprintRequest struct {
@@ -957,6 +1047,9 @@ func (h *Handler) handleBlueprintSplit(w http.ResponseWriter, r *http.Request) {
 		if e != nil {
 			return e
 		}
+		// TODO(TFAC-1539): the index is checked against the steps held now,
+		// not the ones the caller read, so a split sent after another write
+		// moved them cuts next to a step the caller never chose.
 		// 0 < k < N: a split that keeps one side empty is a no-op.
 		if atIndex <= 0 || atIndex >= len(steps) {
 			fault.raise(http.StatusUnprocessableEntity, httpx.ReasonOutOfRange,
@@ -1002,15 +1095,9 @@ func (h *Handler) handleBlueprintSplit(w http.ResponseWriter, r *http.Request) {
 	if fault.write(w) {
 		return
 	}
-	if upSteps == nil {
-		upSteps = []domain.BlueprintStep{}
-	}
-	if downSteps == nil {
-		downSteps = []domain.BlueprintStep{}
-	}
 	httpx.WriteJSON(w, http.StatusOK, blueprintSplitResponse{
-		Upstream:   blueprintWithSteps{Blueprint: upstream, Steps: upSteps},
-		Downstream: blueprintWithSteps{Blueprint: downstream, Steps: downSteps},
+		Upstream:   withSteps(upstream, upSteps),
+		Downstream: withSteps(downstream, downSteps),
 	})
 }
 
@@ -1112,6 +1199,9 @@ func (h *Handler) handleBlueprintReconnect(w http.ResponseWriter, r *http.Reques
 		if e != nil {
 			return e
 		}
+		// TODO(TFAC-1539): the index is checked against the steps held now,
+		// not the ones the caller read, so a reconnect sent after another
+		// write moved them cuts next to a step the caller never chose.
 		// 0 < k < N: both the surviving upstream and the orphaned downstream must
 		// be non-empty (a sequence edge always sits at such a boundary).
 		if atIndex <= 0 || atIndex >= len(steps) {
@@ -1185,11 +1275,8 @@ func (h *Handler) handleBlueprintReconnect(w http.ResponseWriter, r *http.Reques
 	if fault.write(w) {
 		return
 	}
-	if hostSteps == nil {
-		hostSteps = []domain.BlueprintStep{}
-	}
 	httpx.WriteJSON(w, http.StatusOK, blueprintReconnectResponse{
-		Host:              blueprintWithSteps{Blueprint: hostOut, Steps: hostSteps},
+		Host:              withSteps(hostOut, hostSteps),
 		OrphanBlueprintID: orphanID,
 	})
 }
@@ -1274,10 +1361,7 @@ func (h *Handler) handleBlueprintDuplicate(w http.ResponseWriter, r *http.Reques
 			if ge != nil {
 				return ge
 			}
-			if steps == nil {
-				steps = []domain.BlueprintStep{}
-			}
-			out = append(out, blueprintWithSteps{Blueprint: bp, Steps: steps})
+			out = append(out, withSteps(bp, steps))
 		}
 		return nil
 	}); err != nil {
