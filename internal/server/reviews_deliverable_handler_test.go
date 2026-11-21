@@ -234,8 +234,8 @@ func TestReviewDeliverableApprove_SubmitsPostClaimContent(t *testing.T) {
 		if !raced && artID != "" {
 			raced = true
 			rec := doJSON(t, srv, http.MethodPatch, "/api/deliverables/"+artID+"/review", map[string]any{"body": "EDITED just before the claim"})
-			if rec.Code != http.StatusOK {
-				t.Errorf("racing PATCH = %d, want 200 (the claim hasn't been taken yet); body=%s", rec.Code, rec.Body.String())
+			if rec.Code != http.StatusNoContent {
+				t.Errorf("racing PATCH = %d, want 204 (the claim hasn't been taken yet); body=%s", rec.Code, rec.Body.String())
 			}
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -491,8 +491,8 @@ func TestReviewDeliverableDismiss(t *testing.T) {
 
 	artID, conversationID, _ := seedReviewDeliverableWithConversation(t, srv, "rdis", "acme", "api", 7, "COMMENT")
 	rec := doJSON(t, srv, http.MethodPatch, "/api/deliverables/"+artID+"/review", map[string]any{"state": "dismissed"})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("dismiss = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("dismiss = %d, want 204; body=%s", rec.Code, rec.Body.String())
 	}
 	if got := getDeliverable(t, srv, artID).State; got != domain.DeliverableStateReviewDismissed {
 		t.Errorf("deliverable state = %q, want dismissed", got)

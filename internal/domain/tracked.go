@@ -308,13 +308,13 @@ func markedAfter(at string, id int64, markAt string, markID int64) bool {
 // check runs from third-party CI systems (Supabase, Circle, etc.) — those
 // can't be fetched via the Actions log-download endpoint anyway.
 type CheckRun struct {
-	ID            int64  `json:"id"`
-	Name          string `json:"name"`
-	Status        string `json:"status"`     // queued | in_progress | completed
-	Conclusion    string `json:"conclusion"` // success | failure | cancelled | timed_out | action_required | neutral | skipped | stale | ""
-	CompletedAt   string `json:"completed_at"`
-	DetailsURL    string `json:"details_url"`
-	WorkflowRunID int64  `json:"workflow_run_id,omitempty"`
+	ID            int64  `json:"id" doc:"GitHub's id for the check run."`
+	Name          string `json:"name" doc:"The check's name."`
+	Status        string `json:"status" doc:"The check run's status: queued, in_progress, or completed."`                                                                                                    // queued | in_progress | completed
+	Conclusion    string `json:"conclusion" doc:"How a completed check run ended: success, failure, cancelled, timed_out, action_required, neutral, skipped, or stale; an empty string until it completes."` // success | failure | cancelled | timed_out | action_required | neutral | skipped | stale | ""
+	CompletedAt   string `json:"completed_at" doc:"When the check run completed, as an RFC 3339 timestamp, or an empty string until it does."`
+	DetailsURL    string `json:"details_url" doc:"The check run's details page."`
+	WorkflowRunID int64  `json:"workflow_run_id,omitempty" doc:"The id of the GitHub Actions workflow run the check belongs to, absent for a check from any other system."`
 }
 
 // IsFailingConclusion reports whether a check-run conclusion is one we treat

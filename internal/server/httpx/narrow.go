@@ -123,8 +123,8 @@ func Sort(v *Validation, key, dir string, keys []SortKey) db.Sort {
 // Every facets node answers its cuts in this one shape, so a client reads
 // `{value, count}` under each named key whichever list it sits beside.
 type FacetJSON struct {
-	Value string `json:"value"`
-	Count int    `json:"count"`
+	Value string `json:"value" doc:"The value the rows are counted by."`
+	Count int    `json:"count" doc:"How many rows have the value."`
 }
 
 // Facets renders a store's facet rows for the wire. Never nil: a cut nothing

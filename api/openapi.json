@@ -13,6 +13,81 @@
       }
     },
     "schemas": {
+      "CheckRun": {
+        "properties": {
+          "completed_at": {
+            "description": "When the check run completed, as an RFC 3339 timestamp, or an empty string until it does.",
+            "type": "string"
+          },
+          "conclusion": {
+            "description": "How a completed check run ended: success, failure, cancelled, timed_out, action_required, neutral, skipped, or stale; an empty string until it completes.",
+            "type": "string"
+          },
+          "details_url": {
+            "description": "The check run's details page.",
+            "type": "string"
+          },
+          "id": {
+            "description": "GitHub's id for the check run.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "name": {
+            "description": "The check's name.",
+            "type": "string"
+          },
+          "status": {
+            "description": "The check run's status: queued, in_progress, or completed.",
+            "type": "string"
+          },
+          "workflow_run_id": {
+            "description": "The id of the GitHub Actions workflow run the check belongs to, absent for a check from any other system.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "status",
+          "conclusion",
+          "completed_at",
+          "details_url"
+        ],
+        "type": "object"
+      },
+      "ChecksStatus": {
+        "properties": {
+          "failing": {
+            "description": "How many completed as failure, timed_out, cancelled, or action_required.",
+            "type": "integer"
+          },
+          "passing": {
+            "description": "How many completed without failing or being skipped.",
+            "type": "integer"
+          },
+          "pending": {
+            "description": "How many have not completed.",
+            "type": "integer"
+          },
+          "skipped": {
+            "description": "How many completed as skipped.",
+            "type": "integer"
+          },
+          "total": {
+            "description": "How many check runs there are.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total",
+          "passing",
+          "failing",
+          "pending",
+          "skipped"
+        ],
+        "type": "object"
+      },
       "ConnectionsListRequest": {
         "properties": {
           "page_size": {
@@ -27,6 +102,195 @@
             "type": "string"
           }
         },
+        "type": "object"
+      },
+      "DashboardPRUpdateRequest": {
+        "properties": {
+          "draft": {
+            "description": "With true, converts the pull request to a draft on GitHub; with false, marks it ready for review. It is required, and null is refused.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "DashboardPoint": {
+        "properties": {
+          "count": {
+            "description": "How many of the caller's pull requests merged that day.",
+            "type": "integer"
+          },
+          "date": {
+            "description": "The day, as a YYYY-MM-DD date in UTC.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "date",
+          "count"
+        ],
+        "type": "object"
+      },
+      "DashboardStats": {
+        "properties": {
+          "awaiting": {
+            "description": "How many of the caller's pull requests are open and ready for review.",
+            "type": "integer"
+          },
+          "closed": {
+            "description": "How many of the caller's pull requests closed without merging within the window.",
+            "type": "integer"
+          },
+          "draft": {
+            "description": "How many of the caller's pull requests are open drafts.",
+            "type": "integer"
+          },
+          "merged": {
+            "description": "How many of the caller's pull requests merged within the window.",
+            "type": "integer"
+          },
+          "merged_over_time": {
+            "description": "How many of the caller's pull requests merged on each of the last 14 days, oldest first, counting only merges within the window; null when the caller has no GitHub identity bound.",
+            "items": {
+              "$ref": "#/components/schemas/DashboardPoint"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "reviews_given": {
+            "description": "How many reviews the caller has left on other people's pull requests.",
+            "type": "integer"
+          },
+          "reviews_received": {
+            "description": "How many reviews other people have left on the caller's pull requests.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "merged",
+          "closed",
+          "awaiting",
+          "draft",
+          "reviews_given",
+          "reviews_received",
+          "merged_over_time"
+        ],
+        "type": "object"
+      },
+      "DeliverableApproveResponse": {
+        "properties": {
+          "event": {
+            "description": "The event the review was submitted with: APPROVE, COMMENT, or REQUEST_CHANGES, set for a review deliverable.",
+            "type": "string"
+          },
+          "html_url": {
+            "description": "The pull request's page on GitHub, set for a pull request deliverable.",
+            "type": "string"
+          },
+          "number": {
+            "description": "The pull request's number, set for a pull request deliverable.",
+            "type": "integer"
+          },
+          "review_id": {
+            "description": "The id GitHub gave the submitted review, set for a review deliverable.",
+            "type": "string"
+          },
+          "state": {
+            "description": "The deliverable's state after the approval: open for a pull request, submitted for a review.",
+            "type": "string"
+          },
+          "url": {
+            "description": "The submitted review's page on GitHub, set for a review deliverable.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "state"
+        ],
+        "type": "object"
+      },
+      "DeliverableDismissResponse": {
+        "properties": {
+          "html_url": {
+            "description": "The pull request's page on GitHub.",
+            "type": "string"
+          },
+          "number": {
+            "description": "The pull request's number, or 0 when the deliverable names no pull request.",
+            "type": "integer"
+          },
+          "state": {
+            "description": "The deliverable's state after the dismissal: closed.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "number",
+          "html_url",
+          "state"
+        ],
+        "type": "object"
+      },
+      "DeliverableOKResponse": {
+        "properties": {
+          "ok": {
+            "description": "Always true.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok"
+        ],
+        "type": "object"
+      },
+      "DeliverablePRUpdateRequest": {
+        "properties": {
+          "body": {
+            "description": "The pull request's new body; absent or null keeps the current body.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "description": "The pull request's new title, trimmed of surrounding whitespace, which may not be empty; absent or null keeps the current title.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "DeliverableRejectResponse": {
+        "properties": {
+          "branch": {
+            "description": "The name of the head branch deleted from the repository.",
+            "type": "string"
+          },
+          "html_url": {
+            "description": "The pull request's page on GitHub.",
+            "type": "string"
+          },
+          "number": {
+            "description": "The pull request's number.",
+            "type": "integer"
+          },
+          "state": {
+            "description": "The deliverable's state after the rejection: closed.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "number",
+          "html_url",
+          "state",
+          "branch"
+        ],
         "type": "object"
       },
       "DependabotAlertJSON": {
@@ -81,6 +345,212 @@
         ],
         "type": "object"
       },
+      "EntityJSON": {
+        "properties": {
+          "closed_at": {
+            "description": "When the entity closed, as an RFC 3339 timestamp, or null while it is active.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "description": "When the entity was first recorded, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "description": "The entity's id.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "The kind of entity: pr, issue, vulnerable_package, thread, or message.",
+            "type": "string"
+          },
+          "latest_event_at": {
+            "description": "When the entity's newest event was recorded, as an RFC 3339 timestamp, or null when it has none.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "latest_event_type": {
+            "description": "The type of the entity's newest recorded event, or null when it has none.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "mine": {
+            "description": "Whether the entity is a pull request the caller's GitHub identity on the organization's host wrote; false for every other kind of entity.",
+            "type": "boolean"
+          },
+          "pull_request": {
+            "description": "A pull request's fields as its last poll read them, or null for every other kind of entity and for a pull request no poll has read yet.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/EntityPullRequestJSON"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "repository_id": {
+            "description": "The id of a GitHub entity's repository, which a rename of the repository does not change, or null for an entity from any other source.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "description": "The system the entity comes from: github, jira, linear, or slack.",
+            "type": "string"
+          },
+          "source_id": {
+            "description": "The entity's key in its source, such as owner/repo#42 for a pull request or PROJ-123 for a Jira issue.",
+            "type": "string"
+          },
+          "state": {
+            "description": "Whether the entity is active or closed.",
+            "type": "string"
+          },
+          "title": {
+            "description": "The entity's title.",
+            "type": "string"
+          },
+          "url": {
+            "description": "The entity's page in its source.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "source",
+          "source_id",
+          "kind",
+          "title",
+          "url",
+          "state",
+          "created_at",
+          "closed_at",
+          "repository_id",
+          "latest_event_type",
+          "latest_event_at",
+          "mine",
+          "pull_request"
+        ],
+        "type": "object"
+      },
+      "EntityListRequest": {
+        "properties": {
+          "closed_since": {
+            "description": "An RFC 3339 timestamp that leaves out entities that closed before it; an entity that has not closed is included.",
+            "type": "string"
+          },
+          "ids": {
+            "description": "Ids of the entities to include, at most 200, each a UUID in lowercase hyphenated form; empty includes every entity.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "kinds": {
+            "description": "Kinds of entity to include, from issue, message, pr, thread, and vulnerable_package; empty includes every kind.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "page_size": {
+            "description": "How many rows to return, 50 when absent; 0 returns no rows and only total_count, and a value above the list's maximum, 200 unless the route says otherwise, is refused.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "page_token": {
+            "description": "The next_page_token of the previous page, which reads the page after it; it is refused for a request with different filters.",
+            "type": "string"
+          },
+          "sources": {
+            "description": "Sources whose entities to include, from github, jira, linear, and slack; empty includes every source.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "states": {
+            "description": "States to include, from active and closed; empty includes both.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "team_ids": {
+            "description": "Ids of the teams, at most 100, whose tracked repositories, projects, teams, and channels limit the result; empty uses every team the caller belongs to, and a team the caller is not on matches nothing.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "EntityPullRequestJSON": {
+        "properties": {
+          "additions": {
+            "description": "How many lines the pull request adds.",
+            "type": "integer"
+          },
+          "author": {
+            "description": "The GitHub login of the pull request's author.",
+            "type": "string"
+          },
+          "deletions": {
+            "description": "How many lines the pull request removes.",
+            "type": "integer"
+          },
+          "draft": {
+            "description": "Whether the pull request is a draft.",
+            "type": "boolean"
+          },
+          "number": {
+            "description": "The pull request's number in its repository.",
+            "type": "integer"
+          },
+          "repo": {
+            "description": "The repository, as owner/name.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "number",
+          "repo",
+          "author",
+          "draft",
+          "additions",
+          "deletions"
+        ],
+        "type": "object"
+      },
       "ErrorEnvelope": {
         "properties": {
           "errors": {
@@ -120,6 +590,102 @@
         ],
         "type": "object"
       },
+      "EventJSON": {
+        "properties": {
+          "created_at": {
+            "description": "When the event was recorded, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "dedup_key": {
+            "description": "The value that tells apart events of one type on one entity, such as a label name, or an empty string for most event types.",
+            "type": "string"
+          },
+          "entity_id": {
+            "description": "The id of the entity the event happened on.",
+            "type": "string"
+          },
+          "event_type": {
+            "description": "The event's type, such as github:pr:ci_check_failed.",
+            "type": "string"
+          },
+          "id": {
+            "description": "The event's id.",
+            "type": "string"
+          },
+          "occurred_at": {
+            "description": "When the event happened in its source, as an RFC 3339 timestamp, such as a commit's or a review's time, or null when the source reported none.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "entity_id",
+          "event_type",
+          "dedup_key",
+          "occurred_at",
+          "created_at"
+        ],
+        "type": "object"
+      },
+      "EventListRequest": {
+        "properties": {
+          "entity_ids": {
+            "description": "Ids of the entities whose events to include, at most 200, each a UUID in lowercase hyphenated form; empty includes the events of every entity the caller may read.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "page_size": {
+            "description": "How many rows to return, 50 when absent; 0 returns no rows and only total_count, and a value above the list's maximum, 200 unless the route says otherwise, is refused.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "page_token": {
+            "description": "The next_page_token of the previous page, which reads the page after it; it is refused for a request with different filters.",
+            "type": "string"
+          },
+          "per_entity": {
+            "description": "The most events to include for each entity, its newest, from 1 to 200; absent includes every event.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "since": {
+            "description": "An RFC 3339 timestamp that limits the result to events recorded at or after it.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "FacetJSON": {
+        "properties": {
+          "count": {
+            "description": "How many rows have the value.",
+            "type": "integer"
+          },
+          "value": {
+            "description": "The value the rows are counted by.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "value",
+          "count"
+        ],
+        "type": "object"
+      },
       "HealthResponse": {
         "properties": {
           "status": {
@@ -129,6 +695,70 @@
         },
         "required": [
           "status"
+        ],
+        "type": "object"
+      },
+      "JSON": {
+        "properties": {
+          "can_write": {
+            "description": "Whether the caller may approve, reject, dismiss, or edit the deliverable, absent when the check fails.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "created_at": {
+            "description": "When the deliverable was recorded, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "details": {
+            "description": "The deliverable's kind-specific content as a JSON object, or null when it has none: from GET /api/deliverables/{id}, a pull request's owner, repo, number, head_branch, base_branch, title, and body, with the title and body read from GitHub when it answers, or a review's owner, repo, pr_number, review_body, review_event, comments, and commits_since_finalize; in a conversation's deliverables list, the stored content, whose fields include head_branch, base, proposed, snapshot, and resolution for a pull request and review_body, review_event, staged_comments, proposed, and resolution for a review."
+          },
+          "external_id": {
+            "description": "The object's id on GitHub: the pull request's number, or the submitted review's id, empty while the object does not exist on GitHub.",
+            "type": "string"
+          },
+          "id": {
+            "description": "The deliverable's id.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "What the deliverable is: pull_request or review.",
+            "type": "string"
+          },
+          "provider": {
+            "description": "The system the deliverable's object is on: github.",
+            "type": "string"
+          },
+          "scope": {
+            "description": "The base URL of the GitHub the deliverable's object is on.",
+            "type": "string"
+          },
+          "state": {
+            "description": "Where the deliverable is in its lifecycle: pending, draft, open, merged, or closed for a pull request, and pending, submitted, or dismissed for a review.",
+            "type": "string"
+          },
+          "target": {
+            "description": "The pull request the deliverable is or reviews, as owner/repo#number.",
+            "type": "string"
+          },
+          "url": {
+            "description": "The object's page on GitHub, empty while the object does not exist on GitHub.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "provider",
+          "scope",
+          "state",
+          "target",
+          "external_id",
+          "url",
+          "details",
+          "created_at"
         ],
         "type": "object"
       },
@@ -154,6 +784,203 @@
         "required": [
           "started_at"
         ],
+        "type": "object"
+      },
+      "PRStatus": {
+        "properties": {
+          "auto_merge": {
+            "description": "Whether auto-merge is enabled on the pull request.",
+            "type": "boolean"
+          },
+          "check_runs": {
+            "description": "The check runs on the pull request's head commit, the latest run of each check name.",
+            "items": {
+              "$ref": "#/components/schemas/CheckRun"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "checks_status": {
+            "$ref": "#/components/schemas/ChecksStatus",
+            "description": "How many of check_runs are in each state."
+          },
+          "conflicts": {
+            "description": "Whether the pull request has merge conflicts, which is when mergeable_state is dirty.",
+            "type": "boolean"
+          },
+          "mergeable": {
+            "description": "Whether GitHub can merge the pull request, or null while GitHub is still computing it.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "mergeable_state": {
+            "description": "GitHub's mergeable state, such as clean, dirty, blocked, behind, or unknown.",
+            "type": "string"
+          },
+          "review_decision": {
+            "description": "The decision the reviews add up to: approved, changes_requested, review_required, or an empty string when there is none.",
+            "type": "string"
+          },
+          "reviews": {
+            "description": "Each reviewer's latest approval, change request, or dismissal, in no particular order; null when there is none.",
+            "items": {
+              "$ref": "#/components/schemas/ReviewState"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "mergeable",
+          "auto_merge",
+          "mergeable_state",
+          "reviews",
+          "checks_status",
+          "check_runs",
+          "conflicts",
+          "review_decision"
+        ],
+        "type": "object"
+      },
+      "PRSummaryRow": {
+        "properties": {
+          "author": {
+            "description": "The GitHub login of the pull request's author.",
+            "type": "string"
+          },
+          "created_at": {
+            "description": "When the pull request was opened, as an RFC 3339 timestamp.",
+            "type": "string"
+          },
+          "draft": {
+            "description": "Whether the pull request is a draft.",
+            "type": "boolean"
+          },
+          "entity_id": {
+            "description": "The id of the pull request's entity, which the per-pull-request routes take.",
+            "type": "string"
+          },
+          "html_url": {
+            "description": "The pull request's page on GitHub.",
+            "type": "string"
+          },
+          "labels": {
+            "description": "The names of the pull request's labels.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "number": {
+            "description": "The pull request's number in its repository.",
+            "type": "integer"
+          },
+          "repo": {
+            "description": "The repository, as owner/name.",
+            "type": "string"
+          },
+          "state": {
+            "description": "The pull request's state: open, merged, or closed.",
+            "type": "string"
+          },
+          "title": {
+            "description": "The pull request's title.",
+            "type": "string"
+          },
+          "updated_at": {
+            "description": "When the pull request last changed on GitHub, as an RFC 3339 timestamp.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "entity_id",
+          "number",
+          "title",
+          "repo",
+          "author",
+          "state",
+          "draft",
+          "labels",
+          "created_at",
+          "updated_at",
+          "html_url"
+        ],
+        "type": "object"
+      },
+      "PatchReviewRequest": {
+        "properties": {
+          "body": {
+            "description": "The review's new summary body, trimmed of surrounding whitespace, which may not be empty; absent or null keeps the current body.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "event": {
+            "description": "The event the review is to be submitted with: APPROVE, COMMENT, or REQUEST_CHANGES; absent or null keeps the current event.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "description": "Set to dismissed, the only value accepted, to abandon the pending review; it may not be sent with body or event, and absent or null leaves the review pending.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "PrListRequest": {
+        "properties": {
+          "draft": {
+            "description": "With true, only drafts; with false, only pull requests ready for review; absent or null includes both.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "page_size": {
+            "description": "How many rows to return, 50 when absent; 0 returns no rows and only total_count, and a value above the list's maximum, 200 unless the route says otherwise, is refused.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "page_token": {
+            "description": "The next_page_token of the previous page, which reads the page after it; it is refused for a request with different filters.",
+            "type": "string"
+          },
+          "sort_dir": {
+            "description": "The direction of sort_key, asc or desc, desc when absent; it is refused without sort_key.",
+            "type": "string"
+          },
+          "sort_key": {
+            "description": "Orders the result by updated_at, GitHub's last-activity time, with a pull request that has none last; absent orders it by when TF last polled each pull request, newest first.",
+            "type": "string"
+          },
+          "states": {
+            "description": "States to include, from open, merged, and closed; empty includes every state.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
         "type": "object"
       },
       "RepoJSON": {
@@ -260,6 +1087,424 @@
             ]
           }
         },
+        "type": "object"
+      },
+      "ReviewCommentUpdateRequest": {
+        "properties": {
+          "body": {
+            "description": "The comment's new text, trimmed of surrounding whitespace, which may not be empty and may not start with a severity badge; the comment keeps the severity it was written with.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ReviewRefreshResponse": {
+        "properties": {
+          "dropped": {
+            "description": "How many staged comments were removed because the code they commented on is no longer in the pull request's diff.",
+            "type": "integer"
+          },
+          "head": {
+            "description": "The commit SHA of the pull request's head the review now matches.",
+            "type": "string"
+          },
+          "moved": {
+            "description": "How many staged comments now sit on a different line or file of the current head.",
+            "type": "integer"
+          },
+          "state": {
+            "description": "The review deliverable's state: pending.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "moved",
+          "dropped",
+          "head",
+          "state"
+        ],
+        "type": "object"
+      },
+      "ReviewState": {
+        "properties": {
+          "author": {
+            "description": "The GitHub login of the reviewer.",
+            "type": "string"
+          },
+          "state": {
+            "description": "The review's state as GitHub spells it, such as APPROVED, CHANGES_REQUESTED, DISMISSED, or PENDING.",
+            "type": "string"
+          },
+          "submitted_at": {
+            "description": "When the review was submitted, as an RFC 3339 timestamp, or an empty string for a pending review.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "author",
+          "state",
+          "submitted_at"
+        ],
+        "type": "object"
+      },
+      "StockActionRequest": {
+        "properties": {
+          "entity_ids": {
+            "description": "The entity ids of the tickets to act on, as the deck lists them: at least one and at most 500, each given once and with no surrounding whitespace.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "team_id": {
+            "description": "The id of the caller's team the action is for, whose tracked projects and Jira status rules apply and on which any task is created; when absent it is the team the caller last wrote under, or their one team, and a caller on several teams with neither must give it.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "StockActionResponse": {
+        "properties": {
+          "applied": {
+            "description": "How many tickets the action applied to.",
+            "type": "integer"
+          },
+          "failed": {
+            "description": "How many tickets the action did not apply to.",
+            "type": "integer"
+          },
+          "results": {
+            "description": "One result for each submitted entity id, in the order submitted.",
+            "items": {
+              "$ref": "#/components/schemas/StockItemResult"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "applied",
+          "failed",
+          "results"
+        ],
+        "type": "object"
+      },
+      "StockDeck": {
+        "properties": {
+          "assigned": {
+            "description": "The tickets assigned to the caller that have no task, newest first.",
+            "items": {
+              "$ref": "#/components/schemas/StockTicket"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "available": {
+            "description": "The unassigned tickets in a pickup status that have no task, newest first.",
+            "items": {
+              "$ref": "#/components/schemas/StockTicket"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "status": {
+            "description": "Whether the lists are filled: ready, or polling, with both lists empty, until Jira's first poll since its configuration last changed has finished.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "assigned",
+          "available"
+        ],
+        "type": "object"
+      },
+      "StockItemResult": {
+        "properties": {
+          "entity_id": {
+            "description": "The entity id as it was submitted.",
+            "type": "string"
+          },
+          "errors": {
+            "description": "Why the action did not apply to the ticket, absent when it did.",
+            "items": {
+              "$ref": "#/components/schemas/ErrorItem"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "issue_key": {
+            "description": "The ticket's current Jira key, absent when the entity id names no ticket on the caller's deck.",
+            "type": "string"
+          },
+          "ok": {
+            "description": "Whether the action applied to the ticket.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "entity_id",
+          "ok"
+        ],
+        "type": "object"
+      },
+      "StockTicket": {
+        "properties": {
+          "bucket": {
+            "description": "Which list the ticket is in: assigned, for a ticket assigned to the caller, or available, for an unassigned ticket in a pickup status.",
+            "type": "string"
+          },
+          "entity_id": {
+            "description": "The id of the ticket's entity, which the carry-over action routes take.",
+            "type": "string"
+          },
+          "issue_key": {
+            "description": "The ticket's Jira key, such as PROJ-123.",
+            "type": "string"
+          },
+          "issue_type": {
+            "description": "The name of the ticket's issue type.",
+            "type": "string"
+          },
+          "parent_key": {
+            "description": "The Jira key of the ticket's parent issue, absent when it has none.",
+            "type": "string"
+          },
+          "parent_url": {
+            "description": "The parent issue's page in Jira, absent when the ticket has no parent.",
+            "type": "string"
+          },
+          "prefilled_action": {
+            "description": "The action the status rules suggest for an assigned ticket from its Jira status: done for a done status, claim for an in-progress one, or queue for a pickup one; absent when no rule matches and on every available ticket.",
+            "type": "string"
+          },
+          "priority": {
+            "description": "The name of the ticket's priority.",
+            "type": "string"
+          },
+          "project": {
+            "description": "The key of the ticket's Jira project.",
+            "type": "string"
+          },
+          "status": {
+            "description": "The name of the ticket's Jira status.",
+            "type": "string"
+          },
+          "summary": {
+            "description": "The ticket's summary.",
+            "type": "string"
+          },
+          "url": {
+            "description": "The ticket's page in Jira.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "entity_id",
+          "issue_key",
+          "summary",
+          "status",
+          "project",
+          "issue_type",
+          "priority",
+          "url",
+          "bucket"
+        ],
+        "type": "object"
+      },
+      "TaskClaimRequest": {
+        "properties": {
+          "target_user_id": {
+            "description": "The id of the person to hand the task to, which moves the claim another person holds to them; absent, the caller claims the task. It cannot be empty.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "team_id": {
+            "description": "The id of the team the caller's own claim puts the task on, one of the task's claim_team_ids; absent when there is only one. It cannot be sent with target_user_id.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "version": {
+            "description": "The version the caller's read of the task returned; the claim is refused when the task has changed since. It is required.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "TaskCreateRequest": {
+        "properties": {
+          "dedup_key": {
+            "description": "The value that tells apart tasks of one event type on one entity, such as a label name, which the event must also have; empty for most event types.",
+            "type": "string"
+          },
+          "entity_id": {
+            "description": "The id of the entity the task is about, which must be active. It is required.",
+            "type": "string"
+          },
+          "event_type": {
+            "description": "The event type the task is for, which an event recorded on the entity must have. It is required.",
+            "type": "string"
+          },
+          "team_id": {
+            "description": "The id of the team to create the task for; absent uses the team the caller last wrote to, or their only team.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "TaskDelegateRequest": {
+        "properties": {
+          "blueprint_id": {
+            "description": "The id of the blueprint the run carries out, which must belong to the team the task lands on. It is required.",
+            "type": "string"
+          },
+          "team_id": {
+            "description": "The id of the team the task lands on and the run belongs to, one of the task's claim_team_ids; absent when there is only one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "version": {
+            "description": "The version the caller's read of the task returned; the delegation is refused when the task has changed since. It is required.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "TaskDelegateResponse": {
+        "properties": {
+          "conversation_id": {
+            "description": "The id of the conversation of the run's first step, absent when it could not be read.",
+            "type": "string"
+          },
+          "status": {
+            "description": "The task's lane after the agent claimed it.",
+            "type": "string"
+          },
+          "version": {
+            "description": "The task's version after the agent claimed it, which the caller's next write to the task sends.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "status",
+          "version"
+        ],
+        "type": "object"
+      },
+      "TaskFacetsRequest": {
+        "properties": {
+          "closed_since": {
+            "description": "An RFC 3339 timestamp that limits done and dismissed tasks to those closed at or after it.",
+            "type": "string"
+          },
+          "created_since": {
+            "description": "An RFC 3339 timestamp that limits the result to tasks created at or after it.",
+            "type": "string"
+          },
+          "entity_kinds": {
+            "description": "Entity kinds whose tasks to include, such as pr or vulnerable_package; empty includes every kind.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "include_snoozed": {
+            "description": "Whether to include tasks still inside their snooze window.",
+            "type": "boolean"
+          },
+          "only_unclaimed": {
+            "description": "Whether to include only tasks nobody holds.",
+            "type": "boolean"
+          },
+          "sources": {
+            "description": "Sources whose tasks to include, such as github or jira; empty includes every source.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "statuses": {
+            "description": "Lanes to include, from queued, in_progress, done, dismissed, and snoozed; empty includes every lane.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "team_ids": {
+            "description": "Ids of the teams whose tasks to include; empty includes every team the caller belongs to.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "TaskFacetsResponse": {
+        "properties": {
+          "entity_kinds": {
+            "description": "Each entity kind the lane's tasks are about, with how many tasks are about it, counted under every filter in the body except entity_kinds.",
+            "items": {
+              "$ref": "#/components/schemas/FacetJSON"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "event_types": {
+            "description": "Each event type the lane's tasks have, with how many tasks have it, counted under every filter in the body.",
+            "items": {
+              "$ref": "#/components/schemas/FacetJSON"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "event_types",
+          "entity_kinds"
+        ],
         "type": "object"
       },
       "TaskJSON": {
@@ -555,6 +1800,46 @@
             },
             "type": [
               "array",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "TaskPatchRequest": {
+        "properties": {
+          "snooze_until": {
+            "description": "When the task returns to the queue, as an RFC 3339 timestamp in the future, which snoozes an open task nobody holds; null returns a snoozed task to the queue now. It cannot be sent with status.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "description": "The lane to move the task to: done or dismissed, which close it, or in_progress, which needs the caller to hold the task. It cannot be null or sent with snooze_until.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "version": {
+            "description": "The version the caller's read of the task returned; the write is refused when the task has changed since. It is required.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "TaskRequeueRequest": {
+        "properties": {
+          "version": {
+            "description": "The version the caller's read of the task returned; the requeue is refused when the task has changed since. It is required.",
+            "format": "int64",
+            "type": [
+              "integer",
               "null"
             ]
           }
@@ -1025,6 +2310,414 @@
         ],
         "type": "object"
       },
+      "WorkCancelJSON": {
+        "properties": {
+          "by": {
+            "description": "The id of the person who requested it.",
+            "type": "string"
+          },
+          "reason": {
+            "description": "The reason the person gave.",
+            "type": "string"
+          },
+          "requested_at": {
+            "description": "When cancellation was requested, as an RFC 3339 timestamp.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "requested_at",
+          "by",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "WorkCancelRequest": {
+        "properties": {
+          "ids": {
+            "description": "The ids of the rows to request cancellation for, at least one and at most 500.",
+            "items": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "reason": {
+            "description": "Why the rows are being cancelled, which each row records; it is required and is at most 500 characters once surrounding whitespace is trimmed.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "WorkCancelResponse": {
+        "properties": {
+          "requested": {
+            "description": "How many of the named rows had a cancellation request recorded; a row that has settled or already has a request is not counted.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "requested"
+        ],
+        "type": "object"
+      },
+      "WorkCatalogueResponse": {
+        "properties": {
+          "kinds": {
+            "description": "Every kind of durable work the deployment registers.",
+            "items": {
+              "$ref": "#/components/schemas/WorkKindJSON"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kinds"
+        ],
+        "type": "object"
+      },
+      "WorkControlsJSON": {
+        "properties": {
+          "cancel": {
+            "description": "Whether cancellation can be requested for the kind's rows.",
+            "type": "boolean"
+          },
+          "redrive": {
+            "description": "Whether the kind's parked rows can be redriven.",
+            "type": "boolean"
+          },
+          "supersede": {
+            "description": "Whether a parked row of the kind can be superseded by another row.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "redrive",
+          "supersede",
+          "cancel"
+        ],
+        "type": "object"
+      },
+      "WorkDepthJSON": {
+        "properties": {
+          "deferred": {
+            "description": "How many rows are ready but cannot be claimed yet, such as a row whose retry time has not come.",
+            "type": "integer"
+          },
+          "leased": {
+            "description": "How many rows a worker holds.",
+            "type": "integer"
+          },
+          "oldest_deferred_age_seconds": {
+            "description": "The age in seconds, from its first enqueue, of the oldest row counted in deferred, or 0 when there is none.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "oldest_ready_age_seconds": {
+            "description": "The age in seconds, from its first enqueue, of the oldest row counted in ready, or 0 when there is none.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "parked": {
+            "description": "How many rows are parked, which no worker runs again until an operator redrives or supersedes them.",
+            "type": "integer"
+          },
+          "ready": {
+            "description": "How many of the organization's rows of the kind are ready and can be claimed now.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "ready",
+          "leased",
+          "parked",
+          "deferred",
+          "oldest_ready_age_seconds",
+          "oldest_deferred_age_seconds"
+        ],
+        "type": "object"
+      },
+      "WorkIDsRequest": {
+        "properties": {
+          "ids": {
+            "description": "The ids of the parked rows to redrive, at least one and at most 500.",
+            "items": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "WorkItemJSON": {
+        "properties": {
+          "attempt": {
+            "description": "How many attempts have been made on the row since it was enqueued or last redriven.",
+            "type": "integer"
+          },
+          "cancel": {
+            "description": "The cancellation requested for the row, present only when a request is recorded.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/WorkCancelJSON"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_at": {
+            "description": "When the row was created, as an RFC 3339 timestamp.",
+            "type": "string"
+          },
+          "done_at": {
+            "description": "When the row was last done, cancelled, or parked, as an RFC 3339 timestamp, absent when none of those has happened since it was enqueued or last redriven.",
+            "type": "string"
+          },
+          "first_enqueued_at": {
+            "description": "When the row's work was first enqueued, as an RFC 3339 timestamp, which a redrive does not change.",
+            "type": "string"
+          },
+          "id": {
+            "description": "The row's id.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "kind": {
+            "description": "The name of the row's kind.",
+            "type": "string"
+          },
+          "last_error": {
+            "description": "The error the row last recorded, absent when none is recorded.",
+            "type": "string"
+          },
+          "last_outcome": {
+            "description": "The outcome the row last recorded, such as transient, permanent, budget_exhausted, done, or redriven, absent when none is recorded.",
+            "type": "string"
+          },
+          "lease": {
+            "description": "The worker's hold on the row, present only while the row is leased.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/WorkLeaseJSON"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "max_attempts": {
+            "description": "How many attempts the row may have before it is parked.",
+            "type": "integer"
+          },
+          "next_attempt_at": {
+            "description": "The earliest time the row's next attempt may start, as an RFC 3339 timestamp, absent when no retry time is set.",
+            "type": "string"
+          },
+          "status": {
+            "description": "The row's status: ready, leased, done, parked, or cancelled.",
+            "type": "string"
+          },
+          "subject": {
+            "description": "What the row is about, in its kind's words, absent when the kind could not describe the row.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/WorkSubjectJSON"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "superseded_by": {
+            "description": "The id of the row that replaced this one, absent unless the row was superseded.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "unique_key": {
+            "description": "The key that keeps a second row for the same work from being enqueued, absent when the row has none.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "id",
+          "status",
+          "attempt",
+          "max_attempts",
+          "first_enqueued_at",
+          "created_at"
+        ],
+        "type": "object"
+      },
+      "WorkItemsListRequest": {
+        "properties": {
+          "page_size": {
+            "description": "How many rows to return, 50 when absent; 0 returns no rows and only total_count, and a value above the list's maximum, 200 unless the route says otherwise, is refused.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "page_token": {
+            "description": "The next_page_token of the previous page, which reads the page after it; it is refused for a request with different filters.",
+            "type": "string"
+          },
+          "status": {
+            "description": "Only rows with this status: ready, leased, done, parked, cancelled, or deferred, which is the ready rows that cannot be claimed yet; absent lists every status.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "WorkKindJSON": {
+        "properties": {
+          "controls": {
+            "$ref": "#/components/schemas/WorkControlsJSON",
+            "description": "Which operator controls the kind offers."
+          },
+          "kind": {
+            "description": "The kind's name, which the kind's routes take in their path.",
+            "type": "string"
+          },
+          "label": {
+            "description": "The kind's name for a person to read.",
+            "type": "string"
+          },
+          "objective": {
+            "$ref": "#/components/schemas/WorkObjectiveJSON",
+            "description": "The kind's monitoring objective."
+          }
+        },
+        "required": [
+          "kind",
+          "label",
+          "controls",
+          "objective"
+        ],
+        "type": "object"
+      },
+      "WorkLeaseJSON": {
+        "properties": {
+          "epoch": {
+            "description": "The boot count of the process that holds the row, absent when none is recorded.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "expires_at": {
+            "description": "When the lease expires unless its holder renews it, as an RFC 3339 timestamp, absent when none is recorded.",
+            "type": "string"
+          },
+          "generation": {
+            "description": "The lease's generation, a number that rises each time the row is claimed, redriven, or parked.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "leased_at": {
+            "description": "When the row was claimed, as an RFC 3339 timestamp, absent when none is recorded.",
+            "type": "string"
+          },
+          "owner": {
+            "description": "The id of the Triage Factory process that holds the row.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "generation",
+          "owner"
+        ],
+        "type": "object"
+      },
+      "WorkObjectiveJSON": {
+        "properties": {
+          "oldest_ready_age_seconds": {
+            "description": "How old, in seconds from its first enqueue, the kind's oldest ready row may get before the kind's queue counts as behind.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "oldest_ready_age_seconds"
+        ],
+        "type": "object"
+      },
+      "WorkRedriveResponse": {
+        "properties": {
+          "redriven": {
+            "description": "How many of the named rows returned to ready; a row that was no longer parked is not counted.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "redriven"
+        ],
+        "type": "object"
+      },
+      "WorkSubjectJSON": {
+        "properties": {
+          "detail": {
+            "description": "A longer description, such as the pull request's or issue's title, absent when it is unknown.",
+            "type": "string"
+          },
+          "fields": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Further facts about the row by name, such as event_type and entity_id.",
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "label": {
+            "description": "A short name for what the row is about, such as owner/repo#18 for a pull request or PROJ-123 for a Jira issue.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "label",
+          "fields"
+        ],
+        "type": "object"
+      },
+      "WorkSupersedeRequest": {
+        "properties": {
+          "superseded_by": {
+            "description": "The id of the organization's row of the same kind that replaces this one.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "WorkSupersedeResponse": {
+        "properties": {
+          "superseded": {
+            "description": "1 when the row was settled as superseded, or 0 when it was no longer parked.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "superseded"
+        ],
+        "type": "object"
+      },
       "WorkspaceView": {
         "properties": {
           "active": {
@@ -1241,6 +2934,966 @@
         }
       }
     },
+    "/api/dashboard/prs/list": {
+      "post": {
+        "description": "Returns one page of the pull requests the caller's GitHub identity authored and those opened by runs the caller started, from what TF last polled, narrowed by the body's filters. In multi mode, when the caller has a GitHub identity bound, the read also starts a one-time background import of that identity's recent pull requests from GitHub, which adds them to TF.",
+        "operationId": "list_dashboard_prs",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PrListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "items": {
+                      "description": "The rows of this page, as an empty array when it has none.",
+                      "items": {
+                        "$ref": "#/components/schemas/PRSummaryRow"
+                      },
+                      "type": "array"
+                    },
+                    "next_page_token": {
+                      "description": "The page_token that reads the next page, absent on the last page.",
+                      "type": "string"
+                    },
+                    "total_count": {
+                      "description": "How many rows match the request's filters across every page, or null for a list whose upstream cannot count them.",
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "total_count"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List the caller's pull requests",
+        "x-hints": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/dashboard/prs/{entity_id}": {
+      "patch": {
+        "description": "Converts one of the caller's pull requests to a draft, or marks it ready for review, on GitHub, and returns the pull request as the list returns it. The pull request must be one POST /api/dashboard/prs/list returns to the caller.",
+        "operationId": "update_dashboard_pr",
+        "parameters": [
+          {
+            "description": "The id of the pull request's entity, as the pull request list returns it.",
+            "in": "path",
+            "name": "entity_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DashboardPRUpdateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PRSummaryRow"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Update one of the caller's pull requests",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/dashboard/prs/{entity_id}/status": {
+      "get": {
+        "description": "Reads one of the caller's pull requests from GitHub and returns its mergeability, its reviewers' latest decisions, and its check runs. The pull request must be one POST /api/dashboard/prs/list returns to the caller.",
+        "operationId": "get_dashboard_pr_status",
+        "parameters": [
+          {
+            "description": "The id of the pull request's entity, as the pull request list returns it.",
+            "in": "path",
+            "name": "entity_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PRStatus"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get a pull request's live status",
+        "x-hints": {
+          "openWorldHint": true,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/dashboard/stats": {
+      "get": {
+        "description": "Returns counts of the pull requests the caller's GitHub identity authored and the reviews it gave and received, with merges and closes counted within the window, from what TF last polled. Every count is 0 when the caller has no GitHub identity bound on the organization's host. In multi mode, when one is bound, the read also starts a one-time background import of that identity's recent pull requests from GitHub, which adds them to TF.",
+        "operationId": "get_dashboard_stats",
+        "parameters": [
+          {
+            "description": "Start of the window, as an RFC 3339 timestamp or a YYYY-MM-DD date read as UTC midnight; absent is the last 30 days.",
+            "in": "query",
+            "name": "since",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DashboardStats"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get the caller's pull request statistics",
+        "x-hints": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/deliverables/{id}": {
+      "get": {
+        "description": "Returns one pull request or review a run prepared, with its kind-specific details. A pull request's title and body are read from GitHub, and so is the current head a pending review's comments are each compared against.",
+        "operationId": "get_deliverable",
+        "parameters": [
+          {
+            "description": "The deliverable's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get a deliverable",
+        "x-hints": {
+          "openWorldHint": true,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/deliverables/{id}/approve": {
+      "post": {
+        "description": "Publishes a deliverable a run prepared: a draft pull request is marked ready for review on GitHub, and a pending review is submitted to GitHub with its staged comments. The run that prepared it is told, and its task closes when this was the last deliverable awaiting a person on a run that completed.",
+        "operationId": "approve_deliverable",
+        "parameters": [
+          {
+            "description": "The id of the pull request or review deliverable.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeliverableApproveResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Approve a deliverable",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/deliverables/{id}/comments/{commentId}": {
+      "delete": {
+        "description": "Removes one inline comment staged on a pending review deliverable, so it is not posted when the review is approved.",
+        "operationId": "delete_deliverable_comment",
+        "parameters": [
+          {
+            "description": "The id of the review deliverable.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The id of the staged comment, as the deliverable's details list it.",
+            "in": "path",
+            "name": "commentId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeliverableOKResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Delete a pending review's staged comment",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      },
+      "patch": {
+        "description": "Replaces the text of one inline comment staged on a pending review deliverable. The comment reaches GitHub only when the review is approved.",
+        "operationId": "update_deliverable_comment",
+        "parameters": [
+          {
+            "description": "The id of the review deliverable.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The id of the staged comment, as the deliverable's details list it.",
+            "in": "path",
+            "name": "commentId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReviewCommentUpdateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeliverableOKResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Edit a pending review's staged comment",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/deliverables/{id}/diff": {
+      "get": {
+        "description": "Returns the unified diff of the pull request a deliverable is or reviews, read from GitHub: the pull request's current diff, or for a review with comments the diff as it stood when the run finished writing the review. When GitHub refuses the diff as too large, the body is reassembled from each file's patch and the X-Diff-Truncated response header says so.",
+        "operationId": "get_deliverable_diff",
+        "parameters": [
+          {
+            "description": "The id of the pull request or review deliverable.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The path of one file in the diff, to return that file's diff alone; absent returns every file.",
+            "in": "query",
+            "name": "file",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/plain; charset=utf-8": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get a deliverable's diff",
+        "x-hints": {
+          "openWorldHint": true,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/deliverables/{id}/dismiss": {
+      "post": {
+        "description": "Marks a draft pull request deliverable closed and closes its pull request on GitHub, keeping the branch. The run that prepared it is told, and its task closes when this was the last deliverable awaiting a person on a run that completed. A pending review is dismissed through PATCH /api/deliverables/{id}/review instead.",
+        "operationId": "dismiss_deliverable",
+        "parameters": [
+          {
+            "description": "The id of the pull request deliverable.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeliverableDismissResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Dismiss a draft pull request deliverable",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/deliverables/{id}/pr": {
+      "patch": {
+        "description": "Writes a new title, body, or both to a pull request deliverable's pull request on GitHub, and records them on the deliverable once GitHub accepts them. A field the body leaves out keeps the value GitHub holds now, and a body naming neither field is refused.",
+        "operationId": "update_deliverable_pr",
+        "parameters": [
+          {
+            "description": "The id of the pull request deliverable.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeliverablePRUpdateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeliverableOKResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Edit a pull request deliverable",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/deliverables/{id}/reject": {
+      "post": {
+        "description": "Deletes a draft pull request deliverable's head branch from the repository on GitHub, closes the pull request, and marks the deliverable closed; the branch delete cannot be undone. The run that prepared it is told, and its task closes when this was the last deliverable awaiting a person on a run that completed.",
+        "operationId": "reject_deliverable",
+        "parameters": [
+          {
+            "description": "The id of the pull request deliverable.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeliverableRejectResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Reject a draft pull request deliverable",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/deliverables/{id}/review": {
+      "patch": {
+        "description": "Stages a new summary body, event, or both on a pending review deliverable, which reach GitHub only when the review is approved, or dismisses the review with state set to dismissed. Dismissing tells the run that prepared the review, and closes its task when this was the last deliverable awaiting a person on a run that completed. Nothing is sent to GitHub.",
+        "operationId": "update_deliverable_review",
+        "parameters": [
+          {
+            "description": "The id of the review deliverable.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PatchReviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Edit or dismiss a pending review deliverable",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/deliverables/{id}/review/refresh": {
+      "post": {
+        "description": "Reads a pending review deliverable's pull request from GitHub and moves the review's staged comments onto its current head: a comment whose code moved follows it, and a comment whose code is gone is removed. Refused when that would leave a review with no summary body and no comments.",
+        "operationId": "refresh_deliverable_review",
+        "parameters": [
+          {
+            "description": "The id of the review deliverable.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewRefreshResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Move a pending review to the pull request's head",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/entities/list": {
+      "post": {
+        "description": "Returns one page of the entities the caller may read, newest first, narrowed by the body's filters: the pull requests, issues, vulnerable packages, and Slack threads and messages in the repositories, projects, teams, and channels the caller's teams track. Each entity carries its newest event's type and time.",
+        "operationId": "list_entities",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EntityListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "items": {
+                      "description": "The rows of this page, as an empty array when it has none.",
+                      "items": {
+                        "$ref": "#/components/schemas/EntityJSON"
+                      },
+                      "type": "array"
+                    },
+                    "next_page_token": {
+                      "description": "The page_token that reads the next page, absent on the last page.",
+                      "type": "string"
+                    },
+                    "total_count": {
+                      "description": "How many rows match the request's filters across every page, or null for a list whose upstream cannot count them.",
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "total_count"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List entities",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/entities/{id}": {
+      "get": {
+        "description": "Returns one entity the caller may read, in the shape the entity list returns it.",
+        "operationId": "get_entity",
+        "parameters": [
+          {
+            "description": "The entity's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntityJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get an entity",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/events/list": {
+      "post": {
+        "description": "Returns one page of the events recorded on the entities the caller may read, newest recorded first, narrowed by the body's filters. A page_token resumes after the last event of the page that returned it, so a walk neither repeats nor skips an event while new ones are recorded.",
+        "operationId": "list_events",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EventListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "items": {
+                      "description": "The rows of this page, as an empty array when it has none.",
+                      "items": {
+                        "$ref": "#/components/schemas/EventJSON"
+                      },
+                      "type": "array"
+                    },
+                    "next_page_token": {
+                      "description": "The page_token that reads the next page, absent on the last page.",
+                      "type": "string"
+                    },
+                    "total_count": {
+                      "description": "How many rows match the request's filters across every page, or null for a list whose upstream cannot count them.",
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "total_count"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List events",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/events/{id}": {
+      "get": {
+        "description": "Returns one event recorded on an entity the caller may read, in the shape the event list returns it.",
+        "operationId": "get_event",
+        "parameters": [
+          {
+            "description": "The event's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get an event",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
     "/api/health": {
       "get": {
         "description": "Reports status ok once the server accepts requests. It needs no credential and checks no database or integration, so it says only that the process is serving.",
@@ -1265,6 +3918,189 @@
         "x-hints": {
           "openWorldHint": false,
           "readOnlyHint": true
+        }
+      }
+    },
+    "/api/jira/stock": {
+      "get": {
+        "description": "Returns the open Jira tickets of one team's tracked projects that have no task yet, in two lists: those assigned to the caller, and unassigned ones in a pickup status. A parent ticket with open subtasks is left out, and each ticket says which action its Jira status suggests.",
+        "operationId": "get_jira_stock",
+        "parameters": [
+          {
+            "description": "The id of the team whose tracked Jira projects the deck draws from; when it is absent, or names a team the caller is not on, the deck is for the team the caller last wrote under, or else for their oldest team.",
+            "in": "query",
+            "name": "team_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StockDeck"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get the Jira carry-over deck",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/jira/stock/claim": {
+      "post": {
+        "description": "Assigns each named ticket on the caller's carry-over deck to the caller in Jira, moves it to its project's in-progress status, and creates a task the caller holds. A ticket the action cannot apply to is reported in results, and the others still apply.",
+        "operationId": "claim_jira_stock",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StockActionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StockActionResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Claim Jira tickets from the carry-over deck",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/jira/stock/done": {
+      "post": {
+        "description": "Moves each named ticket assigned to the caller to its project's done status in Jira and closes it in Triage Factory, creating no task. A ticket the action cannot apply to is reported in results, and the others still apply.",
+        "operationId": "complete_jira_stock",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StockActionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StockActionResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Close Jira tickets from the carry-over deck",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/jira/stock/queue": {
+      "post": {
+        "description": "Creates a queued task for each named ticket on the caller's carry-over deck, without writing to Jira. A ticket the action cannot apply to is reported in results, and the others still apply.",
+        "operationId": "queue_jira_stock",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StockActionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StockActionResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Queue Jira tickets from the carry-over deck",
+        "x-hints": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
         }
       }
     },
@@ -1464,6 +4300,463 @@
         }
       }
     },
+    "/api/orgs/{org_id}/work": {
+      "get": {
+        "description": "Returns every kind of durable work the deployment registers, with the operator controls each kind offers and its monitoring objective.",
+        "operationId": "get_work_catalogue",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkCatalogueResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List the kinds of durable work",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/work/{kind}/depth": {
+      "get": {
+        "description": "Returns how many of the organization's rows of the kind are ready, leased, parked, and deferred, and the ages of the oldest ready and deferred rows.",
+        "operationId": "get_work_depth",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The work kind's name, as the catalogue lists it, such as event_queue.",
+            "in": "path",
+            "name": "kind",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkDepthJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get a work kind's queue depth",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/work/{kind}/items/cancel": {
+      "post": {
+        "description": "Records a cancellation request on each named row, which takes effect when the row is next claimed or its holder next renews its lease, and answers how many requests were recorded. A named row that has settled or already has a request is skipped, and a kind whose controls do not include cancel refuses the call.",
+        "operationId": "cancel_work_items",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The work kind's name, as the catalogue lists it, such as event_queue.",
+            "in": "path",
+            "name": "kind",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkCancelRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkCancelResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Request cancellation of work rows",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/orgs/{org_id}/work/{kind}/items/list": {
+      "post": {
+        "description": "Returns one page of the organization's rows of the kind, newest first, optionally narrowed to one status. Each row carries its kind's description of what it is about.",
+        "operationId": "list_work_items",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The work kind's name, as the catalogue lists it, such as event_queue.",
+            "in": "path",
+            "name": "kind",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkItemsListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "items": {
+                      "description": "The rows of this page, as an empty array when it has none.",
+                      "items": {
+                        "$ref": "#/components/schemas/WorkItemJSON"
+                      },
+                      "type": "array"
+                    },
+                    "next_page_token": {
+                      "description": "The page_token that reads the next page, absent on the last page.",
+                      "type": "string"
+                    },
+                    "total_count": {
+                      "description": "How many rows match the request's filters across every page, or null for a list whose upstream cannot count them.",
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "total_count"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List a work kind's rows",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/work/{kind}/items/redrive": {
+      "post": {
+        "description": "Returns each named parked row to ready with a fresh attempt budget, and answers how many moved. A named row that is no longer parked is skipped, and a kind whose controls do not include redrive refuses the call.",
+        "operationId": "redrive_work_items",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The work kind's name, as the catalogue lists it, such as event_queue.",
+            "in": "path",
+            "name": "kind",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkIDsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkRedriveResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Redrive parked work rows",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/orgs/{org_id}/work/{kind}/items/{id}": {
+      "get": {
+        "description": "Returns one of the organization's rows of the kind, in any status, in the shape the list serves it.",
+        "operationId": "get_work_item",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The work kind's name, as the catalogue lists it, such as event_queue.",
+            "in": "path",
+            "name": "kind",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The row's id, a positive integer.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkItemJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get a work row",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/work/{kind}/items/{id}/supersede": {
+      "post": {
+        "description": "Settles the parked row as cancelled in favour of the named replacement row, which releases the row's unique key, and answers whether it did. A row that is no longer parked is left as it is, and a kind whose controls do not include supersede refuses the call.",
+        "operationId": "supersede_work_item",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The work kind's name, as the catalogue lists it, such as event_queue.",
+            "in": "path",
+            "name": "kind",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The row's id, a positive integer.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkSupersedeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkSupersedeResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Supersede a parked work row",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
     "/api/repos/{id}": {
       "patch": {
         "description": "Sets or clears the branch agents base their work on in the repository, and returns the repository with the change applied.",
@@ -1518,6 +4811,106 @@
           "idempotentHint": true,
           "openWorldHint": false,
           "readOnlyHint": false
+        }
+      }
+    },
+    "/api/tasks": {
+      "post": {
+        "description": "Returns the open task for the entity, event type, and dedup key on the acting team, creating it when there is none, anchored on the newest matching event recorded on the entity. Answers 201 when it creates the task and 200 when it finds one. It starts no run; delegating the task is POST /api/tasks/{id}/delegate.",
+        "operationId": "create_task",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TaskCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskJSON"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Create a task",
+        "x-hints": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/tasks/facets": {
+      "post": {
+        "description": "Returns the event types and entity kinds among the tasks the caller can see in a lane, the set the lane filters of POST /api/tasks/list describe, with how many tasks have each. It takes only those lane filters, and refuses the list's other fields and its paging fields by name.",
+        "operationId": "get_task_facets",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TaskFacetsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskFacetsResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Count a lane's tasks by event type and entity kind",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
         }
       }
     },
@@ -1586,6 +4979,277 @@
         "x-hints": {
           "openWorldHint": false,
           "readOnlyHint": true
+        }
+      }
+    },
+    "/api/tasks/{id}": {
+      "get": {
+        "description": "Returns one task the caller can see, with whether the caller may write it and the teams the caller's claim or delegation of it may put it on.",
+        "operationId": "get_task",
+        "parameters": [
+          {
+            "description": "The task's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get a task",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      },
+      "patch": {
+        "description": "Closes the task as done or dismissed, snoozes it until a time, returns a snoozed task to the queue, or confirms in_progress on a task the caller holds, and returns the task with the change applied. Closing a task tells any run working on it that it closed; the run is not stopped.",
+        "operationId": "update_task",
+        "parameters": [
+          {
+            "description": "The task's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TaskPatchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Update a task",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/tasks/{id}/claim": {
+      "post": {
+        "description": "Without target_user_id, the caller claims the task: it moves to in_progress under the caller, any run the agent had on it is stopped, and a Jira or Linear issue behind it is assigned to the caller and moved to in-progress. With target_user_id, the claim another person holds moves to that person, and nothing else changes. Returns the task with the claim applied.",
+        "operationId": "claim_task",
+        "parameters": [
+          {
+            "description": "The task's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TaskClaimRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Claim a task or hand it to another person",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/tasks/{id}/delegate": {
+      "post": {
+        "description": "Hands the task to the team's agent and starts a run of the blueprint on it, stopping any run already working on the task, which keeps the deliverables it left. Returns the task's lane and version after the handoff and the run's first conversation.",
+        "operationId": "delegate_task",
+        "parameters": [
+          {
+            "description": "The task's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TaskDelegateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskDelegateResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Delegate a task to the agent",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/tasks/{id}/requeue": {
+      "post": {
+        "description": "Puts the task back in the queue whatever its status, unclaimed, and returns it. It stops every run working on the task and ends its conversations, keeps the deliverables they left, and, where the claim moved a Jira or Linear issue to the claimant, unassigns the issue and moves it back to the status it had before.",
+        "operationId": "requeue_task",
+        "parameters": [
+          {
+            "description": "The task's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TaskRequeueRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Return a task to the queue",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": false
         }
       }
     },

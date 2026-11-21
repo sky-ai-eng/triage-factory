@@ -23,6 +23,25 @@ func TestDashboardStats_AppModeNoPAT_ReturnsStats(t *testing.T) {
 	userID := runmode.LocalDefaultUserID
 
 	host := dashboardTestHost(t, s, orgID, userID)
+
+	// With no identity bound the answer is the same shape, every count 0.
+	unbound := doJSON(t, s, "GET", "/api/dashboard/stats", nil)
+	if unbound.Code != http.StatusOK {
+		t.Fatalf("GET /api/dashboard/stats with no identity: got %d, want 200; body=%s", unbound.Code, unbound.Body.String())
+	}
+	var zero map[string]any
+	if err := json.Unmarshal(unbound.Body.Bytes(), &zero); err != nil {
+		t.Fatalf("decode body %q: %v", unbound.Body.String(), err)
+	}
+	for _, key := range []string{"merged", "closed", "awaiting", "draft", "reviews_given", "reviews_received"} {
+		if zero[key] != float64(0) {
+			t.Errorf("with no identity, %s = %v, want 0; body=%s", key, zero[key], unbound.Body.String())
+		}
+	}
+	if _, ok := zero["merged_over_time"]; !ok {
+		t.Errorf("with no identity, merged_over_time is absent; body=%s", unbound.Body.String())
+	}
+
 	if err := s.users.UpsertGitHubIdentity(ctx, userID, host, "octocat", "", "", "connect_oauth"); err != nil {
 		t.Fatalf("bind identity: %v", err)
 	}
@@ -41,8 +60,8 @@ func TestDashboardStats_AppModeNoPAT_ReturnsStats(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &stats); err != nil {
 		t.Fatalf("decode body %q: %v", rec.Body.String(), err)
 	}
-	// The no-identity path writes {} (all zero); a real read counts the open
-	// non-draft PR, so Awaiting==1 tells the two apart.
+	// The no-identity path writes every count as 0; a real read counts the
+	// open non-draft PR, so Awaiting==1 tells the two apart.
 	if stats.Awaiting != 1 {
 		t.Errorf("stats.Awaiting = %d, want 1 (one open non-draft PR by octocat); body=%s", stats.Awaiting, rec.Body.String())
 	}

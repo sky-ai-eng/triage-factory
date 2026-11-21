@@ -30,25 +30,25 @@ type stockTicket struct {
 	// EntityID is the ticket's entity, which the action routes take. The
 	// issue key beside it is the display value: an issue that moves between
 	// the read and the action answers under a new key and keeps its entity.
-	EntityID  string `json:"entity_id"`
-	IssueKey  string `json:"issue_key"`
-	Summary   string `json:"summary"`
-	Status    string `json:"status"`
-	Project   string `json:"project"`
-	IssueType string `json:"issue_type"`
-	Priority  string `json:"priority"`
-	ParentKey string `json:"parent_key,omitempty"`
-	ParentURL string `json:"parent_url,omitempty"`
-	URL       string `json:"url"`
+	EntityID  string `json:"entity_id" doc:"The id of the ticket's entity, which the carry-over action routes take."`
+	IssueKey  string `json:"issue_key" doc:"The ticket's Jira key, such as PROJ-123."`
+	Summary   string `json:"summary" doc:"The ticket's summary."`
+	Status    string `json:"status" doc:"The name of the ticket's Jira status."`
+	Project   string `json:"project" doc:"The key of the ticket's Jira project."`
+	IssueType string `json:"issue_type" doc:"The name of the ticket's issue type."`
+	Priority  string `json:"priority" doc:"The name of the ticket's priority."`
+	ParentKey string `json:"parent_key,omitempty" doc:"The Jira key of the ticket's parent issue, absent when it has none."`
+	ParentURL string `json:"parent_url,omitempty" doc:"The parent issue's page in Jira, absent when the ticket has no parent."`
+	URL       string `json:"url" doc:"The ticket's page in Jira."`
 	// Bucket is "assigned" (assigned to the user) or "available" (unassigned
 	// in a Pickup-rule status). Frontend splits the list on this field.
-	Bucket string `json:"bucket"`
+	Bucket string `json:"bucket" doc:"Which list the ticket is in: assigned, for a ticket assigned to the caller, or available, for an unassigned ticket in a pickup status."`
 	// PrefilledAction is "queue" | "claim" | "done" | "". Empty means the
 	// user must choose — we couldn't infer a sensible default from the
 	// current Jira status (e.g. an assigned ticket in a status that matches
 	// none of the configured Pickup/InProgress/Done rules, or any ticket in
 	// the available bucket).
-	PrefilledAction string `json:"prefilled_action,omitempty"`
+	PrefilledAction string `json:"prefilled_action,omitempty" doc:"The action the status rules suggest for an assigned ticket from its Jira status: done for a done status, claim for an in-progress one, or queue for a pickup one; absent when no rule matches and on every available ticket."`
 }
 
 // stockDeck is the GET response, and it is the whole response in every state.
@@ -56,10 +56,22 @@ type stockTicket struct {
 // the last config change" from "here is the deck"; the two partitions are
 // always present, empty while polling, so a client parses one shape.
 type stockDeck struct {
-	Status    string        `json:"status"`
-	Assigned  []stockTicket `json:"assigned"`
-	Available []stockTicket `json:"available"`
+	Status    string        `json:"status" doc:"Whether the lists are filled: ready, or polling, with both lists empty, until Jira's first poll since its configuration last changed has finished."`
+	Assigned  []stockTicket `json:"assigned" doc:"The tickets assigned to the caller that have no task, newest first."`
+	Available []stockTicket `json:"available" doc:"The unassigned tickets in a pickup status that have no task, newest first."`
 }
+
+var opJiraStock = httpx.NewJSONOp[httpx.NoBody, stockDeck](httpx.OpSpec{
+	Pattern:     "GET /api/jira/stock",
+	ID:          "get_jira_stock",
+	Summary:     "Get the Jira carry-over deck",
+	Description: "Returns the open Jira tickets of one team's tracked projects that have no task yet, in two lists: those assigned to the caller, and unassigned ones in a pickup status. A parent ticket with open subtasks is left out, and each ticket says which action its Jira status suggests.",
+	Query: []httpx.QueryParam{{
+		Name: "team_id", Type: httpx.ParamString,
+		Doc: "The id of the team whose tracked Jira projects the deck draws from; when it is absent, or names a team the caller is not on, the deck is for the team the caller last wrote under, or else for their oldest team.",
+	}},
+	Hints: httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleJiraStockGet returns two carry-over buckets:
 //
@@ -103,7 +115,11 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 	// when no filter is set rather than blocking a multi-team caller. A
 	// malformed id is rejected outright — silently falling through to the
 	// default team would retarget the deck instead of narrowing it.
-	filterTeam, ok := teamscope.SingleParamStrict(w, r)
+	q, ok := opJiraStock.Query(w, r)
+	if !ok {
+		return
+	}
+	filterTeam, ok := teamscope.SingleParamStrict(w, q.All("team_id"))
 	if !ok {
 		return
 	}
@@ -158,7 +174,7 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 		// depends on its status makes every client write two parsers and
 		// hope it picked the right one; the deck's own poll loop just
 		// re-reads until status flips.
-		writeJSON(w, http.StatusOK, stockDeck{
+		opJiraStock.Write(w, stockDeck{
 			Status:    "polling",
 			Assigned:  []stockTicket{},
 			Available: []stockTicket{},
@@ -306,7 +322,7 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 		availableOut[i] = s.ticket
 	}
 
-	writeJSON(w, http.StatusOK, stockDeck{
+	opJiraStock.Write(w, stockDeck{
 		Status:    "ready",
 		Assigned:  assignedOut,
 		Available: availableOut,
@@ -359,14 +375,53 @@ type stockActionRequest struct {
 	// EntityIDs names the tickets by the entity_id the deck serves on each,
 	// never by issue key: a key the issue left between the read and the
 	// action names nothing, or another issue.
-	EntityIDs []string `json:"entity_ids"`
+	EntityIDs []string `json:"entity_ids" doc:"The entity ids of the tickets to act on, as the deck lists them: at least one and at most 500, each given once and with no surrounding whitespace."`
 	// TeamID is the acting team the write picker supplied — the team
 	// claimed/queued stock tasks are stamped under. Required in the UI
 	// when the caller belongs to ≥2 teams; empty (sole-team fallback)
 	// otherwise. The same value scopes the Jira rules the actions
 	// validate against, so claim writes land on the picked team.
-	TeamID string `json:"team_id,omitempty"`
+	TeamID string `json:"team_id,omitempty" doc:"The id of the caller's team the action is for, whose tracked projects and Jira status rules apply and on which any task is created; when absent it is the team the caller last wrote under, or their one team, and a caller on several teams with neither must give it."`
 }
+
+// stockActionResponse is the answer every carry-over action route gives:
+// the per-row accounting, and the counts of the two outcomes.
+type stockActionResponse struct {
+	Applied int               `json:"applied" doc:"How many tickets the action applied to."`
+	Failed  int               `json:"failed" doc:"How many tickets the action did not apply to."`
+	Results []stockItemResult `json:"results" doc:"One result for each submitted entity id, in the order submitted."`
+}
+
+// stockActionOp is the shape the three carry-over action routes share.
+type stockActionOp = httpx.JSONOp[stockActionRequest, stockActionResponse]
+
+// stockActionResultsNote ends each action route's description: a per-row
+// failure is a row of the answer, not a failed request.
+const stockActionResultsNote = "A ticket the action cannot apply to is reported in results, and the others still apply."
+
+var opJiraStockQueue = httpx.NewJSONOp[stockActionRequest, stockActionResponse](httpx.OpSpec{
+	Pattern:     "POST /api/jira/stock/queue",
+	ID:          "queue_jira_stock",
+	Summary:     "Queue Jira tickets from the carry-over deck",
+	Description: "Creates a queued task for each named ticket on the caller's carry-over deck, without writing to Jira. " + stockActionResultsNote,
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintNo, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
+
+var opJiraStockClaim = httpx.NewJSONOp[stockActionRequest, stockActionResponse](httpx.OpSpec{
+	Pattern:     "POST /api/jira/stock/claim",
+	ID:          "claim_jira_stock",
+	Summary:     "Claim Jira tickets from the carry-over deck",
+	Description: "Assigns each named ticket on the caller's carry-over deck to the caller in Jira, moves it to its project's in-progress status, and creates a task the caller holds. " + stockActionResultsNote,
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
+
+var opJiraStockDone = httpx.NewJSONOp[stockActionRequest, stockActionResponse](httpx.OpSpec{
+	Pattern:     "POST /api/jira/stock/done",
+	ID:          "complete_jira_stock",
+	Summary:     "Close Jira tickets from the carry-over deck",
+	Description: "Moves each named ticket assigned to the caller to its project's done status in Jira and closes it in Triage Factory, creating no task. " + stockActionResultsNote,
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // stockItemResult is one row of a batch's per-item accounting. Every
 // submitted entity id appears exactly once, ok either way, so applied +
@@ -376,10 +431,10 @@ type stockActionRequest struct {
 // item shape, so a per-row failure is as machine-readable as a request-level
 // one.
 type stockItemResult struct {
-	EntityID string            `json:"entity_id"`
-	IssueKey string            `json:"issue_key,omitempty"`
-	OK       bool              `json:"ok"`
-	Errors   []httpx.ErrorItem `json:"errors,omitempty"`
+	EntityID string            `json:"entity_id" doc:"The entity id as it was submitted."`
+	IssueKey string            `json:"issue_key,omitempty" doc:"The ticket's current Jira key, absent when the entity id names no ticket on the caller's deck."`
+	OK       bool              `json:"ok" doc:"Whether the action applied to the ticket."`
+	Errors   []httpx.ErrorItem `json:"errors,omitempty" doc:"Why the action did not apply to the ticket, absent when it did."`
 }
 
 // stockFailed builds a one-item per-row failure.
@@ -393,7 +448,7 @@ func stockFailed(issueKey, reason, msg string) stockItemResult {
 //
 // POST /api/jira/stock/queue
 func (s *Server) handleJiraStockQueue(w http.ResponseWriter, r *http.Request) {
-	s.applyStockAction(w, r, stockActionQueue)
+	s.applyStockAction(w, r, opJiraStockQueue, stockActionQueue)
 }
 
 // handleJiraStockClaim takes the named tickets: assigns each to the acting
@@ -402,7 +457,7 @@ func (s *Server) handleJiraStockQueue(w http.ResponseWriter, r *http.Request) {
 //
 // POST /api/jira/stock/claim
 func (s *Server) handleJiraStockClaim(w http.ResponseWriter, r *http.Request) {
-	s.applyStockAction(w, r, stockActionClaim)
+	s.applyStockAction(w, r, opJiraStockClaim, stockActionClaim)
 }
 
 // handleJiraStockDone closes out the named tickets: transitions each to the
@@ -411,7 +466,7 @@ func (s *Server) handleJiraStockClaim(w http.ResponseWriter, r *http.Request) {
 //
 // POST /api/jira/stock/done
 func (s *Server) handleJiraStockDone(w http.ResponseWriter, r *http.Request) {
-	s.applyStockAction(w, r, stockActionDone)
+	s.applyStockAction(w, r, opJiraStockDone, stockActionDone)
 }
 
 // The carry-over actions. These are route identities now rather than a body
@@ -430,15 +485,15 @@ const (
 // the deck would never have surfaced. Per-row failures are collected rather
 // than failing the batch — a Jira transition that bounces on one ticket
 // shouldn't discard the twenty that applied.
-func (s *Server) applyStockAction(w http.ResponseWriter, r *http.Request, action string) {
+func (s *Server) applyStockAction(w http.ResponseWriter, r *http.Request, op *stockActionOp, action string) {
 	orgID, ok := s.requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 
-	var req stockActionRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := op.Decode(w, r)
+	if !ok {
 		return
 	}
 	entityIDs, ok := validateStockBatch(w, req.EntityIDs)
@@ -584,10 +639,10 @@ func (s *Server) applyStockAction(w http.ResponseWriter, r *http.Request, action
 		toast.FireUser(s.ws, orgID, userID, toast.LevelSuccess, "", fmt.Sprintf("Carry-over applied: %d %s", applied, stockActionPastTense(action)))
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"applied": applied,
-		"failed":  len(results) - applied,
-		"results": results,
+	op.Write(w, stockActionResponse{
+		Applied: applied,
+		Failed:  len(results) - applied,
+		Results: results,
 	})
 }
 
@@ -1099,12 +1154,12 @@ func (s *Server) registerStockRoutes() {
 	// rather than by a window; the deck is meant to be dealt whole. What it
 	// does hold to is one shape in every state: the status field never changes
 	// which keys are present.
-	s.api("GET /api/jira/stock", s.handleJiraStockGet)
+	s.op(opJiraStock, s.handleJiraStockGet)
 	// One route per carry-over action. The arms share only an eligibility
 	// gate: queue mints a task off a synthesized event with no Jira write,
 	// claim makes two external Jira writes before it touches a row, and done
 	// transitions the ticket and closes the entity without minting anything.
-	s.apiMutating("POST /api/jira/stock/queue", s.handleJiraStockQueue)
-	s.apiMutating("POST /api/jira/stock/claim", s.handleJiraStockClaim)
-	s.apiMutating("POST /api/jira/stock/done", s.handleJiraStockDone)
+	s.op(opJiraStockQueue, s.handleJiraStockQueue)
+	s.op(opJiraStockClaim, s.handleJiraStockClaim)
+	s.op(opJiraStockDone, s.handleJiraStockDone)
 }

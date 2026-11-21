@@ -106,22 +106,42 @@ func (h *Handler) resolveKind(w http.ResponseWriter, r *http.Request) (orgID str
 }
 
 // The catalogue's wire shape: a fixed small set, the shape /sources takes.
+type workCatalogueResponse struct {
+	Kinds []workKindJSON `json:"kinds" doc:"Every kind of durable work the deployment registers."`
+}
+
 type workKindJSON struct {
-	Kind      string            `json:"kind"`
-	Label     string            `json:"label"`
-	Controls  workControlsJSON  `json:"controls"`
-	Objective workObjectiveJSON `json:"objective"`
+	Kind      string            `json:"kind" doc:"The kind's name, which the kind's routes take in their path."`
+	Label     string            `json:"label" doc:"The kind's name for a person to read."`
+	Controls  workControlsJSON  `json:"controls" doc:"Which operator controls the kind offers."`
+	Objective workObjectiveJSON `json:"objective" doc:"The kind's monitoring objective."`
 }
 
 type workControlsJSON struct {
-	Redrive   bool `json:"redrive"`
-	Supersede bool `json:"supersede"`
-	Cancel    bool `json:"cancel"`
+	Redrive   bool `json:"redrive" doc:"Whether the kind's parked rows can be redriven."`
+	Supersede bool `json:"supersede" doc:"Whether a parked row of the kind can be superseded by another row."`
+	Cancel    bool `json:"cancel" doc:"Whether cancellation can be requested for the kind's rows."`
 }
 
 type workObjectiveJSON struct {
-	OldestReadyAgeSeconds int64 `json:"oldest_ready_age_seconds"`
+	OldestReadyAgeSeconds int64 `json:"oldest_ready_age_seconds" doc:"How old, in seconds from its first enqueue, the kind's oldest ready row may get before the kind's queue counts as behind."`
 }
+
+// The path parameters the work routes share.
+const (
+	workOrgParam  = "The organization's id."
+	workKindParam = "The work kind's name, as the catalogue lists it, such as event_queue."
+	workIDParam   = "The row's id, a positive integer."
+)
+
+var opWorkCatalogue = httpx.NewJSONOp[httpx.NoBody, workCatalogueResponse](httpx.OpSpec{
+	Pattern:     "GET /api/orgs/{org_id}/work",
+	ID:          "get_work_catalogue",
+	Summary:     "List the kinds of durable work",
+	Description: "Returns every kind of durable work the deployment registers, with the operator controls each kind offers and its monitoring objective.",
+	PathParams:  map[string]string{"org_id": workOrgParam},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleCatalogue serves GET /api/orgs/{org_id}/work: every registered kind
 // with its controls and objective. The caller passes each distinct access
@@ -156,18 +176,27 @@ func (h *Handler) handleCatalogue(w http.ResponseWriter, r *http.Request) {
 			Objective: workObjectiveJSON{OldestReadyAgeSeconds: int64(k.Objective().OldestReadyAge.Seconds())},
 		})
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"kinds": kinds})
+	opWorkCatalogue.Write(w, workCatalogueResponse{Kinds: kinds})
 }
 
 // workDepthJSON is the depth node: numbers about rows, on their own path.
 type workDepthJSON struct {
-	Ready                    int   `json:"ready"`
-	Leased                   int   `json:"leased"`
-	Parked                   int   `json:"parked"`
-	Deferred                 int   `json:"deferred"`
-	OldestReadyAgeSeconds    int64 `json:"oldest_ready_age_seconds"`
-	OldestDeferredAgeSeconds int64 `json:"oldest_deferred_age_seconds"`
+	Ready                    int   `json:"ready" doc:"How many of the organization's rows of the kind are ready and can be claimed now."`
+	Leased                   int   `json:"leased" doc:"How many rows a worker holds."`
+	Parked                   int   `json:"parked" doc:"How many rows are parked, which no worker runs again until an operator redrives or supersedes them."`
+	Deferred                 int   `json:"deferred" doc:"How many rows are ready but cannot be claimed yet, such as a row whose retry time has not come."`
+	OldestReadyAgeSeconds    int64 `json:"oldest_ready_age_seconds" doc:"The age in seconds, from its first enqueue, of the oldest row counted in ready, or 0 when there is none."`
+	OldestDeferredAgeSeconds int64 `json:"oldest_deferred_age_seconds" doc:"The age in seconds, from its first enqueue, of the oldest row counted in deferred, or 0 when there is none."`
 }
+
+var opWorkDepth = httpx.NewJSONOp[httpx.NoBody, workDepthJSON](httpx.OpSpec{
+	Pattern:     "GET /api/orgs/{org_id}/work/{kind}/depth",
+	ID:          "get_work_depth",
+	Summary:     "Get a work kind's queue depth",
+	Description: "Returns how many of the organization's rows of the kind are ready, leased, parked, and deferred, and the ages of the oldest ready and deferred rows.",
+	PathParams:  map[string]string{"org_id": workOrgParam, "kind": workKindParam},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleDepth serves GET /api/orgs/{org_id}/work/{kind}/depth.
 func (h *Handler) handleDepth(w http.ResponseWriter, r *http.Request) {
@@ -180,7 +209,7 @@ func (h *Handler) handleDepth(w http.ResponseWriter, r *http.Request) {
 		httpx.InternalError(w, "work", err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, workDepthJSON{
+	opWorkDepth.Write(w, workDepthJSON{
 		Ready: d.Ready, Leased: d.Leased, Parked: d.Parked, Deferred: d.Deferred,
 		OldestReadyAgeSeconds:    int64(d.OldestReadyAge.Seconds()),
 		OldestDeferredAgeSeconds: int64(d.OldestDeferredAge.Seconds()),
@@ -192,42 +221,42 @@ func (h *Handler) handleDepth(w http.ResponseWriter, r *http.Request) {
 // RFC 3339 UTC; nullable fields are omitted when null. lease is present only
 // while the row is leased, cancel only when a request is recorded.
 type workItemJSON struct {
-	Kind            string           `json:"kind"`
-	ID              int64            `json:"id"`
-	Status          string           `json:"status"`
-	Attempt         int              `json:"attempt"`
-	MaxAttempts     int              `json:"max_attempts"`
-	LastOutcome     string           `json:"last_outcome,omitempty"`
-	LastError       string           `json:"last_error,omitempty"`
-	UniqueKey       string           `json:"unique_key,omitempty"`
-	FirstEnqueuedAt string           `json:"first_enqueued_at"`
-	CreatedAt       string           `json:"created_at"`
-	DoneAt          string           `json:"done_at,omitempty"`
-	NextAttemptAt   string           `json:"next_attempt_at,omitempty"`
-	SupersededBy    *int64           `json:"superseded_by,omitempty"`
-	Lease           *workLeaseJSON   `json:"lease,omitempty"`
-	Cancel          *workCancelJSON  `json:"cancel,omitempty"`
-	Subject         *workSubjectJSON `json:"subject,omitempty"`
+	Kind            string           `json:"kind" doc:"The name of the row's kind."`
+	ID              int64            `json:"id" doc:"The row's id."`
+	Status          string           `json:"status" doc:"The row's status: ready, leased, done, parked, or cancelled."`
+	Attempt         int              `json:"attempt" doc:"How many attempts have been made on the row since it was enqueued or last redriven."`
+	MaxAttempts     int              `json:"max_attempts" doc:"How many attempts the row may have before it is parked."`
+	LastOutcome     string           `json:"last_outcome,omitempty" doc:"The outcome the row last recorded, such as transient, permanent, budget_exhausted, done, or redriven, absent when none is recorded."`
+	LastError       string           `json:"last_error,omitempty" doc:"The error the row last recorded, absent when none is recorded."`
+	UniqueKey       string           `json:"unique_key,omitempty" doc:"The key that keeps a second row for the same work from being enqueued, absent when the row has none."`
+	FirstEnqueuedAt string           `json:"first_enqueued_at" doc:"When the row's work was first enqueued, as an RFC 3339 timestamp, which a redrive does not change."`
+	CreatedAt       string           `json:"created_at" doc:"When the row was created, as an RFC 3339 timestamp."`
+	DoneAt          string           `json:"done_at,omitempty" doc:"When the row was last done, cancelled, or parked, as an RFC 3339 timestamp, absent when none of those has happened since it was enqueued or last redriven."`
+	NextAttemptAt   string           `json:"next_attempt_at,omitempty" doc:"The earliest time the row's next attempt may start, as an RFC 3339 timestamp, absent when no retry time is set."`
+	SupersededBy    *int64           `json:"superseded_by,omitempty" doc:"The id of the row that replaced this one, absent unless the row was superseded."`
+	Lease           *workLeaseJSON   `json:"lease,omitempty" doc:"The worker's hold on the row, present only while the row is leased."`
+	Cancel          *workCancelJSON  `json:"cancel,omitempty" doc:"The cancellation requested for the row, present only when a request is recorded."`
+	Subject         *workSubjectJSON `json:"subject,omitempty" doc:"What the row is about, in its kind's words, absent when the kind could not describe the row."`
 }
 
 type workLeaseJSON struct {
-	Generation int64  `json:"generation"`
-	Owner      string `json:"owner"`
-	Epoch      *int64 `json:"epoch,omitempty"`
-	LeasedAt   string `json:"leased_at,omitempty"`
-	ExpiresAt  string `json:"expires_at,omitempty"`
+	Generation int64  `json:"generation" doc:"The lease's generation, a number that rises each time the row is claimed, redriven, or parked."`
+	Owner      string `json:"owner" doc:"The id of the Triage Factory process that holds the row."`
+	Epoch      *int64 `json:"epoch,omitempty" doc:"The boot count of the process that holds the row, absent when none is recorded."`
+	LeasedAt   string `json:"leased_at,omitempty" doc:"When the row was claimed, as an RFC 3339 timestamp, absent when none is recorded."`
+	ExpiresAt  string `json:"expires_at,omitempty" doc:"When the lease expires unless its holder renews it, as an RFC 3339 timestamp, absent when none is recorded."`
 }
 
 type workCancelJSON struct {
-	RequestedAt string `json:"requested_at"`
-	By          string `json:"by"`
-	Reason      string `json:"reason"`
+	RequestedAt string `json:"requested_at" doc:"When cancellation was requested, as an RFC 3339 timestamp."`
+	By          string `json:"by" doc:"The id of the person who requested it."`
+	Reason      string `json:"reason" doc:"The reason the person gave."`
 }
 
 type workSubjectJSON struct {
-	Label  string            `json:"label"`
-	Detail string            `json:"detail,omitempty"`
-	Fields map[string]string `json:"fields"`
+	Label  string            `json:"label" doc:"A short name for what the row is about, such as owner/repo#18 for a pull request or PROJ-123 for a Jira issue."`
+	Detail string            `json:"detail,omitempty" doc:"A longer description, such as the pull request's or issue's title, absent when it is unknown."`
+	Fields map[string]string `json:"fields" doc:"Further facts about the row by name, such as event_type and entity_id."`
 }
 
 func rfc3339(t time.Time) string { return t.UTC().Format(time.RFC3339) }
@@ -312,9 +341,18 @@ func describeItems(r *http.Request, k db.WorkKindHandle, orgID string, items []w
 // workItemsListRequest is the body of POST …/items/list: an optional status
 // and the paging pair. status absent is every status.
 type workItemsListRequest struct {
-	Status string `json:"status"`
+	Status string `json:"status" doc:"Only rows with this status: ready, leased, done, parked, cancelled, or deferred, which is the ready rows that cannot be claimed yet; absent lists every status."`
 	httpx.PageRequest
 }
+
+var opWorkItemsList = httpx.NewListOp[workItemsListRequest, workItemJSON](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/work/{kind}/items/list",
+	ID:          "list_work_items",
+	Summary:     "List a work kind's rows",
+	Description: "Returns one page of the organization's rows of the kind, newest first, optionally narrowed to one status. Each row carries its kind's description of what it is about.",
+	PathParams:  map[string]string{"org_id": workOrgParam, "kind": workKindParam},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // workItemsFilter is the canonicalized filter set the page token is minted
 // against, so page 2 of one status cannot be requested with page 1's token of
@@ -331,8 +369,8 @@ func (h *Handler) handleItemsList(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var req workItemsListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opWorkItemsList.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -358,7 +396,7 @@ func (h *Handler) handleItemsList(w http.ResponseWriter, r *http.Request) {
 		httpx.InternalError(w, "work", err)
 		return
 	}
-	httpx.WriteList(w, page, out, total)
+	opWorkItemsList.Write(w, page, out, total)
 }
 
 func validWorkStatus(s string) bool {
@@ -383,6 +421,15 @@ func parseItemID(w http.ResponseWriter, r *http.Request) (int64, bool) {
 	}
 	return id, true
 }
+
+var opWorkItem = httpx.NewJSONOp[httpx.NoBody, workItemJSON](httpx.OpSpec{
+	Pattern:     "GET /api/orgs/{org_id}/work/{kind}/items/{id}",
+	ID:          "get_work_item",
+	Summary:     "Get a work row",
+	Description: "Returns one of the organization's rows of the kind, in any status, in the shape the list serves it.",
+	PathParams:  map[string]string{"org_id": workOrgParam, "kind": workKindParam, "id": workIDParam},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleItemGet serves GET /api/orgs/{org_id}/work/{kind}/items/{id}: one
 // row in any status, in the shape the list serves it.
@@ -409,13 +456,27 @@ func (h *Handler) handleItemGet(w http.ResponseWriter, r *http.Request) {
 		httpx.InternalError(w, "work", err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, out[0])
+	opWorkItem.Write(w, out[0])
 }
 
 // workIDsRequest is the redrive body: the row ids an operator selected.
 type workIDsRequest struct {
-	IDs []int64 `json:"ids"`
+	IDs []int64 `json:"ids" doc:"The ids of the parked rows to redrive, at least one and at most 500."`
 }
+
+// workRedriveResponse is the redrive answer: how many rows moved.
+type workRedriveResponse struct {
+	Redriven int `json:"redriven" doc:"How many of the named rows returned to ready; a row that was no longer parked is not counted."`
+}
+
+var opWorkRedrive = httpx.NewJSONOp[workIDsRequest, workRedriveResponse](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/work/{kind}/items/redrive",
+	ID:          "redrive_work_items",
+	Summary:     "Redrive parked work rows",
+	Description: "Returns each named parked row to ready with a fresh attempt budget, and answers how many moved. A named row that is no longer parked is skipped, and a kind whose controls do not include redrive refuses the call.",
+	PathParams:  map[string]string{"org_id": workOrgParam, "kind": workKindParam},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // validateIDs is the shared check on a selection: at least one id, and no
 // more than the bound that keeps the per-id loop bounded.
@@ -455,8 +516,8 @@ func (h *Handler) handleRedrive(w http.ResponseWriter, r *http.Request) {
 		refuseControl(w, k, "redrive")
 		return
 	}
-	var req workIDsRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opWorkRedrive.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -483,15 +544,29 @@ func (h *Handler) handleRedrive(w http.ResponseWriter, r *http.Request) {
 	// the next thing in the log is that work running.
 	workLog.InfoContext(r.Context(), "operator redrove parked work",
 		"org", orgID, "kind", k.Name(), "requested", len(req.IDs), "redriven", moved)
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"redriven": moved})
+	opWorkRedrive.Write(w, workRedriveResponse{Redriven: moved})
 }
 
 // workCancelRequest is the cancel body: the ids and the reason the terminal
 // record keeps.
 type workCancelRequest struct {
-	IDs    []int64 `json:"ids"`
-	Reason string  `json:"reason"`
+	IDs    []int64 `json:"ids" doc:"The ids of the rows to request cancellation for, at least one and at most 500."`
+	Reason string  `json:"reason" doc:"Why the rows are being cancelled, which each row records; it is required and is at most 500 characters once surrounding whitespace is trimmed."`
 }
+
+// workCancelResponse is the cancel answer: how many requests were recorded.
+type workCancelResponse struct {
+	Requested int `json:"requested" doc:"How many of the named rows had a cancellation request recorded; a row that has settled or already has a request is not counted."`
+}
+
+var opWorkCancel = httpx.NewJSONOp[workCancelRequest, workCancelResponse](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/work/{kind}/items/cancel",
+	ID:          "cancel_work_items",
+	Summary:     "Request cancellation of work rows",
+	Description: "Records a cancellation request on each named row, which takes effect when the row is next claimed or its holder next renews its lease, and answers how many requests were recorded. A named row that has settled or already has a request is skipped, and a kind whose controls do not include cancel refuses the call.",
+	PathParams:  map[string]string{"org_id": workOrgParam, "kind": workKindParam},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // maxCancelReasonLen bounds the reason a cancellation records.
 const maxCancelReasonLen = 500
@@ -510,8 +585,8 @@ func (h *Handler) handleCancel(w http.ResponseWriter, r *http.Request) {
 		refuseControl(w, k, "cancel")
 		return
 	}
-	var req workCancelRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opWorkCancel.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -543,13 +618,27 @@ func (h *Handler) handleCancel(w http.ResponseWriter, r *http.Request) {
 	}
 	workLog.InfoContext(r.Context(), "operator requested cancellation of work",
 		"org", orgID, "kind", k.Name(), "named", len(req.IDs), "requested", requested)
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"requested": requested})
+	opWorkCancel.Write(w, workCancelResponse{Requested: requested})
 }
 
 // workSupersedeRequest is the supersede body: the replacement row.
 type workSupersedeRequest struct {
-	SupersededBy int64 `json:"superseded_by"`
+	SupersededBy int64 `json:"superseded_by" doc:"The id of the organization's row of the same kind that replaces this one."`
 }
+
+// workSupersedeResponse is the supersede answer: the count, zero or one.
+type workSupersedeResponse struct {
+	Superseded int `json:"superseded" doc:"1 when the row was settled as superseded, or 0 when it was no longer parked."`
+}
+
+var opWorkSupersede = httpx.NewJSONOp[workSupersedeRequest, workSupersedeResponse](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/work/{kind}/items/{id}/supersede",
+	ID:          "supersede_work_item",
+	Summary:     "Supersede a parked work row",
+	Description: "Settles the parked row as cancelled in favour of the named replacement row, which releases the row's unique key, and answers whether it did. A row that is no longer parked is left as it is, and a kind whose controls do not include supersede refuses the call.",
+	PathParams:  map[string]string{"org_id": workOrgParam, "kind": workKindParam, "id": workIDParam},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleSupersede serves POST …/items/{id}/supersede: the parked row is
 // settled as cancelled in favour of the named replacement, releasing its
@@ -571,8 +660,8 @@ func (h *Handler) handleSupersede(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var req workSupersedeRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opWorkSupersede.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -612,7 +701,7 @@ func (h *Handler) handleSupersede(w http.ResponseWriter, r *http.Request) {
 	}
 	workLog.InfoContext(r.Context(), "operator superseded parked work",
 		"org", orgID, "kind", k.Name(), "id", id, "superseded_by", req.SupersededBy, "superseded", superseded)
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"superseded": superseded})
+	opWorkSupersede.Write(w, workSupersedeResponse{Superseded: superseded})
 }
 
 // New builds the work handler over the registered kinds.
@@ -627,11 +716,11 @@ func (h *Handler) Register(m httpx.Mounts) {
 	// access policy inside the handler; every kind runs on the admin pool
 	// with org_id bound by argument, so the handler's predicate is the whole
 	// enforcement. See work.go.
-	m.API("GET /api/orgs/{org_id}/work", h.handleCatalogue)
-	m.API("GET /api/orgs/{org_id}/work/{kind}/depth", h.handleDepth)
-	m.APIMutating("POST /api/orgs/{org_id}/work/{kind}/items/list", h.handleItemsList)
-	m.API("GET /api/orgs/{org_id}/work/{kind}/items/{id}", h.handleItemGet)
-	m.APIMutating("POST /api/orgs/{org_id}/work/{kind}/items/redrive", h.handleRedrive)
-	m.APIMutating("POST /api/orgs/{org_id}/work/{kind}/items/cancel", h.handleCancel)
-	m.APIMutating("POST /api/orgs/{org_id}/work/{kind}/items/{id}/supersede", h.handleSupersede)
+	m.Op(opWorkCatalogue, h.handleCatalogue)
+	m.Op(opWorkDepth, h.handleDepth)
+	m.Op(opWorkItemsList, h.handleItemsList)
+	m.Op(opWorkItem, h.handleItemGet)
+	m.Op(opWorkRedrive, h.handleRedrive)
+	m.Op(opWorkCancel, h.handleCancel)
+	m.Op(opWorkSupersede, h.handleSupersede)
 }

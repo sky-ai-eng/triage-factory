@@ -298,10 +298,10 @@ func SingleParam(r *http.Request) string {
 // taking the first value) would silently retarget a single-team read to the
 // caller's default team, the exact fall-through this variant exists to close.
 // A malformed id is a 400 INVALID_PARAM rather than dropped, since dropping a
-// corrupt filter widens the result set.
-func SingleParamStrict(w http.ResponseWriter, r *http.Request) (team string, ok bool) {
-	raw, present := r.URL.Query()["team_id"]
-	if !present {
+// corrupt filter widens the result set. raw is every value of team_id the
+// query carries, in request order, as the route's operation reads them.
+func SingleParamStrict(w http.ResponseWriter, raw []string) (team string, ok bool) {
+	if len(raw) == 0 {
 		return "", true
 	}
 	if len(raw) > 1 {

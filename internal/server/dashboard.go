@@ -47,6 +47,17 @@ func (dh *dashboardHandler) kickBackfill(orgID, userID, login, host string) {
 // the panel's label and the query it describes come from the same place.
 const dashboardStatsWindowDays = 30
 
+var opDashboardStats = httpx.NewJSONOp[httpx.NoBody, domain.DashboardStats](httpx.OpSpec{
+	Pattern:     "GET /api/dashboard/stats",
+	ID:          "get_dashboard_stats",
+	Summary:     "Get the caller's pull request statistics",
+	Description: "Returns counts of the pull requests the caller's GitHub identity authored and the reviews it gave and received, with merges and closes counted within the window, from what TF last polled. Every count is 0 when the caller has no GitHub identity bound on the organization's host. In multi mode, when one is bound, the read also starts a one-time background import of that identity's recent pull requests from GitHub, which adds them to TF.",
+	Query: []httpx.QueryParam{
+		{Name: "since", Type: httpx.ParamString, Doc: "Start of the window, as an RFC 3339 timestamp or a YYYY-MM-DD date read as UTC midnight; absent is the last 30 days."},
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintNo, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
+
 // handleDashboardStats returns aggregated PR statistics from entity snapshots
 // over the ?since window (RFC3339 or YYYY-MM-DD; default: the last 30 days).
 func (dh *dashboardHandler) handleDashboardStats(w http.ResponseWriter, r *http.Request) {
@@ -54,9 +65,13 @@ func (dh *dashboardHandler) handleDashboardStats(w http.ResponseWriter, r *http.
 	if !ok {
 		return
 	}
+	query, ok := opDashboardStats.Query(w, r)
+	if !ok {
+		return
+	}
 	var v httpx.Validation
 	since := time.Now().AddDate(0, 0, -dashboardStatsWindowDays)
-	if raw := strings.TrimSpace(r.URL.Query().Get("since")); raw != "" {
+	if raw := strings.TrimSpace(query.Get("since")); raw != "" {
 		t, err := httpx.ParseWindowTime(raw)
 		if err != nil {
 			v.Invalid("since", "must be RFC3339 or YYYY-MM-DD")
@@ -110,13 +125,23 @@ func (dh *dashboardHandler) handleDashboardStats(w http.ResponseWriter, r *http.
 		return
 	}
 	if me.Login == "" {
-		writeJSON(w, http.StatusOK, map[string]any{})
+		// The same shape as a real read, with every count 0: a caller
+		// with no bound identity has authored nothing TF can count.
+		opDashboardStats.Write(w, domain.DashboardStats{})
 		return
 	}
 
 	dh.kickBackfill(orgID, userID, me.Login, host)
-	writeJSON(w, http.StatusOK, stats)
+	opDashboardStats.Write(w, *stats)
 }
+
+var opDashboardPRList = httpx.NewListOp[prListRequest, domain.PRSummaryRow](httpx.OpSpec{
+	Pattern:     "POST /api/dashboard/prs/list",
+	ID:          "list_dashboard_prs",
+	Summary:     "List the caller's pull requests",
+	Description: "Returns one page of the pull requests the caller's GitHub identity authored and those opened by runs the caller started, from what TF last polled, narrowed by the body's filters. In multi mode, when the caller has a GitHub identity bound, the read also starts a one-time background import of that identity's recent pull requests from GitHub, which adds them to TF.",
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintNo, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // handleDashboardPRs returns one page of the caller's PRs from entity
 // snapshots, newest polled first unless sort_key names another order, narrowed
@@ -141,8 +166,8 @@ func (dh *dashboardHandler) handleDashboardPRs(w http.ResponseWriter, r *http.Re
 	if !ok {
 		return
 	}
-	var req prListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opDashboardPRList.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -194,7 +219,7 @@ func (dh *dashboardHandler) handleDashboardPRs(w http.ResponseWriter, r *http.Re
 	// The backfill is about a GitHub identity's history, so it still needs a
 	// bound one; the list above does not.
 	dh.kickBackfill(orgID, userID, me.Login, host)
-	httpx.WriteList(w, page, prs, total)
+	opDashboardPRList.Write(w, page, prs, total)
 }
 
 // dashboardPR is the pull request a per-PR route addresses, resolved from the
@@ -289,6 +314,15 @@ func (dh *dashboardHandler) resolveDashboardPR(w http.ResponseWriter, r *http.Re
 	return pr, true
 }
 
+var opDashboardPRStatus = httpx.NewJSONOp[httpx.NoBody, ghclient.PRStatus](httpx.OpSpec{
+	Pattern:     "GET /api/dashboard/prs/{entity_id}/status",
+	ID:          "get_dashboard_pr_status",
+	Summary:     "Get a pull request's live status",
+	Description: "Reads one of the caller's pull requests from GitHub and returns its mergeability, its reviewers' latest decisions, and its check runs. The pull request must be one POST /api/dashboard/prs/list returns to the caller.",
+	PathParams:  map[string]string{"entity_id": "The id of the pull request's entity, as the pull request list returns it."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
+
 // handleDashboardPRStatus fetches live CI/review status for a single PR.
 // This stays as a live API call since it's on-demand detail, not aggregated data.
 //
@@ -324,8 +358,25 @@ func (dh *dashboardHandler) handleDashboardPRStatus(w http.ResponseWriter, r *ht
 		return
 	}
 
-	writeJSON(w, http.StatusOK, status)
+	opDashboardPRStatus.Write(w, *status)
 }
+
+// dashboardPRUpdateRequest is the body of PATCH /api/dashboard/prs/{entity_id}.
+type dashboardPRUpdateRequest struct {
+	// Draft is a Patch so an absent field, an explicit null and a value are
+	// three different requests: with a plain bool, {} would zero-value into
+	// "not a draft" and silently mark the PR ready.
+	Draft httpx.Patch[bool] `json:"draft" doc:"With true, converts the pull request to a draft on GitHub; with false, marks it ready for review. It is required, and null is refused."`
+}
+
+var opDashboardPRUpdate = httpx.NewJSONOp[dashboardPRUpdateRequest, domain.PRSummaryRow](httpx.OpSpec{
+	Pattern:     "PATCH /api/dashboard/prs/{entity_id}",
+	ID:          "update_dashboard_pr",
+	Summary:     "Update one of the caller's pull requests",
+	Description: "Converts one of the caller's pull requests to a draft, or marks it ready for review, on GitHub, and returns the pull request as the list returns it. The pull request must be one POST /api/dashboard/prs/list returns to the caller.",
+	PathParams:  map[string]string{"entity_id": "The id of the pull request's entity, as the pull request list returns it."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // handleDashboardPRUpdate writes the pull request's fields. draft is the one
 // writable field: true converts the pull request to a draft on GitHub, false
@@ -334,23 +385,22 @@ func (dh *dashboardHandler) handleDashboardPRStatus(w http.ResponseWriter, r *ht
 //
 // PATCH /api/dashboard/prs/{entity_id}
 func (dh *dashboardHandler) handleDashboardPRUpdate(w http.ResponseWriter, r *http.Request) {
-	// RawMessage so an absent field, an explicit null and a value are three
-	// different requests: with a plain bool, {} would zero-value into "not a
-	// draft" and silently mark the PR ready.
-	var body struct {
-		Draft json.RawMessage `json:"draft"`
-	}
-	if !httpx.DecodeJSONStrict(w, r, &body) {
+	body, ok := opDashboardPRUpdate.Decode(w, r)
+	if !ok {
 		return
 	}
-	if body.Draft == nil {
+	// The reader's own fault is not flushed: null and a value of the wrong
+	// type get one refusal, since a draft flag cannot be cleared.
+	var read httpx.Validation
+	draft, state := body.Draft.Read(&read, "draft")
+	switch state {
+	case httpx.PatchAbsent:
 		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
 			Reason: httpx.ReasonMissingField, Message: "no fields to update: provide draft", Field: "draft",
 		})
 		return
-	}
-	var draft bool
-	if string(body.Draft) == "null" || json.Unmarshal(body.Draft, &draft) != nil {
+	case httpx.PatchSet:
+	default:
 		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
 			Reason: httpx.ReasonInvalidField, Message: "draft must be true or false", Field: "draft",
 		})
@@ -451,13 +501,13 @@ func (dh *dashboardHandler) handleDashboardPRUpdate(w http.ResponseWriter, r *ht
 
 	row := domain.PRSummaryFromSnapshot(snap)
 	row.EntityID = pr.entity.ID
-	writeJSON(w, http.StatusOK, row)
+	opDashboardPRUpdate.Write(w, row)
 }
 
 func (s *Server) registerDashboardRoutes() {
 	dh := &dashboardHandler{tx: s.tx, ghResolver: s.ghResolver, backfill: s.kickDashboardBackfill}
-	s.api("GET /api/dashboard/stats", dh.handleDashboardStats)
-	s.apiMutating("POST /api/dashboard/prs/list", dh.handleDashboardPRs)
-	s.api("GET /api/dashboard/prs/{entity_id}/status", dh.handleDashboardPRStatus)
-	s.apiMutating("PATCH /api/dashboard/prs/{entity_id}", dh.handleDashboardPRUpdate)
+	s.op(opDashboardStats, dh.handleDashboardStats)
+	s.op(opDashboardPRList, dh.handleDashboardPRs)
+	s.op(opDashboardPRStatus, dh.handleDashboardPRStatus)
+	s.op(opDashboardPRUpdate, dh.handleDashboardPRUpdate)
 }

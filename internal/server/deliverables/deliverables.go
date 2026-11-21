@@ -110,23 +110,23 @@ func (ah *Handler) injectDeliverableNote(orgID string, a domain.Deliverable) {
 // the client gets structured data, not a string to re-parse. The mutable
 // dedup_key / org_id / team_id internals stay off the wire.
 type JSON struct {
-	ID         string          `json:"id"`
-	Kind       string          `json:"kind"`
-	Provider   string          `json:"provider"`
-	Scope      string          `json:"scope"`
-	State      string          `json:"state"`
-	Target     string          `json:"target"`
-	ExternalID string          `json:"external_id"`
-	URL        string          `json:"url"`
-	Details    json.RawMessage `json:"details"`
-	CreatedAt  time.Time       `json:"created_at"`
+	ID         string          `json:"id" doc:"The deliverable's id."`
+	Kind       string          `json:"kind" doc:"What the deliverable is: pull_request or review."`
+	Provider   string          `json:"provider" doc:"The system the deliverable's object is on: github."`
+	Scope      string          `json:"scope" doc:"The base URL of the GitHub the deliverable's object is on."`
+	State      string          `json:"state" doc:"Where the deliverable is in its lifecycle: pending, draft, open, merged, or closed for a pull request, and pending, submitted, or dismissed for a review."`
+	Target     string          `json:"target" doc:"The pull request the deliverable is or reviews, as owner/repo#number."`
+	ExternalID string          `json:"external_id" doc:"The object's id on GitHub: the pull request's number, or the submitted review's id, empty while the object does not exist on GitHub."`
+	URL        string          `json:"url" doc:"The object's page on GitHub, empty while the object does not exist on GitHub."`
+	Details    json.RawMessage `json:"details" doc:"The deliverable's kind-specific content as a JSON object, or null when it has none: from GET /api/deliverables/{id}, a pull request's owner, repo, number, head_branch, base_branch, title, and body, with the title and body read from GitHub when it answers, or a review's owner, repo, pr_number, review_body, review_event, comments, and commits_since_finalize; in a conversation's deliverables list, the stored content, whose fields include head_branch, base, proposed, snapshot, and resolution for a pull request and review_body, review_event, staged_comments, proposed, and resolution for a review."`
+	CreatedAt  time.Time       `json:"created_at" doc:"When the deliverable was recorded, as an RFC 3339 timestamp."`
 	// CanWrite is whether the caller may act on the deliverable: approve,
 	// reject, dismiss, or edit it. It is the answer loadWritableDeliverable
 	// gives (canWriteDeliverable), so a team viewer and an org admin who is
 	// not on the deliverable's team read false, and a client offers the verbs
 	// only to a caller the routes accept. Absent when the check fails, which
 	// a client reads as unknown.
-	CanWrite *bool `json:"can_write,omitempty"`
+	CanWrite *bool `json:"can_write,omitempty" doc:"Whether the caller may approve, reject, dismiss, or edit the deliverable, absent when the check fails."`
 }
 
 // ToJSON projects a stored deliverable onto the read-API wire shape,
@@ -404,6 +404,15 @@ func (ah *Handler) ghForDeliverable(w http.ResponseWriter, r *http.Request, orgI
 	return client, pr, true
 }
 
+var opDeliverableGet = httpx.NewJSONOp[httpx.NoBody, JSON](httpx.OpSpec{
+	Pattern:     "GET /api/deliverables/{id}",
+	ID:          "get_deliverable",
+	Summary:     "Get a deliverable",
+	Description: "Returns one pull request or review a run prepared, with its kind-specific details. A pull request's title and body are read from GitHub, and so is the current head a pending review's comments are each compared against.",
+	PathParams:  map[string]string{"id": "The deliverable's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
+
 // handleDeliverableGet serves one deliverable in the same shape the
 // conversation-scoped list serves it (JSON): the kind-independent
 // envelope, with `kind` as the explicit discriminator over a kind-shaped
@@ -447,7 +456,7 @@ func (ah *Handler) handleDeliverableGet(w http.ResponseWriter, r *http.Request) 
 	}
 	rows := []JSON{out}
 	AddCanWrite(r.Context(), ah.az, orgID, userID, []domain.Deliverable{*art}, rows)
-	httpx.WriteJSON(w, http.StatusOK, rows[0])
+	opDeliverableGet.Write(w, rows[0])
 }
 
 // prDeliverableDetails composes the pull_request `details` payload: the live PR
@@ -513,6 +522,27 @@ func (ah *Handler) prDeliverableDetails(w http.ResponseWriter, r *http.Request, 
 	}, true
 }
 
+// deliverablePRUpdateRequest is the body of PATCH /api/deliverables/{id}/pr.
+type deliverablePRUpdateRequest struct {
+	Title *string `json:"title" doc:"The pull request's new title, trimmed of surrounding whitespace, which may not be empty; absent or null keeps the current title."`
+	Body  *string `json:"body" doc:"The pull request's new body; absent or null keeps the current body."`
+}
+
+// deliverableOKResponse is the body of the deliverable writes that answer
+// only that they succeeded.
+type deliverableOKResponse struct {
+	OK bool `json:"ok" doc:"Always true."`
+}
+
+var opDeliverablePRUpdate = httpx.NewJSONOp[deliverablePRUpdateRequest, deliverableOKResponse](httpx.OpSpec{
+	Pattern:     "PATCH /api/deliverables/{id}/pr",
+	ID:          "update_deliverable_pr",
+	Summary:     "Edit a pull request deliverable",
+	Description: "Writes a new title, body, or both to a pull request deliverable's pull request on GitHub, and records them on the deliverable once GitHub accepts them. A field the body leaves out keeps the value GitHub holds now, and a body naming neither field is refused.",
+	PathParams:  map[string]string{"id": "The id of the pull request deliverable."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
+
 // handleDeliverablePRUpdate edits the live PR's title/body 1:1 via UpdatePR and
 // refreshes the deliverable's details_json snapshot. Pessimistic by contract: a
 // GitHub failure returns non-2xx and leaves the snapshot untouched, so the
@@ -545,11 +575,8 @@ func (ah *Handler) handleDeliverablePRUpdate(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	var req struct {
-		Title *string `json:"title"`
-		Body  *string `json:"body"`
-	}
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opDeliverablePRUpdate.Decode(w, r)
+	if !ok {
 		return
 	}
 	if req.Title == nil && req.Body == nil {
@@ -637,8 +664,20 @@ func (ah *Handler) handleDeliverablePRUpdate(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"ok": true})
+	opDeliverablePRUpdate.Write(w, deliverableOKResponse{OK: true})
 }
+
+var opDeliverableDiff = httpx.NewBytesOp[httpx.NoBody](httpx.OpSpec{
+	Pattern:     "GET /api/deliverables/{id}/diff",
+	ID:          "get_deliverable_diff",
+	Summary:     "Get a deliverable's diff",
+	Description: "Returns the unified diff of the pull request a deliverable is or reviews, read from GitHub: the pull request's current diff, or for a review with comments the diff as it stood when the run finished writing the review. When GitHub refuses the diff as too large, the body is reassembled from each file's patch and the X-Diff-Truncated response header says so.",
+	PathParams:  map[string]string{"id": "The id of the pull request or review deliverable."},
+	Query: []httpx.QueryParam{
+		{Name: "file", Type: httpx.ParamString, Doc: "The path of one file in the diff, to return that file's diff alone; absent returns every file."},
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintYes},
+}, "text/plain; charset=utf-8")
 
 // handleDeliverableDiff returns the unified diff the overlay renders. A PR deliverable
 // (and a legacy/comment-less review with no stored frame) renders the LIVE PR diff
@@ -668,13 +707,17 @@ func (ah *Handler) handleDeliverableDiff(w http.ResponseWriter, r *http.Request)
 		httpx.NotFound(w, "deliverable")
 		return
 	}
+	q, ok := opDeliverableDiff.Query(w, r)
+	if !ok {
+		return
+	}
+	file := q.Get("file")
 	gh, prRef, ok := ah.ghForDeliverable(w, r, orgID, art)
 	if !ok {
 		return
 	}
 	owner, repo, number := prRef.Owner, prRef.Repo, prRef.Number
 
-	file := r.URL.Query().Get("file")
 	finBase, finHead := reviewFinalizeFrame(art)
 	useFin := finBase != "" && finHead != ""
 
@@ -866,6 +909,27 @@ func (ah *Handler) reconcileDeliverableOutOfBand(r *http.Request, orgID, userID 
 	}
 }
 
+// deliverableApproveResponse is the body of POST
+// /api/deliverables/{id}/approve. A pull request sets number and html_url, a
+// review sets review_id, url and event, and both set state.
+type deliverableApproveResponse struct {
+	Number   int    `json:"number,omitempty" doc:"The pull request's number, set for a pull request deliverable."`
+	HTMLURL  string `json:"html_url,omitempty" doc:"The pull request's page on GitHub, set for a pull request deliverable."`
+	ReviewID string `json:"review_id,omitempty" doc:"The id GitHub gave the submitted review, set for a review deliverable."`
+	URL      string `json:"url,omitempty" doc:"The submitted review's page on GitHub, set for a review deliverable."`
+	Event    string `json:"event,omitempty" doc:"The event the review was submitted with: APPROVE, COMMENT, or REQUEST_CHANGES, set for a review deliverable."`
+	State    string `json:"state" doc:"The deliverable's state after the approval: open for a pull request, submitted for a review."`
+}
+
+var opDeliverableApprove = httpx.NewJSONOp[httpx.NoBody, deliverableApproveResponse](httpx.OpSpec{
+	Pattern:     "POST /api/deliverables/{id}/approve",
+	ID:          "approve_deliverable",
+	Summary:     "Approve a deliverable",
+	Description: "Publishes a deliverable a run prepared: a draft pull request is marked ready for review on GitHub, and a pending review is submitted to GitHub with its staged comments. The run that prepared it is told, and its task closes when this was the last deliverable awaiting a person on a run that completed.",
+	PathParams:  map[string]string{"id": "The id of the pull request or review deliverable."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
+
 func (ah *Handler) handleDeliverableApprove(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
@@ -991,12 +1055,29 @@ func (ah *Handler) handleDeliverableApprove(w http.ResponseWriter, r *http.Reque
 	// note reports.
 	ah.injectDeliverableNote(orgID, openArt)
 
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{
-		"number":   number,
-		"html_url": art.URL,
-		"state":    domain.DeliverableStatePROpen,
+	opDeliverableApprove.Write(w, deliverableApproveResponse{
+		Number:  number,
+		HTMLURL: art.URL,
+		State:   domain.DeliverableStatePROpen,
 	})
 }
+
+// deliverableDismissResponse is the body of POST
+// /api/deliverables/{id}/dismiss.
+type deliverableDismissResponse struct {
+	Number  int    `json:"number" doc:"The pull request's number, or 0 when the deliverable names no pull request."`
+	HTMLURL string `json:"html_url" doc:"The pull request's page on GitHub."`
+	State   string `json:"state" doc:"The deliverable's state after the dismissal: closed."`
+}
+
+var opDeliverableDismiss = httpx.NewJSONOp[httpx.NoBody, deliverableDismissResponse](httpx.OpSpec{
+	Pattern:     "POST /api/deliverables/{id}/dismiss",
+	ID:          "dismiss_deliverable",
+	Summary:     "Dismiss a draft pull request deliverable",
+	Description: "Marks a draft pull request deliverable closed and closes its pull request on GitHub, keeping the branch. The run that prepared it is told, and its task closes when this was the last deliverable awaiting a person on a run that completed. A pending review is dismissed through PATCH /api/deliverables/{id}/review instead.",
+	PathParams:  map[string]string{"id": "The id of the pull request deliverable."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // handleDeliverableDismiss resolves ONE draft pull request as a decoupled sidecar
 // operation, the per-item counterpart to approve: it abandons the GitHub object
@@ -1094,10 +1175,10 @@ func (ah *Handler) handleDeliverableDismiss(w http.ResponseWriter, r *http.Reque
 	// Tell the drafting agent its draft PR was dismissed.
 	ah.injectDeliverableNote(orgID, closed)
 
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{
-		"number":   number,
-		"html_url": art.URL,
-		"state":    domain.DeliverableStatePRClosed,
+	opDeliverableDismiss.Write(w, deliverableDismissResponse{
+		Number:  number,
+		HTMLURL: art.URL,
+		State:   domain.DeliverableStatePRClosed,
 	})
 }
 
@@ -1129,6 +1210,23 @@ func closeDraftPR(ctx context.Context, resolver ghclient.Resolver, orgID string,
 		deliverablesLog.Warn("close draft PR on github failed (deliverable already marked closed)", "deliverable", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
 	}
 }
+
+// deliverableRejectResponse is the body of POST /api/deliverables/{id}/reject.
+type deliverableRejectResponse struct {
+	Number  int    `json:"number" doc:"The pull request's number."`
+	HTMLURL string `json:"html_url" doc:"The pull request's page on GitHub."`
+	State   string `json:"state" doc:"The deliverable's state after the rejection: closed."`
+	Branch  string `json:"branch" doc:"The name of the head branch deleted from the repository."`
+}
+
+var opDeliverableReject = httpx.NewJSONOp[httpx.NoBody, deliverableRejectResponse](httpx.OpSpec{
+	Pattern:     "POST /api/deliverables/{id}/reject",
+	ID:          "reject_deliverable",
+	Summary:     "Reject a draft pull request deliverable",
+	Description: "Deletes a draft pull request deliverable's head branch from the repository on GitHub, closes the pull request, and marks the deliverable closed; the branch delete cannot be undone. The run that prepared it is told, and its task closes when this was the last deliverable awaiting a person on a run that completed.",
+	PathParams:  map[string]string{"id": "The id of the pull request deliverable."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // handleDeliverableReject resolves ONE draft pull request the hard way: the head
 // branch is deleted from the upstream and the draft PR closed. It is the
@@ -1268,11 +1366,11 @@ func (ah *Handler) handleDeliverableReject(w http.ResponseWriter, r *http.Reques
 	// Tell the drafting agent its draft PR was rejected.
 	ah.injectDeliverableNote(orgID, closed)
 
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{
-		"number":   number,
-		"html_url": art.URL,
-		"state":    domain.DeliverableStatePRClosed,
-		"branch":   details.HeadBranch,
+	opDeliverableReject.Write(w, deliverableRejectResponse{
+		Number:  number,
+		HTMLURL: art.URL,
+		State:   domain.DeliverableStatePRClosed,
+		Branch:  details.HeadBranch,
 	})
 }
 
@@ -1527,19 +1625,19 @@ func (ah *Handler) Register(m httpx.Mounts) {
 	//
 	// One read for every kind; the writes are kind-scoped sub-resources, so a
 	// review-shaped body can never reach the PR write path.
-	m.API("GET /api/deliverables/{id}", ah.handleDeliverableGet)
-	m.APIMutating("PATCH /api/deliverables/{id}/pr", ah.handleDeliverablePRUpdate)
-	m.APIMutating("PATCH /api/deliverables/{id}/review", ah.handleDeliverableReviewUpdate)
-	m.API("GET /api/deliverables/{id}/diff", ah.handleDeliverableDiff)
-	m.APIMutating("POST /api/deliverables/{id}/approve", ah.handleDeliverableApprove)
+	m.Op(opDeliverableGet, ah.handleDeliverableGet)
+	m.Op(opDeliverablePRUpdate, ah.handleDeliverablePRUpdate)
+	m.Op(opDeliverableReviewUpdate, ah.handleDeliverableReviewUpdate)
+	m.Op(opDeliverableDiff, ah.handleDeliverableDiff)
+	m.Op(opDeliverableApprove, ah.handleDeliverableApprove)
 	// Pull requests only: closing one is a real GitHub write. A review is
 	// abandoned through PATCH …/review {state:"dismissed"}.
-	m.APIMutating("POST /api/deliverables/{id}/dismiss", ah.handleDeliverableDismiss)
+	m.Op(opDeliverableDismiss, ah.handleDeliverableDismiss)
 	// Dismiss's irreversible sibling: the head branch is deleted from the
 	// upstream as well. Its own verb because the branch delete is the one PR
 	// write that cannot be undone, so the client confirms it explicitly.
-	m.APIMutating("POST /api/deliverables/{id}/reject", ah.handleDeliverableReject)
-	m.APIMutating("POST /api/deliverables/{id}/review/refresh", ah.handleReviewRefresh)
-	m.APIMutating("PATCH /api/deliverables/{id}/comments/{commentId}", ah.handleDeliverableCommentUpdate)
-	m.APIMutating("DELETE /api/deliverables/{id}/comments/{commentId}", ah.handleDeliverableCommentDelete)
+	m.Op(opDeliverableReject, ah.handleDeliverableReject)
+	m.Op(opReviewRefresh, ah.handleReviewRefresh)
+	m.Op(opDeliverableCommentUpdate, ah.handleDeliverableCommentUpdate)
+	m.Op(opDeliverableCommentDelete, ah.handleDeliverableCommentDelete)
 }

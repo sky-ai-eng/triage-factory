@@ -12,28 +12,28 @@ import (
 
 // PRStatus is the live status for a single PR, fetched on demand.
 type PRStatus struct {
-	Mergeable      *bool             `json:"mergeable"` // null = unknown/calculating
-	AutoMerge      bool              `json:"auto_merge"`
-	MergeableState string            `json:"mergeable_state"` // "clean", "dirty", "blocked", "behind", "unknown"
-	Reviews        []ReviewState     `json:"reviews"`
-	ChecksStatus   ChecksStatus      `json:"checks_status"`
-	CheckRuns      []domain.CheckRun `json:"check_runs"` // deduped by name, latest execution per check
-	Conflicts      bool              `json:"conflicts"`
-	ReviewDecision string            `json:"review_decision"` // "approved", "changes_requested", "review_required", ""
+	Mergeable      *bool             `json:"mergeable" doc:"Whether GitHub can merge the pull request, or null while GitHub is still computing it."` // null = unknown/calculating
+	AutoMerge      bool              `json:"auto_merge" doc:"Whether auto-merge is enabled on the pull request."`
+	MergeableState string            `json:"mergeable_state" doc:"GitHub's mergeable state, such as clean, dirty, blocked, behind, or unknown."` // "clean", "dirty", "blocked", "behind", "unknown"
+	Reviews        []ReviewState     `json:"reviews" doc:"Each reviewer's latest approval, change request, or dismissal, in no particular order; null when there is none."`
+	ChecksStatus   ChecksStatus      `json:"checks_status" doc:"How many of check_runs are in each state."`
+	CheckRuns      []domain.CheckRun `json:"check_runs" doc:"The check runs on the pull request's head commit, the latest run of each check name."` // deduped by name, latest execution per check
+	Conflicts      bool              `json:"conflicts" doc:"Whether the pull request has merge conflicts, which is when mergeable_state is dirty."`
+	ReviewDecision string            `json:"review_decision" doc:"The decision the reviews add up to: approved, changes_requested, review_required, or an empty string when there is none."` // "approved", "changes_requested", "review_required", ""
 }
 
 type ReviewState struct {
-	Author      string `json:"author"`
-	State       string `json:"state"` // APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED, PENDING
-	SubmittedAt string `json:"submitted_at"`
+	Author      string `json:"author" doc:"The GitHub login of the reviewer."`
+	State       string `json:"state" doc:"The review's state as GitHub spells it, such as APPROVED, CHANGES_REQUESTED, DISMISSED, or PENDING."` // APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED, PENDING
+	SubmittedAt string `json:"submitted_at" doc:"When the review was submitted, as an RFC 3339 timestamp, or an empty string for a pending review."`
 }
 
 type ChecksStatus struct {
-	Total   int `json:"total"`
-	Passing int `json:"passing"`
-	Failing int `json:"failing"`
-	Pending int `json:"pending"`
-	Skipped int `json:"skipped"`
+	Total   int `json:"total" doc:"How many check runs there are."`
+	Passing int `json:"passing" doc:"How many completed without failing or being skipped."`
+	Failing int `json:"failing" doc:"How many completed as failure, timed_out, cancelled, or action_required."`
+	Pending int `json:"pending" doc:"How many have not completed."`
+	Skipped int `json:"skipped" doc:"How many completed as skipped."`
 }
 
 // GetPRStatus fetches the live status for a PR: mergeability, reviews, checks.

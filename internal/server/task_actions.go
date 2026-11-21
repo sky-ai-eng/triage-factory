@@ -44,16 +44,25 @@ type taskClaimRequest struct {
 	// "absent" — an empty id names nobody, and quietly reading it as a
 	// self-claim would hand the task to whoever asked instead of erroring on
 	// a client that lost track of its target.
-	TargetUserID *string `json:"target_user_id,omitempty"`
+	TargetUserID *string `json:"target_user_id,omitempty" doc:"The id of the person to hand the task to, which moves the claim another person holds to them; absent, the caller claims the task. It cannot be empty."`
 	// TeamID is the team the caller's own claim lands the task on, one of
 	// the caller's candidates (resolveClaimTeam). It may be absent when the
 	// caller has one candidate. Refused beside target_user_id: a handoff
 	// lands on a team derived from its target.
-	TeamID *string `json:"team_id,omitempty"`
+	TeamID *string `json:"team_id,omitempty" doc:"The id of the team the caller's own claim puts the task on, one of the task's claim_team_ids; absent when there is only one. It cannot be sent with target_user_id."`
 	// Version is the task version the caller read (taskJSON.Version), on both
 	// arms.
-	Version *int64 `json:"version"`
+	Version *int64 `json:"version" doc:"The version the caller's read of the task returned; the claim is refused when the task has changed since. It is required."`
 }
+
+var opTaskClaim = httpx.NewJSONOp[taskClaimRequest, taskJSON](httpx.OpSpec{
+	Pattern:     "POST /api/tasks/{id}/claim",
+	ID:          "claim_task",
+	Summary:     "Claim a task or hand it to another person",
+	Description: "Without target_user_id, the caller claims the task: it moves to in_progress under the caller, any run the agent had on it is stopped, and a Jira or Linear issue behind it is assigned to the caller and moved to in-progress. With target_user_id, the claim another person holds moves to that person, and nothing else changes. Returns the task with the claim applied.",
+	PathParams:  map[string]string{"id": "The task's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // handleTaskClaim moves a task's user claim. Self-claim (no target) takes
 // ownership for the caller, lands the task in progress, tears down whatever
@@ -74,8 +83,8 @@ func (s *Server) handleTaskClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req taskClaimRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opTaskClaim.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -108,7 +117,7 @@ func (s *Server) handleTaskClaim(w http.ResponseWriter, r *http.Request) {
 		// Admin-pool read, deliberately: a handoff can consolidate team_id
 		// to the target's team, which an overriding admin need not be in —
 		// the RLS-scoped read would answer 404 for a write that landed.
-		s.writeTaskResourceSystem(w, r, orgID, userID, id, written)
+		s.writeTaskResourceSystem(w, r, opTaskClaim, orgID, userID, id, written)
 		return
 	}
 
@@ -146,7 +155,7 @@ func (s *Server) handleTaskClaim(w http.ResponseWriter, r *http.Request) {
 	if claim.linear != nil {
 		s.syncLinearClaim(r, orgID, userID, id, claim.linear)
 	}
-	s.writeTaskResource(w, r, orgID, userID, id, claim.version)
+	s.writeTaskResource(w, r, opTaskClaim, orgID, userID, id, claim.version)
 }
 
 // claimLanding names which of selfClaim's three accept paths a claim took. It
@@ -670,14 +679,34 @@ func (s *Server) reassignClaim(w http.ResponseWriter, r *http.Request, orgID, us
 type taskDelegateRequest struct {
 	// BlueprintID names the blueprint the run executes. Required: an absent
 	// one is refused with the other blueprint refusals, 422 on blueprint_id.
-	BlueprintID string `json:"blueprint_id,omitempty"`
+	BlueprintID string `json:"blueprint_id,omitempty" doc:"The id of the blueprint the run carries out, which must belong to the team the task lands on. It is required."`
 	// TeamID is the team the task lands on and the run belongs to, one of
 	// the caller's candidates (resolveClaimTeam). It may be absent when the
 	// caller has one candidate. The blueprint must be that team's.
-	TeamID *string `json:"team_id,omitempty"`
+	TeamID *string `json:"team_id,omitempty" doc:"The id of the team the task lands on and the run belongs to, one of the task's claim_team_ids; absent when there is only one."`
 	// Version is the task version the caller read (taskJSON.Version).
-	Version *int64 `json:"version"`
+	Version *int64 `json:"version" doc:"The version the caller's read of the task returned; the delegation is refused when the task has changed since. It is required."`
 }
+
+// taskDelegateResponse is what POST /api/tasks/{id}/delegate answers: the
+// task's state after the agent's claim landed, and the run's first
+// conversation.
+type taskDelegateResponse struct {
+	Status  string `json:"status" doc:"The task's lane after the agent claimed it."`
+	Version int64  `json:"version" doc:"The task's version after the agent claimed it, which the caller's next write to the task sends."`
+	// ConversationID is left off when the step's conversation could not be
+	// read back, rather than naming an id that resolves to nothing.
+	ConversationID string `json:"conversation_id,omitempty" doc:"The id of the conversation of the run's first step, absent when it could not be read."`
+}
+
+var opTaskDelegate = httpx.NewJSONOp[taskDelegateRequest, taskDelegateResponse](httpx.OpSpec{
+	Pattern:     "POST /api/tasks/{id}/delegate",
+	ID:          "delegate_task",
+	Summary:     "Delegate a task to the agent",
+	Description: "Hands the task to the team's agent and starts a run of the blueprint on it, stopping any run already working on the task, which keeps the deliverables it left. Returns the task's lane and version after the handoff and the run's first conversation.",
+	PathParams:  map[string]string{"id": "The task's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // handleTaskDelegate hands a task to the agent and spawns its run.
 //
@@ -699,8 +728,8 @@ func (s *Server) handleTaskDelegate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req taskDelegateRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opTaskDelegate.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -784,13 +813,13 @@ func (s *Server) handleTaskDelegate(w http.ResponseWriter, r *http.Request) {
 
 	// The version is the one the handoff left, so the client's next write on
 	// the task names it without reading the task again.
-	response := map[string]any{"status": handed.Status, "version": handed.Version}
+	response := taskDelegateResponse{Status: handed.Status, Version: handed.Version}
 	if s.spawner != nil {
-		if !s.fireDelegation(w, r, orgID, userID, plan, response) {
+		if !s.fireDelegation(w, r, orgID, userID, plan, &response) {
 			return
 		}
 	}
-	writeJSON(w, http.StatusOK, response)
+	opTaskDelegate.Write(w, response)
 }
 
 // agentClaimTarget is what a delegate's claim will write, read before it
@@ -1168,12 +1197,12 @@ func (s *Server) syncLinearClaim(r *http.Request, orgID, userID, id string, line
 }
 
 // fireDelegation fires the planned run and records the conversation_id on the
-// response map. The caller has already verified s.spawner != nil and landed
+// response. The caller has already verified s.spawner != nil and landed
 // the bot's claim. A failure here is a race or a fault that came after the
 // claim, which stays: the client re-reads the task on SPAWN_FAILED and finds
 // it in the bot's lane without a run. Returns false once an error response is
 // written.
-func (s *Server) fireDelegation(w http.ResponseWriter, r *http.Request, orgID, userID string, plan delegate.DelegationPlan, response map[string]any) bool {
+func (s *Server) fireDelegation(w http.ResponseWriter, r *http.Request, orgID, userID string, plan delegate.DelegationPlan, response *taskDelegateResponse) bool {
 	blueprintRunID, err := s.spawner.FireDelegation(plan)
 	if err != nil {
 		writeDelegateSpawnError(w, err)
@@ -1186,7 +1215,7 @@ func (s *Server) fireDelegation(w http.ResponseWriter, r *http.Request, orgID, u
 	// the field off rather than substituting an id that resolves against
 	// nothing, and the client's own task refetch reconciles.
 	if conversationID := s.firstStepConversationID(r.Context(), orgID, userID, blueprintRunID); conversationID != "" {
-		response["conversation_id"] = conversationID
+		response.ConversationID = conversationID
 	}
 	return true
 }
