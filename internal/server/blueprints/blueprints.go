@@ -747,17 +747,17 @@ func (h *Handler) handleBlueprintStepsPut(w http.ResponseWriter, r *http.Request
 			// Copy-only guard: a prompt belongs to at most one blueprint. If this
 			// prompt is already a step in a *different* blueprint, refuse with a
 			// clean 422 instead of letting the unique index 500. (Owner == this
-			// blueprint is fine — re-saving its own step list.)
-			// TODO(TFAC-1540): only this PUT's blueprint is held, so two PUTs on
-			// different blueprints that add one prompt both pass, and the
-			// second answers 500 from the unique index.
+			// blueprint is fine — re-saving its own step list.) Only this PUT's
+			// blueprint is held, so a PUT on another blueprint can add the same
+			// prompt after this check passes; the index then refuses whichever
+			// insert lands second, and ReplaceSteps' typed error is answered as
+			// this check answers.
 			ownerID, owned, e := tx.Blueprints.StepPromptOwner(r.Context(), orgID, sid)
 			if e != nil {
 				return e
 			}
 			if owned && ownerID != id {
-				fault.raise(http.StatusUnprocessableEntity, httpx.ReasonConflict,
-					"step "+strconv.Itoa(i)+" references a prompt that already belongs to another blueprint — copy it to reuse.", "steps")
+				fault.stepPromptOwned(i)
 				return nil
 			}
 		}
@@ -775,8 +775,12 @@ func (h *Handler) handleBlueprintStepsPut(w http.ResponseWriter, r *http.Request
 		written = withSteps(&stamped, steps)
 		return nil
 	}); err != nil {
-		httpx.InternalError(w, "blueprints", err)
-		return
+		var taken *db.StepPromptOwnedError
+		if !errors.As(err, &taken) {
+			httpx.InternalError(w, "blueprints", err)
+			return
+		}
+		fault.stepPromptOwned(taken.StepIndex)
 	}
 	if gone {
 		httpx.NotFound(w, "blueprint")
@@ -809,6 +813,13 @@ func (f *blueprintFault) raise(status int, reason, message, field string) {
 	}
 	f.status = status
 	f.item = httpx.ErrorItem{Reason: reason, Message: message, Field: field}
+}
+
+// stepPromptOwned refuses step i of a steps PUT for naming a prompt that is
+// already a step of another blueprint.
+func (f *blueprintFault) stepPromptOwned(i int) {
+	f.raise(http.StatusUnprocessableEntity, httpx.ReasonConflict,
+		"step "+strconv.Itoa(i)+" references a prompt that already belongs to another blueprint — copy it to reuse.", "steps")
 }
 
 // write emits the refusal if one was raised, reporting whether it did so the

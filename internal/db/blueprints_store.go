@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -94,6 +95,18 @@ var (
 	// committed on an archived team is one nobody stops and nobody can see.
 	ErrTeamArchived = errors.New("db: the run's team is archived")
 )
+
+// StepPromptOwnedError is the Postgres ReplaceSteps' refusal when the
+// copy-only unique index refuses a step: its prompt is already a step of
+// another blueprint. StepIndex is the refused step's position in the list
+// ReplaceSteps was given.
+type StepPromptOwnedError struct {
+	StepIndex int
+}
+
+func (e *StepPromptOwnedError) Error() string {
+	return fmt.Sprintf("db: step %d names a prompt that is already a step of another blueprint", e.StepIndex)
+}
 
 // DuplicationStep is one selected prompt resolved to its place in a source
 // blueprint, carrying everything the deep-copy needs. It is scope-neutral
@@ -511,6 +524,14 @@ type BlueprintStore interface {
 	// a single-row write — and it is the row the caller renders after
 	// replacing the steps, carrying a user_modified and an updated_at that
 	// only this statement knows.
+	//
+	// The copy-only unique index refuses a step whose prompt is already a step
+	// of another blueprint. Postgres answers it with *StepPromptOwnedError: a
+	// caller's StepPromptOwner check reads committed owners only, so a write
+	// on another blueprint can add the same prompt after the check passes,
+	// and the index decides which write keeps it. SQLite runs one write
+	// transaction at a time, so a StepPromptOwner check in the caller's
+	// transaction sees every owner, and SQLite returns the driver's error.
 	ReplaceSteps(ctx context.Context, orgID string, blueprintID string, stepPromptIDs []string, briefs []string) (domain.Blueprint, error)
 
 	// MergeInto absorbs the source blueprint's steps onto the tail of the host

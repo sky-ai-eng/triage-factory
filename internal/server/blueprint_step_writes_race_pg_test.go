@@ -18,22 +18,23 @@ import (
 )
 
 // pausingBlueprintsTx pauses a write transaction right after it takes a hold
-// on blueprints, GetForUpdate or GetAllForUpdate, with the hold taken.
+// on blueprints, GetForUpdate or GetAllForUpdate, with the hold taken, or
+// right after ReplaceSteps, with the step rows written and not committed.
 type pausingBlueprintsTx struct {
 	db.TxRunner
-	afterHold *pausePoint
+	afterHold, afterReplace *pausePoint
 }
 
 func (w pausingBlueprintsTx) WithTx(ctx context.Context, orgID, userID string, fn func(db.TxStores) error) error {
 	return w.TxRunner.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		tx.Blueprints = pausingBlueprints{BlueprintStore: tx.Blueprints, afterHold: w.afterHold}
+		tx.Blueprints = pausingBlueprints{BlueprintStore: tx.Blueprints, afterHold: w.afterHold, afterReplace: w.afterReplace}
 		return fn(tx)
 	})
 }
 
 type pausingBlueprints struct {
 	db.BlueprintStore
-	afterHold *pausePoint
+	afterHold, afterReplace *pausePoint
 }
 
 func (b pausingBlueprints) GetForUpdate(ctx context.Context, orgID, id string) (*domain.Blueprint, error) {
@@ -48,27 +49,33 @@ func (b pausingBlueprints) GetAllForUpdate(ctx context.Context, orgID string, id
 	return out, err
 }
 
+func (b pausingBlueprints) ReplaceSteps(ctx context.Context, orgID, blueprintID string, stepPromptIDs, briefs []string) (domain.Blueprint, error) {
+	out, err := b.BlueprintStore.ReplaceSteps(ctx, orgID, blueprintID, stepPromptIDs, briefs)
+	b.afterReplace.hold()
+	return out, err
+}
+
 // stepWriteRig is a Postgres server whose write transactions can be held
-// right after their blueprint hold, with the blueprint and prompt routes on
-// one mux, sent as the rig's admin.
+// right after their blueprint hold or right after ReplaceSteps, with the
+// blueprint and prompt routes on one mux, sent as the rig's admin.
 type stepWriteRig struct {
 	*viewerRig
-	mux       *http.ServeMux
-	afterHold *pausePoint
+	mux                     *http.ServeMux
+	afterHold, afterReplace *pausePoint
 }
 
 func newStepWriteRig(t *testing.T) stepWriteRig {
 	t.Helper()
-	afterHold := newPausePoint(t)
+	afterHold, afterReplace := newPausePoint(t), newPausePoint(t)
 	r := newViewerRigWithTx(t, func(tx db.TxRunner) db.TxRunner {
-		return pausingBlueprintsTx{TxRunner: tx, afterHold: afterHold}
+		return pausingBlueprintsTx{TxRunner: tx, afterHold: afterHold, afterReplace: afterReplace}
 	})
 	mux := http.NewServeMux()
 	mount := func(pattern string, h http.HandlerFunc) { mux.HandleFunc(pattern, h) }
 	m := httpx.Mounts{API: mount, APIMutating: mount}
 	blueprints.New(r.s.tx, r.s.az).Register(m)
 	prompts.New(r.s.db, r.s.tx, r.s.az).Register(m)
-	return stepWriteRig{viewerRig: r, mux: mux, afterHold: afterHold}
+	return stepWriteRig{viewerRig: r, mux: mux, afterHold: afterHold, afterReplace: afterReplace}
 }
 
 func (r stepWriteRig) send(method, path string, body any) <-chan *httptest.ResponseRecorder {
@@ -93,12 +100,18 @@ func (r stepWriteRig) putSteps(id string, version int64, brief string, prompts [
 // responses.
 func (r stepWriteRig) firstHolds(t *testing.T, what [2]string, first, second func() <-chan *httptest.ResponseRecorder) (*httptest.ResponseRecorder, *httptest.ResponseRecorder) {
 	t.Helper()
-	r.afterHold.armed.Store(true)
+	return r.firstHoldsAt(t, r.afterHold, what, first, second)
+}
+
+// firstHoldsAt is firstHolds with first held at pause.
+func (r stepWriteRig) firstHoldsAt(t *testing.T, pause *pausePoint, what [2]string, first, second func() <-chan *httptest.ResponseRecorder) (*httptest.ResponseRecorder, *httptest.ResponseRecorder) {
+	t.Helper()
+	pause.armed.Store(true)
 	held := first()
-	r.afterHold.waitReached(t, "the "+what[0])
+	pause.waitReached(t, "the "+what[0])
 	waiting := second()
 	waitForLockWait(t, r.h, "the "+what[1])
-	r.afterHold.free()
+	pause.free()
 	return receiveResponse(t, "the "+what[0], held), receiveResponse(t, "the "+what[1], waiting)
 }
 
@@ -399,6 +412,49 @@ func TestBlueprints_StepsPutRacesAnotherStepsPut_Postgres(t *testing.T) {
 	}
 	if v := r.version(t, a); v != aVersion+1 {
 		t.Errorf("version = %d, want %d: the first PUT's raise alone", v, aVersion+1)
+	}
+}
+
+// TestBlueprints_StepsPutsAddingOnePromptToTwoBlueprints_Postgres runs two
+// steps PUTs, on blueprints X and Y, that each add a prompt P belonging to no
+// blueprint. Each PUT holds only its own blueprint, so both read P as
+// unowned. The PUT on X is held after it writes its step rows and before it
+// commits, and the PUT on Y waits on X's row for P at the unique index. Once
+// X's PUT commits, the index refuses Y's insert, and Y's PUT answers 422
+// CONFLICT on steps, as the check answers a prompt another blueprint holds.
+// P is a step of X alone.
+func TestBlueprints_StepsPutsAddingOnePromptToTwoBlueprints_Postgres(t *testing.T) {
+	r := newStepWriteRig(t)
+	x, y := r.seedChain(t, "x", 1), r.seedChain(t, "y", 1)
+	xSteps, ySteps := r.stepPrompts(t, x), r.stepPrompts(t, y)
+	xVersion, yVersion := r.version(t, x), r.version(t, y)
+	p := uuid.NewString()
+	if err := r.s.tx.WithTx(t.Context(), r.orgID, r.admin, func(tx db.TxStores) error {
+		_, err := tx.Prompts.Create(t.Context(), r.orgID, r.teamID, domain.Prompt{ID: p, Name: "p", Body: "body", Source: "user"})
+		return err
+	}); err != nil {
+		t.Fatalf("seed a prompt that belongs to no blueprint: %v", err)
+	}
+
+	onX, onY := r.firstHoldsAt(t, r.afterReplace, [2]string{"steps PUT on X", "steps PUT on Y"},
+		func() <-chan *httptest.ResponseRecorder {
+			return r.putSteps(x, xVersion, "x", concat(xSteps, []string{p}))
+		},
+		func() <-chan *httptest.ResponseRecorder {
+			return r.putSteps(y, yVersion, "y", concat(ySteps, []string{p}))
+		})
+	if onX.Code != http.StatusOK {
+		t.Fatalf("steps PUT on X = %d %s, want 200", onX.Code, onX.Body.String())
+	}
+	if onY.Code != http.StatusUnprocessableEntity {
+		t.Errorf("steps PUT on Y behind X's = %d %s, want 422", onY.Code, onY.Body.String())
+	} else if items := decodeErrorItems(t, onY); len(items) != 1 || items[0].Reason != httpx.ReasonConflict || items[0].Field != "steps" {
+		t.Errorf("steps PUT on Y: errors = %+v; want one CONFLICT on steps", items)
+	}
+	r.wantSteps(t, "X", x, true, concat(xSteps, []string{p}))
+	r.wantSteps(t, "Y", y, true, ySteps)
+	if v := r.version(t, y); v != yVersion {
+		t.Errorf("Y's version = %d, want %d: the refused PUT wrote nothing", v, yVersion)
 	}
 }
 
