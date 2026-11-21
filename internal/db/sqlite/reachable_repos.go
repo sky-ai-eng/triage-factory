@@ -364,7 +364,7 @@ func (s *reachableReposStore) ListReachableSystem(ctx context.Context, orgID, ho
 	}
 
 	query := `SELECT ` + reachableColumns + ` FROM reachable_repositories r` + where +
-		` ORDER BY LOWER(r.owner), LOWER(r.repo)`
+		` ORDER BY LOWER(r.owner), LOWER(r.repo), COALESCE(r.installation_id, '')`
 	if opts.Limit > 0 {
 		query += ` LIMIT ?`
 		args = append(args, opts.Limit)

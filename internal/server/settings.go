@@ -230,16 +230,16 @@ func defaultedCloneProtocolView(stored string) string {
 // A caller never supplies a name — see the write shape — so a rendered name is
 // always one Jira gave us, as of the rule's last save.
 type jiraStatusRefJSON struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID   string `json:"id" doc:"Jira's id for the status."`
+	Name string `json:"name" doc:"The status's name, as Jira gave it at the rule's last save."`
 }
 
 // jiraStatusRuleJSON is one rule as the API renders it. canonical is null on an
 // unmapped rule rather than absent, so a client reads one shape in both states
 // — and always null on pickup, which has no write target to name.
 type jiraStatusRuleJSON struct {
-	Members   []jiraStatusRefJSON `json:"members"`
-	Canonical *jiraStatusRefJSON  `json:"canonical"`
+	Members   []jiraStatusRefJSON `json:"members" doc:"The statuses that count as this state, as an empty array on an unmapped rule."`
+	Canonical *jiraStatusRefJSON  `json:"canonical" doc:"The status that stands for this state, or null on an unmapped rule; always null on pickup."`
 }
 
 // jiraProjectSettings is the per-project read shape: the project's registry
@@ -248,18 +248,18 @@ type jiraStatusRuleJSON struct {
 // and the four rules. Armed is not a field — it is derivable from these rules
 // by the SPA and a headless caller alike.
 type jiraProjectSettings struct {
-	ID string `json:"id"`
+	ID string `json:"id" doc:"The project's id in Triage Factory, which a write names a tracked project by."`
 	// JiraID is Jira's project id, the jira_id the org's catalog serves the
 	// project under, so a client matches catalog candidates against the
 	// tracked set by it. "" while the poll has not resolved the registry row
 	// against Jira.
-	JiraID     string             `json:"jira_id"`
-	Key        string             `json:"key"`
-	Name       string             `json:"name"`
-	Pickup     jiraStatusRuleJSON `json:"pickup"`
-	InProgress jiraStatusRuleJSON `json:"in_progress"`
-	InReview   jiraStatusRuleJSON `json:"in_review"`
-	Done       jiraStatusRuleJSON `json:"done"`
+	JiraID     string             `json:"jira_id" doc:"Jira's id for the project, empty while the project has not been matched against Jira."`
+	Key        string             `json:"key" doc:"The project's key in Jira, as last recorded."`
+	Name       string             `json:"name" doc:"The project's name in Jira, as last recorded."`
+	Pickup     jiraStatusRuleJSON `json:"pickup" doc:"The statuses in which unassigned tickets are picked up."`
+	InProgress jiraStatusRuleJSON `json:"in_progress" doc:"The statuses that count as being worked on, with the one a claimed ticket is moved to."`
+	InReview   jiraStatusRuleJSON `json:"in_review" doc:"The optional statuses that mean the work awaits human review."`
+	Done       jiraStatusRuleJSON `json:"done" doc:"The statuses that count as complete, with the one a finished ticket is moved to."`
 }
 
 // rulesToProjectConfigsOrdered reorders the stored rules to match order, the

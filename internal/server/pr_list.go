@@ -28,15 +28,15 @@ type prListRequest struct {
 	// States narrows to a subset of open|merged|closed. Empty = all, like
 	// every other narrowing filter. Validated against domain.PRListStates;
 	// an unknown value is a client fault, not an empty page.
-	States []string `json:"states"`
+	States []string `json:"states" doc:"The states to narrow to, each one of open, merged, or closed; absent or empty lists every state."`
 	// Draft narrows to the row's draft flag: true keeps the drafts, false
 	// the pull requests ready for review. Absent (or null) is both. A value
 	// that is not a JSON boolean is a 400 naming draft.
-	Draft *bool `json:"draft"`
+	Draft *bool `json:"draft" doc:"true lists only drafts and false only pull requests ready for review; absent or null lists both."`
 	// SortKey / SortDir order the page (prListSortKeys). Absent is the
 	// default order, last polled first.
-	SortKey string `json:"sort_key"`
-	SortDir string `json:"sort_dir"`
+	SortKey string `json:"sort_key" doc:"Orders the page by updated_at, the pull request's last activity on GitHub, with those that have none last; absent orders it by when each pull request was last polled, newest first."`
+	SortDir string `json:"sort_dir" doc:"The direction of sort_key, asc or desc, desc when absent; it is refused without sort_key."`
 
 	httpx.PageRequest
 }

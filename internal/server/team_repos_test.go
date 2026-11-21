@@ -6,6 +6,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -487,13 +488,57 @@ func TestTeamRepos_ARenameKeepsTheSameRow(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("save after the rename = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
-	var saved teamReposPutResponse
+	var saved teamReposResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &saved); err != nil {
 		t.Fatalf("decode PUT response: %v", err)
 	}
 	want := trackedRepoJSON{ID: api.ID, GitHubID: "31", Owner: "acme", Repo: "platform-api"}
 	if len(saved.Repos) != 1 || saved.Repos[0] != want {
 		t.Errorf("PUT echoed %+v, want %+v", saved.Repos, want)
+	}
+}
+
+// TestRepoProfiling_SaveAsksForATTLPassAndTheVerbForcesOne: saving the tracked
+// set profiles only what has no fresh profile, so a repeated save re-profiles
+// nothing, and POST /api/repos/profile is the one way to force a pass.
+func TestRepoProfiling_SaveAsksForATTLPassAndTheVerbForcesOne(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	gh := newMutablePATGitHub(t, map[string]int64{"acme/api": 51})
+	seedPATOrg(t, srv, gh.URL)
+	wireReachRefresh(t, srv).refresh(t, runmode.LocalDefaultOrgID, true)
+
+	// With no profiler wired the verb cannot ask for a pass, so it must not
+	// answer that it did.
+	rec := doJSON(t, srv, http.MethodPost, "/api/repos/profile", map[string]any{})
+	if rec.Code != http.StatusServiceUnavailable || firstErrorReason(t, rec) != httpx.ReasonNotConfigured {
+		t.Fatalf("profile with no profiler = %d, want 503 %s; body=%s", rec.Code, httpx.ReasonNotConfigured, rec.Body.String())
+	}
+
+	var forced []bool
+	srv.SetProfilerTrigger(func(orgID string, force bool) {
+		if orgID != runmode.LocalDefaultOrgID {
+			t.Errorf("profiler triggered for org %q, want %q", orgID, runmode.LocalDefaultOrgID)
+		}
+		forced = append(forced, force)
+	})
+
+	api := registeredID(t, srv, "51")
+	for range 2 {
+		if rec := putTracked(t, srv, api.ID); rec.Code != http.StatusOK {
+			t.Fatalf("track = %d; body=%s", rec.Code, rec.Body.String())
+		}
+	}
+	if want := []bool{false, false}; !slices.Equal(forced, want) {
+		t.Fatalf("saves triggered force=%v, want %v", forced, want)
+	}
+
+	rec = doJSON(t, srv, http.MethodPost, "/api/repos/profile", map[string]any{})
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("profile = %d, want 202; body=%s", rec.Code, rec.Body.String())
+	}
+	if want := []bool{false, false, true}; !slices.Equal(forced, want) {
+		t.Errorf("after the verb, force=%v, want %v", forced, want)
 	}
 }
 

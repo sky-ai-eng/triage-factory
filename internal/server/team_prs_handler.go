@@ -32,6 +32,15 @@ import (
 // generic entities list stays deliberately unbuilt.
 // --------------------------------------------------------------------
 
+var opTeamPRList = httpx.NewListOp[prListRequest, domain.PRSummaryRow](httpx.OpSpec{
+	Pattern:     "POST /api/teams/{team_id}/prs/list",
+	ID:          "list_team_pull_requests",
+	Summary:     "List a team's pull requests",
+	Description: "Returns one page of the pull requests in the team's tracked repositories that a member of the team opened or that Triage Factory opened for the team, narrowed by states and draft, and ordered by sort_key or, without one, by when each was last polled, newest first. A caller who is not on the team gets an empty list.",
+	PathParams:  map[string]string{"team_id": teamIDPathDoc},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
+
 func (s *Server) handleTeamPRList(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := s.requireOrg(w, r)
 	if !ok {
@@ -46,8 +55,8 @@ func (s *Server) handleTeamPRList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req prListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opTeamPRList.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -77,12 +86,12 @@ func (s *Server) handleTeamPRList(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "teams/prs", err)
 		return
 	}
-	httpx.WriteList(w, page, prs, total)
+	opTeamPRList.Write(w, page, prs, total)
 }
 
 func (s *Server) registerTeamPRRoutes() {
 	// The team's pull requests — the PR page's team arm, and (as its
 	// count-only read) the Overview's OPEN PRS figure. Same member-level
 	// gate as the flow node beside it.
-	s.apiMutating("POST /api/teams/{team_id}/prs/list", s.handleTeamPRList)
+	s.op(opTeamPRList, s.handleTeamPRList)
 }

@@ -45,7 +45,7 @@ function stubFetch(rows: unknown[]) {
     const url = String(input)
     if (url.startsWith('/api/repos/list')) return { ok: true, ...listBody(rows) }
     if (url.includes('/github-repos') && url.startsWith('/api/teams/')) {
-      return { ok: true, ...jsonBody({ repos: [TRACKED], role: 'admin' }) }
+      return { ok: true, ...jsonBody({ repos: [TRACKED] }) }
     }
     if (/^\/api\/orgs\/[^/]+\/settings/.test(url)) {
       return { ok: true, ...jsonBody({ github_base_url: 'https://github.com' }) }
@@ -119,7 +119,7 @@ describe('Repos page addressing', () => {
         }
       }
       if (url.includes('/github-repos') && url.startsWith('/api/teams/')) {
-        return { ok: true, ...jsonBody({ repos: [TRACKED], role: 'admin' }) }
+        return { ok: true, ...jsonBody({ repos: [TRACKED] }) }
       }
       if (url.startsWith('/api/settings/org')) {
         return { ok: true, ...jsonBody({ github_base_url: 'https://github.com' }) }
@@ -147,7 +147,7 @@ describe('Repos page addressing', () => {
         return { ok: true, ...listBody([{ name: 'develop' }, { name: 'release/1.0' }]) }
       }
       if (url.includes('/github-repos') && url.startsWith('/api/teams/')) {
-        return { ok: true, ...jsonBody({ repos: [TRACKED], role: 'admin' }) }
+        return { ok: true, ...jsonBody({ repos: [TRACKED] }) }
       }
       if (url.startsWith('/api/settings/org')) {
         return { ok: true, ...jsonBody({ github_base_url: 'https://github.com' }) }
@@ -195,5 +195,28 @@ describe('Repos page addressing', () => {
     await waitFor(() => {
       expect(screen.queryByText('belongs to a different row')).not.toBeInTheDocument()
     })
+  })
+
+  // Re-profiling is its own verb: the button asks for a forced pass and never
+  // re-PUTs the team's tracked set to get one.
+  it('re-profiles through POST /api/repos/profile without saving the selection', async () => {
+    const base = stubFetch([repoRow()])
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+      if (String(input) === '/api/repos/profile')
+        return { ok: true, status: 202, ...jsonBody({ status: 'profiling' }) }
+      return base(input)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderRepos()
+    fireEvent.click(await screen.findByRole('button', { name: /Re-profile/ }))
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        '/api/repos/profile',
+        expect.objectContaining({ method: 'POST' }),
+      )
+    })
+    const puts = fetchMock.mock.calls.filter(([, init]) => init?.method === 'PUT')
+    expect(puts).toEqual([])
   })
 })

@@ -336,6 +336,7 @@ func TestRepoRoutes_NoGitHubURL(t *testing.T) {
 		{"registration", http.MethodPost, "/api/repos", map[string]any{"github_id": "41"}},
 		{"repo PATCH", http.MethodPatch, "/api/repos/" + repoID, map[string]string{"base_branch": "develop"}},
 		{"picker refresh", http.MethodPost, "/api/github/repos/refresh", map[string]any{}},
+		{"re-profile", http.MethodPost, "/api/repos/profile", map[string]any{}},
 	} {
 		rec := doJSON(t, s, tc.method, tc.path, tc.body)
 		if rec.Code != http.StatusConflict || firstErrorReason(t, rec) != httpx.ReasonNotConfigured {

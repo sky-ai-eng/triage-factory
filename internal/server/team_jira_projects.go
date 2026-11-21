@@ -71,7 +71,7 @@ import (
 // refused by the strict decode with the field named — TF never transitions a
 // ticket back into pickup, so there is no write target to name.
 type jiraPickupRuleWrite struct {
-	MemberIDs []string `json:"member_ids"`
+	MemberIDs []string `json:"member_ids" doc:"The ids of the Jira statuses in which unassigned tickets are picked up; an empty array clears the rule."`
 }
 
 // jiraStatusRuleWrite is a write-target rule's shape: the statuses that count
@@ -80,8 +80,8 @@ type jiraPickupRuleWrite struct {
 // a project watched but not armed, and for in_review — which arms nothing — is
 // simply a team that does not name a review status.
 type jiraStatusRuleWrite struct {
-	MemberIDs   []string `json:"member_ids"`
-	CanonicalID string   `json:"canonical_id"`
+	MemberIDs   []string `json:"member_ids" doc:"The ids of the Jira statuses that count as this state; an empty array, with an empty canonical_id, clears the rule."`
+	CanonicalID string   `json:"canonical_id" doc:"The id of the status, one of member_ids, that stands for this state, which Triage Factory moves a ticket into for in_progress and done; empty exactly when member_ids is."`
 }
 
 // jiraProjectWrite is one project in the desired set, named by exactly one of
@@ -90,13 +90,13 @@ type jiraStatusRuleWrite struct {
 // clears it.
 type jiraProjectWrite struct {
 	// ID is the registry row id of a project this team tracks.
-	ID string `json:"id"`
+	ID string `json:"id" doc:"The id in Triage Factory of a project this team tracks, as the response names it; an element sets exactly one of id and jira_id."`
 	// JiraID is Jira's project id of a project being added.
-	JiraID     string               `json:"jira_id"`
-	Pickup     *jiraPickupRuleWrite `json:"pickup"`
-	InProgress *jiraStatusRuleWrite `json:"in_progress"`
-	InReview   *jiraStatusRuleWrite `json:"in_review"`
-	Done       *jiraStatusRuleWrite `json:"done"`
+	JiraID     string               `json:"jira_id" doc:"Jira's id for a project being added, as a decimal string; an element sets exactly one of id and jira_id."`
+	Pickup     *jiraPickupRuleWrite `json:"pickup" doc:"The statuses in which unassigned tickets are picked up; absent or null keeps the stored rule, and leaves a project being added unmapped."`
+	InProgress *jiraStatusRuleWrite `json:"in_progress" doc:"The statuses that count as being worked on, and the one a claimed ticket is moved to; absent or null keeps the stored rule, and leaves a project being added unmapped."`
+	InReview   *jiraStatusRuleWrite `json:"in_review" doc:"The optional statuses that mean the work awaits human review; absent or null keeps the stored rule, and leaves a project being added unmapped."`
+	Done       *jiraStatusRuleWrite `json:"done" doc:"The statuses that count as complete, and the one a finished ticket is moved to; absent or null keeps the stored rule, and leaves a project being added unmapped."`
 }
 
 // jiraProjectIDRe is a Jira project id as both deployments write one: a
@@ -108,7 +108,7 @@ var jiraProjectIDRe = regexp.MustCompile(`^[0-9]+$`)
 // preserved — the settings UI keeps projects in the order they were added, and
 // the GET hands them back that way.
 type teamJiraProjectsRequest struct {
-	JiraProjects []jiraProjectWrite `json:"jira_projects"`
+	JiraProjects []jiraProjectWrite `json:"jira_projects" doc:"Every Jira project the team is to track, in display order; an empty array, or an absent field, untracks every project."`
 }
 
 // teamJiraProjectsResponse echoes the set as stored, so a client renders the
@@ -116,8 +116,17 @@ type teamJiraProjectsRequest struct {
 // spells them today, status names likewise, empty rule members normalized to
 // []) rather than what it happened to send.
 type teamJiraProjectsResponse struct {
-	JiraProjects []jiraProjectSettings `json:"jira_projects"`
+	JiraProjects []jiraProjectSettings `json:"jira_projects" doc:"The Jira projects the team tracks, as stored, in display order."`
 }
+
+var opTeamJiraProjectsPut = httpx.NewJSONOp[teamJiraProjectsRequest, teamJiraProjectsResponse](httpx.OpSpec{
+	Pattern:     "PUT /api/teams/{team_id}/jira-projects",
+	ID:          "replace_team_jira_projects",
+	Summary:     "Replace a team's tracked Jira projects",
+	Description: "Replaces the Jira projects the team tracks on the organization's Jira site, and each project's status rules, with the set the body names, in its order, and returns the set as stored. Projects being added, and the statuses of every rule that changes, are checked with Jira. A rule an element leaves out keeps its stored value, and a body with no jira_projects untracks every project.",
+	PathParams:  map[string]string{"team_id": teamIDPathDoc},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // errJiraProjectNamedTwice is the write's refusal of an added project that
 // registering resolved onto a project already in the set: a tracked row the
@@ -152,8 +161,8 @@ func (s *Server) handleTeamJiraProjectsPut(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	var req teamJiraProjectsRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opTeamJiraProjectsPut.Decode(w, r)
+	if !ok {
 		return
 	}
 
@@ -326,7 +335,7 @@ func (s *Server) handleTeamJiraProjectsPut(w http.ResponseWriter, r *http.Reques
 	}
 	jiradrift.RulesSaved(context.WithoutCancel(r.Context()), orgID, teamID, prev, next, read)
 
-	writeJSON(w, http.StatusOK, teamJiraProjectsResponse{JiraProjects: toJiraProjectSettings(next)})
+	opTeamJiraProjectsPut.Write(w, teamJiraProjectsResponse{JiraProjects: toJiraProjectSettings(next)})
 }
 
 // resolveJiraMirrorsOnSave resolves kinds.JiraMirrorFailing for every project

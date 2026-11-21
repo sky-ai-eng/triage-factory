@@ -17,8 +17,24 @@ import (
 // org state — they only probe the network — so they are session-gated (via
 // s.apiMutating) but not org-scoped.
 type reachabilityRequest struct {
-	URL string `json:"url"`
+	URL string `json:"url" doc:"The base URL to check, an http or https URL with no credentials, query, or fragment."`
 }
+
+var opGitHubReachability = httpx.NewJSONOp[reachabilityRequest, reachability.Result](httpx.OpSpec{
+	Pattern:     "POST /api/github/reachability",
+	ID:          "check_github_reachability",
+	Summary:     "Check that a GitHub host is reachable",
+	Description: "Sends one request, with no credential, to the API of the GitHub host at url, and returns whether the host answered; any HTTP response counts as reachable. It reads and changes nothing in the organization.",
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
+
+var opJiraReachability = httpx.NewJSONOp[reachabilityRequest, reachability.Result](httpx.OpSpec{
+	Pattern:     "POST /api/jira/reachability",
+	ID:          "check_jira_reachability",
+	Summary:     "Check that a Jira site is reachable",
+	Description: "Sends one request, with no credential, to the server-information endpoint of the Jira site at url, and returns whether the site answered; any HTTP response counts as reachable. It reads and changes nothing in the organization.",
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // handleGitHubReachability probes whether this deployment can reach the API
 // host behind a user-entered GitHub base URL — one of the three free-entry
@@ -31,8 +47,8 @@ type reachabilityRequest struct {
 //
 // POST /api/github/reachability   body: {"url": "https://github.com"}
 func handleGitHubReachability(w http.ResponseWriter, r *http.Request) {
-	var req reachabilityRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opGitHubReachability.Decode(w, r)
+	if !ok {
 		return
 	}
 	base, ok := ghbase.NormalizeBaseURL(req.URL)
@@ -40,7 +56,7 @@ func handleGitHubReachability(w http.ResponseWriter, r *http.Request) {
 		invalidBaseURLField(w, "url")
 		return
 	}
-	writeJSON(w, http.StatusOK, reachability.Probe(r.Context(), ghbase.APIBase(base)))
+	opGitHubReachability.Write(w, reachability.Probe(r.Context(), ghbase.APIBase(base)))
 }
 
 // handleJiraReachability is the Jira equivalent: it probes the same host a
@@ -50,8 +66,8 @@ func handleGitHubReachability(w http.ResponseWriter, r *http.Request) {
 //
 // POST /api/jira/reachability   body: {"url": "https://jira.example.com"}
 func handleJiraReachability(w http.ResponseWriter, r *http.Request) {
-	var req reachabilityRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opJiraReachability.Decode(w, r)
+	if !ok {
 		return
 	}
 	base, ok := ghbase.NormalizeBaseURL(req.URL)
@@ -59,7 +75,7 @@ func handleJiraReachability(w http.ResponseWriter, r *http.Request) {
 		invalidBaseURLField(w, "url")
 		return
 	}
-	writeJSON(w, http.StatusOK, reachability.Probe(r.Context(), jira.ReachabilityURL(base)))
+	opJiraReachability.Write(w, reachability.Probe(r.Context(), jira.ReachabilityURL(base)))
 }
 
 // invalidBaseURLField writes the rejection every base-URL door gives, so the
@@ -75,6 +91,6 @@ func invalidBaseURLField(w http.ResponseWriter, field string) {
 func (s *Server) registerReachabilityRoutes() {
 	// URL-only host reachability (the wizard's URL sub-step) — no auth sent,
 	// distinct from the creds stage (auth.ValidateGitHub / /api/jira/connect).
-	s.apiMutating("POST /api/github/reachability", handleGitHubReachability)
-	s.apiMutating("POST /api/jira/reachability", handleJiraReachability)
+	s.op(opGitHubReachability, handleGitHubReachability)
+	s.op(opJiraReachability, handleJiraReachability)
 }

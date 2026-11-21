@@ -55,10 +55,10 @@ var client = &http.Client{
 // Status carries the HTTP status the host answered with (0 when unreachable);
 // Reason is a short, operator-readable cause, populated only when unreachable.
 type Result struct {
-	Reachable bool   `json:"reachable"`
-	ProbedURL string `json:"probed_url"`
-	Status    int    `json:"status,omitempty"`
-	Reason    string `json:"reason,omitempty"`
+	Reachable bool   `json:"reachable" doc:"Whether the host answered with any HTTP response."`
+	ProbedURL string `json:"probed_url" doc:"The URL the request was sent to."`
+	Status    int    `json:"status,omitempty" doc:"The HTTP status the host answered with, absent when it is unreachable."`
+	Reason    string `json:"reason,omitempty" doc:"Why the host could not be reached, such as a name that does not resolve or a timeout, present only when it is unreachable."`
 }
 
 // Probe issues a single no-auth GET to probeURL and classifies the outcome.

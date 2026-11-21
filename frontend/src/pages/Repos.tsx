@@ -10,14 +10,14 @@ import { useOptionalAuth } from '../contexts/AuthContext'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { toast } from '../components/Toast/toastStore'
 import { apiJSON, apiList, apiListFirstRows } from '../lib/apiClient'
-import type { RepoRef } from '../lib/githubRepos'
+import { profileRepositories, type RepoRef } from '../lib/githubRepos'
 import { fetchTeamRepos, saveTeamRepos } from './settings/teamConfig'
 
 // Repo tracking is per-team; writes go to the team's tracked-set
 // endpoint (fetchTeamRepos / saveTeamRepos). This page is pre-team-context,
 // so it pins one team — a future change will thread the selected team here.
 // That team's repo *tracking* set — read to seed the selection and
-// written on Save/Re-profile. This must NOT be sourced from GET /api/repos
+// written on Save. This must NOT be sourced from GET /api/repos
 // (the org-wide repositories union): in a multi-team org that union
 // includes sibling teams' repos, and writing it back here would pull them
 // into the pinned team's tracked set and past the router gate.
@@ -692,8 +692,8 @@ export default function Repos() {
   const [selectedRepos, setSelectedRepos] = useState<RepoRef[]>([])
   // True when the default team's tracked-set fetch failed. selectedRepos
   // stays [] on failure, which is indistinguishable from "genuinely tracks
-  // nothing" — without this flag a transient failure would let Re-profile
-  // PUT an empty array and wipe the team's repos (+ GC `repositories`).
+  // nothing" — without this flag a transient failure would let a save PUT
+  // an empty array and wipe the team's repos.
   const [teamLoadFailed, setTeamLoadFailed] = useState(false)
   const [saving, setSaving] = useState(false)
   // Starts unset — we don't know the right host until settings load. Doc
@@ -705,7 +705,7 @@ export default function Repos() {
   const fetchData = async () => {
     try {
       // Two distinct lists: the cards show the org-wide repositories union
-      // (the registry list), but the *selection* — what Save/Re-profile writes
+      // (the registry list), but the *selection* — what Save writes
       // back to the first team — must come from that team's own
       // tracked set, never the union (see the note above).
       // Each settles on its own: the cards are worth painting even when the
@@ -806,22 +806,13 @@ export default function Repos() {
   }
 
   const handleReprofile = async () => {
-    // Re-profile re-PUTs the current selection. Never do that when the
-    // selection is empty or its load failed — that would clear the team's
-    // tracked repos. The button is also disabled in these states; this is
-    // the defense-in-depth guard.
-    if (!teamId || teamLoadFailed || selectedRepos.length === 0) {
-      return
-    }
     setSaving(true)
     try {
-      const res = await saveTeamRepos(teamId, selectedRepos)
-      if (!res.ok) {
-        toast.error(res.error)
-        return
-      }
+      await profileRepositories()
       toast.success('Re-profiling started')
       setTimeout(fetchData, 8000)
+    } catch (err) {
+      toast.failed(err, 'Could not start re-profiling.')
     } finally {
       setSaving(false)
     }
@@ -905,10 +896,9 @@ export default function Repos() {
             icon={<RotateCw size={12} />}
             label={saving ? 'Working…' : 'Re-profile'}
             onClick={handleReprofile}
-            // Gate on the *selection* (what gets PUT), not the profile
-            // cards: an empty selection re-PUTs nothing meaningful, and a
-            // failed selection-load must not be written back as empty.
-            disabled={saving || teamLoadFailed || selectedRepos.length === 0}
+            // With no repository listed, the caller has nothing here whose
+            // profile they would see change.
+            disabled={saving || profiles.length === 0}
           />
           <ActionButton
             icon={<Plus size={12} />}
