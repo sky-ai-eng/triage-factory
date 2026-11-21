@@ -15,9 +15,9 @@ import "time"
 // is recorded at all: an allow left no trace whatsoever, and a deny survived
 // only as prose in a tool_result body.
 type ConversationPermission struct {
-	ID             string `json:"id"`
-	OrgID          string `json:"org_id,omitempty"`
-	ConversationID string `json:"conversation_id"`
+	ID             string `json:"id" doc:"The prompt record's id."`
+	OrgID          string `json:"org_id,omitempty" doc:"The id of the organization the prompt belongs to."`
+	ConversationID string `json:"conversation_id" doc:"The id of the conversation that raised the prompt."`
 
 	// ClaimID is the engagement that asked. Pending is derived against the
 	// conversation's ACTIVE claim rather than trusted from State (see
@@ -40,39 +40,39 @@ type ConversationPermission struct {
 	// ToolCallID is the SDK's toolUseID for the gated call — the same id the
 	// assistant message's tool_calls carry and the answering tool row echoes,
 	// so a decision ties back to the exact call it authorized.
-	ToolCallID string `json:"tool_call_id"`
-	ToolName   string `json:"tool_name"`
+	ToolCallID string `json:"tool_call_id" doc:"The id of the tool call the prompt asked about."`
+	ToolName   string `json:"tool_name" doc:"The name of the tool the agent asked to call."`
 
 	// Input is the tool input the agent asked to run with. This — not Title —
 	// is what a user is actually approving, so a surface that renders the
 	// prompt must render this.
-	Input map[string]any `json:"input,omitempty"`
+	Input map[string]any `json:"input,omitempty" doc:"The input the agent asked to call the tool with, absent when it is not known."`
 
 	// Title is the prompt copy the SDK already rendered ("Claude wants to read
 	// foo.txt"), empty when it rendered none. A consumer must still be able to
 	// build a headline from ToolName + Input.
-	Title string `json:"title,omitempty"`
+	Title string `json:"title,omitempty" doc:"The prompt's text as the agent runtime wrote it, absent when it wrote none."`
 
-	State  string `json:"state"`
-	Reason string `json:"reason,omitempty"`
+	State  string `json:"state" doc:"Where the prompt stands: pending, allowed, denied, or expired."`
+	Reason string `json:"reason,omitempty" doc:"Why the prompt reached its state: user when a person answered it, timeout when no answer came within its window, absent when no one was present to answer it, closing when the conversation ended under it, or claim_lost when the engagement that asked went away; the key is left out while the prompt is pending."`
 
-	RequestedAt time.Time `json:"requested_at"`
+	RequestedAt time.Time `json:"requested_at" doc:"When the agent asked, as an RFC 3339 timestamp."`
 	// ExpiresAt is the end of the prompt's window as projected on the wall
 	// clock when it was raised. The wait itself runs on the asking process's
 	// monotonic clock, which stops during a system suspend while the wall
 	// clock does not, so after a sleep the real deadline is later than this.
 	// While that process still holds the prompt, its own deadline is the
 	// answer (see PendingPermissionDTOs); this is the fallback and the record.
-	ExpiresAt *time.Time `json:"expires_at,omitempty"`
-	DecidedBy string     `json:"decided_by,omitempty"`
-	DecidedAt *time.Time `json:"decided_at,omitempty"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty" doc:"When the prompt's window was due to end, as projected when it was raised, as an RFC 3339 timestamp, absent when none was recorded."`
+	DecidedBy string     `json:"decided_by,omitempty" doc:"The id of the person who answered the prompt, absent when no person did."`
+	DecidedAt *time.Time `json:"decided_at,omitempty" doc:"When the prompt was answered, as an RFC 3339 timestamp, absent while it is pending."`
 
 	// WaitedMs is how long the prompt stood open — milliseconds from
 	// RequestedAt to DecidedAt, stamped once at resolution and nil while
 	// pending. Stored rather than derived: the two timestamps can come from
 	// different clocks, so read-time subtraction is wrong by whatever they
 	// disagree by.
-	WaitedMs *int `json:"waited_ms,omitempty"`
+	WaitedMs *int `json:"waited_ms,omitempty" doc:"How long the prompt stood open before it was answered, in milliseconds, absent while it is pending."`
 }
 
 // The permission states. A prompt is minted 'pending' and reaches exactly one
@@ -155,20 +155,20 @@ func ValidPermissionReason(r string) bool {
 // took) stay off this shape — they exist for a history read, and a pending row
 // has none of them by definition.
 type PendingPermissionDTO struct {
-	ToolCallID string `json:"tool_call_id"`
-	ToolName   string `json:"tool_name"`
+	ToolCallID string `json:"tool_call_id" doc:"The id of the tool call the prompt asks about, which the answer route takes in its path."`
+	ToolName   string `json:"tool_name" doc:"The name of the tool the agent wants to call."`
 	// Input is always present, never omitted and never null — a client renders
 	// the prompt by indexing it, so an absent key would be a render crash
 	// rather than a thinner prompt. Unknown input is an empty object.
-	Input map[string]any `json:"input"`
-	Title string         `json:"title,omitempty"`
+	Input map[string]any `json:"input" doc:"The input the agent wants to call the tool with, an empty object when it is not known."`
+	Title string         `json:"title,omitempty" doc:"The prompt's text as the agent runtime wrote it, absent when it wrote none."`
 	// TimeoutMs is the deadline REMAINING, not the window the prompt was
 	// granted. Sent relative so the client derives its TTL from the payload
 	// rather than mirroring a server constant, and clock skew between
 	// the two never enters into it. A prompt reconstructed after a refresh
 	// gets the time it actually has left, not a fresh full window it doesn't.
-	TimeoutMs   int64     `json:"timeout_ms"`
-	RequestedAt time.Time `json:"requested_at"`
+	TimeoutMs   int64     `json:"timeout_ms" doc:"How long the prompt has left before it is denied for want of an answer, in milliseconds, or 0 when that is not known."`
+	RequestedAt time.Time `json:"requested_at" doc:"When the agent asked, as an RFC 3339 timestamp."`
 }
 
 // PendingPermissionDTOs projects open prompts onto the wire shape. A prompt's

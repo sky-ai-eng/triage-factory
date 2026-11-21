@@ -50,17 +50,6 @@ var notInSpec = map[string]string{
 // operation. A route leaves this list when it gains one, and nothing is added
 // to it: a new route is declared.
 var unannotated = []string{
-	"POST /api/agent/conversations/list",
-	"GET /api/agent/conversations/{conversationID}",
-	"POST /api/agent/conversations/{conversationID}/actions/list",
-	"POST /api/agent/conversations/{conversationID}/artifacts/list",
-	"POST /api/agent/conversations/{conversationID}/deliverables/list",
-	"POST /api/agent/conversations/{conversationID}/deliverables/refresh",
-	"POST /api/agent/conversations/{conversationID}/message",
-	"GET /api/agent/conversations/{conversationID}/messages",
-	"GET /api/agent/conversations/{conversationID}/permissions",
-	"POST /api/agent/conversations/{conversationID}/permissions/{toolCallID}",
-	"POST /api/agent/conversations/{conversationID}/stop",
 	"POST /api/auth/logout",
 	"POST /api/auth/logout/all",
 	"POST /api/bedrock/role-setup",

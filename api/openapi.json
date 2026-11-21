@@ -13,6 +13,247 @@
       }
     },
     "schemas": {
+      "ActionJSON": {
+        "properties": {
+          "action": {
+            "description": "What was done, such as pr_created or branch_pushed, or what was refused or failed, such as git_denied or branch_push_failed.",
+            "type": "string"
+          },
+          "actor_name": {
+            "description": "The name of the person in actor_user_id, set only on the organization's actions feed.",
+            "type": "string"
+          },
+          "actor_user_id": {
+            "description": "The id of the person who took, authorized, or started the work behind the action, absent when no person did.",
+            "type": "string"
+          },
+          "conversation_id": {
+            "description": "The id of the conversation the action was taken for, absent when it was taken for none or the conversation was deleted.",
+            "type": "string"
+          },
+          "credential": {
+            "description": "The organization credential the action was taken with: github_app, github_pat, jira_org, linear_org, slack_bot, or none when it used none.",
+            "type": "string"
+          },
+          "details": {
+            "description": "JSON details particular to the action, such as the commit sha of a branch push, absent when there are none."
+          },
+          "external_id": {
+            "description": "The outside system's own id for the object the action was on, such as a pull request number or a comment id, absent when none was recorded.",
+            "type": "string"
+          },
+          "from_state": {
+            "description": "The state a transition moved the object from, such as a Jira status, absent when the action is not a transition.",
+            "type": "string"
+          },
+          "id": {
+            "description": "The action's id.",
+            "type": "string"
+          },
+          "object_id": {
+            "description": "The id of the object the action changed, the value an artifact's object_id carries, absent when it changed none or the object cannot be identified.",
+            "type": "string"
+          },
+          "object_kind": {
+            "description": "The kind of object the action changed, such as pull_request, branch, or comment, absent when it changed none.",
+            "type": "string"
+          },
+          "occurred_at": {
+            "description": "When the action was taken, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "performed_by": {
+            "description": "Who performed the action: agent, person, or system.",
+            "type": "string"
+          },
+          "provider": {
+            "description": "The outside system the action was on: github, jira, linear, slack, or network for a refused network connection.",
+            "type": "string"
+          },
+          "scope": {
+            "description": "Where in that system the action was: the GitHub host, the Jira site, the Linear workspace id, slack.com, or internet for a refused network connection.",
+            "type": "string"
+          },
+          "target": {
+            "description": "The key of what the action was on, as the action named it, such as owner/repo#42, owner/repo, or PROJ-123.",
+            "type": "string"
+          },
+          "team_id": {
+            "description": "The id of the team whose conversation took the action, set only on the organization's actions feed and absent there for an action with no team.",
+            "type": "string"
+          },
+          "team_name": {
+            "description": "That team's name, set only on the organization's actions feed.",
+            "type": "string"
+          },
+          "to_state": {
+            "description": "The state a transition moved the object to, absent when the action is not a transition.",
+            "type": "string"
+          },
+          "url": {
+            "description": "The page of the object the action was on, under the object's current name, absent when none was recorded.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "provider",
+          "scope",
+          "action",
+          "target",
+          "performed_by",
+          "credential",
+          "occurred_at"
+        ],
+        "type": "object"
+      },
+      "AgentPermissionAnswerRequest": {
+        "properties": {
+          "behavior": {
+            "description": "The answer: allow or deny.",
+            "type": "string"
+          },
+          "message": {
+            "description": "On a deny, the reason the agent is given, which may be empty.",
+            "type": "string"
+          },
+          "updated_input": {
+            "additionalProperties": {},
+            "description": "On an allow, the tool input the agent runs the call with in place of its own; absent or null runs the call with the agent's input.",
+            "type": [
+              "object",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "AgentPermissionResolvedResponse": {
+        "properties": {
+          "permission": {
+            "description": "The answered prompt, absent when no record of it could be read.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ConversationPermission"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "description": "Always resolved.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
+      "ArtifactDeliverableJSON": {
+        "properties": {
+          "id": {
+            "description": "The deliverable's id.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "The kind of deliverable: pull_request or review.",
+            "type": "string"
+          },
+          "state": {
+            "description": "Where the deliverable stands: pending, draft, open, merged, or closed for a pull request, and pending, submitted, or dismissed for a review.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "state"
+        ],
+        "type": "object"
+      },
+      "ArtifactJSON": {
+        "properties": {
+          "action_count": {
+            "description": "How many actions the conversation took on the object.",
+            "type": "integer"
+          },
+          "deliverable": {
+            "description": "The conversation's deliverable that is this object, or null when none is.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ArtifactDeliverableJSON"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "entity_id": {
+            "description": "The id of the entity the object is or is on, absent when it is on none.",
+            "type": "string"
+          },
+          "first_at": {
+            "description": "When the conversation first acted on the object, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "last_action": {
+            "description": "The newest action the conversation took on the object, such as pr_created or branch_pushed.",
+            "type": "string"
+          },
+          "last_at": {
+            "description": "When the conversation last acted on the object, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "name": {
+            "description": "The object's name within its repository for a branch, label, release, workflow, or workflow run, and empty for every other kind.",
+            "type": "string"
+          },
+          "object_id": {
+            "description": "The object's id, which the conversation's actions list takes as object_id.",
+            "type": "string"
+          },
+          "object_kind": {
+            "description": "The kind of object: pull_request, issue, repository, branch, label, release, workflow, workflow_run, review, comment, or message.",
+            "type": "string"
+          },
+          "provider": {
+            "description": "The outside system the object is in, such as github, jira, linear, or slack.",
+            "type": "string"
+          },
+          "scope": {
+            "description": "Where in that system the object is: the GitHub host, the Jira site, the Linear workspace id, or slack.com.",
+            "type": "string"
+          },
+          "target": {
+            "description": "The key of the object, or of the entity it is on, such as owner/repo#42 or PROJ-123, kept current through renames.",
+            "type": "string"
+          },
+          "url": {
+            "description": "The object's page in its system, empty when no action recorded one.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "object_id",
+          "object_kind",
+          "provider",
+          "scope",
+          "target",
+          "name",
+          "url",
+          "last_action",
+          "action_count",
+          "first_at",
+          "last_at",
+          "deliverable"
+        ],
+        "type": "object"
+      },
       "CheckRun": {
         "properties": {
           "completed_at": {
@@ -102,6 +343,703 @@
             "type": "string"
           }
         },
+        "type": "object"
+      },
+      "ContentBlock": {
+        "properties": {
+          "file": {
+            "description": "The file of a file block, absent on any other block.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ContentFile"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "image_url": {
+            "description": "The image of an image_url block, absent on any other block.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ContentImageURL"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "text": {
+            "description": "The text of a text block, absent on any other block.",
+            "type": "string"
+          },
+          "type": {
+            "description": "The kind of block: text, image_url, or file.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      "ContentFile": {
+        "properties": {
+          "file_data": {
+            "description": "The file's contents, absent when file_url or file_id gives the file.",
+            "type": "string"
+          },
+          "file_id": {
+            "description": "The model provider's id for the file, absent when file_data or file_url gives the file.",
+            "type": "string"
+          },
+          "file_type": {
+            "description": "The file's media type, absent when none is recorded.",
+            "type": "string"
+          },
+          "file_url": {
+            "description": "The file's URL, absent when file_data or file_id gives the file.",
+            "type": "string"
+          },
+          "filename": {
+            "description": "The file's name, absent when none is recorded.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ContentImageURL": {
+        "properties": {
+          "detail": {
+            "description": "The level of detail the model reads the image at, such as low or high, absent for the provider's default.",
+            "type": "string"
+          },
+          "file_id": {
+            "description": "The model provider's id for the image file, absent when url gives the image.",
+            "type": "string"
+          },
+          "url": {
+            "description": "The image's URL, which may be a data: URI, absent when file_id names the image.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ConversationActionListRequest": {
+        "properties": {
+          "object_id": {
+            "description": "The object_id of one of the conversation's artifacts, to return only the actions that changed that object; absent or empty applies no object filter.",
+            "type": "string"
+          },
+          "page_size": {
+            "description": "How many rows to return, 50 when absent; 0 returns no rows and only total_count, and a value above the list's maximum, 200 unless the route says otherwise, is refused.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "page_token": {
+            "description": "The next_page_token of the previous page, which reads the page after it; it is refused for a request with different filters.",
+            "type": "string"
+          },
+          "refused": {
+            "description": "Whether to return only the actions that were refused or failed.",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "ConversationArtifactListRequest": {
+        "properties": {
+          "page_size": {
+            "description": "How many rows to return, 50 when absent; 0 returns no rows and only total_count, and a value above the list's maximum, 200 unless the route says otherwise, is refused.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "page_token": {
+            "description": "The next_page_token of the previous page, which reads the page after it; it is refused for a request with different filters.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ConversationDeliverableListRequest": {
+        "properties": {
+          "page_size": {
+            "description": "How many rows to return, 50 when absent; 0 returns no rows and only total_count, and a value above the list's maximum, 200 unless the route says otherwise, is refused.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "page_token": {
+            "description": "The next_page_token of the previous page, which reads the page after it; it is refused for a request with different filters.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ConversationJSON": {
+        "properties": {
+          "action_count": {
+            "description": "How many actions on outside systems the conversation recorded, refused and failed ones included.",
+            "type": "integer"
+          },
+          "actor_agent_id": {
+            "description": "The id of the agent the conversation runs as, empty when none is recorded.",
+            "type": "string"
+          },
+          "actor_agent_name": {
+            "description": "The display name of that agent, empty when actor_agent_id is empty or the agent was deleted.",
+            "type": "string"
+          },
+          "artifact_count": {
+            "description": "How many objects in outside systems the conversation changed.",
+            "type": "integer"
+          },
+          "artifact_counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "description": "How many objects the conversation changed, keyed by object kind, such as pull_request or branch, and an empty object when it changed none.",
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "blueprint_run_id": {
+            "description": "The id of the blueprint run the conversation is a step of, empty when it is not a step.",
+            "type": "string"
+          },
+          "blueprint_run_status": {
+            "description": "The status of the conversation's blueprint run: running, completed, aborted, failed, or cancelled, empty when it is not a step or the run could not be read.",
+            "type": "string"
+          },
+          "blueprint_step_count": {
+            "description": "How many steps the conversation's blueprint run has, 0 when it is not a step or the run could not be read.",
+            "type": "integer"
+          },
+          "blueprint_step_index": {
+            "description": "The conversation's step in its blueprint run, counted from 0, or null when it is not a step.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "cache_creation_tokens": {
+            "description": "How many input tokens the conversation's model calls wrote to the provider's prompt cache.",
+            "type": "integer"
+          },
+          "cache_read_tokens": {
+            "description": "How many input tokens the conversation's model calls read from the provider's prompt cache.",
+            "type": "integer"
+          },
+          "cache_warm_until": {
+            "description": "When the model provider's prompt cache from the newest assistant turn expires, as an RFC 3339 timestamp, absent from the conversation list and when the conversation has no assistant turn.",
+            "type": "string"
+          },
+          "can_write": {
+            "description": "Whether the caller may stop the conversation, message it, and answer its permission prompts, absent when the check fails.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "claim_current_op": {
+            "description": "The operation that engagement had in flight at its last report, absent when no engagement holds the conversation or it has not reported yet.",
+            "type": "string"
+          },
+          "claim_last_activity_at": {
+            "description": "When the engagement running the conversation last reported activity, as an RFC 3339 timestamp, absent when no engagement holds the conversation or it has not reported yet.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "claimed_at": {
+            "description": "When work on the conversation last started, as an RFC 3339 timestamp, or null when it never has.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "completed_at": {
+            "description": "When the conversation's last engagement finished, as an RFC 3339 timestamp, or null when none has.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "current_action": {
+            "description": "A sentence saying what a running conversation is doing, present only on the conversation list and only when there is something to say.",
+            "type": "string"
+          },
+          "duration_ms": {
+            "description": "How long the conversation's engagements have spent working, in milliseconds, or null before any time is recorded.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "ended_at": {
+            "description": "When the conversation stopped being its task's current conversation, as an RFC 3339 timestamp, absent while it still is.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ended_reason": {
+            "description": "Why the conversation stopped being its task's current conversation, such as requeued, delegated, or taken_over, present exactly when ended_at is.",
+            "type": "string"
+          },
+          "failure_kind": {
+            "description": "What made a failed conversation fail, such as memory_limit, crash, or executor_lost, empty when it has not failed or the failure was not classified.",
+            "type": "string"
+          },
+          "has_run": {
+            "description": "Whether the conversation holds an assistant turn.",
+            "type": "boolean"
+          },
+          "has_unresolved_deliverables": {
+            "description": "Whether a draft pull request or a ready review the conversation prepared still waits on a person, absent when the conversation's deliverables could not be read.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "id": {
+            "description": "The conversation's id.",
+            "type": "string"
+          },
+          "input_tokens": {
+            "description": "How many input tokens the conversation's model calls used.",
+            "type": "integer"
+          },
+          "memory_missing": {
+            "description": "Whether the agent has not written its own memory of the conversation.",
+            "type": "boolean"
+          },
+          "model": {
+            "description": "The model the conversation runs on, empty before one is chosen.",
+            "type": "string"
+          },
+          "next_attempt_at": {
+            "description": "The earliest time the conversation is picked up again after its model provider was unavailable, as an RFC 3339 timestamp, absent when nothing is holding it back.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "next_message_effort": {
+            "description": "The reasoning effort a message that names none would run at, present with next_message_model unless it is the provider's default.",
+            "type": "string"
+          },
+          "next_message_model": {
+            "description": "The model a message that names none would run on, absent from the conversation list and when such a message would be refused.",
+            "type": "string"
+          },
+          "num_turns": {
+            "description": "How many turns the conversation's engagements have run, or null before any are recorded.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "outcome": {
+            "description": "The verdict the agent reported when it stopped: continue, finish, or abort, empty when it reported none.",
+            "type": "string"
+          },
+          "outcome_reason": {
+            "description": "Why the agent stopped and what a person needs to do, empty when it gave no reason.",
+            "type": "string"
+          },
+          "output_tokens": {
+            "description": "How many output tokens the conversation's model calls produced.",
+            "type": "integer"
+          },
+          "park_reason": {
+            "description": "Why the conversation was parked open, such as user_cancelled, stalled, or launch_failed, empty when it is not parked or has resumed since.",
+            "type": "string"
+          },
+          "pending_deliverable_ids": {
+            "description": "The ids of the draft pull requests and ready reviews that still wait on a person, an empty array when none do, and absent when the conversation's deliverables could not be read.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "prompt_id": {
+            "description": "The id of the prompt the conversation was started with, empty when it was started with none.",
+            "type": "string"
+          },
+          "queue_position": {
+            "description": "The conversation's place in its organization's queue, counted from 1, present only on the conversation list and only while it waits in line.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "queued_at": {
+            "description": "When the conversation last entered the queue, as an RFC 3339 timestamp, or null when it never has.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "result_summary": {
+            "description": "The agent's account of what it did, empty until it gives one.",
+            "type": "string"
+          },
+          "resumable": {
+            "description": "Whether a message sent now would continue the conversation, absent from the conversation list and for a conversation that is active or failed.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "resume_blocked_reason": {
+            "description": "Why a message sent now would not continue the conversation, such as workspace_expired or blueprint_concluded, present exactly when resumable is false.",
+            "type": "string"
+          },
+          "runtime": {
+            "description": "The engine that runs the conversation: sdk or native.",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "The Claude Code session id a conversation on the sdk runtime resumes with, empty when it has none.",
+            "type": "string"
+          },
+          "started_at": {
+            "description": "When the conversation was created, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "status": {
+            "description": "The conversation's displayed status: queued, running, open, or failed, or, while an engagement is setting up, its phase: fetching, cloning, agent_starting, or awaiting_credentials.",
+            "type": "string"
+          },
+          "stop_requested_at": {
+            "description": "When a stop that has not taken effect yet was requested, as an RFC 3339 timestamp, absent when no stop is pending.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "task_id": {
+            "description": "The id of the task the conversation works on.",
+            "type": "string"
+          },
+          "total_cost_usd": {
+            "description": "What the conversation's model calls have cost, in USD, or null before any cost is recorded.",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "trigger_id": {
+            "description": "The id of the event handler whose firing started the conversation, empty for a manual one.",
+            "type": "string"
+          },
+          "trigger_type": {
+            "description": "How the conversation was started: manual or event.",
+            "type": "string"
+          },
+          "type": {
+            "description": "What the conversation is for: delegation for agent work, or interactive for the conversation a person's claim of the task started.",
+            "type": "string"
+          },
+          "unresolved_pr_count": {
+            "description": "How many draft pull requests the conversation prepared still wait on a person, absent when the conversation's deliverables could not be read.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "unresolved_review_count": {
+            "description": "How many ready reviews the conversation prepared still wait on a person, absent when the conversation's deliverables could not be read.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "worktree_path": {
+            "description": "The path of the conversation's run directory on the host that ran it, empty before it has one.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "task_id",
+          "prompt_id",
+          "status",
+          "model",
+          "started_at",
+          "queued_at",
+          "claimed_at",
+          "completed_at",
+          "total_cost_usd",
+          "duration_ms",
+          "num_turns",
+          "park_reason",
+          "worktree_path",
+          "result_summary",
+          "outcome",
+          "outcome_reason",
+          "failure_kind",
+          "session_id",
+          "memory_missing",
+          "has_run",
+          "type",
+          "runtime",
+          "trigger_type",
+          "trigger_id",
+          "actor_agent_id",
+          "actor_agent_name",
+          "blueprint_run_id",
+          "blueprint_step_index",
+          "blueprint_step_count",
+          "blueprint_run_status",
+          "artifact_count",
+          "artifact_counts",
+          "action_count",
+          "input_tokens",
+          "output_tokens",
+          "cache_read_tokens",
+          "cache_creation_tokens"
+        ],
+        "type": "object"
+      },
+      "ConversationListRequest": {
+        "properties": {
+          "attention": {
+            "description": "Whether to return only the conversations waiting on a person: those with an unanswered permission prompt, and those neither running nor setting up that still hold a draft pull request or a ready review waiting on a person.",
+            "type": "boolean"
+          },
+          "entity_ids": {
+            "description": "The ids of the entities whose tasks' conversations to return, at most 200; absent or empty applies no entity filter.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "include_messages": {
+            "description": "Whether to return, as messages, the transcript of the newest conversation of each task on the page.",
+            "type": "boolean"
+          },
+          "page_size": {
+            "description": "How many rows to return, 50 when absent; 0 returns no rows and only total_count, and a value above the list's maximum, 200 unless the route says otherwise, is refused.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "page_token": {
+            "description": "The next_page_token of the previous page, which reads the page after it; it is refused for a request with different filters.",
+            "type": "string"
+          },
+          "statuses": {
+            "description": "The displayed statuses to return, from queued, running, open, failed, fetching, cloning, agent_starting, and awaiting_credentials; absent or empty returns every status.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "task_ids": {
+            "description": "The ids of the tasks whose conversations to return, at most 500; absent or empty applies no task filter.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "team_ids": {
+            "description": "The ids of the teams whose conversations to return, at most 100; absent or empty applies no team filter.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "ConversationListResponse": {
+        "properties": {
+          "messages": {
+            "additionalProperties": {
+              "items": {
+                "$ref": "#/components/schemas/MessageDTO"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "description": "The transcript of each task's newest conversation on the page, keyed by conversation id, oldest message first, present only when include_messages is true and a transcript holds a message.",
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "next_page_token": {
+            "description": "The token that reads the next page, as page_token, absent on the last page.",
+            "type": "string"
+          },
+          "runs": {
+            "additionalProperties": {
+              "items": {
+                "$ref": "#/components/schemas/ConversationJSON"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "description": "The page's conversations, keyed by task id, each task's newest first; an empty object when the page holds none.",
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "total_count": {
+            "description": "How many conversations match the filters, across every page.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "runs",
+          "total_count"
+        ],
+        "type": "object"
+      },
+      "ConversationMessageRequest": {
+        "properties": {
+          "effort": {
+            "description": "The reasoning effort the message runs at: low, medium, high, xhigh, or max; absent or null runs it at the effort the conversation's next_message_effort names, or the provider's default when that is absent.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "model": {
+            "description": "The model the message runs on, one this deployment offers; absent or null runs it on the model the conversation's next_message_model names.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text": {
+            "description": "The message, which must not be blank.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ConversationPermission": {
+        "properties": {
+          "conversation_id": {
+            "description": "The id of the conversation that raised the prompt.",
+            "type": "string"
+          },
+          "decided_at": {
+            "description": "When the prompt was answered, as an RFC 3339 timestamp, absent while it is pending.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "decided_by": {
+            "description": "The id of the person who answered the prompt, absent when no person did.",
+            "type": "string"
+          },
+          "expires_at": {
+            "description": "When the prompt's window was due to end, as projected when it was raised, as an RFC 3339 timestamp, absent when none was recorded.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "description": "The prompt record's id.",
+            "type": "string"
+          },
+          "input": {
+            "additionalProperties": {},
+            "description": "The input the agent asked to call the tool with, absent when it is not known.",
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "org_id": {
+            "description": "The id of the organization the prompt belongs to.",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Why the prompt reached its state: user when a person answered it, timeout when no answer came within its window, absent when no one was present to answer it, closing when the conversation ended under it, or claim_lost when the engagement that asked went away; the key is left out while the prompt is pending.",
+            "type": "string"
+          },
+          "requested_at": {
+            "description": "When the agent asked, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "state": {
+            "description": "Where the prompt stands: pending, allowed, denied, or expired.",
+            "type": "string"
+          },
+          "title": {
+            "description": "The prompt's text as the agent runtime wrote it, absent when it wrote none.",
+            "type": "string"
+          },
+          "tool_call_id": {
+            "description": "The id of the tool call the prompt asked about.",
+            "type": "string"
+          },
+          "tool_name": {
+            "description": "The name of the tool the agent asked to call.",
+            "type": "string"
+          },
+          "waited_ms": {
+            "description": "How long the prompt stood open before it was answered, in milliseconds, absent while it is pending.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "conversation_id",
+          "tool_call_id",
+          "tool_name",
+          "state",
+          "requested_at"
+        ],
         "type": "object"
       },
       "DashboardPRUpdateRequest": {
@@ -264,6 +1202,18 @@
             ]
           }
         },
+        "type": "object"
+      },
+      "DeliverableRefreshResponse": {
+        "properties": {
+          "updated": {
+            "description": "How many of the conversation's pull requests changed state.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "updated"
+        ],
         "type": "object"
       },
       "DeliverableRejectResponse": {
@@ -786,6 +1736,140 @@
         ],
         "type": "object"
       },
+      "MessageDTO": {
+        "properties": {
+          "cache_creation_tokens": {
+            "description": "How many input tokens that model call wrote to the provider's prompt cache, absent when none are recorded.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "cache_read_tokens": {
+            "description": "How many input tokens that model call read from the provider's prompt cache, absent when none are recorded.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "content": {
+            "description": "The message's text.",
+            "type": "string"
+          },
+          "content_blocks": {
+            "description": "The message's images and files, absent when its text is its whole content.",
+            "items": {
+              "$ref": "#/components/schemas/ContentBlock"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "conversation_id": {
+            "description": "The id of the conversation the message belongs to.",
+            "type": "string"
+          },
+          "cost_usd": {
+            "description": "The cost of the model calls settled at this message, in USD, absent when the message settles none.",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "created_at": {
+            "description": "When the message was written, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "duration_ms": {
+            "description": "How long the work the message records took, in milliseconds, absent when it was not measured.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "id": {
+            "description": "The message's id.",
+            "type": "integer"
+          },
+          "input_tokens": {
+            "description": "How many input tokens the model call that wrote the message used, absent when none are recorded.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "is_error": {
+            "description": "Whether a tool message reports a failed call, absent when it does not.",
+            "type": "boolean"
+          },
+          "metadata": {
+            "additionalProperties": {},
+            "description": "Further details the agent runtime recorded on the message, absent when there are none.",
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "model": {
+            "description": "The model that wrote an assistant message, or the model a person's message runs on, absent when none is recorded.",
+            "type": "string"
+          },
+          "output_tokens": {
+            "description": "How many output tokens the model call that wrote the message produced, absent when none are recorded.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "reasoning": {
+            "description": "The model's recorded reasoning for the message, absent when there is none.",
+            "items": {
+              "$ref": "#/components/schemas/ReasoningDetail"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "role": {
+            "description": "Who the message is from: assistant, user, tool, or system.",
+            "type": "string"
+          },
+          "stop_reason": {
+            "description": "Why the model provider ended the turn the message records, in the provider's spelling, such as end_turn or max_tokens, absent when it reported none.",
+            "type": "string"
+          },
+          "subtype": {
+            "description": "A code naming a message that is not an ordinary turn, such as injection:memory for a note the system wrote into the transcript; empty for an assistant turn, a tool result, or a person's message.",
+            "type": "string"
+          },
+          "tool_call_id": {
+            "description": "On a tool message, the id of the tool call it answers, absent on any other message.",
+            "type": "string"
+          },
+          "tool_calls": {
+            "description": "The tool calls an assistant message makes, absent when it makes none.",
+            "items": {
+              "$ref": "#/components/schemas/ToolCall"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "conversation_id",
+          "role",
+          "subtype",
+          "content",
+          "created_at"
+        ],
+        "type": "object"
+      },
       "PRStatus": {
         "properties": {
           "auto_merge": {
@@ -942,6 +2026,48 @@
         },
         "type": "object"
       },
+      "PendingPermissionDTO": {
+        "properties": {
+          "input": {
+            "additionalProperties": {},
+            "description": "The input the agent wants to call the tool with, an empty object when it is not known.",
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "requested_at": {
+            "description": "When the agent asked, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "timeout_ms": {
+            "description": "How long the prompt has left before it is denied for want of an answer, in milliseconds, or 0 when that is not known.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "title": {
+            "description": "The prompt's text as the agent runtime wrote it, absent when it wrote none.",
+            "type": "string"
+          },
+          "tool_call_id": {
+            "description": "The id of the tool call the prompt asks about, which the answer route takes in its path.",
+            "type": "string"
+          },
+          "tool_name": {
+            "description": "The name of the tool the agent wants to call.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tool_call_id",
+          "tool_name",
+          "input",
+          "timeout_ms",
+          "requested_at"
+        ],
+        "type": "object"
+      },
       "PrListRequest": {
         "properties": {
           "draft": {
@@ -981,6 +2107,35 @@
             ]
           }
         },
+        "type": "object"
+      },
+      "ReasoningDetail": {
+        "properties": {
+          "data": {
+            "description": "The entry in the encrypted form the model provider returned, absent when it returned none.",
+            "type": "string"
+          },
+          "index": {
+            "description": "The entry's position among the message's reasoning entries.",
+            "type": "integer"
+          },
+          "signature": {
+            "description": "A token the model provider issued with the entry to verify it, absent when it issued none.",
+            "type": "string"
+          },
+          "text": {
+            "description": "The reasoning text, absent when the provider returned none.",
+            "type": "string"
+          },
+          "type": {
+            "description": "The kind of reasoning entry, in the model provider's spelling.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "index",
+          "type"
+        ],
         "type": "object"
       },
       "RepoJSON": {
@@ -1844,6 +2999,54 @@
             ]
           }
         },
+        "type": "object"
+      },
+      "ToolCall": {
+        "properties": {
+          "id": {
+            "description": "The tool call's id, which the tool message answering it carries as tool_call_id.",
+            "type": "string"
+          },
+          "input": {
+            "additionalProperties": {},
+            "description": "The input the tool is called with.",
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "name": {
+            "description": "The name of the tool called.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "input"
+        ],
+        "type": "object"
+      },
+      "TranscriptResponse": {
+        "properties": {
+          "items": {
+            "description": "The page's messages, oldest first.",
+            "items": {
+              "$ref": "#/components/schemas/MessageDTO"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "next_page_token": {
+            "description": "The token that reads the messages before this page, as page_token, absent when the page reaches the start of the transcript or since_id was given.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "items"
+        ],
         "type": "object"
       },
       "UsageCategoryBucket": {
@@ -2870,6 +4073,663 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/agent/conversations/list": {
+      "post": {
+        "description": "Returns one page of the conversations the caller can see, narrowed by the body's filters and grouped by task id in runs, with each task's newest first. page_size allows up to 500, and total_count counts conversations, not tasks. With include_messages, messages carries the transcript of each task's newest conversation on the page.",
+        "operationId": "list_conversations",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConversationListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationListResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List conversations",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/agent/conversations/{conversationID}": {
+      "get": {
+        "description": "Returns one conversation the caller can see: its status, spend, blueprint step, the deliverables waiting on a person, whether a message sent now would continue it, the settings such a message would run on, and whether the caller may act on it.",
+        "operationId": "get_conversation",
+        "parameters": [
+          {
+            "description": "The conversation's id.",
+            "in": "path",
+            "name": "conversationID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get a conversation",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/agent/conversations/{conversationID}/actions/list": {
+      "post": {
+        "description": "Returns one page of the actions the conversation recorded on outside systems, newest first, including refused and failed writes and writes that produced no object, narrowed by the body's filters.",
+        "operationId": "list_conversation_actions",
+        "parameters": [
+          {
+            "description": "The conversation's id.",
+            "in": "path",
+            "name": "conversationID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConversationActionListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "items": {
+                      "description": "The rows of this page, as an empty array when it has none.",
+                      "items": {
+                        "$ref": "#/components/schemas/ActionJSON"
+                      },
+                      "type": "array"
+                    },
+                    "next_page_token": {
+                      "description": "The page_token that reads the next page, absent on the last page.",
+                      "type": "string"
+                    },
+                    "total_count": {
+                      "description": "How many rows match the request's filters across every page, or null for a list whose upstream cannot count them.",
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "total_count"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List a conversation's actions",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/agent/conversations/{conversationID}/artifacts/list": {
+      "post": {
+        "description": "Returns one page of the objects in outside systems the conversation changed, one item per object however many actions it took on it, ordered by the latest of those actions first. Each item names the conversation's deliverable that is the same object.",
+        "operationId": "list_conversation_artifacts",
+        "parameters": [
+          {
+            "description": "The conversation's id.",
+            "in": "path",
+            "name": "conversationID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConversationArtifactListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "items": {
+                      "description": "The rows of this page, as an empty array when it has none.",
+                      "items": {
+                        "$ref": "#/components/schemas/ArtifactJSON"
+                      },
+                      "type": "array"
+                    },
+                    "next_page_token": {
+                      "description": "The page_token that reads the next page, absent on the last page.",
+                      "type": "string"
+                    },
+                    "total_count": {
+                      "description": "How many rows match the request's filters across every page, or null for a list whose upstream cannot count them.",
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "total_count"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List a conversation's artifacts",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/agent/conversations/{conversationID}/deliverables/list": {
+      "post": {
+        "description": "Returns one page of the pull requests and reviews the conversation prepared, newest first, each saying whether the caller may act on it.",
+        "operationId": "list_conversation_deliverables",
+        "parameters": [
+          {
+            "description": "The conversation's id.",
+            "in": "path",
+            "name": "conversationID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConversationDeliverableListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "items": {
+                      "description": "The rows of this page, as an empty array when it has none.",
+                      "items": {
+                        "$ref": "#/components/schemas/JSON"
+                      },
+                      "type": "array"
+                    },
+                    "next_page_token": {
+                      "description": "The page_token that reads the next page, absent on the last page.",
+                      "type": "string"
+                    },
+                    "total_count": {
+                      "description": "How many rows match the request's filters across every page, or null for a list whose upstream cannot count them.",
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "total_count"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List a conversation's deliverables",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/agent/conversations/{conversationID}/deliverables/refresh": {
+      "post": {
+        "description": "Reads each of the conversation's draft and open pull requests from GitHub, stores the state GitHub reports, and returns how many changed state.",
+        "operationId": "refresh_conversation_deliverables",
+        "parameters": [
+          {
+            "description": "The conversation's id.",
+            "in": "path",
+            "name": "conversationID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeliverableRefreshResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Refresh a conversation's deliverables",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/agent/conversations/{conversationID}/message": {
+      "post": {
+        "description": "Sends a person's message to the conversation's agent, which takes it in its current turn when it is running or starts working on it again when it is parked, and returns the conversation. A conversation that can take no message is refused with nothing recorded.",
+        "operationId": "message_conversation",
+        "parameters": [
+          {
+            "description": "The conversation's id.",
+            "in": "path",
+            "name": "conversationID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConversationMessageRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Send a message to a conversation",
+        "x-hints": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/agent/conversations/{conversationID}/messages": {
+      "get": {
+        "description": "Returns up to 500 messages of the conversation's transcript, oldest first: the newest ones, the ones after since_id, or the ones before page_token. The response carries no total_count.",
+        "operationId": "list_conversation_messages",
+        "parameters": [
+          {
+            "description": "The conversation's id.",
+            "in": "path",
+            "name": "conversationID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The id of the newest message the caller already holds, to read only the messages after it; absent or 0 reads the newest messages.",
+            "in": "query",
+            "name": "since_id",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "The next_page_token of an earlier response, a message id, to read the messages before it; it cannot be combined with since_id.",
+            "in": "query",
+            "name": "page_token",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TranscriptResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List a conversation's messages",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/agent/conversations/{conversationID}/permissions": {
+      "get": {
+        "description": "Returns every permission prompt the conversation's agent is waiting on a person to answer, as an array with no paging, each with the time it has left.",
+        "operationId": "list_conversation_permissions",
+        "parameters": [
+          {
+            "description": "The conversation's id.",
+            "in": "path",
+            "name": "conversationID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/PendingPermissionDTO"
+                  },
+                  "type": [
+                    "array",
+                    "null"
+                  ]
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List a conversation's pending permission prompts",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/agent/conversations/{conversationID}/permissions/{toolCallID}": {
+      "post": {
+        "description": "Allows or denies the tool call a pending permission prompt asks about, which lets the conversation's agent go on with its turn. behavior decides which other field applies: message to a deny, updated_input to an allow. A prompt that is no longer pending is not found.",
+        "operationId": "resolve_conversation_permission",
+        "parameters": [
+          {
+            "description": "The conversation's id.",
+            "in": "path",
+            "name": "conversationID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The id of the tool call the prompt asks about, as the pending prompt's tool_call_id gives it.",
+            "in": "path",
+            "name": "toolCallID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentPermissionAnswerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentPermissionResolvedResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Answer a conversation's permission prompt",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/agent/conversations/{conversationID}/stop": {
+      "post": {
+        "description": "Requests that the conversation's agent stop, and returns the conversation with stop_requested_at set. The conversation parks open once its engagement settles the stop, which leaves it resumable, and its blueprint run and task are left as they are. A second request while the first is pending answers the same.",
+        "operationId": "stop_conversation",
+        "parameters": [
+          {
+            "description": "The conversation's id.",
+            "in": "path",
+            "name": "conversationID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Stop a conversation",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
     "/api/avatars/{user_id}": {
       "get": {
         "description": "Returns the avatar image of a person in the caller's organization. The image is fetched from the address the person's sign-in provider gave and cached for a short time.",

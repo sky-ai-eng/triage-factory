@@ -54,6 +54,15 @@ func traceConversation(r *http.Request, conversationID string) {
 	trace.SpanFromContext(r.Context()).SetAttributes(telemetry.ConversationID(conversationID))
 }
 
+var opConversationGet = httpx.NewJSONOp[httpx.NoBody, conversationJSON](httpx.OpSpec{
+	Pattern:     "GET /api/agent/conversations/{conversationID}",
+	ID:          "get_conversation",
+	Summary:     "Get a conversation",
+	Description: "Returns one conversation the caller can see: its status, spend, blueprint step, the deliverables waiting on a person, whether a message sent now would continue it, the settings such a message would run on, and whether the caller may act on it.",
+	PathParams:  map[string]string{"conversationID": "The conversation's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
+
 func (ag *agentHandler) handleAgentStatus(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
@@ -64,19 +73,20 @@ func (ag *agentHandler) handleAgentStatus(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
-	ag.writeConversationResource(w, r, orgID, userID, conversationID)
+	ag.writeConversationResource(w, r, opConversationGet.Write, orgID, userID, conversationID)
 }
 
 // writeConversationResource reads the conversation resource exactly as
 // handleAgentStatus does — the point read plus its display enrichment
 // (artifact counts, the derived approval signal, blueprint step count,
 // resumability, the next message's settings, and the cache's warmth) — and
-// writes it as the response. Shared with handleAgentStop/handleMessage so a
-// mutating verb route answers with the resource it just changed rather than a
-// status stub naming only the field that verb happens to touch.
-func (ag *agentHandler) writeConversationResource(w http.ResponseWriter, r *http.Request, orgID, userID, conversationID string) {
+// writes it as the response through write, the answering route's op. Shared
+// with handleAgentStop/handleMessage so a mutating verb route answers with the
+// resource it just changed rather than a status stub naming only the field
+// that verb happens to touch.
+func (ag *agentHandler) writeConversationResource(w http.ResponseWriter, r *http.Request, write func(http.ResponseWriter, conversationJSON), orgID, userID, conversationID string) {
 	var conv *domain.Conversation
-	var resp map[string]any
+	var resp conversationJSON
 	var newestAssistant *domain.Message
 	if err := ag.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -141,11 +151,12 @@ func (ag *agentHandler) writeConversationResource(w http.ResponseWriter, r *http
 		notFound(w, "conversation")
 		return
 	}
-	addCacheWarmUntil(resp, newestAssistant)
-	addResumability(r.Context(), resp, orgID, conv, ag.spawner())
-	addNextMessageSettings(r.Context(), resp, orgID, conv, ag.spawner())
-	ag.addCanWrite(r.Context(), orgID, userID, []string{conv.ID}, []map[string]any{resp})
-	writeJSON(w, http.StatusOK, resp)
+	addCacheWarmUntil(&resp, newestAssistant)
+	addResumability(r.Context(), &resp, orgID, conv, ag.spawner())
+	addNextMessageSettings(r.Context(), &resp, orgID, conv, ag.spawner())
+	rows := []conversationJSON{resp}
+	ag.addCanWrite(r.Context(), orgID, userID, []string{conv.ID}, rows)
+	write(w, rows[0])
 }
 
 // addCacheWarmUntil puts on the detail read when the provider's prompt
@@ -153,11 +164,11 @@ func (ag *agentHandler) writeConversationResource(w http.ResponseWriter, r *http
 // plus domain.ProviderCacheTTL, in RFC 3339 UTC, for the client to compare
 // with the current time. Warmth is derived, never stored, and the field is
 // absent for a conversation with no assistant turn in its window.
-func addCacheWarmUntil(resp map[string]any, newestAssistant *domain.Message) {
+func addCacheWarmUntil(resp *conversationJSON, newestAssistant *domain.Message) {
 	if newestAssistant == nil {
 		return
 	}
-	resp["cache_warm_until"] = newestAssistant.CreatedAt.Add(domain.ProviderCacheTTL).UTC().Format(time.RFC3339)
+	resp.CacheWarmUntil = newestAssistant.CreatedAt.Add(domain.ProviderCacheTTL).UTC().Format(time.RFC3339)
 }
 
 // addNextMessageSettings puts on the detail read the settings a message that
@@ -168,7 +179,7 @@ func addCacheWarmUntil(resp map[string]any, newestAssistant *domain.Message) {
 // enabled or on a model whose provider the organization has not connected,
 // and the composer then asks for a model; and, best-effort like the read's
 // other enrichment, when a read fails.
-func addNextMessageSettings(ctx context.Context, resp map[string]any, orgID string, conv *domain.Conversation, spawner *delegate.Spawner) {
+func addNextMessageSettings(ctx context.Context, resp *conversationJSON, orgID string, conv *domain.Conversation, spawner *delegate.Spawner) {
 	if spawner == nil || conv == nil {
 		return
 	}
@@ -185,10 +196,8 @@ func addNextMessageSettings(ctx context.Context, resp map[string]any, orgID stri
 	if settings.Model == "" {
 		return
 	}
-	resp["next_message_model"] = settings.Model
-	if settings.Effort != "" {
-		resp["next_message_effort"] = settings.Effort
-	}
+	resp.NextMessageModel = settings.Model
+	resp.NextMessageEffort = settings.Effort
 }
 
 // addCanWrite puts requireWritableConversation's answer on each conversation
@@ -202,7 +211,7 @@ func addNextMessageSettings(ctx context.Context, resp map[string]any, orgID stri
 // enrichment: a failed probe omits the key on every row, which a client reads
 // as unknown rather than as a refusal. It runs outside the read's transaction
 // because the probe opens its own.
-func (ag *agentHandler) addCanWrite(ctx context.Context, orgID, userID string, ids []string, rows []map[string]any) {
+func (ag *agentHandler) addCanWrite(ctx context.Context, orgID, userID string, ids []string, rows []conversationJSON) {
 	if len(ids) == 0 {
 		return
 	}
@@ -212,7 +221,8 @@ func (ag *agentHandler) addCanWrite(ctx context.Context, orgID, userID string, i
 		return
 	}
 	for i, id := range ids {
-		rows[i]["can_write"] = writable[id]
+		canWrite := writable[id]
+		rows[i].CanWrite = &canWrite
 	}
 }
 
@@ -239,7 +249,7 @@ func (ag *agentHandler) addCanWrite(ctx context.Context, orgID, userID string, i
 // Runs outside the tx that read the row: the workspace probe stats the disk and
 // may reach blob storage, and no read should hold a transaction open across
 // that. A spawner that isn't wired (delegation disabled) omits the keys too.
-func addResumability(ctx context.Context, resp map[string]any, orgID string, conv *domain.Conversation, spawner *delegate.Spawner) {
+func addResumability(ctx context.Context, resp *conversationJSON, orgID string, conv *domain.Conversation, spawner *delegate.Spawner) {
 	if spawner == nil || conv == nil {
 		return
 	}
@@ -247,11 +257,18 @@ func addResumability(ctx context.Context, resp map[string]any, orgID string, con
 		return
 	}
 	ok, reason := spawner.ResumabilityFor(ctx, orgID, conv)
-	resp["resumable"] = ok
-	if !ok {
-		resp["resume_blocked_reason"] = reason
-	}
+	resp.Resumable = &ok
+	resp.ResumeBlockedReason = reason
 }
+
+var opConversationDeliverablesRefresh = httpx.NewJSONOp[httpx.NoBody, deliverableRefreshResponse](httpx.OpSpec{
+	Pattern:     "POST /api/agent/conversations/{conversationID}/deliverables/refresh",
+	ID:          "refresh_conversation_deliverables",
+	Summary:     "Refresh a conversation's deliverables",
+	Description: "Reads each of the conversation's draft and open pull requests from GitHub, stores the state GitHub reports, and returns how many changed state.",
+	PathParams:  map[string]string{"conversationID": "The conversation's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // handleDeliverableRefresh is the Tier-2, conversation-scoped half of deliverable
 // reconciliation (TFAC-464): the conversation view polls it (~5s while open) to pull a
@@ -318,7 +335,13 @@ func (ag *agentHandler) handleDeliverableRefresh(w http.ResponseWriter, r *http.
 		internalError(w, "agent", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"updated": len(updated)})
+	opConversationDeliverablesRefresh.Write(w, deliverableRefreshResponse{Updated: len(updated)})
+}
+
+// deliverableRefreshResponse is the body of POST
+// /api/agent/conversations/{conversationID}/deliverables/refresh.
+type deliverableRefreshResponse struct {
+	Updated int `json:"updated" doc:"How many of the conversation's pull requests changed state."`
 }
 
 // conversationDeliverableListRequest is the body of POST
@@ -328,6 +351,15 @@ func (ag *agentHandler) handleDeliverableRefresh(w http.ResponseWriter, r *http.
 type conversationDeliverableListRequest struct {
 	httpx.PageRequest
 }
+
+var opConversationDeliverables = httpx.NewListOp[conversationDeliverableListRequest, deliverables.JSON](httpx.OpSpec{
+	Pattern:     "POST /api/agent/conversations/{conversationID}/deliverables/list",
+	ID:          "list_conversation_deliverables",
+	Summary:     "List a conversation's deliverables",
+	Description: "Returns one page of the pull requests and reviews the conversation prepared, newest first, each saying whether the caller may act on it.",
+	PathParams:  map[string]string{"conversationID": "The conversation's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleAgentDeliverables returns the deliverables a conversation prepared — its
 // pull requests and reviews — newest first, one page at a time. It reads the
@@ -348,8 +380,8 @@ func (ag *agentHandler) handleAgentDeliverables(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	var req conversationDeliverableListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opConversationDeliverables.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -389,7 +421,7 @@ func (ag *agentHandler) handleAgentDeliverables(w http.ResponseWriter, r *http.R
 		out[i] = deliverables.ToJSON(a)
 	}
 	deliverables.AddCanWrite(r.Context(), ag.az, orgID, userID, arts, out)
-	httpx.WriteList(w, page, out, total)
+	opConversationDeliverables.Write(w, page, out, total)
 }
 
 // conversationActionListRequest is the body of POST
@@ -401,11 +433,20 @@ func (ag *agentHandler) handleAgentDeliverables(w http.ResponseWriter, r *http.R
 // itself rather than an embedded struct, so a type fault names them as the
 // caller spelled them.
 type conversationActionListRequest struct {
-	ObjectID string `json:"object_id"`
-	Refused  bool   `json:"refused"`
+	ObjectID string `json:"object_id" doc:"The object_id of one of the conversation's artifacts, to return only the actions that changed that object; absent or empty applies no object filter."`
+	Refused  bool   `json:"refused" doc:"Whether to return only the actions that were refused or failed."`
 
 	httpx.PageRequest
 }
+
+var opConversationActions = httpx.NewListOp[conversationActionListRequest, usage.ActionJSON](httpx.OpSpec{
+	Pattern:     "POST /api/agent/conversations/{conversationID}/actions/list",
+	ID:          "list_conversation_actions",
+	Summary:     "List a conversation's actions",
+	Description: "Returns one page of the actions the conversation recorded on outside systems, newest first, including refused and failed writes and writes that produced no object, narrowed by the body's filters.",
+	PathParams:  map[string]string{"conversationID": "The conversation's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // conversationActionFilters is the canonical filter set the page token is
 // fingerprinted over, and what the store reads.
@@ -446,8 +487,8 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	var req conversationActionListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opConversationActions.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -497,7 +538,7 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 	for i, a := range actions {
 		out[i] = usage.ToActionJSON(a)
 	}
-	httpx.WriteList(w, page, out, total)
+	opConversationActions.Write(w, page, out, total)
 }
 
 // artifactJSON is the wire shape of one item of POST
@@ -507,19 +548,19 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 // (domain.ArtifactDeliverable), or null. Name is the object's name within
 // its repository (domain.Artifact.Name), "" for a kind Target already names.
 type artifactJSON struct {
-	ObjectID    domain.ObjectRef               `json:"object_id"`
-	ObjectKind  string                         `json:"object_kind"`
-	Provider    string                         `json:"provider"`
-	Scope       string                         `json:"scope"`
-	Target      string                         `json:"target"`
-	Name        string                         `json:"name"`
-	URL         string                         `json:"url"`
-	EntityID    string                         `json:"entity_id,omitempty"`
-	LastAction  string                         `json:"last_action"`
-	ActionCount int                            `json:"action_count"`
-	FirstAt     time.Time                      `json:"first_at"`
-	LastAt      time.Time                      `json:"last_at"`
-	Deliverable *usage.ArtifactDeliverableJSON `json:"deliverable"`
+	ObjectID    domain.ObjectRef               `json:"object_id" doc:"The object's id, which the conversation's actions list takes as object_id."`
+	ObjectKind  string                         `json:"object_kind" doc:"The kind of object: pull_request, issue, repository, branch, label, release, workflow, workflow_run, review, comment, or message."`
+	Provider    string                         `json:"provider" doc:"The outside system the object is in, such as github, jira, linear, or slack."`
+	Scope       string                         `json:"scope" doc:"Where in that system the object is: the GitHub host, the Jira site, the Linear workspace id, or slack.com."`
+	Target      string                         `json:"target" doc:"The key of the object, or of the entity it is on, such as owner/repo#42 or PROJ-123, kept current through renames."`
+	Name        string                         `json:"name" doc:"The object's name within its repository for a branch, label, release, workflow, or workflow run, and empty for every other kind."`
+	URL         string                         `json:"url" doc:"The object's page in its system, empty when no action recorded one."`
+	EntityID    string                         `json:"entity_id,omitempty" doc:"The id of the entity the object is or is on, absent when it is on none."`
+	LastAction  string                         `json:"last_action" doc:"The newest action the conversation took on the object, such as pr_created or branch_pushed."`
+	ActionCount int                            `json:"action_count" doc:"How many actions the conversation took on the object."`
+	FirstAt     time.Time                      `json:"first_at" doc:"When the conversation first acted on the object, as an RFC 3339 timestamp."`
+	LastAt      time.Time                      `json:"last_at" doc:"When the conversation last acted on the object, as an RFC 3339 timestamp."`
+	Deliverable *usage.ArtifactDeliverableJSON `json:"deliverable" doc:"The conversation's deliverable that is this object, or null when none is."`
 }
 
 func toArtifactJSON(a domain.Artifact, deliverables []domain.Deliverable) artifactJSON {
@@ -551,6 +592,15 @@ type conversationArtifactListRequest struct {
 	httpx.PageRequest
 }
 
+var opConversationArtifacts = httpx.NewListOp[conversationArtifactListRequest, artifactJSON](httpx.OpSpec{
+	Pattern:     "POST /api/agent/conversations/{conversationID}/artifacts/list",
+	ID:          "list_conversation_artifacts",
+	Summary:     "List a conversation's artifacts",
+	Description: "Returns one page of the objects in outside systems the conversation changed, one item per object however many actions it took on it, ordered by the latest of those actions first. Each item names the conversation's deliverable that is the same object.",
+	PathParams:  map[string]string{"conversationID": "The conversation's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
+
 // handleAgentArtifacts returns the objects this conversation changed,
 // one item per object however many actions it took on it, by the latest of
 // those actions first. Each item names the conversation's deliverable that is
@@ -570,8 +620,8 @@ func (ag *agentHandler) handleAgentArtifacts(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	var req conversationArtifactListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opConversationArtifacts.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -615,7 +665,76 @@ func (ag *agentHandler) handleAgentArtifacts(w http.ResponseWriter, r *http.Requ
 	for i, a := range artifacts {
 		out[i] = toArtifactJSON(a, deliverables)
 	}
-	httpx.WriteList(w, page, out, total)
+	opConversationArtifacts.Write(w, page, out, total)
+}
+
+// conversationJSON is the conversation resource: the body GET, stop, and
+// message answer with, and one row of the conversation list. Keys that only
+// some reads compute, or that a read leaves out when its answer is not
+// definitive, are omitted rather than zeroed, and a client reads their absence
+// as "not known" (see conversationResponse and the add* helpers). A
+// conditional value whose zero is itself an answer is a pointer, so omitempty
+// drops only the unset key.
+type conversationJSON struct {
+	ID                  string         `json:"id" doc:"The conversation's id."`
+	TaskID              string         `json:"task_id" doc:"The id of the task the conversation works on."`
+	PromptID            string         `json:"prompt_id" doc:"The id of the prompt the conversation was started with, empty when it was started with none."`
+	Status              string         `json:"status" doc:"The conversation's displayed status: queued, running, open, or failed, or, while an engagement is setting up, its phase: fetching, cloning, agent_starting, or awaiting_credentials."`
+	Model               string         `json:"model" doc:"The model the conversation runs on, empty before one is chosen."`
+	StartedAt           time.Time      `json:"started_at" doc:"When the conversation was created, as an RFC 3339 timestamp."`
+	QueuedAt            *time.Time     `json:"queued_at" doc:"When the conversation last entered the queue, as an RFC 3339 timestamp, or null when it never has."`
+	ClaimedAt           *time.Time     `json:"claimed_at" doc:"When work on the conversation last started, as an RFC 3339 timestamp, or null when it never has."`
+	CompletedAt         *time.Time     `json:"completed_at" doc:"When the conversation's last engagement finished, as an RFC 3339 timestamp, or null when none has."`
+	TotalCostUSD        *float64       `json:"total_cost_usd" doc:"What the conversation's model calls have cost, in USD, or null before any cost is recorded."`
+	DurationMs          *int           `json:"duration_ms" doc:"How long the conversation's engagements have spent working, in milliseconds, or null before any time is recorded."`
+	NumTurns            *int           `json:"num_turns" doc:"How many turns the conversation's engagements have run, or null before any are recorded."`
+	ParkReason          string         `json:"park_reason" doc:"Why the conversation was parked open, such as user_cancelled, stalled, or launch_failed, empty when it is not parked or has resumed since."`
+	WorktreePath        string         `json:"worktree_path" doc:"The path of the conversation's run directory on the host that ran it, empty before it has one."`
+	ResultSummary       string         `json:"result_summary" doc:"The agent's account of what it did, empty until it gives one."`
+	Outcome             string         `json:"outcome" doc:"The verdict the agent reported when it stopped: continue, finish, or abort, empty when it reported none."`
+	OutcomeReason       string         `json:"outcome_reason" doc:"Why the agent stopped and what a person needs to do, empty when it gave no reason."`
+	FailureKind         string         `json:"failure_kind" doc:"What made a failed conversation fail, such as memory_limit, crash, or executor_lost, empty when it has not failed or the failure was not classified."`
+	SessionID           string         `json:"session_id" doc:"The Claude Code session id a conversation on the sdk runtime resumes with, empty when it has none."`
+	MemoryMissing       bool           `json:"memory_missing" doc:"Whether the agent has not written its own memory of the conversation."`
+	HasRun              bool           `json:"has_run" doc:"Whether the conversation holds an assistant turn."`
+	Type                string         `json:"type" doc:"What the conversation is for: delegation for agent work, or interactive for the conversation a person's claim of the task started."`
+	Runtime             string         `json:"runtime" doc:"The engine that runs the conversation: sdk or native."`
+	TriggerType         string         `json:"trigger_type" doc:"How the conversation was started: manual or event."`
+	TriggerID           string         `json:"trigger_id" doc:"The id of the event handler whose firing started the conversation, empty for a manual one."`
+	ActorAgentID        string         `json:"actor_agent_id" doc:"The id of the agent the conversation runs as, empty when none is recorded."`
+	ActorAgentName      string         `json:"actor_agent_name" doc:"The display name of that agent, empty when actor_agent_id is empty or the agent was deleted."`
+	BlueprintRunID      string         `json:"blueprint_run_id" doc:"The id of the blueprint run the conversation is a step of, empty when it is not a step."`
+	BlueprintStepIndex  *int           `json:"blueprint_step_index" doc:"The conversation's step in its blueprint run, counted from 0, or null when it is not a step."`
+	BlueprintStepCount  int            `json:"blueprint_step_count" doc:"How many steps the conversation's blueprint run has, 0 when it is not a step or the run could not be read."`
+	BlueprintRunStatus  string         `json:"blueprint_run_status" doc:"The status of the conversation's blueprint run: running, completed, aborted, failed, or cancelled, empty when it is not a step or the run could not be read."`
+	ArtifactCount       int            `json:"artifact_count" doc:"How many objects in outside systems the conversation changed."`
+	ArtifactCounts      map[string]int `json:"artifact_counts" doc:"How many objects the conversation changed, keyed by object kind, such as pull_request or branch, and an empty object when it changed none."`
+	ActionCount         int            `json:"action_count" doc:"How many actions on outside systems the conversation recorded, refused and failed ones included."`
+	InputTokens         int            `json:"input_tokens" doc:"How many input tokens the conversation's model calls used."`
+	OutputTokens        int            `json:"output_tokens" doc:"How many output tokens the conversation's model calls produced."`
+	CacheReadTokens     int            `json:"cache_read_tokens" doc:"How many input tokens the conversation's model calls read from the provider's prompt cache."`
+	CacheCreationTokens int            `json:"cache_creation_tokens" doc:"How many input tokens the conversation's model calls wrote to the provider's prompt cache."`
+
+	CurrentAction       string     `json:"current_action,omitempty" doc:"A sentence saying what a running conversation is doing, present only on the conversation list and only when there is something to say."`
+	QueuePosition       *int       `json:"queue_position,omitempty" doc:"The conversation's place in its organization's queue, counted from 1, present only on the conversation list and only while it waits in line."`
+	EndedAt             *time.Time `json:"ended_at,omitempty" doc:"When the conversation stopped being its task's current conversation, as an RFC 3339 timestamp, absent while it still is."`
+	EndedReason         string     `json:"ended_reason,omitempty" doc:"Why the conversation stopped being its task's current conversation, such as requeued, delegated, or taken_over, present exactly when ended_at is."`
+	StopRequestedAt     *time.Time `json:"stop_requested_at,omitempty" doc:"When a stop that has not taken effect yet was requested, as an RFC 3339 timestamp, absent when no stop is pending."`
+	NextAttemptAt       *time.Time `json:"next_attempt_at,omitempty" doc:"The earliest time the conversation is picked up again after its model provider was unavailable, as an RFC 3339 timestamp, absent when nothing is holding it back."`
+	ClaimLastActivityAt *time.Time `json:"claim_last_activity_at,omitempty" doc:"When the engagement running the conversation last reported activity, as an RFC 3339 timestamp, absent when no engagement holds the conversation or it has not reported yet."`
+	ClaimCurrentOp      string     `json:"claim_current_op,omitempty" doc:"The operation that engagement had in flight at its last report, absent when no engagement holds the conversation or it has not reported yet."`
+
+	HasUnresolvedDeliverables *bool    `json:"has_unresolved_deliverables,omitempty" doc:"Whether a draft pull request or a ready review the conversation prepared still waits on a person, absent when the conversation's deliverables could not be read."`
+	UnresolvedPRCount         *int     `json:"unresolved_pr_count,omitempty" doc:"How many draft pull requests the conversation prepared still wait on a person, absent when the conversation's deliverables could not be read."`
+	UnresolvedReviewCount     *int     `json:"unresolved_review_count,omitempty" doc:"How many ready reviews the conversation prepared still wait on a person, absent when the conversation's deliverables could not be read."`
+	PendingDeliverableIDs     []string `json:"pending_deliverable_ids,omitzero" doc:"The ids of the draft pull requests and ready reviews that still wait on a person, an empty array when none do, and absent when the conversation's deliverables could not be read."`
+
+	CacheWarmUntil      string `json:"cache_warm_until,omitempty" doc:"When the model provider's prompt cache from the newest assistant turn expires, as an RFC 3339 timestamp, absent from the conversation list and when the conversation has no assistant turn."`
+	Resumable           *bool  `json:"resumable,omitempty" doc:"Whether a message sent now would continue the conversation, absent from the conversation list and for a conversation that is active or failed."`
+	ResumeBlockedReason string `json:"resume_blocked_reason,omitempty" doc:"Why a message sent now would not continue the conversation, such as workspace_expired or blueprint_concluded, present exactly when resumable is false."`
+	NextMessageModel    string `json:"next_message_model,omitempty" doc:"The model a message that names none would run on, absent from the conversation list and when such a message would be refused."`
+	NextMessageEffort   string `json:"next_message_effort,omitempty" doc:"The reasoning effort a message that names none would run at, present with next_message_model unless it is the provider's default."`
+	CanWrite            *bool  `json:"can_write,omitempty" doc:"Whether the caller may stop the conversation, message it, and answer its permission prompts, absent when the check fails."`
 }
 
 // conversationResponse projects a Conversation into the wire shape the frontend consumes,
@@ -677,83 +796,96 @@ func (ag *agentHandler) handleAgentArtifacts(w http.ResponseWriter, r *http.Requ
 // purpose: that route's client is the run station, whose live transcript
 // already shows the call this line would summarize, and buying it there would
 // add a query to a polled route for a field it does not render.
-func conversationResponse(conv *domain.Conversation, deliverableCount int, arts []domain.Deliverable, artifactCounts map[string]int, actionCount int, progress db.RunProgress, currentAction string) map[string]any {
-	out := map[string]any{
-		"id":             conv.ID,
-		"task_id":        conv.TaskID,
-		"prompt_id":      conv.PromptID,
-		"status":         conv.Status,
-		"model":          conv.Model,
-		"started_at":     conv.StartedAt,
-		"queued_at":      conv.QueuedAt,
-		"claimed_at":     conv.ClaimedAt,
-		"completed_at":   conv.CompletedAt,
-		"total_cost_usd": conv.TotalCostUSD,
-		"duration_ms":    conv.DurationMs,
-		"num_turns":      conv.NumTurns,
-		"park_reason":    string(conv.ParkReason),
-		"worktree_path":  conv.WorktreePath,
-		"result_summary": conv.ResultSummary,
+func conversationResponse(conv *domain.Conversation, deliverableCount int, arts []domain.Deliverable, artifactCounts map[string]int, actionCount int, progress db.RunProgress, currentAction string) conversationJSON {
+	out := conversationJSON{
+		ID:            conv.ID,
+		TaskID:        conv.TaskID,
+		PromptID:      conv.PromptID,
+		Status:        conv.Status,
+		Model:         conv.Model,
+		StartedAt:     conv.StartedAt,
+		QueuedAt:      conv.QueuedAt,
+		ClaimedAt:     conv.ClaimedAt,
+		CompletedAt:   conv.CompletedAt,
+		TotalCostUSD:  conv.TotalCostUSD,
+		DurationMs:    conv.DurationMs,
+		NumTurns:      conv.NumTurns,
+		ParkReason:    string(conv.ParkReason),
+		WorktreePath:  conv.WorktreePath,
+		ResultSummary: conv.ResultSummary,
 		// The terminal envelope's parsed outcome and its abort note; empty
 		// string when the conversation holds none (still executing, an infra
 		// failure, or an outcome gate that exhausted its retries).
-		"outcome":        conv.Outcome,
-		"outcome_reason": conv.OutcomeReason,
-		"failure_kind":   string(conv.FailureKind),
-		"session_id":     conv.SessionID,
-		"memory_missing": conv.MemoryMissing,
+		Outcome:       conv.Outcome,
+		OutcomeReason: conv.OutcomeReason,
+		FailureKind:   string(conv.FailureKind),
+		SessionID:     conv.SessionID,
+		MemoryMissing: conv.MemoryMissing,
 		// Whether the conversation holds an assistant message. A conversation a
 		// person's claim minted reads false until its first turn.
-		"has_run": conv.HasRun,
-		"type":    conv.Type,
+		HasRun: conv.HasRun,
+		Type:   conv.Type,
 		// The engine driving the transcript: a composer says when a settings
 		// change takes effect, which differs between the two.
-		"runtime":              conv.Runtime,
-		"trigger_type":         conv.TriggerType,
-		"trigger_id":           conv.TriggerID,
-		"actor_agent_id":       conv.ActorAgentID,
-		"actor_agent_name":     conv.ActorAgentName,
-		"blueprint_run_id":     conv.BlueprintRunID,
-		"blueprint_step_index": conv.BlueprintStepIndex,
-		"blueprint_step_count": progress.StepCount,
-		"blueprint_run_status": string(progress.Status),
+		Runtime:            conv.Runtime,
+		TriggerType:        conv.TriggerType,
+		TriggerID:          conv.TriggerID,
+		ActorAgentID:       conv.ActorAgentID,
+		ActorAgentName:     conv.ActorAgentName,
+		BlueprintRunID:     conv.BlueprintRunID,
+		BlueprintStepIndex: conv.BlueprintStepIndex,
+		BlueprintStepCount: progress.StepCount,
+		BlueprintRunStatus: string(progress.Status),
 		// The objects the conversation changed, in all and by object
 		// kind, read from the ledger. {} for a conversation that changed
 		// nothing.
-		"artifact_count":  artifactTotal(artifactCounts),
-		"artifact_counts": artifactCountsOrEmpty(artifactCounts),
+		ArtifactCount:  artifactTotal(artifactCounts),
+		ArtifactCounts: artifactCountsOrEmpty(artifactCounts),
 		// How many acts on an outside system the conversation recorded, a
 		// refused one included: its ledger rows, whoever performed them. A
 		// run acting again on an object it already changed moves this and
 		// not the artifact counts, so it is what a view of the
 		// conversation's actions refetches on.
-		"action_count": actionCount,
+		ActionCount: actionCount,
 		// The token rollups the conversation read already SUMs, alongside the
 		// cost / duration / turns ones above. Plain ints — 0 for a
 		// conversation that never streamed a usage-bearing message — so a
 		// consumer never has to distinguish absent from none.
-		"input_tokens":          conv.InputTokens,
-		"output_tokens":         conv.OutputTokens,
-		"cache_read_tokens":     conv.CacheReadTokens,
-		"cache_creation_tokens": conv.CacheCreationTokens,
-	}
-	// What a WORKING conversation is doing right now, in place of the title it
-	// does not have. Composed by the caller, and emitted only when it had
-	// something honest to say — an absent key means the client renders the
-	// state label, never a fabricated action.
-	if currentAction != "" {
-		out["current_action"] = currentAction
-	}
-	// The queued run's place in its own org's line, emitted only when the
-	// conversation actually has one — a running, open or terminal
-	// conversation carries no key at all, never a 0 or a null, so a client
-	// renders the mark on presence rather than on a sentinel. Org-local by
-	// contract: it carries no fleet occupancy, no executor identity, no
-	// placement tier and no cross-org term, and must not grow one. See
-	// domain.Conversation.QueuePosition for why a deployment-truthful
-	// position would be a cross-tenant disclosure.
-	if conv.QueuePosition != nil {
-		out["queue_position"] = *conv.QueuePosition
+		InputTokens:         conv.InputTokens,
+		OutputTokens:        conv.OutputTokens,
+		CacheReadTokens:     conv.CacheReadTokens,
+		CacheCreationTokens: conv.CacheCreationTokens,
+		// What a WORKING conversation is doing right now, in place of the
+		// title it does not have. Composed by the caller, and emitted only
+		// when it had something honest to say — an absent key means the
+		// client renders the state label, never a fabricated action.
+		CurrentAction: currentAction,
+		// The queued run's place in its own org's line, emitted only when the
+		// conversation actually has one — a running, open or terminal
+		// conversation carries no key at all, never a 0 or a null, so a
+		// client renders the mark on presence rather than on a sentinel.
+		// Org-local by contract: it carries no fleet occupancy, no executor
+		// identity, no placement tier and no cross-org term, and must not
+		// grow one. See domain.Conversation.QueuePosition for why a
+		// deployment-truthful position would be a cross-tenant disclosure.
+		QueuePosition: conv.QueuePosition,
+		// A pending stop: asked for, not yet settled. Absent rather than null
+		// once settled or never asked, read off presence like ended_at. Who
+		// asked stays off the wire; the park_reason the settlement records
+		// says it.
+		StopRequestedAt: conv.StopRequestedAt,
+		// The wait a hand-back set: the earliest the conversation is claimed
+		// again, after its model provider was unavailable. It still reads
+		// `queued`, with no queue_position, because it waits for a time
+		// rather than for the conversations ahead of it. Absent when nothing
+		// is holding it, read off presence like the keys above.
+		NextAttemptAt: conv.NextAttemptAt,
+		// The live claim's activity as its last renewal stamped it: when the
+		// engagement last did anything its stall watchdog counts, and what it
+		// had in flight. Absent with no live claim or before the first
+		// renewal, read off presence like the keys above.
+		ClaimLastActivityAt: conv.ClaimLastActivityAt,
+		ClaimCurrentOp:      conv.ClaimCurrentOp,
 	}
 	// The boundary: when this conversation stopped being its task's live one,
 	// and why. Both keys are absent — not null, not "" — while it is open, so
@@ -761,43 +893,20 @@ func conversationResponse(conv *domain.Conversation, deliverableCount int, arts 
 	// way it reads queue_position. They travel together by construction: the
 	// stamp writes both columns or neither.
 	if conv.EndedAt != nil {
-		out["ended_at"] = *conv.EndedAt
-		out["ended_reason"] = string(conv.EndedReason)
-	}
-	// A pending stop: asked for, not yet settled. Absent rather than null
-	// once settled or never asked, read off presence like ended_at. Who asked
-	// stays off the wire; the park_reason the settlement records says it.
-	if conv.StopRequestedAt != nil {
-		out["stop_requested_at"] = *conv.StopRequestedAt
-	}
-	// The wait a hand-back set: the earliest the conversation is claimed
-	// again, after its model provider was unavailable. It still reads
-	// `queued`, with no queue_position, because it waits for a time rather
-	// than for the conversations ahead of it. Absent when nothing is holding
-	// it, read off presence like the keys above.
-	if conv.NextAttemptAt != nil {
-		out["next_attempt_at"] = *conv.NextAttemptAt
-	}
-	// The live claim's activity as its last renewal stamped it: when the
-	// engagement last did anything its stall watchdog counts, and what it had
-	// in flight. Absent with no live claim or before the first renewal, read
-	// off presence like the keys above.
-	if conv.ClaimLastActivityAt != nil {
-		out["claim_last_activity_at"] = *conv.ClaimLastActivityAt
-	}
-	if conv.ClaimCurrentOp != "" {
-		out["claim_current_op"] = conv.ClaimCurrentOp
+		out.EndedAt = conv.EndedAt
+		out.EndedReason = string(conv.EndedReason)
 	}
 	if deliverableCount == 0 || len(arts) > 0 {
 		prCount, reviewCount := domain.UnresolvedDeliverableCounts(arts)
-		out["has_unresolved_deliverables"] = prCount > 0 || reviewCount > 0
-		out["unresolved_pr_count"] = prCount
-		out["unresolved_review_count"] = reviewCount
+		hasUnresolved := prCount > 0 || reviewCount > 0
+		out.HasUnresolvedDeliverables = &hasUnresolved
+		out.UnresolvedPRCount = &prCount
+		out.UnresolvedReviewCount = &reviewCount
 		// The set of unresolved approvable deliverable ids (all draft PRs + all ready
 		// reviews) — what the approval UI lists for per-item resolve. Emitted under
 		// the same definitive-only guard as the counts above, and always non-nil so
 		// the field is [] rather than null when nothing is unresolved.
-		out["pending_deliverable_ids"] = domain.UnresolvedDeliverableIDs(arts)
+		out.PendingDeliverableIDs = domain.UnresolvedDeliverableIDs(arts)
 	}
 	return out
 }
@@ -849,9 +958,22 @@ const transcriptPageSize = 500
 // A response never carries a total: counting a stream that is still being
 // appended to would be a number that is wrong by the time it renders.
 type transcriptResponse struct {
-	Items         []domain.MessageDTO `json:"items"`
-	NextPageToken string              `json:"next_page_token,omitempty"`
+	Items         []domain.MessageDTO `json:"items" doc:"The page's messages, oldest first."`
+	NextPageToken string              `json:"next_page_token,omitempty" doc:"The token that reads the messages before this page, as page_token, absent when the page reaches the start of the transcript or since_id was given."`
 }
+
+var opConversationMessages = httpx.NewJSONOp[httpx.NoBody, transcriptResponse](httpx.OpSpec{
+	Pattern:     "GET /api/agent/conversations/{conversationID}/messages",
+	ID:          "list_conversation_messages",
+	Summary:     "List a conversation's messages",
+	Description: "Returns up to 500 messages of the conversation's transcript, oldest first: the newest ones, the ones after since_id, or the ones before page_token. The response carries no total_count.",
+	PathParams:  map[string]string{"conversationID": "The conversation's id."},
+	Query: []httpx.QueryParam{
+		{Name: "since_id", Type: httpx.ParamInteger, Doc: "The id of the newest message the caller already holds, to read only the messages after it; absent or 0 reads the newest messages."},
+		{Name: "page_token", Type: httpx.ParamString, Doc: "The next_page_token of an earlier response, a message id, to read the messages before it; it cannot be combined with since_id."},
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 func (ag *agentHandler) handleMessages(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
@@ -860,6 +982,10 @@ func (ag *agentHandler) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	conversationID, ok := conversationIDOr404(w, r)
+	if !ok {
+		return
+	}
+	query, ok := opConversationMessages.Query(w, r)
 	if !ok {
 		return
 	}
@@ -876,10 +1002,10 @@ func (ag *agentHandler) handleMessages(w http.ResponseWriter, r *http.Request) {
 	// contract. Surrounding whitespace is trimmed first (the convention for
 	// query params here).
 	var v httpx.Validation
-	sinceID := nonNegativeIntParam(&v, r, "since_id")
+	sinceID := nonNegativeIntParam(&v, query, "since_id")
 	// page_token addresses older history. It is the opaque token the previous
 	// response minted; a client never constructs one.
-	beforeID := nonNegativeIntParam(&v, r, "page_token")
+	beforeID := nonNegativeIntParam(&v, query, "page_token")
 	if sinceID > 0 && beforeID > 0 {
 		v.Param("page_token", "page_token walks history backward and since_id follows the tail; send one, not both")
 	}
@@ -921,14 +1047,14 @@ func (ag *agentHandler) handleMessages(w http.ResponseWriter, r *http.Request) {
 	if sinceID == 0 && len(messages) == transcriptPageSize {
 		resp.NextPageToken = strconv.Itoa(messages[0].ID)
 	}
-	writeJSON(w, http.StatusOK, resp)
+	opConversationMessages.Write(w, resp)
 }
 
 // nonNegativeIntParam reads an optional non-negative integer query param,
 // recording a fault on v rather than falling back to the default — a corrupt
 // paging param must never widen the read it bounds. Absent yields 0.
-func nonNegativeIntParam(v *httpx.Validation, r *http.Request, name string) int {
-	raw := strings.TrimSpace(r.URL.Query().Get(name))
+func nonNegativeIntParam(v *httpx.Validation, query httpx.QueryValues, name string) int {
+	raw := strings.TrimSpace(query.Get(name))
 	if raw == "" {
 		return 0
 	}
@@ -939,6 +1065,15 @@ func nonNegativeIntParam(v *httpx.Validation, r *http.Request, name string) int 
 	}
 	return n
 }
+
+var opConversationStop = httpx.NewJSONOp[httpx.NoBody, conversationJSON](httpx.OpSpec{
+	Pattern:     "POST /api/agent/conversations/{conversationID}/stop",
+	ID:          "stop_conversation",
+	Summary:     "Stop a conversation",
+	Description: "Requests that the conversation's agent stop, and returns the conversation with stop_requested_at set. The conversation parks open once its engagement settles the stop, which leaves it resumable, and its blueprint run and task are left as they are. A second request while the first is pending answers the same.",
+	PathParams:  map[string]string{"conversationID": "The conversation's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleAgentStop is the conversation-level stop verb: the agent stops, the
 // conversation parks `open`, and everything outside it freezes — the blueprint
@@ -995,7 +1130,7 @@ func (ag *agentHandler) handleAgentStop(w http.ResponseWriter, r *http.Request) 
 		internalError(w, "agent", err)
 		return
 	}
-	ag.writeConversationResource(w, r, orgID, userID, conversationID)
+	ag.writeConversationResource(w, r, opConversationStop.Write, orgID, userID, conversationID)
 }
 
 // conversationViewOnlyMessage is the 403 body for a caller who can read a
@@ -1058,6 +1193,23 @@ func (ag *agentHandler) conversationVisible(ctx context.Context, orgID, userID, 
 	return exists, err
 }
 
+// conversationMessageRequest is the body of POST
+// /api/agent/conversations/{conversationID}/message.
+type conversationMessageRequest struct {
+	Text   string  `json:"text" doc:"The message, which must not be blank."`
+	Model  *string `json:"model" doc:"The model the message runs on, one this deployment offers; absent or null runs it on the model the conversation's next_message_model names."`
+	Effort *string `json:"effort" doc:"The reasoning effort the message runs at: low, medium, high, xhigh, or max; absent or null runs it at the effort the conversation's next_message_effort names, or the provider's default when that is absent."`
+}
+
+var opConversationMessage = httpx.NewJSONOp[conversationMessageRequest, conversationJSON](httpx.OpSpec{
+	Pattern:     "POST /api/agent/conversations/{conversationID}/message",
+	ID:          "message_conversation",
+	Summary:     "Send a message to a conversation",
+	Description: "Sends a person's message to the conversation's agent, which takes it in its current turn when it is running or starts working on it again when it is parked, and returns the conversation. A conversation that can take no message is refused with nothing recorded.",
+	PathParams:  map[string]string{"conversationID": "The conversation's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintNo, Idempotent: httpx.HintNo, OpenWorld: httpx.HintYes},
+})
+
 // handleMessage routes a free-form user message to a conversation: a live conversation is
 // steered in place, a parked conversation is woken via resume. requireWritableConversation
 // runs before any control op: 404 for a conversation the caller cannot see, 403 for one
@@ -1090,12 +1242,8 @@ func (ag *agentHandler) handleMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	traceConversation(r, conversationID)
 
-	var body struct {
-		Text   string  `json:"text"`
-		Model  *string `json:"model"`
-		Effort *string `json:"effort"`
-	}
-	if !httpx.DecodeJSONStrict(w, r, &body) {
+	body, ok := opConversationMessage.Decode(w, r)
+	if !ok {
 		return
 	}
 	settings, ok := decodeTurnSettings(w, body.Text, body.Model, body.Effort)
@@ -1137,7 +1285,7 @@ func (ag *agentHandler) handleMessage(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteErrors(w, status, httpx.ErrorItem{Reason: reason, Message: err.Error(), Field: steerErrorField(err)})
 		return
 	}
-	ag.writeConversationResource(w, r, orgID, userID, conversationID)
+	ag.writeConversationResource(w, r, opConversationMessage.Write, orgID, userID, conversationID)
 }
 
 // decodeTurnSettings checks a message body's fields and answers the settings
@@ -1278,12 +1426,8 @@ func (ag *agentHandler) handleAgentPermission(w http.ResponseWriter, r *http.Req
 	traceConversation(r, conversationID)
 	toolCallID := r.PathValue("toolCallID")
 
-	var body struct {
-		Behavior     string         `json:"behavior"`
-		Message      string         `json:"message"`
-		UpdatedInput map[string]any `json:"updated_input"`
-	}
-	if !httpx.DecodeJSONStrict(w, r, &body) {
+	body, ok := opConversationPermissionResolve.Decode(w, r)
+	if !ok {
 		return
 	}
 	if body.Behavior != "allow" && body.Behavior != "deny" {
@@ -1350,7 +1494,7 @@ func (ag *agentHandler) handleAgentPermission(w http.ResponseWriter, r *http.Req
 	// when a row was found (locally, or via the cross-pod fallback read) and
 	// omitted — never a differently-typed stub — when there's genuinely
 	// nothing to show. A client can always read `status` unconditionally.
-	writeJSON(w, http.StatusOK, agentPermissionResolvedResponse{Status: "resolved", Permission: resolved})
+	opConversationPermissionResolve.Write(w, agentPermissionResolvedResponse{Status: "resolved", Permission: resolved})
 }
 
 // agentPermissionResolvedResponse is handleAgentPermission's one 200 body
@@ -1359,9 +1503,40 @@ func (ag *agentHandler) handleAgentPermission(w http.ResponseWriter, r *http.Req
 // differently-shaped body, so a client can always safely read Status without
 // a type switch.
 type agentPermissionResolvedResponse struct {
-	Status     string                         `json:"status"`
-	Permission *domain.ConversationPermission `json:"permission,omitempty"`
+	Status     string                         `json:"status" doc:"Always resolved."`
+	Permission *domain.ConversationPermission `json:"permission,omitempty" doc:"The answered prompt, absent when no record of it could be read."`
 }
+
+// agentPermissionAnswerRequest is the body of POST
+// /api/agent/conversations/{conversationID}/permissions/{toolCallID}.
+// Behavior decides which of the other two fields applies: Message to a deny,
+// UpdatedInput to an allow.
+type agentPermissionAnswerRequest struct {
+	Behavior     string         `json:"behavior" doc:"The answer: allow or deny."`
+	Message      string         `json:"message" doc:"On a deny, the reason the agent is given, which may be empty."`
+	UpdatedInput map[string]any `json:"updated_input" doc:"On an allow, the tool input the agent runs the call with in place of its own; absent or null runs the call with the agent's input."`
+}
+
+var opConversationPermissionResolve = httpx.NewJSONOp[agentPermissionAnswerRequest, agentPermissionResolvedResponse](httpx.OpSpec{
+	Pattern:     "POST /api/agent/conversations/{conversationID}/permissions/{toolCallID}",
+	ID:          "resolve_conversation_permission",
+	Summary:     "Answer a conversation's permission prompt",
+	Description: "Allows or denies the tool call a pending permission prompt asks about, which lets the conversation's agent go on with its turn. behavior decides which other field applies: message to a deny, updated_input to an allow. A prompt that is no longer pending is not found.",
+	PathParams: map[string]string{
+		"conversationID": "The conversation's id.",
+		"toolCallID":     "The id of the tool call the prompt asks about, as the pending prompt's tool_call_id gives it.",
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
+
+var opConversationPermissions = httpx.NewJSONOp[httpx.NoBody, []domain.PendingPermissionDTO](httpx.OpSpec{
+	Pattern:     "GET /api/agent/conversations/{conversationID}/permissions",
+	ID:          "list_conversation_permissions",
+	Summary:     "List a conversation's pending permission prompts",
+	Description: "Returns every permission prompt the conversation's agent is waiting on a person to answer, as an array with no paging, each with the time it has left.",
+	PathParams:  map[string]string{"conversationID": "The conversation's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleAgentPermissions lists the tool-approval prompts a conversation is
 // currently waiting on. This is the address a pending prompt didn't have: the
@@ -1417,7 +1592,7 @@ func (ag *agentHandler) handleAgentPermissions(w http.ResponseWriter, r *http.Re
 	if spawner := ag.spawner(); spawner != nil {
 		live = spawner.PermissionRemaining(orgID, conversationID)
 	}
-	writeJSON(w, http.StatusOK, domain.PendingPermissionDTOs(pending, time.Now().UTC(), live))
+	opConversationPermissions.Write(w, domain.PendingPermissionDTOs(pending, time.Now().UTC(), live))
 }
 
 // enrichConversations projects conversations onto the wire shape, augmenting each with a batched
@@ -1452,7 +1627,7 @@ func (ag *agentHandler) handleAgentPermissions(w http.ResponseWriter, r *http.Re
 // are display annotations on rows the caller can already see, so surfacing the
 // failure would fail a whole board refresh over a badge. Shared by the
 // single-task and batched (task_ids) conversation-list paths.
-func enrichConversations(ctx context.Context, tx db.TxStores, orgID string, convs []domain.Conversation) ([]map[string]any, error) {
+func enrichConversations(ctx context.Context, tx db.TxStores, orgID string, convs []domain.Conversation) ([]conversationJSON, error) {
 	conversationIDs := make([]string, len(convs))
 	for i := range convs {
 		conversationIDs[i] = convs[i].ID
@@ -1528,7 +1703,7 @@ func enrichConversations(ctx context.Context, tx db.TxStores, orgID string, conv
 			toolCalls = calls
 		}
 	}
-	out := make([]map[string]any, len(convs))
+	out := make([]conversationJSON, len(convs))
 	for i := range convs {
 		out[i] = conversationResponse(&convs[i], counts[convs[i].ID], artsByConv[convs[i].ID],
 			artifactCounts[convs[i].ID], actionCounts[convs[i].ID], progress[convs[i].BlueprintRunID],
@@ -1567,33 +1742,33 @@ type conversationListRequest struct {
 	// or empty is no task narrowing — the viewer's whole visible set under RLS,
 	// which is what a resource-wide question ("how many are running") has to be
 	// able to ask. When present, at most maxBatchTaskIDs, each a valid task id.
-	TaskIDs []string `json:"task_ids"`
+	TaskIDs []string `json:"task_ids" doc:"The ids of the tasks whose conversations to return, at most 500; absent or empty applies no task filter."`
 	// TeamIDs narrows to the conversations these teams own. Optional: absent
 	// or empty is no team narrowing — the viewer-wide read the shell rail
 	// asks for. A present set that is unusable is a 400, never a silent
 	// widening back to every team; the Overview's team-scoped counts would
 	// otherwise report another team's work as this team's. When present, at
 	// most maxBatchTeamIDs, each a valid team id.
-	TeamIDs []string `json:"team_ids"`
+	TeamIDs []string `json:"team_ids" doc:"The ids of the teams whose conversations to return, at most 100; absent or empty applies no team filter."`
 	// EntityIDs narrows to the conversations whose task is on one of these
 	// entities, for a caller that holds the entities it shows and wants the
 	// work on them. Optional: absent or empty is no entity narrowing. When
 	// present, at most maxEntityListIDs, each in canonical form. The rows
 	// still group by task id, and each row's task_id is the key a caller
 	// joins its tasks on.
-	EntityIDs []string `json:"entity_ids"`
+	EntityIDs []string `json:"entity_ids" doc:"The ids of the entities whose tasks' conversations to return, at most 200; absent or empty applies no entity filter."`
 	// Statuses narrows to these DISPLAY statuses — the value every surface
 	// shows, which is why a claim phase is a legal value here and the stored
 	// column is not what gets filtered. Empty = every status. An unknown value
 	// is a client fault, not an empty page.
-	Statuses []string `json:"statuses"`
+	Statuses []string `json:"statuses" doc:"The displayed statuses to return, from queued, running, open, failed, fetching, cloning, agent_starting, and awaiting_credentials; absent or empty returns every status."`
 	// Attention keeps only the conversations waiting on a human: an unanswered
 	// permission prompt, or a not-live conversation still holding an unresolved
 	// deliverable. False narrows nothing.
-	Attention bool `json:"attention"`
+	Attention bool `json:"attention" doc:"Whether to return only the conversations waiting on a person: those with an unanswered permission prompt, and those neither running nor setting up that still hold a draft pull request or a ready review waiting on a person."`
 	// IncludeMessages adds each task's PRIMARY (newest-started) conversation's
 	// transcript, keyed by that conversation's id — what the Board seeds onto a card.
-	IncludeMessages bool `json:"include_messages"`
+	IncludeMessages bool `json:"include_messages" doc:"Whether to return, as messages, the transcript of the newest conversation of each task on the page."`
 
 	httpx.PageRequest
 }
@@ -1617,11 +1792,19 @@ type conversationListFilterKey struct {
 // a task's conversations stay contiguous and total_count counts conversations, not
 // tasks.
 type conversationListResponse struct {
-	Runs          map[string][]map[string]any    `json:"runs"`
-	Messages      map[string][]domain.MessageDTO `json:"messages,omitempty"`
-	NextPageToken string                         `json:"next_page_token,omitempty"`
-	TotalCount    int                            `json:"total_count"`
+	Runs          map[string][]conversationJSON  `json:"runs" doc:"The page's conversations, keyed by task id, each task's newest first; an empty object when the page holds none."`
+	Messages      map[string][]domain.MessageDTO `json:"messages,omitempty" doc:"The transcript of each task's newest conversation on the page, keyed by conversation id, oldest message first, present only when include_messages is true and a transcript holds a message."`
+	NextPageToken string                         `json:"next_page_token,omitempty" doc:"The token that reads the next page, as page_token, absent on the last page."`
+	TotalCount    int                            `json:"total_count" doc:"How many conversations match the filters, across every page."`
 }
+
+var opConversationList = httpx.NewJSONOp[conversationListRequest, conversationListResponse](httpx.OpSpec{
+	Pattern:     "POST /api/agent/conversations/list",
+	ID:          "list_conversations",
+	Summary:     "List conversations",
+	Description: "Returns one page of the conversations the caller can see, narrowed by the body's filters and grouped by task id in runs, with each task's newest first. page_size allows up to 500, and total_count counts conversations, not tasks. With include_messages, messages carries the transcript of each task's newest conversation on the page.",
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleConversations serves POST /api/agent/conversations/list.
 //
@@ -1643,8 +1826,8 @@ func (ag *agentHandler) handleConversations(w http.ResponseWriter, r *http.Reque
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 
-	var req conversationListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opConversationList.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -1689,13 +1872,13 @@ func (ag *agentHandler) handleConversations(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	resp := conversationListResponse{Runs: map[string][]map[string]any{}}
+	resp := conversationListResponse{Runs: map[string][]conversationJSON{}}
 	if req.IncludeMessages {
 		resp.Messages = map[string][]domain.MessageDTO{}
 	}
 	var (
 		pageIDs  []string
-		pageRows []map[string]any
+		pageRows []conversationJSON
 	)
 	if err := ag.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		convs, total, e := tx.Conversations.List(r.Context(), orgID,
@@ -1721,7 +1904,6 @@ func (ag *agentHandler) handleConversations(w http.ResponseWriter, r *http.Reque
 		seenTask := map[string]bool{}
 		for i := range convs {
 			tid := convs[i].TaskID
-			resp.Runs[tid] = append(resp.Runs[tid], enriched[i])
 			// Conversations come back started_at DESC within a task, so the first seen
 			// per task is its primary (newest) conversation — the one whose transcript
 			// the card shows. "First seen in this page": a task whose conversations
@@ -1747,18 +1929,15 @@ func (ag *agentHandler) handleConversations(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	ag.addCanWrite(r.Context(), orgID, userID, pageIDs, pageRows)
-	resp.NextPageToken = httpx.NextPageToken(page, len(flattenConversationGroups(resp.Runs)), resp.TotalCount)
-	writeJSON(w, http.StatusOK, resp)
-}
-
-// flattenConversationGroups counts the rows a grouped page carries, so the next-token
-// arithmetic sees the same number a flat `items` array would have.
-func flattenConversationGroups(groups map[string][]map[string]any) []map[string]any {
-	var out []map[string]any
-	for _, rows := range groups {
-		out = append(out, rows...)
+	// Grouped after the write probe, because the groups hold copies of the
+	// rows the probe fills in.
+	for _, row := range pageRows {
+		resp.Runs[row.TaskID] = append(resp.Runs[row.TaskID], row)
 	}
-	return out
+	// Counted over the rows the page carries, so the next-token arithmetic
+	// sees the same number a flat `items` array would have.
+	resp.NextPageToken = httpx.NextPageToken(page, len(pageRows), resp.TotalCount)
+	opConversationList.Write(w, resp)
 }
 
 // WSHub returns the websocket hub for use by the delegation spawner.
@@ -1768,34 +1947,34 @@ func (s *Server) WSHub() *websocket.Hub {
 
 func (s *Server) registerAgentRoutes() {
 	ag := &agentHandler{tx: s.tx, az: s.az, ws: s.ws, spawner: func() *delegate.Spawner { return s.spawner }, reconciler: func() *reconcile.Reconciler { return s.reconciler }}
-	s.api("GET /api/agent/conversations/{conversationID}", ag.handleAgentStatus)
-	s.api("GET /api/agent/conversations/{conversationID}/messages", ag.handleMessages)
+	s.op(opConversationGet, ag.handleAgentStatus)
+	s.op(opConversationMessages, ag.handleMessages)
 	// Conversation-scoped deliverable read: the conversation's deliverables across
 	// every kind, team-scoped via the conversation. Backs the conversation
 	// detail surface.
-	s.apiMutating("POST /api/agent/conversations/{conversationID}/deliverables/list", ag.handleAgentDeliverables)
+	s.op(opConversationDeliverables, ag.handleAgentDeliverables)
 	// Conversation-scoped external-action read — the audit log filtered to
 	// this conversation. Its sibling above answers "what objects does this
 	// conversation own"; this answers "what did it do", including the writes
 	// that produce no object at all (a review-thread reply, a refused merge, a
 	// denied push).
-	s.apiMutating("POST /api/agent/conversations/{conversationID}/actions/list", ag.handleAgentActions)
+	s.op(opConversationActions, ag.handleAgentActions)
 	// Conversation-scoped artifact read — the objects this conversation
 	// changed, read from the same ledger as the action list above and
 	// grouped per object.
-	s.apiMutating("POST /api/agent/conversations/{conversationID}/artifacts/list", ag.handleAgentArtifacts)
+	s.op(opConversationArtifacts, ag.handleAgentArtifacts)
 	// The one conversation-level stop. A second address for it is how `open`
 	// acquires two meanings.
-	s.apiMutating("POST /api/agent/conversations/{conversationID}/stop", ag.handleAgentStop)
-	s.apiMutating("POST /api/agent/conversations/{conversationID}/message", ag.handleMessage)
+	s.op(opConversationStop, ag.handleAgentStop)
+	s.op(opConversationMessage, ag.handleMessage)
 	// The pending set behind the demoted `permission_request` frame: the frame
 	// carries only the tool_call_id and every surface reads the prompt from
 	// here, so a refresh / second tab / cold load reconstructs it.
-	s.api("GET /api/agent/conversations/{conversationID}/permissions", ag.handleAgentPermissions)
-	s.apiMutating("POST /api/agent/conversations/{conversationID}/permissions/{toolCallID}", ag.handleAgentPermission)
+	s.op(opConversationPermissions, ag.handleAgentPermissions)
+	s.op(opConversationPermissionResolve, ag.handleAgentPermission)
 	// Tier-2 conversation-scoped deliverable reconcile: the conversation view
 	// polls this while open to refresh that conversation's non-terminal
 	// deliverables against GitHub.
-	s.apiMutating("POST /api/agent/conversations/{conversationID}/deliverables/refresh", ag.handleDeliverableRefresh)
-	s.apiMutating("POST /api/agent/conversations/list", ag.handleConversations)
+	s.op(opConversationDeliverablesRefresh, ag.handleDeliverableRefresh)
+	s.op(opConversationList, ag.handleConversations)
 }
