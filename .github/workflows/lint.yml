@@ -46,10 +46,17 @@ jobs:
       # release built with that Go version or newer, otherwise lint
       # fails with "Go language version used to build golangci-lint is
       # lower than the targeted Go version".
+      #
+      # pipefail, because a pipeline's status is its last command's: a
+      # failed download hands sh an empty script, which exits 0, so the
+      # step would pass with nothing installed and lint would fail later
+      # on "golangci-lint not installed". The retries repeat the download
+      # when raw.githubusercontent.com answers a transient 5xx.
       - name: Install Go lint tools
         run: |
+          set -o pipefail
           go install golang.org/x/tools/cmd/goimports@v0.42.0
-          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/v2.15.0/install.sh | \
+          curl -sSfL --retry 5 --retry-all-errors https://raw.githubusercontent.com/golangci/golangci-lint/v2.15.0/install.sh | \
             sh -s -- -b "$(go env GOPATH)/bin" v2.15.0
 
       # scripts/lint.sh gates on cargo fmt + clippy for the harness. Without a
