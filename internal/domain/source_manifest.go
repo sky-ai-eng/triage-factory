@@ -57,16 +57,16 @@ const (
 
 // SourceEntry is one source's line in a SourceManifest.
 type SourceEntry struct {
-	State SourceState `json:"state"`
+	State SourceState `json:"state" doc:"Whether the engagement holds the source's credential: sealed, unresolved (the organization has the source but its credential could not be read), unconfigured, disabled, unlicensed, or withheld."`
 	// Reason refines State from the closed vocabulary above, empty when the
 	// state says everything.
-	Reason string `json:"reason,omitempty"`
+	Reason string `json:"reason,omitempty" doc:"Why the state applies (token_endpoint_unavailable, token_expired, or resolve_failed), absent when the state needs no reason."`
 	// ExpiresAt is when the sealed credential stops working, for a sealed
 	// source whose credential expires: the earliest expiry among what was
 	// sealed for it. Nil for a credential with no expiry and for every other
 	// state. The refresh sweep re-seals an engagement whose sealed credential
 	// is close to it.
-	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty" doc:"When the sealed credential stops working, as an RFC 3339 timestamp, absent when it does not expire and for every state but sealed."`
 	// AccountID and AccountLogin are the account the sealed credential acts
 	// as, for a sealed source whose seal learned it. On the GitHub entry they
 	// are the bot user of the App the engagement's tokens were minted from,
@@ -75,8 +75,8 @@ type SourceEntry struct {
 	// login. The reconciler checks a pull request's author against them
 	// before it treats the pull request as the run's. Both empty for every
 	// other source and state, and for a seal that could not learn the account.
-	AccountID    string `json:"account_id,omitempty"`
-	AccountLogin string `json:"account_login,omitempty"`
+	AccountID    string `json:"account_id,omitempty" doc:"The source's id for the account the sealed credential acts as, absent when it is not known."`
+	AccountLogin string `json:"account_login,omitempty" doc:"The login of the account the sealed credential acts as, absent when it is not known."`
 }
 
 // SourceManifest is the record of which source credentials one executor

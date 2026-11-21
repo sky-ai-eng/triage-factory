@@ -68,21 +68,21 @@ type channelsListRequest struct {
 	// Search is a case-insensitive literal substring the channel's name or
 	// its Slack channel id must carry. Trimmed; empty after the trim is
 	// absent.
-	Search string `json:"search"`
+	Search string `json:"search" doc:"Text the channel's name or Slack channel id must contain, compared without regard to case; it is trimmed, and empty lists every channel."`
 	// Tracked narrows to the channels this team tracks (true) or to the ones
 	// it does not (false). Absent lists both.
-	Tracked *bool `json:"tracked"`
+	Tracked *bool `json:"tracked" doc:"true lists only the channels the team tracks, and false only the ones it does not; absent lists both."`
 	// IDs narrows to the channels with these registry ids (a row's id field,
 	// what a slack:message handler's channel_in stores). A live Slack channel
 	// TF holds no row for has no id and never matches. Absent or empty lists
 	// every channel.
-	IDs []string `json:"ids"`
+	IDs []string `json:"ids" doc:"Lists only the channels with these registry ids, each a channel's id field; a channel with no registry id never matches, and absent or empty lists every channel."`
 	// SortKey reorders the list (channelListSortKeys). Absent is the default
 	// order: name, then channel id.
-	SortKey string `json:"sort_key"`
+	SortKey string `json:"sort_key" doc:"What to order by: name, last_mention_at, or primary; absent orders by name, then Slack channel id."`
 	// SortDir is SortKey's direction; absent takes the key's own default, and
 	// alone it is refused.
-	SortDir string `json:"sort_dir"`
+	SortDir string `json:"sort_dir" doc:"The direction of sort_key, asc or desc; absent takes ascending for name and primary and descending for last_mention_at, and it is refused without sort_key."`
 
 	httpx.PageRequest
 }
@@ -102,12 +102,21 @@ type channelsListFilterKey struct {
 // the live Slack read raised (slack_unreachable, slack_channels_truncated),
 // which say the set the page and its total describe is short.
 type channelsListResponse struct {
-	Items         []channelView     `json:"items"`
-	NextPageToken string            `json:"next_page_token,omitempty"`
-	TotalCount    int               `json:"total_count"`
-	Role          string            `json:"role"`
-	Warnings      []channelsWarning `json:"warnings"`
+	Items         []channelView     `json:"items" doc:"The page's channels."`
+	NextPageToken string            `json:"next_page_token,omitempty" doc:"The page_token that reads the next page, absent on the last page."`
+	TotalCount    int               `json:"total_count" doc:"How many channels match the filters, across every page."`
+	Role          string            `json:"role" doc:"The caller's role on the team: admin or member."`
+	Warnings      []channelsWarning `json:"warnings" doc:"What is wrong with the read of Slack, which means the list and its total may be missing channels; empty when nothing is."`
 }
+
+var opListChannels = httpx.NewJSONOp[channelsListRequest, channelsListResponse](httpx.OpSpec{
+	Pattern:     "POST /api/teams/{team_id}/slack-channels/list",
+	ID:          "list_team_slack_channels",
+	Summary:     "List a team's Slack channels",
+	Description: "Returns one page of the Slack channels the team can track: the ones it tracks, the ones the app has seen, and the ones the organization's Slack connections list, narrowed by the filters and ordered by sort_key. Slack's channels are read at most once a minute per organization, and the response's warnings say when that read was incomplete." + slackAccess,
+	PathParams:  map[string]string{"team_id": "The team's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // channelFilter is a resolved set of the list's narrowing fields.
 type channelFilter struct {
@@ -282,8 +291,8 @@ func (h *channelsHandler) handleList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req channelsListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opListChannels.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -307,7 +316,7 @@ func (h *channelsHandler) handleList(w http.ResponseWriter, r *http.Request) {
 	matched := filterChannels(channels, filter)
 	sortChannels(matched, order)
 	items := channelPage(matched, page)
-	httpx.WriteJSON(w, http.StatusOK, channelsListResponse{
+	opListChannels.Write(w, channelsListResponse{
 		Items:         items,
 		NextPageToken: httpx.NextPageToken(page, len(items), len(matched)),
 		TotalCount:    len(matched),
@@ -320,9 +329,9 @@ func (h *channelsHandler) handleList(w http.ResponseWriter, r *http.Request) {
 // narrowing fields, with the same meaning, and neither its paging nor its
 // order, which a count does not have.
 type channelsFacetsRequest struct {
-	Search  string   `json:"search"`
-	Tracked *bool    `json:"tracked"`
-	IDs     []string `json:"ids"`
+	Search  string   `json:"search" doc:"Text the channel's name or Slack channel id must contain, as on the list."`
+	Tracked *bool    `json:"tracked" doc:"true counts only the channels the team tracks, and false only the ones it does not, as on the list; absent counts both."`
+	IDs     []string `json:"ids" doc:"Counts only the channels with these registry ids, as on the list; absent or empty counts every channel."`
 }
 
 // channelsFacetsResponse is the facets node's fixed schema of cuts. A value
@@ -331,11 +340,20 @@ type channelsFacetsRequest struct {
 type channelsFacetsResponse struct {
 	// Tracked counts the channels this team tracks ("true") and the ones it
 	// does not ("false"), under every filter but tracked.
-	Tracked []httpx.FacetJSON `json:"tracked"`
+	Tracked []httpx.FacetJSON `json:"tracked" doc:"How many channels the team tracks (value true) and does not (value false), under every filter but tracked; a value no channel has is left out."`
 	// Primary counts channels by whose primary they are
 	// (channelPrimaryValues), under every filter.
-	Primary []httpx.FacetJSON `json:"primary"`
+	Primary []httpx.FacetJSON `json:"primary" doc:"How many channels have each primary: this_team, no_primary when teams track the channel and none is its primary, other_team, or unwatched when no team tracks it; under every filter, in that order, and leaving out a value no channel has."`
 }
+
+var opFacetsChannels = httpx.NewJSONOp[channelsFacetsRequest, channelsFacetsResponse](httpx.OpSpec{
+	Pattern:     "POST /api/teams/{team_id}/slack-channels/facets",
+	ID:          "get_team_slack_channel_facets",
+	Summary:     "Count a team's Slack channels",
+	Description: "Counts the channels of the team's Slack channel list by whether the team tracks them and by whose primary they are, under the list's filters. It reads the same channels the list does, with the same gaps." + slackAccess,
+	PathParams:  map[string]string{"team_id": "The team's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // channelFacets counts channels into the node's two cuts under f.
 func channelFacets(channels []channelView, f channelFilter) channelsFacetsResponse {
@@ -383,8 +401,8 @@ func (h *channelsHandler) handleFacets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req channelsFacetsRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opFacetsChannels.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -398,5 +416,5 @@ func (h *channelsHandler) handleFacets(w http.ResponseWriter, r *http.Request) {
 		httpx.InternalError(w, "slack/channels", err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, channelFacets(channels, filter))
+	opFacetsChannels.Write(w, channelFacets(channels, filter))
 }

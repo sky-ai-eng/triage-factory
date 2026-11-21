@@ -29,17 +29,17 @@ func (s *Server) SetPlacementResolver(r placementResolver) { s.placement = r }
 // rendezvous score, capacity weight, whether it is eligible/preferred, and a
 // short reason for any special standing (dead/draining/gated/pinned).
 type placementCandidateDTO struct {
-	InstanceID string  `json:"instance_id"`
-	Weight     int     `json:"weight"`
-	Score      float64 `json:"score"`
-	Eligible   bool    `json:"eligible"`
-	Preferred  bool    `json:"preferred"`
-	Reason     string  `json:"reason,omitempty"`
+	InstanceID string  `json:"instance_id" doc:"The instance's id."`
+	Weight     int     `json:"weight" doc:"The instance's weight in the ranking: how many runs it can hold at once, or 0 when it reports none."`
+	Score      float64 `json:"score" doc:"The instance's score for the repository; among eligible instances, a higher score ranks first."`
+	Eligible   bool    `json:"eligible" doc:"Whether the instance can be preferred for the repository: it is live, an executor, not draining, and has capacity."`
+	Preferred  bool    `json:"preferred" doc:"Whether the instance is in preferred_set."`
+	Reason     string  `json:"reason,omitempty" doc:"Why the instance is excluded or placed specially (dead, draining, not-an-executor, no-capacity, or pinned), absent when it is ranked by score alone."`
 }
 
 type placementOverrideDTO struct {
-	PinnedInstanceID string `json:"pinned_instance_id,omitempty"`
-	Replicas         int    `json:"replicas,omitempty"`
+	PinnedInstanceID string `json:"pinned_instance_id,omitempty" doc:"The instance the repository's conversations are pinned to, absent when they are not pinned."`
+	Replicas         int    `json:"replicas,omitempty" doc:"How many of the top-ranked eligible instances are preferred, absent when the override leaves it at the default of one."`
 }
 
 // placementExplainDTO is the GET /api/fleet/placement response: the computed
@@ -53,18 +53,31 @@ type placementOverrideDTO struct {
 // ranks on and the row any override belongs to); host and repo are that
 // row's current host and name, display values read off the row.
 type placementExplainDTO struct {
-	Enabled      bool                    `json:"enabled"`
-	OrgID        string                  `json:"org_id"`
-	KeyKind      string                  `json:"key_kind"`
-	RepositoryID string                  `json:"repository_id"`
-	Host         string                  `json:"host"`
-	Repo         string                  `json:"repo"`
-	PreferredSet []string                `json:"preferred_set"`
-	Candidates   []placementCandidateDTO `json:"candidates"`
-	Override     *placementOverrideDTO   `json:"override,omitempty"`
-	AgingSeconds float64                 `json:"aging_seconds"`
-	LivenessSec  float64                 `json:"liveness_seconds"`
+	Enabled      bool                    `json:"enabled" doc:"Whether placement is on for the deployment; when it is off, the order is still computed, but no conversation is given a preferred executor."`
+	OrgID        string                  `json:"org_id" doc:"The organization's id."`
+	KeyKind      string                  `json:"key_kind" doc:"The kind of placement key, which is always repo."`
+	RepositoryID string                  `json:"repository_id" doc:"The repository's id in Triage Factory, which is the placement key."`
+	Host         string                  `json:"host" doc:"The repository's GitHub host."`
+	Repo         string                  `json:"repo" doc:"The repository's full name, as owner/name."`
+	PreferredSet []string                `json:"preferred_set" doc:"The ids of the executors preferred for the repository's conversations, in order: the pinned instance, or the top-ranked eligible instances."`
+	Candidates   []placementCandidateDTO `json:"candidates" doc:"Every registered instance: the eligible ones first in rank order, then a pinned instance that is not eligible, then the excluded ones."`
+	Override     *placementOverrideDTO   `json:"override,omitempty" doc:"The placement override set for the repository, absent when there is none."`
+	AgingSeconds float64                 `json:"aging_seconds" doc:"How long a queued conversation waits for a preferred executor, in seconds, before any executor may claim it."`
+	LivenessSec  float64                 `json:"liveness_seconds" doc:"How long after its last heartbeat, in seconds, an instance stops counting as live for placement."`
 }
+
+var opFleetPlacement = httpx.NewJSONOp[httpx.NoBody, placementExplainDTO](httpx.OpSpec{
+	Pattern:     "GET /api/fleet/placement",
+	ID:          "get_fleet_placement",
+	Summary:     "Explain a repository's executor placement",
+	Description: "Returns the order in which executors are preferred for a repository's conversations, with each instance's score, weight, and eligibility, and the override and timing windows in effect.",
+	Query: []httpx.QueryParam{
+		{Name: "org", Type: httpx.ParamString, Doc: "The id of the organization the repository belongs to. Required."},
+		{Name: "kind", Type: httpx.ParamString, Doc: "The kind of placement key, which must be repo; absent means repo."},
+		{Name: "repo", Type: httpx.ParamString, Doc: "The repository's full name, as owner/name, on the organization's GitHub host. Required."},
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleFleetPlacement is the placement explainer (spec §6.1): for a
 // repository it returns the computed rendezvous candidate order and why
@@ -92,7 +105,11 @@ func (s *Server) handleFleetPlacement(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	orgID := strings.TrimSpace(r.URL.Query().Get("org"))
+	q, ok := opFleetPlacement.Query(w, r)
+	if !ok {
+		return
+	}
+	orgID := strings.TrimSpace(q.Get("org"))
 	if orgID == "" {
 		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
 			Reason: httpx.ReasonInvalidParam, Message: "org query parameter is required", Field: "org",
@@ -115,7 +132,7 @@ func (s *Server) handleFleetPlacement(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	kind := strings.TrimSpace(r.URL.Query().Get("kind"))
+	kind := strings.TrimSpace(q.Get("kind"))
 	if kind == "" {
 		kind = domain.PlacementKindRepo
 	}
@@ -125,7 +142,7 @@ func (s *Server) handleFleetPlacement(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	slug := strings.TrimSpace(r.URL.Query().Get("repo"))
+	slug := strings.TrimSpace(q.Get("repo"))
 	if slug == "" {
 		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
 			Reason: httpx.ReasonInvalidParam, Message: "repo query parameter is required", Field: "repo",
@@ -192,15 +209,15 @@ func (s *Server) handleFleetPlacement(w http.ResponseWriter, r *http.Request) {
 			Replicas:         plan.Override.Replicas,
 		}
 	}
-	writeJSON(w, http.StatusOK, dto)
+	opFleetPlacement.Write(w, dto)
 }
 
 func (s *Server) registerFleetRoutes() {
 	// Placement explainer: the computed rendezvous candidate order for a key.
 	// Org-admin gated inside the handler on ?org=. Read-only.
-	s.api("GET /api/fleet/placement", s.handleFleetPlacement)
+	s.op(opFleetPlacement, s.handleFleetPlacement)
 	// Fleet queue view: per-org active/queued shares + the org's concurrency
 	// cap. Org-admin gated inside the handler on ?org=, like the placement
 	// explainer above. Read-only.
-	s.api("GET /api/fleet/queue", s.handleFleetQueue)
+	s.op(opFleetQueue, s.handleFleetQueue)
 }

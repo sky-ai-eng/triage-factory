@@ -152,7 +152,8 @@ func TestGateHidesWhenUnlicensed(t *testing.T) {
 
 func TestParseSandboxLimit(t *testing.T) {
 	at := func(q string) (int, bool) {
-		return parseSandboxLimit(httptest.NewRequest("GET", "/x"+q, nil))
+		values, _ := opInstanceSandboxes.Query(httptest.NewRecorder(), httptest.NewRequest("GET", "/x"+q, nil))
+		return parseSandboxLimit(values.Get("limit"))
 	}
 	if n, ok := at(""); !ok || n != defaultSandboxLimit {
 		t.Errorf("absent limit = (%d, %v), want (%d, true)", n, ok, defaultSandboxLimit)

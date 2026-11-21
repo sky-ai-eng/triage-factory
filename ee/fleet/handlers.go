@@ -11,10 +11,19 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
+// fleetAccess is the sentence every console route's description ends with.
+const fleetAccess = " It answers only the deployment's operators, needs an Enterprise licence that includes fleet administration, and refuses API tokens."
+
+// hoursQuery declares the ?hours= parameter parseWindow reads.
+var hoursQuery = httpx.QueryParam{
+	Name: "hours", Type: httpx.ParamInteger,
+	Doc: "The window's length in hours, ending now: 24 when absent or not a whole number, and moved into the range 1 to 168 when outside it.",
+}
+
 // parseWindow reads ?hours= (default 24, clamped 1..168) into a start time.
-func parseWindow(r *http.Request, now time.Time) (since time.Time, hours int) {
+func parseWindow(raw string, now time.Time) (since time.Time, hours int) {
 	hours = 24
-	if raw := r.URL.Query().Get("hours"); raw != "" {
+	if raw != "" {
 		if n, err := strconv.Atoi(raw); err == nil {
 			hours = n
 		}
@@ -31,66 +40,79 @@ func parseWindow(r *http.Request, now time.Time) (since time.Time, hours int) {
 // --- GET /api/fleet/overview ---
 
 type overviewDTO struct {
-	GeneratedAt time.Time     `json:"generated_at"`
-	StaleAfterS float64       `json:"stale_after_seconds"`
-	Totals      fleetTotals   `json:"totals"`
-	Queue       queueSummary  `json:"queue"`
-	Runs        runsSummary   `json:"runs"`
-	Versions    []versionSkew `json:"versions"`
-	Spend       *spendSummary `json:"spend,omitempty"`
+	GeneratedAt time.Time     `json:"generated_at" doc:"When the server built the response, as an RFC 3339 timestamp."`
+	StaleAfterS float64       `json:"stale_after_seconds" doc:"How long after its last heartbeat, in seconds, an instance counts as stale."`
+	Totals      fleetTotals   `json:"totals" doc:"Counts across every registered instance."`
+	Queue       queueSummary  `json:"queue" doc:"The conversations waiting for an executor, and how long conversations started within the window waited."`
+	Runs        runsSummary   `json:"runs" doc:"The conversations started within the window."`
+	Versions    []versionSkew `json:"versions" doc:"How many instances run each build version, most instances first."`
+	Spend       *spendSummary `json:"spend,omitempty" doc:"LLM spend across the deployment within the window, absent when it could not be read."`
 }
 
 type fleetTotals struct {
-	Instances   int `json:"instances"`
-	Executors   int `json:"executors"`
-	Control     int `json:"control"`
-	Draining    int `json:"draining"`
-	Gated       int `json:"gated"`
-	Stale       int `json:"stale"`
-	CapacityMax int `json:"capacity_max"`
-	ActiveRuns  int `json:"active_runs"`
+	Instances   int `json:"instances" doc:"The number of registered instances."`
+	Executors   int `json:"executors" doc:"The number of registered instances that are not control instances."`
+	Control     int `json:"control" doc:"The number of registered control instances."`
+	Draining    int `json:"draining" doc:"The number of instances that are draining."`
+	Gated       int `json:"gated" doc:"The number of executors that last reported they admit no new work."`
+	Stale       int `json:"stale" doc:"The number of instances whose last heartbeat is older than stale_after_seconds."`
+	CapacityMax int `json:"capacity_max" doc:"The sum of the concurrent run limits of the instances that are not stale."`
+	ActiveRuns  int `json:"active_runs" doc:"The sum of the active runs the instances that are not stale last reported."`
 }
 
 type queueSummary struct {
-	Depth       int     `json:"depth"`
-	OldestWaitS float64 `json:"oldest_wait_seconds"`
-	WaitP50MS   *int    `json:"wait_p50_ms,omitempty"`
-	WaitP95MS   *int    `json:"wait_p95_ms,omitempty"`
+	Depth       int     `json:"depth" doc:"The number of conversations waiting for an executor."`
+	OldestWaitS float64 `json:"oldest_wait_seconds" doc:"How long the conversation waiting longest has waited, in seconds, or 0 when none is waiting."`
+	WaitP50MS   *int    `json:"wait_p50_ms,omitempty" doc:"The median time from enqueue to an executor's claim, in milliseconds, across the conversations started within the window that have been claimed, absent when none has."`
+	WaitP95MS   *int    `json:"wait_p95_ms,omitempty" doc:"The 95th percentile of the same wait, in milliseconds, absent when no conversation started within the window has been claimed."`
 }
 
 type runsSummary struct {
-	WindowHours   int               `json:"window_hours"`
-	Total         int               `json:"total"`
-	Active        int               `json:"active"`
-	Completed     int               `json:"completed"`
-	Failed        int               `json:"failed"`
-	DurationP50MS *int              `json:"duration_p50_ms,omitempty"`
-	DurationP95MS *int              `json:"duration_p95_ms,omitempty"`
-	FailureKinds  []failureKindRate `json:"failure_kinds"`
+	WindowHours   int               `json:"window_hours" doc:"The window's length in hours."`
+	Total         int               `json:"total" doc:"The number of conversations started within the window."`
+	Active        int               `json:"active" doc:"How many of them are still active."`
+	Completed     int               `json:"completed" doc:"How many of them completed."`
+	Failed        int               `json:"failed" doc:"How many of them failed."`
+	DurationP50MS *int              `json:"duration_p50_ms,omitempty" doc:"The median duration, in milliseconds, of those that have finished, absent when none has."`
+	DurationP95MS *int              `json:"duration_p95_ms,omitempty" doc:"The 95th percentile duration, in milliseconds, of those that have finished, absent when none has."`
+	FailureKinds  []failureKindRate `json:"failure_kinds" doc:"The failed conversations counted by failure kind, most failures first; failures with no kind are left out."`
 }
 
 type failureKindRate struct {
-	Kind  string `json:"kind"`
-	Count int    `json:"count"`
+	Kind  string `json:"kind" doc:"The failure kind."`
+	Count int    `json:"count" doc:"How many failed conversations have this kind."`
 }
 
 type versionSkew struct {
-	Version string `json:"version"`
-	Count   int    `json:"count"`
+	Version string `json:"version" doc:"A build version."`
+	Count   int    `json:"count" doc:"How many registered instances run it."`
 }
 
 type spendSummary struct {
-	WindowHours int     `json:"window_hours"`
-	TotalUSD    float64 `json:"total_usd"`
+	WindowHours int     `json:"window_hours" doc:"The window's length in hours."`
+	TotalUSD    float64 `json:"total_usd" doc:"The deployment's total LLM spend within the window, in USD."`
 }
+
+var opOverview = httpx.NewJSONOp[httpx.NoBody, overviewDTO](httpx.OpSpec{
+	Pattern:     "GET /api/fleet/overview",
+	ID:          "get_fleet_overview",
+	Summary:     "Get the fleet overview",
+	Description: "Returns counts across every registered instance, the queue of conversations waiting for an executor, the conversations started within the window, the build versions instances run, and the deployment's LLM spend within the window." + fleetAccess,
+	Query:       []httpx.QueryParam{hoursQuery},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 func (h *handler) handleOverview(w http.ResponseWriter, r *http.Request) {
 	if h.gate(w, r) == nil {
 		return
 	}
+	q, ok := opOverview.Query(w, r)
+	if !ok {
+		return
+	}
 	ctx := r.Context()
 	now := time.Now().UTC()
-	since, hours := parseWindow(r, now)
+	since, hours := parseWindow(q.Get("hours"), now)
 
 	instances, err := h.stores.Instances.List(ctx)
 	if err != nil {
@@ -120,7 +142,7 @@ func (h *handler) handleOverview(w http.ResponseWriter, r *http.Request) {
 		dto.Spend = &spendSummary{WindowHours: hours, TotalUSD: total}
 	}
 
-	httpx.WriteJSON(w, http.StatusOK, dto)
+	opOverview.Write(w, dto)
 }
 
 func summarizeInstances(instances []domain.Instance, now time.Time) fleetTotals {
@@ -241,32 +263,40 @@ func sortedFailureKinds(counts map[string]int) []failureKindRate {
 // --- GET /api/fleet/instances ---
 
 type instanceDTO struct {
-	ID            string    `json:"id"`
-	Role          string    `json:"role"`
-	Version       string    `json:"version"`
-	BootEpoch     int64     `json:"boot_epoch"`
-	StartedAt     time.Time `json:"started_at"`
-	LastHeartbeat time.Time `json:"last_heartbeat_at"`
-	HeartbeatAgeS float64   `json:"heartbeat_age_seconds"`
-	Stale         bool      `json:"stale"`
-	Draining      bool      `json:"draining"`
-	DispatchGated *bool     `json:"dispatch_gated,omitempty"`
-	MaxRuns       *int      `json:"max_runs,omitempty"`
-	ActiveRuns    *int      `json:"active_runs,omitempty"`
-	MemTotalMB    *int      `json:"mem_total_mb,omitempty"`
-	MemAvailMB    *int      `json:"mem_available_mb,omitempty"`
+	ID            string    `json:"id" doc:"The instance's id."`
+	Role          string    `json:"role" doc:"The instance's role: control or executor."`
+	Version       string    `json:"version" doc:"The build version the instance runs."`
+	BootEpoch     int64     `json:"boot_epoch" doc:"A number that goes up by one each time the instance restarts."`
+	StartedAt     time.Time `json:"started_at" doc:"When the instance's current process started, as an RFC 3339 timestamp."`
+	LastHeartbeat time.Time `json:"last_heartbeat_at" doc:"When the instance last sent a heartbeat, as an RFC 3339 timestamp."`
+	HeartbeatAgeS float64   `json:"heartbeat_age_seconds" doc:"How long ago the instance last sent a heartbeat, in seconds."`
+	Stale         bool      `json:"stale" doc:"Whether the instance's last heartbeat is older than stale_after_seconds."`
+	Draining      bool      `json:"draining" doc:"Whether the instance is draining: it starts no new work, and its running work finishes."`
+	DispatchGated *bool     `json:"dispatch_gated,omitempty" doc:"Whether the executor last reported that it admits no new work, for lack of memory or disk or because it is stopping; absent on a control instance."`
+	MaxRuns       *int      `json:"max_runs,omitempty" doc:"How many runs the executor can hold at once, absent on a control instance."`
+	ActiveRuns    *int      `json:"active_runs,omitempty" doc:"How many runs the executor last reported holding, absent on a control instance."`
+	MemTotalMB    *int      `json:"mem_total_mb,omitempty" doc:"The executor's total memory in MiB, absent on a control instance and when it could not be read."`
+	MemAvailMB    *int      `json:"mem_available_mb,omitempty" doc:"The executor's available memory in MiB as of its last heartbeat, absent on a control instance and when it could not be read."`
 	// Latest telemetry sample extras (nil until the first sample lands).
-	CPUPct     *float64 `json:"cpu_pct,omitempty"`
-	Load1      *float64 `json:"load1,omitempty"`
-	ClaimsMin  *int     `json:"claims_last_sample,omitempty"`
-	SpawnP50MS *int     `json:"spawn_p50_ms,omitempty"`
+	CPUPct     *float64 `json:"cpu_pct,omitempty" doc:"The instance's CPU use, as a percentage, in its latest telemetry sample from the last five minutes, absent when there is none or it was not measured."`
+	Load1      *float64 `json:"load1,omitempty" doc:"The host's one-minute load average in the instance's latest telemetry sample from the last five minutes, absent when there is none or it was not measured."`
+	ClaimsMin  *int     `json:"claims_last_sample,omitempty" doc:"How many conversations the executor claimed between its previous telemetry sample and its latest one from the last five minutes, absent when there is none and on a control instance."`
+	SpawnP50MS *int     `json:"spawn_p50_ms,omitempty" doc:"The median time, in milliseconds, from claim to agent start across the runs the executor started between its previous telemetry sample and its latest one from the last five minutes, absent when there is none or it started no run."`
 }
 
 type instancesDTO struct {
-	GeneratedAt time.Time     `json:"generated_at"`
-	StaleAfterS float64       `json:"stale_after_seconds"`
-	Instances   []instanceDTO `json:"instances"`
+	GeneratedAt time.Time     `json:"generated_at" doc:"When the server built the response, as an RFC 3339 timestamp."`
+	StaleAfterS float64       `json:"stale_after_seconds" doc:"How long after its last heartbeat, in seconds, an instance counts as stale."`
+	Instances   []instanceDTO `json:"instances" doc:"Every registered instance."`
 }
+
+var opInstances = httpx.NewJSONOp[httpx.NoBody, instancesDTO](httpx.OpSpec{
+	Pattern:     "GET /api/fleet/instances",
+	ID:          "list_fleet_instances",
+	Summary:     "List the fleet's instances",
+	Description: "Returns every registered instance with its role, version, heartbeat, drain state, and capacity, and its latest telemetry sample from the last five minutes." + fleetAccess,
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 func (h *handler) handleInstances(w http.ResponseWriter, r *http.Request) {
 	if h.gate(w, r) == nil {
@@ -310,7 +340,7 @@ func (h *handler) handleInstances(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, d)
 	}
-	httpx.WriteJSON(w, http.StatusOK, instancesDTO{
+	opInstances.Write(w, instancesDTO{
 		GeneratedAt: now,
 		StaleAfterS: staleAfter.Seconds(),
 		Instances:   out,
@@ -339,8 +369,23 @@ func (h *handler) latestSamples(ctx context.Context, since time.Time) map[string
 // --- POST /api/fleet/instances/{id}/drain ---
 
 type drainRequest struct {
-	Draining bool `json:"draining"`
+	Draining bool `json:"draining" doc:"Whether the instance is to drain: true stops it starting new work until it is undrained, and false ends any drain, including one that would last until its next restart."`
 }
+
+// drainResponse echoes the drain state the request wrote.
+type drainResponse struct {
+	ID       string `json:"id" doc:"The instance's id."`
+	Draining bool   `json:"draining" doc:"The drain state the request set."`
+}
+
+var opDrain = httpx.NewJSONOp[drainRequest, drainResponse](httpx.OpSpec{
+	Pattern:     "POST /api/fleet/instances/{id}/drain",
+	ID:          "drain_fleet_instance",
+	Summary:     "Drain or undrain an instance",
+	Description: "Sets whether an instance is draining. A draining instance starts no new work and lets its running work finish, and the drain lasts across restarts until it is undrained." + fleetAccess,
+	PathParams:  map[string]string{"id": "The instance's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 func (h *handler) handleDrain(w http.ResponseWriter, r *http.Request) {
 	if h.gate(w, r) == nil {
@@ -351,8 +396,8 @@ func (h *handler) handleDrain(w http.ResponseWriter, r *http.Request) {
 		httpx.BadRequest(w, "instance id is required")
 		return
 	}
-	var req drainRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opDrain.Decode(w, r)
+	if !ok {
 		return
 	}
 	matched, err := h.stores.Instances.SetDraining(r.Context(), id, req.Draining)
@@ -364,7 +409,7 @@ func (h *handler) handleDrain(w http.ResponseWriter, r *http.Request) {
 		httpx.NotFound(w, "instance")
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"id": id, "draining": req.Draining})
+	opDrain.Write(w, drainResponse{ID: id, Draining: req.Draining})
 }
 
 // --- GET /api/fleet/instances/{id}/sandboxes ---
@@ -387,65 +432,77 @@ const (
 )
 
 type sandboxClaimDTO struct {
-	ID             string     `json:"id"`
-	ConversationID string     `json:"conversation_id"`
-	OrgID          string     `json:"org_id"`
-	ExecutorID     string     `json:"executor_id"`
-	ClaimedAt      time.Time  `json:"claimed_at"`
-	ReleasedAt     *time.Time `json:"released_at,omitempty"`
+	ID             string     `json:"id" doc:"The claim's id: one executor's engagement with one conversation."`
+	ConversationID string     `json:"conversation_id" doc:"The id of the conversation the engagement drove."`
+	OrgID          string     `json:"org_id" doc:"The id of the organization the conversation belongs to."`
+	ExecutorID     string     `json:"executor_id" doc:"The id of the instance that held the engagement."`
+	ClaimedAt      time.Time  `json:"claimed_at" doc:"When the executor claimed the conversation, as an RFC 3339 timestamp."`
+	ReleasedAt     *time.Time `json:"released_at,omitempty" doc:"When the executor released the conversation, as an RFC 3339 timestamp, absent while the engagement is live."`
 	// Live marks an unreleased claim — still holding a slot, and whatever
 	// series it has is still growing.
-	Live bool `json:"live"`
+	Live bool `json:"live" doc:"Whether the engagement is still live, holding one of the executor's run slots."`
 	// DurationS is the engagement's wall clock: claimed → released, or
 	// claimed → now while live. Deliberately NOT the claim's runtime-reported
 	// duration_ms, which times the agent invocation inside a wider engagement
 	// (fetch, clone, sidecar bring-up) and would therefore be a denominator
 	// smaller than the interval the CPU counter actually accumulated over —
 	// inflating any derived average past what the box saw.
-	DurationS float64 `json:"duration_seconds"`
+	DurationS float64 `json:"duration_seconds" doc:"The engagement's wall-clock length in seconds, from claim to release, or to now while it is live."`
 	// PeakMemMB / CPUUsec are the teardown snapshot — the truth half of the
 	// honest-display contract. Absent means NOT MEASURED (an unsandboxed
 	// local claim, a pre-5.19 kernel with no memory.peak, a crashed
 	// teardown), never measured-zero; render a dash, not a 0.
-	PeakMemMB *int   `json:"peak_mem_mb,omitempty"`
-	CPUUsec   *int64 `json:"cpu_usec,omitempty"`
+	PeakMemMB *int   `json:"peak_mem_mb,omitempty" doc:"The sandbox's peak memory in MiB, read when the engagement ended; absent when it was not measured, which is not the same as zero."`
+	CPUUsec   *int64 `json:"cpu_usec,omitempty" doc:"The CPU time the sandbox used, in microseconds, read when the engagement ended; absent when it was not measured, which is not the same as zero."`
 	// Status / FailureKind / Outcome are what the engagement was spent on.
-	Status      string `json:"status,omitempty"`
-	FailureKind string `json:"failure_kind,omitempty"`
-	Outcome     string `json:"outcome,omitempty"`
+	Status      string `json:"status,omitempty" doc:"The status of the conversation the engagement drove."`
+	FailureKind string `json:"failure_kind,omitempty" doc:"The conversation's failure kind, absent when it has not failed or its failure has no kind."`
+	Outcome     string `json:"outcome,omitempty" doc:"How the engagement ended, such as completed, failed, cancelled, parked, or one of the requeued outcomes; absent while it is live."`
 	// LastActivityAt / CurrentOp are what the holder's last renewal stamped:
 	// when the engagement last did anything its stall watchdog counts, and
 	// the operation in flight then. Absent before the first renewal; on a
 	// released claim they are the last reading it took.
-	LastActivityAt *time.Time `json:"last_activity_at,omitempty"`
-	CurrentOp      string     `json:"current_op,omitempty"`
+	LastActivityAt *time.Time `json:"last_activity_at,omitempty" doc:"When the engagement last did work, as an RFC 3339 timestamp, as of the executor's last renewal of its claim; absent before the first renewal."`
+	CurrentOp      string     `json:"current_op,omitempty" doc:"The operation the engagement had in flight at the executor's last renewal of its claim, absent when it had none."`
 	// LastCheckpointAt is when the engagement's workspace was last covered by
 	// a stored checkpoint, as the holder's last renewal stamped it. Absent for
 	// an engagement that does not checkpoint, and before the first renewal.
-	LastCheckpointAt *time.Time `json:"last_checkpoint_at,omitempty"`
+	LastCheckpointAt *time.Time `json:"last_checkpoint_at,omitempty" doc:"When the engagement's workspace was last covered by a stored checkpoint, as an RFC 3339 timestamp, as of the executor's last renewal of its claim; absent for an engagement that does not checkpoint and before the first renewal."`
 	// Sources is the engagement's source manifest as of its latest seal: for
 	// each event source, whether its credential was in the sandbox's sealed
 	// bundle and, when not, why not (state, a closed-vocabulary reason, and a
 	// sealed credential's expiry). It outlives the engagement, so a finished
 	// run still shows what it held. Absent for an engagement that was never
 	// sealed.
-	Sources domain.SourceManifest `json:"sources,omitempty"`
+	Sources domain.SourceManifest `json:"sources,omitempty" doc:"For each event source, keyed by its kind, whether the sandbox held its credential as of the engagement's latest seal and why not when it did not; absent for an engagement that was never sealed."`
 }
 
 type sandboxesDTO struct {
-	GeneratedAt time.Time         `json:"generated_at"`
-	InstanceID  string            `json:"instance_id"`
-	Limit       int               `json:"limit"`
-	Sandboxes   []sandboxClaimDTO `json:"sandboxes"`
+	GeneratedAt time.Time         `json:"generated_at" doc:"When the server built the response, as an RFC 3339 timestamp."`
+	InstanceID  string            `json:"instance_id" doc:"The id of the executor the engagements ran on."`
+	Limit       int               `json:"limit" doc:"The most engagements the response could hold, after the limit parameter was read."`
+	Sandboxes   []sandboxClaimDTO `json:"sandboxes" doc:"The executor's most recent engagements, newest claim first."`
 }
+
+var opInstanceSandboxes = httpx.NewJSONOp[httpx.NoBody, sandboxesDTO](httpx.OpSpec{
+	Pattern:     "GET /api/fleet/instances/{id}/sandboxes",
+	ID:          "list_fleet_instance_sandboxes",
+	Summary:     "List an executor's recent sandboxes",
+	Description: "Returns the executor's most recent engagements across every organization, each with what its sandbox used and which source credentials it held." + fleetAccess,
+	PathParams:  map[string]string{"id": "The executor's instance id."},
+	Query: []httpx.QueryParam{{
+		Name: "limit", Type: httpx.ParamInteger,
+		Doc: "The most engagements to return: 25 when absent, and 100 when above 100. A value that is not a whole number of at least 1 is refused.",
+	}},
+	Hints: httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // parseSandboxLimit reads ?limit= — default 25, capped at 100, and REJECTED
 // (not silently defaulted) when it is unparseable or below 1. Deliberately
 // stricter than parseWindow's clamp above: an out-of-range window is a
 // reasonable "show me as much as you can", whereas limit=abc is a caller bug
 // that a silent default would hide behind plausible-looking data.
-func parseSandboxLimit(r *http.Request) (int, bool) {
-	raw := r.URL.Query().Get("limit")
+func parseSandboxLimit(raw string) (int, bool) {
 	if raw == "" {
 		return defaultSandboxLimit, true
 	}
@@ -468,7 +525,11 @@ func (h *handler) handleInstanceSandboxes(w http.ResponseWriter, r *http.Request
 		httpx.BadRequest(w, "instance id is required")
 		return
 	}
-	limit, ok := parseSandboxLimit(r)
+	q, ok := opInstanceSandboxes.Query(w, r)
+	if !ok {
+		return
+	}
+	limit, ok := parseSandboxLimit(q.Get("limit"))
 	if !ok {
 		httpx.BadRequest(w, "limit must be a positive integer")
 		return
@@ -498,7 +559,7 @@ func (h *handler) handleInstanceSandboxes(w http.ResponseWriter, r *http.Request
 	for _, c := range claims {
 		out = append(out, sandboxClaim(c, now))
 	}
-	httpx.WriteJSON(w, http.StatusOK, sandboxesDTO{
+	opInstanceSandboxes.Write(w, sandboxesDTO{
 		GeneratedAt: now, InstanceID: id, Limit: limit, Sandboxes: out,
 	})
 }
@@ -536,9 +597,18 @@ func sandboxClaim(c domain.ExecutorClaim, now time.Time) sandboxClaimDTO {
 // several, so this is addressed by the claim.
 
 type claimDetailDTO struct {
-	GeneratedAt time.Time `json:"generated_at"`
+	GeneratedAt time.Time `json:"generated_at" doc:"When the server built the response, as an RFC 3339 timestamp."`
 	sandboxClaimDTO
 }
+
+var opClaim = httpx.NewJSONOp[httpx.NoBody, claimDetailDTO](httpx.OpSpec{
+	Pattern:     "GET /api/fleet/claims/{id}",
+	ID:          "get_fleet_claim",
+	Summary:     "Get an executor engagement",
+	Description: "Returns one executor engagement by its claim id, in any organization: what its sandbox used and which source credentials it held." + fleetAccess,
+	PathParams:  map[string]string{"id": "The claim's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 func (h *handler) handleClaim(w http.ResponseWriter, r *http.Request) {
 	if h.gate(w, r) == nil {
@@ -559,7 +629,7 @@ func (h *handler) handleClaim(w http.ResponseWriter, r *http.Request) {
 		httpx.NotFound(w, "claim")
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, claimDetailDTO{GeneratedAt: now, sandboxClaimDTO: sandboxClaim(*claim, now)})
+	opClaim.Write(w, claimDetailDTO{GeneratedAt: now, sandboxClaimDTO: sandboxClaim(*claim, now)})
 }
 
 // --- GET /api/fleet/claims/{id}/series ---
@@ -576,16 +646,25 @@ func (h *handler) handleClaim(w http.ResponseWriter, r *http.Request) {
 // numerically, here or in the UI.
 
 type sandboxSampleDTO struct {
-	At           time.Time `json:"at"`
-	MemCurrentMB *int      `json:"mem_current_mb,omitempty"`
-	CPUUsecCum   *int64    `json:"cpu_usec_cum,omitempty"`
+	At           time.Time `json:"at" doc:"When the sample was taken, as an RFC 3339 timestamp."`
+	MemCurrentMB *int      `json:"mem_current_mb,omitempty" doc:"The sandbox's memory in use when the sample was taken, in MiB, absent when it was not measured."`
+	CPUUsecCum   *int64    `json:"cpu_usec_cum,omitempty" doc:"The CPU time the sandbox had used since it started, in microseconds, absent when it was not measured; the difference between two samples is the CPU used between them."`
 }
 
 type sandboxSeriesDTO struct {
-	GeneratedAt time.Time          `json:"generated_at"`
-	ClaimID     string             `json:"claim_id"`
-	Samples     []sandboxSampleDTO `json:"samples"`
+	GeneratedAt time.Time          `json:"generated_at" doc:"When the server built the response, as an RFC 3339 timestamp."`
+	ClaimID     string             `json:"claim_id" doc:"The claim's id."`
+	Samples     []sandboxSampleDTO `json:"samples" doc:"Every sample taken of the engagement's sandbox, oldest first, empty when none was taken."`
 }
+
+var opClaimSeries = httpx.NewJSONOp[httpx.NoBody, sandboxSeriesDTO](httpx.OpSpec{
+	Pattern:     "GET /api/fleet/claims/{id}/series",
+	ID:          "get_fleet_claim_series",
+	Summary:     "Get an engagement's sandbox resource samples",
+	Description: "Returns the memory and cumulative CPU samples taken of one engagement's sandbox while it ran. The samples miss short spikes, so the engagement's peak memory can be above the highest sample." + fleetAccess,
+	PathParams:  map[string]string{"id": "The claim's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 func (h *handler) handleClaimSeries(w http.ResponseWriter, r *http.Request) {
 	if h.gate(w, r) == nil {
@@ -629,7 +708,7 @@ func (h *handler) handleClaimSeries(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 	}
-	httpx.WriteJSON(w, http.StatusOK, sandboxSeriesDTO{
+	opClaimSeries.Write(w, sandboxSeriesDTO{
 		GeneratedAt: now, ClaimID: id, Samples: out,
 	})
 }
@@ -637,30 +716,43 @@ func (h *handler) handleClaimSeries(w http.ResponseWriter, r *http.Request) {
 // --- GET /api/fleet/timeseries ---
 
 type sampleDTO struct {
-	InstanceID     string    `json:"instance_id"`
-	At             time.Time `json:"at"`
-	ActiveRuns     *int      `json:"active_runs,omitempty"`
-	QueuedVisible  *int      `json:"queued_visible,omitempty"`
-	MemAvailableMB *int      `json:"mem_available_mb,omitempty"`
-	CPUPct         *float64  `json:"cpu_pct,omitempty"`
-	Load1          *float64  `json:"load1,omitempty"`
-	Claims         *int      `json:"claims,omitempty"`
-	SpawnP50MS     *int      `json:"spawn_p50_ms,omitempty"`
-	OOMKills       *int      `json:"oom_kills,omitempty"`
+	InstanceID     string    `json:"instance_id" doc:"The id of the instance that took the sample."`
+	At             time.Time `json:"at" doc:"When the sample was taken, as an RFC 3339 timestamp."`
+	ActiveRuns     *int      `json:"active_runs,omitempty" doc:"How many runs the executor held, absent on a control instance."`
+	QueuedVisible  *int      `json:"queued_visible,omitempty" doc:"How many conversations across the deployment were waiting for an executor, absent on a control instance and when it could not be read."`
+	MemAvailableMB *int      `json:"mem_available_mb,omitempty" doc:"The instance's available memory in MiB, absent when it could not be read."`
+	CPUPct         *float64  `json:"cpu_pct,omitempty" doc:"The instance's CPU use as a percentage, absent when it could not be read."`
+	Load1          *float64  `json:"load1,omitempty" doc:"The host's one-minute load average, absent when it could not be read."`
+	Claims         *int      `json:"claims,omitempty" doc:"How many conversations the executor claimed since its previous sample, absent on a control instance."`
+	SpawnP50MS     *int      `json:"spawn_p50_ms,omitempty" doc:"The median time, in milliseconds, from claim to agent start across the runs the executor started since its previous sample, absent when it started none and on a control instance."`
+	OOMKills       *int      `json:"oom_kills,omitempty" doc:"How many processes the kernel killed for lack of memory on the instance since its previous sample, absent when it could not be read."`
 }
 
 type timeseriesDTO struct {
-	GeneratedAt time.Time   `json:"generated_at"`
-	WindowHours int         `json:"window_hours"`
-	Samples     []sampleDTO `json:"samples"`
+	GeneratedAt time.Time   `json:"generated_at" doc:"When the server built the response, as an RFC 3339 timestamp."`
+	WindowHours int         `json:"window_hours" doc:"The window's length in hours."`
+	Samples     []sampleDTO `json:"samples" doc:"Every instance's telemetry samples taken within the window, oldest first."`
 }
+
+var opTimeseries = httpx.NewJSONOp[httpx.NoBody, timeseriesDTO](httpx.OpSpec{
+	Pattern:     "GET /api/fleet/timeseries",
+	ID:          "get_fleet_timeseries",
+	Summary:     "Get the fleet's telemetry samples",
+	Description: "Returns every instance's telemetry samples taken within the window, about one a minute each: runs held, queue depth, memory, CPU, load, claims, spawn latency, and out-of-memory kills." + fleetAccess,
+	Query:       []httpx.QueryParam{hoursQuery},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 func (h *handler) handleTimeseries(w http.ResponseWriter, r *http.Request) {
 	if h.gate(w, r) == nil {
 		return
 	}
+	q, ok := opTimeseries.Query(w, r)
+	if !ok {
+		return
+	}
 	now := time.Now().UTC()
-	since, hours := parseWindow(r, now)
+	since, hours := parseWindow(q.Get("hours"), now)
 
 	samples, err := h.stores.InstanceStats.ListSince(r.Context(), since)
 	if err != nil {
@@ -676,7 +768,7 @@ func (h *handler) handleTimeseries(w http.ResponseWriter, r *http.Request) {
 			Claims: s.Claims, SpawnP50MS: s.SpawnP50MS, OOMKills: s.OOMKills,
 		})
 	}
-	httpx.WriteJSON(w, http.StatusOK, timeseriesDTO{GeneratedAt: now, WindowHours: hours, Samples: out})
+	opTimeseries.Write(w, timeseriesDTO{GeneratedAt: now, WindowHours: hours, Samples: out})
 }
 
 // --- GET /api/fleet/backlog ---
@@ -689,17 +781,25 @@ func (h *handler) handleTimeseries(w http.ResponseWriter, r *http.Request) {
 // operator + FeatureFleet gated (the console), that one is org-admin (core).
 
 type backlogOrgShare struct {
-	OrgID       string  `json:"org_id"`
-	Count       int     `json:"count"`
-	OldestWaitS float64 `json:"oldest_wait_seconds"`
+	OrgID       string  `json:"org_id" doc:"The organization's id."`
+	Count       int     `json:"count" doc:"How many of the organization's conversations are waiting for an executor."`
+	OldestWaitS float64 `json:"oldest_wait_seconds" doc:"How long the organization's conversation waiting longest has waited, in seconds."`
 }
 
 type backlogDTO struct {
-	GeneratedAt time.Time         `json:"generated_at"`
-	Depth       int               `json:"depth"`
-	OldestWaitS float64           `json:"oldest_wait_seconds"`
-	ByOrg       []backlogOrgShare `json:"by_org"`
+	GeneratedAt time.Time         `json:"generated_at" doc:"When the server built the response, as an RFC 3339 timestamp."`
+	Depth       int               `json:"depth" doc:"How many conversations across the deployment are waiting for an executor."`
+	OldestWaitS float64           `json:"oldest_wait_seconds" doc:"How long the conversation waiting longest has waited, in seconds, or 0 when none is waiting."`
+	ByOrg       []backlogOrgShare `json:"by_org" doc:"Each organization with a conversation waiting, most waiting first, then longest wait first; null when none is waiting."`
 }
+
+var opBacklog = httpx.NewJSONOp[httpx.NoBody, backlogDTO](httpx.OpSpec{
+	Pattern:     "GET /api/fleet/backlog",
+	ID:          "get_fleet_backlog",
+	Summary:     "Get the fleet's backlog",
+	Description: "Returns how many conversations across the deployment are waiting for an executor and how long the oldest has waited, with each organization's count and oldest wait." + fleetAccess,
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 func (h *handler) handleBacklog(w http.ResponseWriter, r *http.Request) {
 	if h.gate(w, r) == nil {
@@ -716,7 +816,7 @@ func (h *handler) handleBacklog(w http.ResponseWriter, r *http.Request) {
 		// QueuedConversationAgesSystem is oldest-first, so [0] is the oldest wait.
 		dto.OldestWaitS = now.Sub(queued[0].EnqueuedAt).Seconds()
 	}
-	httpx.WriteJSON(w, http.StatusOK, dto)
+	opBacklog.Write(w, dto)
 }
 
 func backlogByOrg(queued []domain.QueuedConversation, now time.Time) []backlogOrgShare {

@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // fleetQueueReader is the narrow view the fleet queue endpoint needs of the
@@ -24,12 +25,23 @@ type fleetQueueReader interface {
 // that cap right now (its queued runs are invisible to claims until an active
 // run finishes).
 type fleetQueueShareDTO struct {
-	OrgID             string `json:"org_id"`
-	Active            int    `json:"active"`
-	Queued            int    `json:"queued"`
-	MaxConcurrentRuns *int   `json:"max_concurrent_runs,omitempty"`
-	AtCap             bool   `json:"at_cap"`
+	OrgID             string `json:"org_id" doc:"The organization's id."`
+	Active            int    `json:"active" doc:"How many of the organization's conversations hold an executor's run slot."`
+	Queued            int    `json:"queued" doc:"How many of the organization's conversations are waiting for an executor."`
+	MaxConcurrentRuns *int   `json:"max_concurrent_runs,omitempty" doc:"The organization's limit on concurrent runs, absent when it has none, and also absent when the organization has no active or queued conversation."`
+	AtCap             bool   `json:"at_cap" doc:"Whether the organization is at its limit, so that its queued conversations wait until an active one finishes."`
 }
+
+var opFleetQueue = httpx.NewJSONOp[httpx.NoBody, fleetQueueShareDTO](httpx.OpSpec{
+	Pattern:     "GET /api/fleet/queue",
+	ID:          "get_fleet_queue",
+	Summary:     "Get an organization's run queue",
+	Description: "Returns how many of the organization's conversations are running and how many are waiting for an executor, against the organization's limit on concurrent runs.",
+	Query: []httpx.QueryParam{
+		{Name: "org", Type: httpx.ParamString, Doc: "The organization's id. Required."},
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleFleetQueue surfaces one org's conversation-queue share against its
 // concurrency cap: active vs queued runs, the configured cap, and whether the
@@ -62,7 +74,11 @@ func (s *Server) handleFleetQueue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	orgID := strings.TrimSpace(r.URL.Query().Get("org"))
+	q, ok := opFleetQueue.Query(w, r)
+	if !ok {
+		return
+	}
+	orgID := strings.TrimSpace(q.Get("org"))
 	if orgID == "" {
 		badRequest(w, "org query parameter is required")
 		return
@@ -108,5 +124,5 @@ func (s *Server) handleFleetQueue(w http.ResponseWriter, r *http.Request) {
 		dto.AtCap = sh.MaxConcurrentRuns != nil && sh.Active >= *sh.MaxConcurrentRuns
 		break
 	}
-	writeJSON(w, http.StatusOK, dto)
+	opFleetQueue.Write(w, dto)
 }

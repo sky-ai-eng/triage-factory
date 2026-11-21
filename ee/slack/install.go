@@ -172,15 +172,15 @@ type routeMounter interface {
 // every core team route. The list and facets reads mount through APIMutating
 // because they are POSTs, and CSRF follows the method.
 func mountRoutes(api routeMounter, h *workspacesHandler, dh *deploymentAppHandler, ih *installHandler, ch *channelsHandler, wh *webhookHandler) {
-	api.API("GET /api/orgs/{org_id}/slack/manifest", h.handleManifest)
-	api.APIMutating("POST /api/orgs/{org_id}/slack/connections/import", h.handleConnect)
+	api.Op(opManifest, h.handleManifest)
+	api.Op(opConnect, h.handleConnect)
 	api.Op(opList, h.handleList)
-	api.API("GET /api/orgs/{org_id}/slack/connections/{workspace_id}/{api_app_id}", h.handleGet)
-	api.APIMutating("DELETE /api/orgs/{org_id}/slack/connections/{workspace_id}/{api_app_id}", h.handleDelete)
-	api.API("GET /api/orgs/{org_id}/slack/connections/{workspace_id}/{api_app_id}/activation-preview", h.handleActivationPreview)
-	api.APIMutating("POST /api/orgs/{org_id}/slack/connections/{workspace_id}/{api_app_id}/activate", h.handleActivate)
+	api.Op(opGet, h.handleGet)
+	api.Op(opDelete, h.handleDelete)
+	api.Op(opActivationPreview, h.handleActivationPreview)
+	api.Op(opActivate, h.handleActivate)
 
-	api.API("GET /api/slack/deployment-app", dh.handleGet)
+	api.Op(opDeploymentApp, dh.handleGet)
 
 	// The deployment app's install ceremony (deployment_install.go). Both legs
 	// are top-level navigations, the start from Settings and the callback from
@@ -191,11 +191,11 @@ func mountRoutes(api routeMounter, h *workspacesHandler, dh *deploymentAppHandle
 	api.API("GET /api/orgs/{org_id}/slack/install/start", ih.handleStart)
 	api.API("GET "+installCallbackPath, ih.handleCallback)
 
-	api.APIMutating("PUT /api/teams/{team_id}/slack-channels", ch.handlePut)
-	api.APIMutating("POST /api/teams/{team_id}/slack-channels/list", ch.handleList)
-	api.APIMutating("POST /api/teams/{team_id}/slack-channels/facets", ch.handleFacets)
-	api.API("GET /api/teams/{team_id}/slack-channels/{channel_id}", ch.handleGet)
-	api.APIMutating("PATCH /api/teams/{team_id}/slack-channels/{channel_id}", ch.handlePatch)
+	api.Op(opPut, ch.handlePut)
+	api.Op(opListChannels, ch.handleList)
+	api.Op(opFacetsChannels, ch.handleFacets)
+	api.Op(opGetChannel, ch.handleGet)
+	api.Op(opPatchChannel, ch.handlePatch)
 
 	api.Raw("POST /api/webhooks/slack/{org_id}", api.SignedWebhookRateLimit(http.HandlerFunc(wh.handleWebhook)))
 	api.Raw("POST /api/webhooks/slack", api.SignedWebhookRateLimit(http.HandlerFunc(wh.handleDeploymentWebhook)))

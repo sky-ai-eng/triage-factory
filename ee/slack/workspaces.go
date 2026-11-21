@@ -199,11 +199,15 @@ type connectionsListKey struct {
 	OrgID string `json:"org_id"`
 }
 
+// slackAccess is the sentence every Slack route's description ends with,
+// but the deployment app's, which no organization's licence gates.
+const slackAccess = " It needs an Enterprise licence that includes Slack, and is available only in multi mode."
+
 var opList = httpx.NewListOp[connectionsListRequest, workspaceView](httpx.OpSpec{
 	Pattern:     "POST /api/orgs/{org_id}/slack/connections/list",
 	ID:          "list_slack_connections",
 	Summary:     "List Slack connections",
-	Description: "Returns one page of the organization's Slack connections, active and inactive, ordered by workspace name, then workspace id, then app id. Each connection carries its Socket Mode status when it has one.",
+	Description: "Returns one page of the organization's Slack connections, active and inactive, ordered by workspace name, then workspace id, then app id. Each connection carries its Socket Mode status when it has one." + slackAccess,
 	PathParams:  map[string]string{"org_id": "The organization's id."},
 	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
 })
@@ -250,6 +254,19 @@ func (h *workspacesHandler) handleList(w http.ResponseWriter, r *http.Request) {
 	opList.Write(w, page, out, total)
 }
 
+var opGet = httpx.NewJSONOp[httpx.NoBody, workspaceView](httpx.OpSpec{
+	Pattern:     "GET /api/orgs/{org_id}/slack/connections/{workspace_id}/{api_app_id}",
+	ID:          "get_slack_connection",
+	Summary:     "Get a Slack connection",
+	Description: "Returns one of the organization's Slack connections, by the workspace and the app it connects, with its Socket Mode status when it has one." + slackAccess,
+	PathParams: map[string]string{
+		"org_id":       "The organization's id.",
+		"workspace_id": "The Slack workspace's id.",
+		"api_app_id":   "The Slack app's id.",
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
+
 // handleGet reads one of the org's connections, by the workspace and the app
 // it connects. Any member of the org may read it.
 //
@@ -268,7 +285,7 @@ func (h *workspacesHandler) handleGet(w http.ResponseWriter, r *http.Request) {
 		httpx.NotFound(w, "connection")
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, toWorkspaceView(conn, h.sockets))
+	opGet.Write(w, toWorkspaceView(conn, h.sockets))
 }
 
 // getExisting reads the org's current row for (workspaceID, apiAppID), or
@@ -313,6 +330,28 @@ func refFor(has bool, ref string) string {
 // naming the owning org (the app-single-org invariant).
 var errAppBoundToOtherOrg = errors.New("slack app already connected to a different org")
 
+// connectionImportRequest is the body of POST …/slack/connections/import. A blank
+// signing_secret or app_token keeps the one stored for the same workspace and
+// app, and the transport is inferred from which of the two the connection
+// then holds.
+type connectionImportRequest struct {
+	BotToken      string `json:"bot_token" doc:"The app's bot token, which starts xoxb-, from which the workspace and the app are read. Required."`
+	SigningSecret string `json:"signing_secret" doc:"The app's signing secret, which an app that receives events over HTTP needs; blank or absent keeps the one stored for the same workspace and app."`
+	AppToken      string `json:"app_token" doc:"An app-level token with the connections:write scope, which starts xapp- and which an app that receives events over Socket Mode needs; blank or absent keeps the one stored for the same workspace and app."`
+	Transport     string `json:"transport" doc:"How the app receives events, socket or events_api. It is read only when the connection holds both a signing secret and an app-level token, and is required then; otherwise the transport is the one whose credential the connection holds."`
+}
+
+var opConnect = httpx.NewJSONOp[connectionImportRequest, workspaceView](httpx.OpSpec{
+	Pattern:       "POST /api/orgs/{org_id}/slack/connections/import",
+	ID:            "import_slack_connection",
+	Summary:       "Connect the organization's own Slack app",
+	Description:   "Connects an organization's own Slack app from its tokens, which are checked with Slack, and returns the connection. A new connection answers 201, and is stored inactive when the workspace already has an active connection of another app; connecting an app the workspace already has replaces its stored tokens and answers 200." + slackAccess,
+	PathParams:    map[string]string{"org_id": "The organization's id."},
+	Status:        http.StatusCreated,
+	OtherStatuses: []int{http.StatusOK},
+	Hints:         httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
+
 // handleConnect connects an org's own Slack app from the tokens an org admin
 // pasted. In a workspace where the org already has an active connection of
 // another app, the new connection is stored inactive: the first step of a
@@ -326,13 +365,8 @@ func (h *workspacesHandler) handleConnect(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	var body struct {
-		BotToken      string `json:"bot_token"`
-		SigningSecret string `json:"signing_secret"`
-		AppToken      string `json:"app_token"`
-		Transport     string `json:"transport"`
-	}
-	if !httpx.DecodeJSONStrict(w, r, &body) {
+	body, ok := opConnect.Decode(w, r)
+	if !ok {
 		return
 	}
 	botToken := strings.TrimSpace(body.BotToken)
@@ -546,7 +580,7 @@ func (h *workspacesHandler) handleConnect(w http.ResponseWriter, r *http.Request
 	if existing != nil {
 		status = http.StatusOK
 	}
-	httpx.WriteJSON(w, status, toWorkspaceView(&persisted, h.sockets))
+	opConnect.WriteStatus(w, status, toWorkspaceView(&persisted, h.sockets))
 }
 
 // activeConnections returns the active members of conns, in order: the
@@ -579,6 +613,24 @@ func connectionsInWorkspace(conns []slackstore.Connection, workspaceID, apiAppID
 	}
 	return own, active
 }
+
+// connectionDeleteResponse is the body of DELETE on a connection.
+type connectionDeleteResponse struct {
+	Status string `json:"status" doc:"Always deleted."`
+}
+
+var opDelete = httpx.NewJSONOp[httpx.NoBody, connectionDeleteResponse](httpx.OpSpec{
+	Pattern:     "DELETE /api/orgs/{org_id}/slack/connections/{workspace_id}/{api_app_id}",
+	ID:          "delete_slack_connection",
+	Summary:     "Disconnect a Slack connection",
+	Description: "Disconnects one of the organization's Slack connections and deletes its stored tokens. The app stays installed in Slack, and deleting a workspace's active connection leaves the workspace with none." + slackAccess,
+	PathParams: map[string]string{
+		"org_id":       "The organization's id.",
+		"workspace_id": "The Slack workspace's id.",
+		"api_app_id":   "The Slack app's id.",
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleDelete disconnects one of the org's connections: TF forgets its row and
 // its secrets, and the app stays installed in Slack, for the workspace's admin
@@ -644,8 +696,21 @@ func (h *workspacesHandler) handleDelete(w http.ResponseWriter, r *http.Request)
 
 	notifyConfigChanged(orgID)
 	slackLog.Info("slack workspace disconnected", "org", orgID, "workspace", workspaceID, "app", apiAppID)
-	httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+	opDelete.Write(w, connectionDeleteResponse{Status: "deleted"})
 }
+
+var opManifest = httpx.NewJSONOp[httpx.NoBody, slackManifest](httpx.OpSpec{
+	Pattern:     "GET /api/orgs/{org_id}/slack/manifest",
+	ID:          "get_slack_manifest",
+	Summary:     "Get the manifest for the organization's Slack app",
+	Description: "Returns the Slack app manifest to create the organization's own Slack app from, for the transport given. An events_api manifest names the deployment's public URL, so it needs one configured." + slackAccess,
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Query: []httpx.QueryParam{{
+		Name: "transport", Type: httpx.ParamString,
+		Doc: "How the app is to receive events: socket for Socket Mode, or events_api for HTTP requests to the deployment. Required.",
+	}},
+	Hints: httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleManifest answers the manifest an org admin creates the org's own Slack
 // app from.
@@ -656,7 +721,11 @@ func (h *workspacesHandler) handleManifest(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
-	transport := r.URL.Query().Get("transport")
+	q, ok := opManifest.Query(w, r)
+	if !ok {
+		return
+	}
+	transport := q.Get("transport")
 	if transport != transportSocket && transport != transportEventsAPI {
 		httpx.BadRequest(w, `transport must be "socket" or "events_api"`)
 		return
@@ -682,7 +751,7 @@ func (h *workspacesHandler) handleManifest(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	httpx.WriteJSON(w, http.StatusOK, buildSlackManifest(orgName, transport, publicURL, orgID))
+	opManifest.Write(w, buildSlackManifest(orgName, transport, publicURL, orgID))
 }
 
 // notifyConfigChanged signals the socket connection manager to reconcile

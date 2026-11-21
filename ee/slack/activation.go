@@ -66,48 +66,74 @@ const staleActivationMessage = "the preview is out of date"
 
 // activationChannel is one watched channel in a preview.
 type activationChannel struct {
-	ChannelID string `json:"channel_id"`
-	Name      string `json:"name"`
-	Status    string `json:"status"`
+	ChannelID string `json:"channel_id" doc:"Slack's id for the channel."`
+	Name      string `json:"name" doc:"The channel's name."`
+	Status    string `json:"status" doc:"member when the connection's bot is in the channel, will_join when the channel is public and the activation joins the bot to it, needs_invite when someone must invite the bot in Slack, or unknown when the read of Slack stopped before reaching the channel or a blocker stopped the read."`
 }
 
 // activationBlocker is one reason the target cannot be activated. Scopes is
 // set on missing_scopes only.
 type activationBlocker struct {
-	Code   string   `json:"code"`
-	Scopes []string `json:"scopes,omitempty"`
+	Code   string   `json:"code" doc:"token_rejected when Slack refused the connection's bot token, missing_scopes when the token lacks scopes the app needs, or app_token_rejected when Slack refused the app-level token the app receives events with."`
+	Scopes []string `json:"scopes,omitempty" doc:"The scopes the bot token lacks, present only for missing_scopes."`
 }
 
 // activationNote is something the preview tells the caller that does not stop
 // the activation.
 type activationNote struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code    string `json:"code" doc:"The note's code: history_rate_limit, given when switching to the deployment's app."`
+	Message string `json:"message" doc:"The note, in words."`
 }
 
 // activationPreview is GET …/activation-preview's answer. From is null when
 // the workspace has no active connection.
 type activationPreview struct {
-	From        *workspaceView      `json:"from"`
-	To          workspaceView       `json:"to"`
-	Channels    []activationChannel `json:"channels"`
-	Blockers    []activationBlocker `json:"blockers"`
-	Notes       []activationNote    `json:"notes"`
-	Fingerprint string              `json:"fingerprint"`
+	From        *workspaceView      `json:"from" doc:"The workspace's active connection, or null when it has none."`
+	To          workspaceView       `json:"to" doc:"The connection to activate."`
+	Channels    []activationChannel `json:"channels" doc:"Each channel a team watches in the workspace, with whether the connection's bot is in it."`
+	Blockers    []activationBlocker `json:"blockers" doc:"What stops the activation, empty when nothing does."`
+	Notes       []activationNote    `json:"notes" doc:"What the caller should know about the activation that does not stop it."`
+	Fingerprint string              `json:"fingerprint" doc:"Identifies the stored state this preview read; the activation takes it and is refused when that state has changed."`
 }
 
 // activateRequest is POST …/activate's body. Fingerprint is a pointer so an
 // absent field reads apart from a present one.
 type activateRequest struct {
-	Fingerprint *string `json:"fingerprint"`
+	Fingerprint *string `json:"fingerprint" doc:"The fingerprint the connection's activation preview returned. Required."`
 }
 
 // activationResult is POST …/activate's answer: the target, now active, and
 // each watched channel its bot did not join.
 type activationResult struct {
-	Connection workspaceView     `json:"connection"`
-	Warnings   []channelsWarning `json:"warnings"`
+	Connection workspaceView     `json:"connection" doc:"The connection, now the workspace's active one."`
+	Warnings   []channelsWarning `json:"warnings" doc:"Each watched channel the connection's bot did not join, empty when it joined every one it needed to."`
 }
+
+var opActivationPreview = httpx.NewJSONOp[httpx.NoBody, activationPreview](httpx.OpSpec{
+	Pattern:     "GET /api/orgs/{org_id}/slack/connections/{workspace_id}/{api_app_id}/activation-preview",
+	ID:          "get_slack_connection_activation_preview",
+	Summary:     "Preview making a Slack connection active",
+	Description: "Returns what making a connection the workspace's active one would change: the watched channels and whether its bot is in each, what stops the switch, and a fingerprint the activation takes. It checks the connection's tokens and reads its channels with Slack, and changes nothing." + slackAccess,
+	PathParams: map[string]string{
+		"org_id":       "The organization's id.",
+		"workspace_id": "The Slack workspace's id.",
+		"api_app_id":   "The Slack app's id.",
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
+
+var opActivate = httpx.NewJSONOp[activateRequest, activationResult](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/slack/connections/{workspace_id}/{api_app_id}/activate",
+	ID:          "activate_slack_connection",
+	Summary:     "Make a Slack connection active",
+	Description: "Makes a connection the workspace's active one, in place of the connection that was, and joins its bot to the watched public channels it is not in. It is refused unless the stored state still matches the activation preview's fingerprint; the replaced connection stays connected, inactive." + slackAccess,
+	PathParams: map[string]string{
+		"org_id":       "The organization's id.",
+		"workspace_id": "The Slack workspace's id.",
+		"api_app_id":   "The Slack app's id.",
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // Refusals the activation's transaction returns, for the handler to answer.
 var (
@@ -187,7 +213,7 @@ func (h *workspacesHandler) handleActivationPreview(w http.ResponseWriter, r *ht
 	if target.Source == slackstore.SourceDeployment {
 		resp.Notes = append(resp.Notes, activationNote{Code: noteHistoryRateLimit, Message: historyRateLimitMessage})
 	}
-	httpx.WriteJSON(w, http.StatusOK, resp)
+	opActivationPreview.Write(w, resp)
 }
 
 // handleActivate makes a connection the workspace's active one, in place of
@@ -208,8 +234,8 @@ func (h *workspacesHandler) handleActivate(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
-	var req activateRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opActivate.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -321,7 +347,7 @@ func (h *workspacesHandler) handleActivate(w http.ResponseWriter, r *http.Reques
 	h.channels.candidates.Forget(orgID)
 	notifyConfigChanged(orgID)
 
-	httpx.WriteJSON(w, http.StatusOK, activationResult{Connection: toWorkspaceView(&activated, h.sockets), Warnings: warnings})
+	opActivate.Write(w, activationResult{Connection: toWorkspaceView(&activated, h.sockets), Warnings: warnings})
 }
 
 // connectionFromPath reads the {workspace_id} and {api_app_id} a connection

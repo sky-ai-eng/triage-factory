@@ -13,6 +13,666 @@
       }
     },
     "schemas": {
+      "ActivateRequest": {
+        "properties": {
+          "fingerprint": {
+            "description": "The fingerprint the connection's activation preview returned. Required.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "ActivationBlocker": {
+        "properties": {
+          "code": {
+            "description": "token_rejected when Slack refused the connection's bot token, missing_scopes when the token lacks scopes the app needs, or app_token_rejected when Slack refused the app-level token the app receives events with.",
+            "type": "string"
+          },
+          "scopes": {
+            "description": "The scopes the bot token lacks, present only for missing_scopes.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "type": "object"
+      },
+      "ActivationChannel": {
+        "properties": {
+          "channel_id": {
+            "description": "Slack's id for the channel.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The channel's name.",
+            "type": "string"
+          },
+          "status": {
+            "description": "member when the connection's bot is in the channel, will_join when the channel is public and the activation joins the bot to it, needs_invite when someone must invite the bot in Slack, or unknown when the read of Slack stopped before reaching the channel or a blocker stopped the read.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "channel_id",
+          "name",
+          "status"
+        ],
+        "type": "object"
+      },
+      "ActivationNote": {
+        "properties": {
+          "code": {
+            "description": "The note's code: history_rate_limit, given when switching to the deployment's app.",
+            "type": "string"
+          },
+          "message": {
+            "description": "The note, in words.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "type": "object"
+      },
+      "ActivationPreview": {
+        "properties": {
+          "blockers": {
+            "description": "What stops the activation, empty when nothing does.",
+            "items": {
+              "$ref": "#/components/schemas/ActivationBlocker"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "channels": {
+            "description": "Each channel a team watches in the workspace, with whether the connection's bot is in it.",
+            "items": {
+              "$ref": "#/components/schemas/ActivationChannel"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "fingerprint": {
+            "description": "Identifies the stored state this preview read; the activation takes it and is refused when that state has changed.",
+            "type": "string"
+          },
+          "from": {
+            "description": "The workspace's active connection, or null when it has none.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/WorkspaceView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "notes": {
+            "description": "What the caller should know about the activation that does not stop it.",
+            "items": {
+              "$ref": "#/components/schemas/ActivationNote"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "to": {
+            "$ref": "#/components/schemas/WorkspaceView",
+            "description": "The connection to activate."
+          }
+        },
+        "required": [
+          "from",
+          "to",
+          "channels",
+          "blockers",
+          "notes",
+          "fingerprint"
+        ],
+        "type": "object"
+      },
+      "ActivationResult": {
+        "properties": {
+          "connection": {
+            "$ref": "#/components/schemas/WorkspaceView",
+            "description": "The connection, now the workspace's active one."
+          },
+          "warnings": {
+            "description": "Each watched channel the connection's bot did not join, empty when it joined every one it needed to.",
+            "items": {
+              "$ref": "#/components/schemas/ChannelsWarning"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "connection",
+          "warnings"
+        ],
+        "type": "object"
+      },
+      "BacklogDTO": {
+        "properties": {
+          "by_org": {
+            "description": "Each organization with a conversation waiting, most waiting first, then longest wait first; null when none is waiting.",
+            "items": {
+              "$ref": "#/components/schemas/BacklogOrgShare"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "depth": {
+            "description": "How many conversations across the deployment are waiting for an executor.",
+            "type": "integer"
+          },
+          "generated_at": {
+            "description": "When the server built the response, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "oldest_wait_seconds": {
+            "description": "How long the conversation waiting longest has waited, in seconds, or 0 when none is waiting.",
+            "type": "number"
+          }
+        },
+        "required": [
+          "generated_at",
+          "depth",
+          "oldest_wait_seconds",
+          "by_org"
+        ],
+        "type": "object"
+      },
+      "BacklogOrgShare": {
+        "properties": {
+          "count": {
+            "description": "How many of the organization's conversations are waiting for an executor.",
+            "type": "integer"
+          },
+          "oldest_wait_seconds": {
+            "description": "How long the organization's conversation waiting longest has waited, in seconds.",
+            "type": "number"
+          },
+          "org_id": {
+            "description": "The organization's id.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "org_id",
+          "count",
+          "oldest_wait_seconds"
+        ],
+        "type": "object"
+      },
+      "BreakGlassAddRequest": {
+        "properties": {
+          "email": {
+            "description": "A verified email address of the organization member to make a break-glass principal, compared without regard to case. Required.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "BreakGlassView": {
+        "properties": {
+          "created_at": {
+            "description": "When the person was made a break-glass principal, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "display_name": {
+            "description": "The person's display name, absent when they have none.",
+            "type": "string"
+          },
+          "email": {
+            "description": "The person's email address, absent when none is known.",
+            "type": "string"
+          },
+          "user_id": {
+            "description": "The person's user id.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id",
+          "created_at"
+        ],
+        "type": "object"
+      },
+      "ChannelView": {
+        "properties": {
+          "bot_is_member": {
+            "description": "Whether the app's bot is in the channel, false when the read of Slack did not list it.",
+            "type": "boolean"
+          },
+          "channel_id": {
+            "description": "Slack's id for the channel.",
+            "type": "string"
+          },
+          "id": {
+            "description": "The channel's registry id, which an event handler's channel filter names; absent for a channel Slack lists that Triage Factory holds no row for yet.",
+            "type": "string"
+          },
+          "is_primary": {
+            "description": "Whether the team is the channel's primary, the team the channel's mentions are routed to.",
+            "type": "boolean"
+          },
+          "is_private": {
+            "description": "Whether the channel is private, false when the read of Slack did not list it.",
+            "type": "boolean"
+          },
+          "last_mention_at": {
+            "description": "When the app last saw a mention in the channel, as an RFC 3339 timestamp, absent when it has seen none.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "description": "The channel's name, empty when it is not known.",
+            "type": "string"
+          },
+          "source": {
+            "description": "Where the row comes from: tracked when the team tracks the channel, sighting when the app has seen it, or slack when only the read of Slack lists it.",
+            "type": "string"
+          },
+          "tracked": {
+            "description": "Whether the team tracks the channel.",
+            "type": "boolean"
+          },
+          "tracked_by": {
+            "description": "Every team that tracks the channel.",
+            "items": {
+              "$ref": "#/components/schemas/TrackerView"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "workspace_id": {
+            "description": "The id of the Slack workspace the channel is in.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "channel_id",
+          "name",
+          "workspace_id",
+          "is_private",
+          "bot_is_member",
+          "tracked",
+          "is_primary",
+          "tracked_by",
+          "source"
+        ],
+        "type": "object"
+      },
+      "ChannelsFacetsRequest": {
+        "properties": {
+          "ids": {
+            "description": "Counts only the channels with these registry ids, as on the list; absent or empty counts every channel.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "search": {
+            "description": "Text the channel's name or Slack channel id must contain, as on the list.",
+            "type": "string"
+          },
+          "tracked": {
+            "description": "true counts only the channels the team tracks, and false only the ones it does not, as on the list; absent counts both.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "ChannelsFacetsResponse": {
+        "properties": {
+          "primary": {
+            "description": "How many channels have each primary: this_team, no_primary when teams track the channel and none is its primary, other_team, or unwatched when no team tracks it; under every filter, in that order, and leaving out a value no channel has.",
+            "items": {
+              "$ref": "#/components/schemas/FacetJSON"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "tracked": {
+            "description": "How many channels the team tracks (value true) and does not (value false), under every filter but tracked; a value no channel has is left out.",
+            "items": {
+              "$ref": "#/components/schemas/FacetJSON"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "tracked",
+          "primary"
+        ],
+        "type": "object"
+      },
+      "ChannelsListRequest": {
+        "properties": {
+          "ids": {
+            "description": "Lists only the channels with these registry ids, each a channel's id field; a channel with no registry id never matches, and absent or empty lists every channel.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "page_size": {
+            "description": "How many rows to return, 50 when absent; 0 returns no rows and only total_count, and a value above the list's maximum, 200 unless the route says otherwise, is refused.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "page_token": {
+            "description": "The next_page_token of the previous page, which reads the page after it; it is refused for a request with different filters.",
+            "type": "string"
+          },
+          "search": {
+            "description": "Text the channel's name or Slack channel id must contain, compared without regard to case; it is trimmed, and empty lists every channel.",
+            "type": "string"
+          },
+          "sort_dir": {
+            "description": "The direction of sort_key, asc or desc; absent takes ascending for name and primary and descending for last_mention_at, and it is refused without sort_key.",
+            "type": "string"
+          },
+          "sort_key": {
+            "description": "What to order by: name, last_mention_at, or primary; absent orders by name, then Slack channel id.",
+            "type": "string"
+          },
+          "tracked": {
+            "description": "true lists only the channels the team tracks, and false only the ones it does not; absent lists both.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "ChannelsListResponse": {
+        "properties": {
+          "items": {
+            "description": "The page's channels.",
+            "items": {
+              "$ref": "#/components/schemas/ChannelView"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "next_page_token": {
+            "description": "The page_token that reads the next page, absent on the last page.",
+            "type": "string"
+          },
+          "role": {
+            "description": "The caller's role on the team: admin or member.",
+            "type": "string"
+          },
+          "total_count": {
+            "description": "How many channels match the filters, across every page.",
+            "type": "integer"
+          },
+          "warnings": {
+            "description": "What is wrong with the read of Slack, which means the list and its total may be missing channels; empty when nothing is.",
+            "items": {
+              "$ref": "#/components/schemas/ChannelsWarning"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "items",
+          "total_count",
+          "role",
+          "warnings"
+        ],
+        "type": "object"
+      },
+      "ChannelsResponse": {
+        "properties": {
+          "channels": {
+            "description": "Every channel of the team's list after the change, in Slack channel id order.",
+            "items": {
+              "$ref": "#/components/schemas/ChannelView"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "role": {
+            "description": "The caller's role on the team, which is admin.",
+            "type": "string"
+          },
+          "warnings": {
+            "description": "What is wrong with the read of Slack, and each added channel the bot did not join.",
+            "items": {
+              "$ref": "#/components/schemas/ChannelsWarning"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "role",
+          "warnings",
+          "channels"
+        ],
+        "type": "object"
+      },
+      "ChannelsWarning": {
+        "properties": {
+          "channel_id": {
+            "description": "The channel a warning about one channel concerns, absent on a warning about the whole read.",
+            "type": "string"
+          },
+          "code": {
+            "description": "What is wrong with the whole read: slack_unreachable when a workspace's channels could not be read from Slack, or slack_channels_truncated when a workspace has more channels than one read of Slack collects; absent on a warning about one channel.",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Why the bot did not join the channel: invite_required when the channel is private and someone must invite the bot in Slack, or join_failed; absent on a warning about the whole read.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ClaimDetailDTO": {
+        "properties": {
+          "claimed_at": {
+            "description": "When the executor claimed the conversation, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "conversation_id": {
+            "description": "The id of the conversation the engagement drove.",
+            "type": "string"
+          },
+          "cpu_usec": {
+            "description": "The CPU time the sandbox used, in microseconds, read when the engagement ended; absent when it was not measured, which is not the same as zero.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "current_op": {
+            "description": "The operation the engagement had in flight at the executor's last renewal of its claim, absent when it had none.",
+            "type": "string"
+          },
+          "duration_seconds": {
+            "description": "The engagement's wall-clock length in seconds, from claim to release, or to now while it is live.",
+            "type": "number"
+          },
+          "executor_id": {
+            "description": "The id of the instance that held the engagement.",
+            "type": "string"
+          },
+          "failure_kind": {
+            "description": "The conversation's failure kind, absent when it has not failed or its failure has no kind.",
+            "type": "string"
+          },
+          "generated_at": {
+            "description": "When the server built the response, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "description": "The claim's id: one executor's engagement with one conversation.",
+            "type": "string"
+          },
+          "last_activity_at": {
+            "description": "When the engagement last did work, as an RFC 3339 timestamp, as of the executor's last renewal of its claim; absent before the first renewal.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_checkpoint_at": {
+            "description": "When the engagement's workspace was last covered by a stored checkpoint, as an RFC 3339 timestamp, as of the executor's last renewal of its claim; absent for an engagement that does not checkpoint and before the first renewal.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "live": {
+            "description": "Whether the engagement is still live, holding one of the executor's run slots.",
+            "type": "boolean"
+          },
+          "org_id": {
+            "description": "The id of the organization the conversation belongs to.",
+            "type": "string"
+          },
+          "outcome": {
+            "description": "How the engagement ended, such as completed, failed, cancelled, parked, or one of the requeued outcomes; absent while it is live.",
+            "type": "string"
+          },
+          "peak_mem_mb": {
+            "description": "The sandbox's peak memory in MiB, read when the engagement ended; absent when it was not measured, which is not the same as zero.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "released_at": {
+            "description": "When the executor released the conversation, as an RFC 3339 timestamp, absent while the engagement is live.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sources": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/SourceEntry"
+            },
+            "description": "For each event source, keyed by its kind, whether the sandbox held its credential as of the engagement's latest seal and why not when it did not; absent for an engagement that was never sealed.",
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "status": {
+            "description": "The status of the conversation the engagement drove.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "generated_at",
+          "id",
+          "conversation_id",
+          "org_id",
+          "executor_id",
+          "claimed_at",
+          "live",
+          "duration_seconds"
+        ],
+        "type": "object"
+      },
+      "ConnectionDeleteResponse": {
+        "properties": {
+          "status": {
+            "description": "Always deleted.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
+      "ConnectionImportRequest": {
+        "properties": {
+          "app_token": {
+            "description": "An app-level token with the connections:write scope, which starts xapp- and which an app that receives events over Socket Mode needs; blank or absent keeps the one stored for the same workspace and app.",
+            "type": "string"
+          },
+          "bot_token": {
+            "description": "The app's bot token, which starts xoxb-, from which the workspace and the app are read. Required.",
+            "type": "string"
+          },
+          "signing_secret": {
+            "description": "The app's signing secret, which an app that receives events over HTTP needs; blank or absent keeps the one stored for the same workspace and app.",
+            "type": "string"
+          },
+          "transport": {
+            "description": "How the app receives events, socket or events_api. It is read only when the connection holds both a signing secret and an app-level token, and is required then; otherwise the transport is the one whose credential the connection holds.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "ConnectionsListRequest": {
         "properties": {
           "page_size": {
@@ -81,6 +741,49 @@
         ],
         "type": "object"
       },
+      "DeploymentAppView": {
+        "properties": {
+          "app_id": {
+            "description": "The deployment's Slack app id.",
+            "type": "string"
+          },
+          "transport": {
+            "description": "How the deployment's app receives events: socket or events_api.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "app_id",
+          "transport"
+        ],
+        "type": "object"
+      },
+      "DrainRequest": {
+        "properties": {
+          "draining": {
+            "description": "Whether the instance is to drain: true stops it starting new work until it is undrained, and false ends any drain, including one that would last until its next restart.",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "DrainResponse": {
+        "properties": {
+          "draining": {
+            "description": "The drain state the request set.",
+            "type": "boolean"
+          },
+          "id": {
+            "description": "The instance's id.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "draining"
+        ],
+        "type": "object"
+      },
       "ErrorEnvelope": {
         "properties": {
           "errors": {
@@ -120,6 +823,121 @@
         ],
         "type": "object"
       },
+      "FacetJSON": {
+        "properties": {
+          "count": {
+            "description": "How many rows have the value.",
+            "type": "integer"
+          },
+          "value": {
+            "description": "The value the cut counts by.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "value",
+          "count"
+        ],
+        "type": "object"
+      },
+      "FailureKindRate": {
+        "properties": {
+          "count": {
+            "description": "How many failed conversations have this kind.",
+            "type": "integer"
+          },
+          "kind": {
+            "description": "The failure kind.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "count"
+        ],
+        "type": "object"
+      },
+      "FleetQueueShareDTO": {
+        "properties": {
+          "active": {
+            "description": "How many of the organization's conversations hold an executor's run slot.",
+            "type": "integer"
+          },
+          "at_cap": {
+            "description": "Whether the organization is at its limit, so that its queued conversations wait until an active one finishes.",
+            "type": "boolean"
+          },
+          "max_concurrent_runs": {
+            "description": "The organization's limit on concurrent runs, absent when it has none, and also absent when the organization has no active or queued conversation.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "org_id": {
+            "description": "The organization's id.",
+            "type": "string"
+          },
+          "queued": {
+            "description": "How many of the organization's conversations are waiting for an executor.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "org_id",
+          "active",
+          "queued",
+          "at_cap"
+        ],
+        "type": "object"
+      },
+      "FleetTotals": {
+        "properties": {
+          "active_runs": {
+            "description": "The sum of the active runs the instances that are not stale last reported.",
+            "type": "integer"
+          },
+          "capacity_max": {
+            "description": "The sum of the concurrent run limits of the instances that are not stale.",
+            "type": "integer"
+          },
+          "control": {
+            "description": "The number of registered control instances.",
+            "type": "integer"
+          },
+          "draining": {
+            "description": "The number of instances that are draining.",
+            "type": "integer"
+          },
+          "executors": {
+            "description": "The number of registered instances that are not control instances.",
+            "type": "integer"
+          },
+          "gated": {
+            "description": "The number of executors that last reported they admit no new work.",
+            "type": "integer"
+          },
+          "instances": {
+            "description": "The number of registered instances.",
+            "type": "integer"
+          },
+          "stale": {
+            "description": "The number of instances whose last heartbeat is older than stale_after_seconds.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "instances",
+          "executors",
+          "control",
+          "draining",
+          "gated",
+          "stale",
+          "capacity_max",
+          "active_runs"
+        ],
+        "type": "object"
+      },
       "HealthResponse": {
         "properties": {
           "status": {
@@ -129,6 +947,153 @@
         },
         "required": [
           "status"
+        ],
+        "type": "object"
+      },
+      "InstanceDTO": {
+        "properties": {
+          "active_runs": {
+            "description": "How many runs the executor last reported holding, absent on a control instance.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "boot_epoch": {
+            "description": "A number that goes up by one each time the instance restarts.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "claims_last_sample": {
+            "description": "How many conversations the executor claimed between its previous telemetry sample and its latest one from the last five minutes, absent when there is none and on a control instance.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "cpu_pct": {
+            "description": "The instance's CPU use, as a percentage, in its latest telemetry sample from the last five minutes, absent when there is none or it was not measured.",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "dispatch_gated": {
+            "description": "Whether the executor last reported that it admits no new work, for lack of memory or disk or because it is stopping; absent on a control instance.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "draining": {
+            "description": "Whether the instance is draining: it starts no new work, and its running work finishes.",
+            "type": "boolean"
+          },
+          "heartbeat_age_seconds": {
+            "description": "How long ago the instance last sent a heartbeat, in seconds.",
+            "type": "number"
+          },
+          "id": {
+            "description": "The instance's id.",
+            "type": "string"
+          },
+          "last_heartbeat_at": {
+            "description": "When the instance last sent a heartbeat, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "load1": {
+            "description": "The host's one-minute load average in the instance's latest telemetry sample from the last five minutes, absent when there is none or it was not measured.",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "max_runs": {
+            "description": "How many runs the executor can hold at once, absent on a control instance.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "mem_available_mb": {
+            "description": "The executor's available memory in MiB as of its last heartbeat, absent on a control instance and when it could not be read.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "mem_total_mb": {
+            "description": "The executor's total memory in MiB, absent on a control instance and when it could not be read.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "role": {
+            "description": "The instance's role: control or executor.",
+            "type": "string"
+          },
+          "spawn_p50_ms": {
+            "description": "The median time, in milliseconds, from claim to agent start across the runs the executor started between its previous telemetry sample and its latest one from the last five minutes, absent when there is none or it started no run.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "stale": {
+            "description": "Whether the instance's last heartbeat is older than stale_after_seconds.",
+            "type": "boolean"
+          },
+          "started_at": {
+            "description": "When the instance's current process started, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "version": {
+            "description": "The build version the instance runs.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "role",
+          "version",
+          "boot_epoch",
+          "started_at",
+          "last_heartbeat_at",
+          "heartbeat_age_seconds",
+          "stale",
+          "draining"
+        ],
+        "type": "object"
+      },
+      "InstancesDTO": {
+        "properties": {
+          "generated_at": {
+            "description": "When the server built the response, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "instances": {
+            "description": "Every registered instance.",
+            "items": {
+              "$ref": "#/components/schemas/InstanceDTO"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "stale_after_seconds": {
+            "description": "How long after its last heartbeat, in seconds, an instance counts as stale.",
+            "type": "number"
+          }
+        },
+        "required": [
+          "generated_at",
+          "stale_after_seconds",
+          "instances"
         ],
         "type": "object"
       },
@@ -153,6 +1118,248 @@
         },
         "required": [
           "started_at"
+        ],
+        "type": "object"
+      },
+      "OverviewDTO": {
+        "properties": {
+          "generated_at": {
+            "description": "When the server built the response, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "queue": {
+            "$ref": "#/components/schemas/QueueSummary",
+            "description": "The conversations waiting for an executor, and how long conversations started within the window waited."
+          },
+          "runs": {
+            "$ref": "#/components/schemas/RunsSummary",
+            "description": "The conversations started within the window."
+          },
+          "spend": {
+            "description": "LLM spend across the deployment within the window, absent when it could not be read.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SpendSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "stale_after_seconds": {
+            "description": "How long after its last heartbeat, in seconds, an instance counts as stale.",
+            "type": "number"
+          },
+          "totals": {
+            "$ref": "#/components/schemas/FleetTotals",
+            "description": "Counts across every registered instance."
+          },
+          "versions": {
+            "description": "How many instances run each build version, most instances first.",
+            "items": {
+              "$ref": "#/components/schemas/VersionSkew"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "generated_at",
+          "stale_after_seconds",
+          "totals",
+          "queue",
+          "runs",
+          "versions"
+        ],
+        "type": "object"
+      },
+      "PatchChannelRequest": {
+        "properties": {
+          "is_primary": {
+            "description": "true makes the team the channel's primary, the team its mentions are routed to; false and null are refused, since a watched channel always has a primary and it moves by setting it on another team. Absent writes nothing.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "PlacementCandidateDTO": {
+        "properties": {
+          "eligible": {
+            "description": "Whether the instance can be preferred for the repository: it is live, an executor, not draining, and has capacity.",
+            "type": "boolean"
+          },
+          "instance_id": {
+            "description": "The instance's id.",
+            "type": "string"
+          },
+          "preferred": {
+            "description": "Whether the instance is in preferred_set.",
+            "type": "boolean"
+          },
+          "reason": {
+            "description": "Why the instance is excluded or placed specially (dead, draining, not-an-executor, no-capacity, or pinned), absent when it is ranked by score alone.",
+            "type": "string"
+          },
+          "score": {
+            "description": "The instance's score for the repository; among eligible instances, a higher score ranks first.",
+            "type": "number"
+          },
+          "weight": {
+            "description": "The instance's weight in the ranking: how many runs it can hold at once, or 0 when it reports none.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "instance_id",
+          "weight",
+          "score",
+          "eligible",
+          "preferred"
+        ],
+        "type": "object"
+      },
+      "PlacementExplainDTO": {
+        "properties": {
+          "aging_seconds": {
+            "description": "How long a queued conversation waits for a preferred executor, in seconds, before any executor may claim it.",
+            "type": "number"
+          },
+          "candidates": {
+            "description": "Every registered instance: the eligible ones first in rank order, then a pinned instance that is not eligible, then the excluded ones.",
+            "items": {
+              "$ref": "#/components/schemas/PlacementCandidateDTO"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "enabled": {
+            "description": "Whether placement is on for the deployment; when it is off, the order is still computed, but no conversation is given a preferred executor.",
+            "type": "boolean"
+          },
+          "host": {
+            "description": "The repository's GitHub host.",
+            "type": "string"
+          },
+          "key_kind": {
+            "description": "The kind of placement key, which is always repo.",
+            "type": "string"
+          },
+          "liveness_seconds": {
+            "description": "How long after its last heartbeat, in seconds, an instance stops counting as live for placement.",
+            "type": "number"
+          },
+          "org_id": {
+            "description": "The organization's id.",
+            "type": "string"
+          },
+          "override": {
+            "description": "The placement override set for the repository, absent when there is none.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PlacementOverrideDTO"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "preferred_set": {
+            "description": "The ids of the executors preferred for the repository's conversations, in order: the pinned instance, or the top-ranked eligible instances.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "repo": {
+            "description": "The repository's full name, as owner/name.",
+            "type": "string"
+          },
+          "repository_id": {
+            "description": "The repository's id in Triage Factory, which is the placement key.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "enabled",
+          "org_id",
+          "key_kind",
+          "repository_id",
+          "host",
+          "repo",
+          "preferred_set",
+          "candidates",
+          "aging_seconds",
+          "liveness_seconds"
+        ],
+        "type": "object"
+      },
+      "PlacementOverrideDTO": {
+        "properties": {
+          "pinned_instance_id": {
+            "description": "The instance the repository's conversations are pinned to, absent when they are not pinned.",
+            "type": "string"
+          },
+          "replicas": {
+            "description": "How many of the top-ranked eligible instances are preferred, absent when the override leaves it at the default of one.",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "PutChannelsRequest": {
+        "properties": {
+          "channel_ids": {
+            "description": "Slack's ids for every channel the team is to track; the set replaces the one the team tracks, and an empty array stops it tracking any. Required.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "QueueSummary": {
+        "properties": {
+          "depth": {
+            "description": "The number of conversations waiting for an executor.",
+            "type": "integer"
+          },
+          "oldest_wait_seconds": {
+            "description": "How long the conversation waiting longest has waited, in seconds, or 0 when none is waiting.",
+            "type": "number"
+          },
+          "wait_p50_ms": {
+            "description": "The median time from enqueue to an executor's claim, in milliseconds, across the conversations started within the window that have been claimed, absent when none has.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "wait_p95_ms": {
+            "description": "The 95th percentile of the same wait, in milliseconds, absent when no conversation started within the window has been claimed.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "depth",
+          "oldest_wait_seconds"
         ],
         "type": "object"
       },
@@ -256,6 +1463,776 @@
             "description": "The branch agents base their work on in this repository, or null to clear it so they use the repository's default branch.",
             "type": [
               "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "RunsSummary": {
+        "properties": {
+          "active": {
+            "description": "How many of them are still active.",
+            "type": "integer"
+          },
+          "completed": {
+            "description": "How many of them completed.",
+            "type": "integer"
+          },
+          "duration_p50_ms": {
+            "description": "The median duration, in milliseconds, of those that have finished, absent when none has.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "duration_p95_ms": {
+            "description": "The 95th percentile duration, in milliseconds, of those that have finished, absent when none has.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "failed": {
+            "description": "How many of them failed.",
+            "type": "integer"
+          },
+          "failure_kinds": {
+            "description": "The failed conversations counted by failure kind, most failures first; failures with no kind are left out.",
+            "items": {
+              "$ref": "#/components/schemas/FailureKindRate"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "total": {
+            "description": "The number of conversations started within the window.",
+            "type": "integer"
+          },
+          "window_hours": {
+            "description": "The window's length in hours.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "window_hours",
+          "total",
+          "active",
+          "completed",
+          "failed",
+          "failure_kinds"
+        ],
+        "type": "object"
+      },
+      "SampleDTO": {
+        "properties": {
+          "active_runs": {
+            "description": "How many runs the executor held, absent on a control instance.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "at": {
+            "description": "When the sample was taken, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "claims": {
+            "description": "How many conversations the executor claimed since its previous sample, absent on a control instance.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "cpu_pct": {
+            "description": "The instance's CPU use as a percentage, absent when it could not be read.",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "instance_id": {
+            "description": "The id of the instance that took the sample.",
+            "type": "string"
+          },
+          "load1": {
+            "description": "The host's one-minute load average, absent when it could not be read.",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "mem_available_mb": {
+            "description": "The instance's available memory in MiB, absent when it could not be read.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "oom_kills": {
+            "description": "How many processes the kernel killed for lack of memory on the instance since its previous sample, absent when it could not be read.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "queued_visible": {
+            "description": "How many conversations across the deployment were waiting for an executor, absent on a control instance and when it could not be read.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "spawn_p50_ms": {
+            "description": "The median time, in milliseconds, from claim to agent start across the runs the executor started since its previous sample, absent when it started none and on a control instance.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "instance_id",
+          "at"
+        ],
+        "type": "object"
+      },
+      "SandboxClaimDTO": {
+        "properties": {
+          "claimed_at": {
+            "description": "When the executor claimed the conversation, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "conversation_id": {
+            "description": "The id of the conversation the engagement drove.",
+            "type": "string"
+          },
+          "cpu_usec": {
+            "description": "The CPU time the sandbox used, in microseconds, read when the engagement ended; absent when it was not measured, which is not the same as zero.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "current_op": {
+            "description": "The operation the engagement had in flight at the executor's last renewal of its claim, absent when it had none.",
+            "type": "string"
+          },
+          "duration_seconds": {
+            "description": "The engagement's wall-clock length in seconds, from claim to release, or to now while it is live.",
+            "type": "number"
+          },
+          "executor_id": {
+            "description": "The id of the instance that held the engagement.",
+            "type": "string"
+          },
+          "failure_kind": {
+            "description": "The conversation's failure kind, absent when it has not failed or its failure has no kind.",
+            "type": "string"
+          },
+          "id": {
+            "description": "The claim's id: one executor's engagement with one conversation.",
+            "type": "string"
+          },
+          "last_activity_at": {
+            "description": "When the engagement last did work, as an RFC 3339 timestamp, as of the executor's last renewal of its claim; absent before the first renewal.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_checkpoint_at": {
+            "description": "When the engagement's workspace was last covered by a stored checkpoint, as an RFC 3339 timestamp, as of the executor's last renewal of its claim; absent for an engagement that does not checkpoint and before the first renewal.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "live": {
+            "description": "Whether the engagement is still live, holding one of the executor's run slots.",
+            "type": "boolean"
+          },
+          "org_id": {
+            "description": "The id of the organization the conversation belongs to.",
+            "type": "string"
+          },
+          "outcome": {
+            "description": "How the engagement ended, such as completed, failed, cancelled, parked, or one of the requeued outcomes; absent while it is live.",
+            "type": "string"
+          },
+          "peak_mem_mb": {
+            "description": "The sandbox's peak memory in MiB, read when the engagement ended; absent when it was not measured, which is not the same as zero.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "released_at": {
+            "description": "When the executor released the conversation, as an RFC 3339 timestamp, absent while the engagement is live.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sources": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/SourceEntry"
+            },
+            "description": "For each event source, keyed by its kind, whether the sandbox held its credential as of the engagement's latest seal and why not when it did not; absent for an engagement that was never sealed.",
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "status": {
+            "description": "The status of the conversation the engagement drove.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "conversation_id",
+          "org_id",
+          "executor_id",
+          "claimed_at",
+          "live",
+          "duration_seconds"
+        ],
+        "type": "object"
+      },
+      "SandboxSampleDTO": {
+        "properties": {
+          "at": {
+            "description": "When the sample was taken, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "cpu_usec_cum": {
+            "description": "The CPU time the sandbox had used since it started, in microseconds, absent when it was not measured; the difference between two samples is the CPU used between them.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "mem_current_mb": {
+            "description": "The sandbox's memory in use when the sample was taken, in MiB, absent when it was not measured.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "at"
+        ],
+        "type": "object"
+      },
+      "SandboxSeriesDTO": {
+        "properties": {
+          "claim_id": {
+            "description": "The claim's id.",
+            "type": "string"
+          },
+          "generated_at": {
+            "description": "When the server built the response, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "samples": {
+            "description": "Every sample taken of the engagement's sandbox, oldest first, empty when none was taken.",
+            "items": {
+              "$ref": "#/components/schemas/SandboxSampleDTO"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "generated_at",
+          "claim_id",
+          "samples"
+        ],
+        "type": "object"
+      },
+      "SandboxesDTO": {
+        "properties": {
+          "generated_at": {
+            "description": "When the server built the response, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "instance_id": {
+            "description": "The id of the executor the engagements ran on.",
+            "type": "string"
+          },
+          "limit": {
+            "description": "The most engagements the response could hold, after the limit parameter was read.",
+            "type": "integer"
+          },
+          "sandboxes": {
+            "description": "The executor's most recent engagements, newest claim first.",
+            "items": {
+              "$ref": "#/components/schemas/SandboxClaimDTO"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "generated_at",
+          "instance_id",
+          "limit",
+          "sandboxes"
+        ],
+        "type": "object"
+      },
+      "SlackManifest": {
+        "properties": {
+          "display_information": {
+            "$ref": "#/components/schemas/SlackManifestDisplayInfo",
+            "description": "How Slack shows the app: its name, descriptions, and color."
+          },
+          "features": {
+            "$ref": "#/components/schemas/SlackManifestFeatures",
+            "description": "The app's bot user."
+          },
+          "oauth_config": {
+            "$ref": "#/components/schemas/SlackManifestOAuth",
+            "description": "The app's OAuth settings."
+          },
+          "settings": {
+            "$ref": "#/components/schemas/SlackManifestSettings",
+            "description": "The events the app subscribes to, and how it receives them."
+          }
+        },
+        "required": [
+          "display_information",
+          "features",
+          "oauth_config",
+          "settings"
+        ],
+        "type": "object"
+      },
+      "SlackManifestBotUser": {
+        "properties": {
+          "always_online": {
+            "description": "Whether Slack always shows the bot user as online.",
+            "type": "boolean"
+          },
+          "display_name": {
+            "description": "The bot user's display name.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "display_name",
+          "always_online"
+        ],
+        "type": "object"
+      },
+      "SlackManifestDisplayInfo": {
+        "properties": {
+          "background_color": {
+            "description": "The app's background color, as a hex color.",
+            "type": "string"
+          },
+          "description": {
+            "description": "The app's short description.",
+            "type": "string"
+          },
+          "long_description": {
+            "description": "The app's long description.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The app's name: Triage Factory, followed by the organization's name in parentheses for an organization's own app.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "description",
+          "long_description",
+          "background_color"
+        ],
+        "type": "object"
+      },
+      "SlackManifestEventSubs": {
+        "properties": {
+          "bot_events": {
+            "description": "The events the app's bot subscribes to.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "request_url": {
+            "description": "The URL Slack sends events to, absent when the app receives them over Socket Mode.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "bot_events"
+        ],
+        "type": "object"
+      },
+      "SlackManifestFeatures": {
+        "properties": {
+          "bot_user": {
+            "$ref": "#/components/schemas/SlackManifestBotUser",
+            "description": "The app's bot user."
+          }
+        },
+        "required": [
+          "bot_user"
+        ],
+        "type": "object"
+      },
+      "SlackManifestOAuth": {
+        "properties": {
+          "redirect_urls": {
+            "description": "The URLs Slack may return to after installing the app, absent for an app connected with its tokens instead.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "scopes": {
+            "$ref": "#/components/schemas/SlackManifestScopes",
+            "description": "The OAuth scopes the app requests."
+          }
+        },
+        "required": [
+          "scopes"
+        ],
+        "type": "object"
+      },
+      "SlackManifestScopes": {
+        "properties": {
+          "bot": {
+            "description": "The scopes the app's bot token requests.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "bot"
+        ],
+        "type": "object"
+      },
+      "SlackManifestSettings": {
+        "properties": {
+          "event_subscriptions": {
+            "$ref": "#/components/schemas/SlackManifestEventSubs",
+            "description": "The events the app's bot subscribes to, and where Slack sends them."
+          },
+          "org_deploy_enabled": {
+            "description": "Whether the app can be installed across an Enterprise Grid organization.",
+            "type": "boolean"
+          },
+          "socket_mode_enabled": {
+            "description": "true when the app receives events over Socket Mode, absent when it receives them as HTTP requests.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "token_rotation_enabled": {
+            "description": "Whether the app's tokens expire and are rotated, which is always false: Triage Factory stores a token once and never refreshes it.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "event_subscriptions",
+          "org_deploy_enabled",
+          "token_rotation_enabled"
+        ],
+        "type": "object"
+      },
+      "SourceEntry": {
+        "properties": {
+          "account_id": {
+            "description": "The source's id for the account the sealed credential acts as, absent when it is not known.",
+            "type": "string"
+          },
+          "account_login": {
+            "description": "The login of the account the sealed credential acts as, absent when it is not known.",
+            "type": "string"
+          },
+          "expires_at": {
+            "description": "When the sealed credential stops working, as an RFC 3339 timestamp, absent when it does not expire and for every state but sealed.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "description": "Why the state applies (token_endpoint_unavailable, token_expired, or resolve_failed), absent when the state needs no reason.",
+            "type": "string"
+          },
+          "state": {
+            "description": "Whether the engagement holds the source's credential: sealed, unresolved (the organization has the source but its credential could not be read), unconfigured, disabled, unlicensed, or withheld.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "state"
+        ],
+        "type": "object"
+      },
+      "SpendSummary": {
+        "properties": {
+          "total_usd": {
+            "description": "The deployment's total LLM spend within the window, in USD.",
+            "type": "number"
+          },
+          "window_hours": {
+            "description": "The window's length in hours.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "window_hours",
+          "total_usd"
+        ],
+        "type": "object"
+      },
+      "SsoConnectionCreateRequest": {
+        "properties": {
+          "metadata_url": {
+            "description": "The https URL of the identity provider's SAML metadata, which the deployment fetches to register the connection. Required.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "SsoConnectionResponse": {
+        "properties": {
+          "acs_url": {
+            "description": "The deployment's SAML assertion consumer service URL, to enter in the identity provider's settings.",
+            "type": "string"
+          },
+          "connection": {
+            "description": "The organization's SSO connection, or null when none is registered.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SsoConnectionView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "entity_id": {
+            "description": "The deployment's SAML service provider entity ID, to enter in the identity provider's settings.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "connection",
+          "entity_id",
+          "acs_url"
+        ],
+        "type": "object"
+      },
+      "SsoConnectionUpdateRequest": {
+        "properties": {
+          "enabled": {
+            "description": "Whether people can sign in through the connection; absent or null keeps it. It cannot be turned off while the organization requires SSO.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "idp": {
+            "description": "The identity provider's product (entra, okta, google, onelogin, ping, or other), or null to clear it to not known; absent keeps it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "SsoConnectionView": {
+        "properties": {
+          "created_at": {
+            "description": "When the connection was registered, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "default_role": {
+            "description": "The organization role, admin or member, given to a person who joins the organization by signing in through the connection.",
+            "type": "string"
+          },
+          "enabled": {
+            "description": "Whether people can sign in through the connection.",
+            "type": "boolean"
+          },
+          "enforced": {
+            "description": "Whether the organization requires SSO, so that only sign-ins through the connection and break-glass principals reach it.",
+            "type": "boolean"
+          },
+          "id": {
+            "description": "The connection's id.",
+            "type": "string"
+          },
+          "idp": {
+            "description": "The identity provider's product (entra, okta, google, onelogin, ping, or other), absent when it is not known.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "The connection's protocol: saml or oidc.",
+            "type": "string"
+          },
+          "provider_id": {
+            "description": "The identity provider's id in the deployment's sign-in service, which an SSO sign-in URL names.",
+            "type": "string"
+          },
+          "tested": {
+            "description": "Whether a test sign-in through the connection has succeeded.",
+            "type": "boolean"
+          },
+          "updated_at": {
+            "description": "When the connection was last changed, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "provider_id",
+          "default_role",
+          "enabled",
+          "enforced",
+          "tested",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "SsoDiscoverRequest": {
+        "properties": {
+          "email": {
+            "description": "The email address the person is signing in with.",
+            "type": "string"
+          },
+          "return_to": {
+            "description": "The path on this deployment to return to after signing in, such as /tasks; an empty value, or anything that is not a path on this deployment, is read as /.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "SsoDiscoverResponse": {
+        "properties": {
+          "sso": {
+            "description": "Whether the email address signs in through SSO; when false, the person signs in another way.",
+            "type": "boolean"
+          },
+          "start_url": {
+            "description": "The path that starts the SSO sign-in, present only when sso is true.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sso"
+        ],
+        "type": "object"
+      },
+      "SsoDomainClaimRequest": {
+        "properties": {
+          "domain": {
+            "description": "The domain to claim, a bare domain such as example.com, compared without regard to case. Required.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "SsoDomainDeleteResponse": {
+        "properties": {
+          "status": {
+            "description": "Always deleted.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
+      "SsoDomainJSON": {
+        "properties": {
+          "domain": {
+            "description": "The claimed domain, in lowercase.",
+            "type": "string"
+          },
+          "id": {
+            "description": "The domain claim's id.",
+            "type": "string"
+          },
+          "status": {
+            "description": "pending until the domain is verified, then verified.",
+            "type": "string"
+          },
+          "txt_host": {
+            "description": "The DNS name the verification TXT record goes under.",
+            "type": "string"
+          },
+          "txt_value": {
+            "description": "The value the verification TXT record must hold.",
+            "type": "string"
+          },
+          "verified_at": {
+            "description": "When the domain was verified, as an RFC 3339 timestamp, absent while it is pending.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "domain",
+          "txt_host",
+          "txt_value",
+          "status"
+        ],
+        "type": "object"
+      },
+      "SsoEnforcementUpdateRequest": {
+        "properties": {
+          "enforced": {
+            "description": "Whether the organization requires SSO. Required. Turning it on needs an enabled connection, a successful test sign-in, a verified domain, and a caller who signed in through the connection or is a break-glass principal.",
+            "type": [
+              "boolean",
               "null"
             ]
           }
@@ -559,6 +2536,57 @@
             ]
           }
         },
+        "type": "object"
+      },
+      "TimeseriesDTO": {
+        "properties": {
+          "generated_at": {
+            "description": "When the server built the response, as an RFC 3339 timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "samples": {
+            "description": "Every instance's telemetry samples taken within the window, oldest first.",
+            "items": {
+              "$ref": "#/components/schemas/SampleDTO"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "window_hours": {
+            "description": "The window's length in hours.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "generated_at",
+          "window_hours",
+          "samples"
+        ],
+        "type": "object"
+      },
+      "TrackerView": {
+        "properties": {
+          "is_primary": {
+            "description": "Whether the team is the channel's primary, the team the channel's mentions are routed to.",
+            "type": "boolean"
+          },
+          "team_id": {
+            "description": "The team's id.",
+            "type": "string"
+          },
+          "team_name": {
+            "description": "The team's name.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "team_id",
+          "team_name",
+          "is_primary"
+        ],
         "type": "object"
       },
       "UsageCategoryBucket": {
@@ -983,6 +3011,23 @@
         ],
         "type": "object"
       },
+      "VersionSkew": {
+        "properties": {
+          "count": {
+            "description": "How many registered instances run it.",
+            "type": "integer"
+          },
+          "version": {
+            "description": "A build version.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "version",
+          "count"
+        ],
+        "type": "object"
+      },
       "VulnerablePackageJSON": {
         "properties": {
           "alerts": {
@@ -1241,6 +3286,473 @@
         }
       }
     },
+    "/api/fleet/backlog": {
+      "get": {
+        "description": "Returns how many conversations across the deployment are waiting for an executor and how long the oldest has waited, with each organization's count and oldest wait. It answers only the deployment's operators, needs an Enterprise licence that includes fleet administration, and refuses API tokens.",
+        "operationId": "get_fleet_backlog",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BacklogDTO"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get the fleet's backlog",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/fleet/claims/{id}": {
+      "get": {
+        "description": "Returns one executor engagement by its claim id, in any organization: what its sandbox used and which source credentials it held. It answers only the deployment's operators, needs an Enterprise licence that includes fleet administration, and refuses API tokens.",
+        "operationId": "get_fleet_claim",
+        "parameters": [
+          {
+            "description": "The claim's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClaimDetailDTO"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get an executor engagement",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/fleet/claims/{id}/series": {
+      "get": {
+        "description": "Returns the memory and cumulative CPU samples taken of one engagement's sandbox while it ran. The samples miss short spikes, so the engagement's peak memory can be above the highest sample. It answers only the deployment's operators, needs an Enterprise licence that includes fleet administration, and refuses API tokens.",
+        "operationId": "get_fleet_claim_series",
+        "parameters": [
+          {
+            "description": "The claim's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SandboxSeriesDTO"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get an engagement's sandbox resource samples",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/fleet/instances": {
+      "get": {
+        "description": "Returns every registered instance with its role, version, heartbeat, drain state, and capacity, and its latest telemetry sample from the last five minutes. It answers only the deployment's operators, needs an Enterprise licence that includes fleet administration, and refuses API tokens.",
+        "operationId": "list_fleet_instances",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstancesDTO"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List the fleet's instances",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/fleet/instances/{id}/drain": {
+      "post": {
+        "description": "Sets whether an instance is draining. A draining instance starts no new work and lets its running work finish, and the drain lasts across restarts until it is undrained. It answers only the deployment's operators, needs an Enterprise licence that includes fleet administration, and refuses API tokens.",
+        "operationId": "drain_fleet_instance",
+        "parameters": [
+          {
+            "description": "The instance's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DrainRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DrainResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Drain or undrain an instance",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/fleet/instances/{id}/sandboxes": {
+      "get": {
+        "description": "Returns the executor's most recent engagements across every organization, each with what its sandbox used and which source credentials it held. It answers only the deployment's operators, needs an Enterprise licence that includes fleet administration, and refuses API tokens.",
+        "operationId": "list_fleet_instance_sandboxes",
+        "parameters": [
+          {
+            "description": "The executor's instance id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The most engagements to return: 25 when absent, and 100 when above 100. A value that is not a whole number of at least 1 is refused.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SandboxesDTO"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List an executor's recent sandboxes",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/fleet/overview": {
+      "get": {
+        "description": "Returns counts across every registered instance, the queue of conversations waiting for an executor, the conversations started within the window, the build versions instances run, and the deployment's LLM spend within the window. It answers only the deployment's operators, needs an Enterprise licence that includes fleet administration, and refuses API tokens.",
+        "operationId": "get_fleet_overview",
+        "parameters": [
+          {
+            "description": "The window's length in hours, ending now: 24 when absent or not a whole number, and moved into the range 1 to 168 when outside it.",
+            "in": "query",
+            "name": "hours",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OverviewDTO"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get the fleet overview",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/fleet/placement": {
+      "get": {
+        "description": "Returns the order in which executors are preferred for a repository's conversations, with each instance's score, weight, and eligibility, and the override and timing windows in effect.",
+        "operationId": "get_fleet_placement",
+        "parameters": [
+          {
+            "description": "The id of the organization the repository belongs to. Required.",
+            "in": "query",
+            "name": "org",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The kind of placement key, which must be repo; absent means repo.",
+            "in": "query",
+            "name": "kind",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The repository's full name, as owner/name, on the organization's GitHub host. Required.",
+            "in": "query",
+            "name": "repo",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlacementExplainDTO"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Explain a repository's executor placement",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/fleet/queue": {
+      "get": {
+        "description": "Returns how many of the organization's conversations are running and how many are waiting for an executor, against the organization's limit on concurrent runs.",
+        "operationId": "get_fleet_queue",
+        "parameters": [
+          {
+            "description": "The organization's id. Required.",
+            "in": "query",
+            "name": "org",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FleetQueueShareDTO"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get an organization's run queue",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/fleet/timeseries": {
+      "get": {
+        "description": "Returns every instance's telemetry samples taken within the window, about one a minute each: runs held, queue depth, memory, CPU, load, claims, spawn latency, and out-of-memory kills. It answers only the deployment's operators, needs an Enterprise licence that includes fleet administration, and refuses API tokens.",
+        "operationId": "get_fleet_timeseries",
+        "parameters": [
+          {
+            "description": "The window's length in hours, ending now: 24 when absent or not a whole number, and moved into the range 1 to 168 when outside it.",
+            "in": "query",
+            "name": "hours",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TimeseriesDTO"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get the fleet's telemetry samples",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
     "/api/health": {
       "get": {
         "description": "Reports status ok once the server accepts requests. It needs no credential and checks no database or integration, so it says only that the process is serving.",
@@ -1322,9 +3834,76 @@
         }
       }
     },
+    "/api/orgs/{org_id}/slack/connections/import": {
+      "post": {
+        "description": "Connects an organization's own Slack app from its tokens, which are checked with Slack, and returns the connection. A new connection answers 201, and is stored inactive when the workspace already has an active connection of another app; connecting an app the workspace already has replaces its stored tokens and answers 200. It needs an Enterprise licence that includes Slack, and is available only in multi mode.",
+        "operationId": "import_slack_connection",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectionImportRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceView"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceView"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Connect the organization's own Slack app",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      }
+    },
     "/api/orgs/{org_id}/slack/connections/list": {
       "post": {
-        "description": "Returns one page of the organization's Slack connections, active and inactive, ordered by workspace name, then workspace id, then app id. Each connection carries its Socket Mode status when it has one.",
+        "description": "Returns one page of the organization's Slack connections, active and inactive, ordered by workspace name, then workspace id, then app id. Each connection carries its Socket Mode status when it has one. It needs an Enterprise licence that includes Slack, and is available only in multi mode.",
         "operationId": "list_slack_connections",
         "parameters": [
           {
@@ -1395,6 +3974,324 @@
           }
         ],
         "summary": "List Slack connections",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/slack/connections/{workspace_id}/{api_app_id}": {
+      "delete": {
+        "description": "Disconnects one of the organization's Slack connections and deletes its stored tokens. The app stays installed in Slack, and deleting a workspace's active connection leaves the workspace with none. It needs an Enterprise licence that includes Slack, and is available only in multi mode.",
+        "operationId": "delete_slack_connection",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The Slack workspace's id.",
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The Slack app's id.",
+            "in": "path",
+            "name": "api_app_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionDeleteResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Disconnect a Slack connection",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      },
+      "get": {
+        "description": "Returns one of the organization's Slack connections, by the workspace and the app it connects, with its Socket Mode status when it has one. It needs an Enterprise licence that includes Slack, and is available only in multi mode.",
+        "operationId": "get_slack_connection",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The Slack workspace's id.",
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The Slack app's id.",
+            "in": "path",
+            "name": "api_app_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceView"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get a Slack connection",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/slack/connections/{workspace_id}/{api_app_id}/activate": {
+      "post": {
+        "description": "Makes a connection the workspace's active one, in place of the connection that was, and joins its bot to the watched public channels it is not in. It is refused unless the stored state still matches the activation preview's fingerprint; the replaced connection stays connected, inactive. It needs an Enterprise licence that includes Slack, and is available only in multi mode.",
+        "operationId": "activate_slack_connection",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The Slack workspace's id.",
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The Slack app's id.",
+            "in": "path",
+            "name": "api_app_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ActivateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActivationResult"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Make a Slack connection active",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/orgs/{org_id}/slack/connections/{workspace_id}/{api_app_id}/activation-preview": {
+      "get": {
+        "description": "Returns what making a connection the workspace's active one would change: the watched channels and whether its bot is in each, what stops the switch, and a fingerprint the activation takes. It checks the connection's tokens and reads its channels with Slack, and changes nothing. It needs an Enterprise licence that includes Slack, and is available only in multi mode.",
+        "operationId": "get_slack_connection_activation_preview",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The Slack workspace's id.",
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The Slack app's id.",
+            "in": "path",
+            "name": "api_app_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActivationPreview"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Preview making a Slack connection active",
+        "x-hints": {
+          "openWorldHint": true,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/slack/manifest": {
+      "get": {
+        "description": "Returns the Slack app manifest to create the organization's own Slack app from, for the transport given. An events_api manifest names the deployment's public URL, so it needs one configured. It needs an Enterprise licence that includes Slack, and is available only in multi mode.",
+        "operationId": "get_slack_manifest",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "How the app is to receive events: socket for Socket Mode, or events_api for HTTP requests to the deployment. Required.",
+            "in": "query",
+            "name": "transport",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SlackManifest"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get the manifest for the organization's Slack app",
         "x-hints": {
           "openWorldHint": false,
           "readOnlyHint": true
@@ -1521,6 +4418,573 @@
         }
       }
     },
+    "/api/slack/deployment-app": {
+      "get": {
+        "description": "Returns the deployment's own Slack app, which an organization can install instead of creating its own. A deployment has none to return when no app is configured or its public URL is not HTTPS. It is available only in multi mode.",
+        "operationId": "get_slack_deployment_app",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeploymentAppView"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get the deployment's Slack app",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/sso/break-glass": {
+      "get": {
+        "description": "Returns every break-glass principal: the members who can still sign in without SSO while the organization requires it. It acts on the caller's active organization, needs an Enterprise licence that includes SSO, and is available only in multi mode.",
+        "operationId": "list_sso_break_glass_principals",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/BreakGlassView"
+                  },
+                  "type": [
+                    "array",
+                    "null"
+                  ]
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List break-glass principals",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      },
+      "post": {
+        "description": "Makes the organization member with the given verified email address a break-glass principal, who can still sign in without SSO while the organization requires it, and returns every break-glass principal. Adding one who already is changes nothing. It acts on the caller's active organization, needs an Enterprise licence that includes SSO, and is available only in multi mode.",
+        "operationId": "create_sso_break_glass_principal",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BreakGlassAddRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/BreakGlassView"
+                  },
+                  "type": [
+                    "array",
+                    "null"
+                  ]
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Add a break-glass principal",
+        "x-hints": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/sso/break-glass/{user_id}": {
+      "delete": {
+        "description": "Removes a member from the break-glass principals, and answers the same for a member who is not one. The last one cannot be removed while the organization requires SSO. It acts on the caller's active organization, needs an Enterprise licence that includes SSO, and is available only in multi mode.",
+        "operationId": "delete_sso_break_glass_principal",
+        "parameters": [
+          {
+            "description": "The member's user id.",
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Remove a break-glass principal",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/sso/connection": {
+      "get": {
+        "description": "Returns the organization's SSO connection, or null when none is registered, with the service provider values to enter in the identity provider's settings. It acts on the caller's active organization, needs an Enterprise licence that includes SSO, and is available only in multi mode.",
+        "operationId": "get_sso_connection",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SsoConnectionResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get the SSO connection",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      },
+      "patch": {
+        "description": "Turns the organization's SSO connection on or off, or sets or clears which identity provider product it is, and returns the connection as changed. A body that names neither field is refused. It acts on the caller's active organization, needs an Enterprise licence that includes SSO, and is available only in multi mode.",
+        "operationId": "update_sso_connection",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SsoConnectionUpdateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SsoConnectionResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Update the SSO connection",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      },
+      "post": {
+        "description": "Registers a SAML connection, enabled but not required, from the identity provider's metadata URL, which the deployment fetches, and returns it with the service provider values. An organization that already has a connection gets that one back unchanged, with status 200. It acts on the caller's active organization, needs an Enterprise licence that includes SSO, and is available only in multi mode.",
+        "operationId": "create_sso_connection",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SsoConnectionCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SsoConnectionResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SsoConnectionResponse"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Register an SSO connection",
+        "x-hints": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/sso/connection/enforcement": {
+      "patch": {
+        "description": "Sets whether the organization requires SSO, which while on lets members other than break-glass principals reach the organization only by signing in through its connection, and returns the connection as changed. It acts on the caller's active organization, needs an Enterprise licence that includes SSO, and is available only in multi mode.",
+        "operationId": "update_sso_connection_enforcement",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SsoEnforcementUpdateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SsoConnectionResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Require or stop requiring SSO",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/sso/discover": {
+      "post": {
+        "description": "Returns whether an email address's domain is verified for an organization's enabled SSO connection, and if it is, the path that starts the sign-in through it. It needs no session, and it answers sso false in local mode and for an organization whose Enterprise licence does not include SSO.",
+        "operationId": "discover_sso",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SsoDiscoverRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SsoDiscoverResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [],
+        "summary": "Find the SSO sign-in for an email address",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/sso/domains": {
+      "get": {
+        "description": "Returns every email domain the organization has claimed for SSO, pending or verified, with the DNS TXT record that verifies each. It acts on the caller's active organization, needs an Enterprise licence that includes SSO, and is available only in multi mode.",
+        "operationId": "list_sso_domains",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SsoDomainJSON"
+                  },
+                  "type": [
+                    "array",
+                    "null"
+                  ]
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List claimed SSO domains",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      },
+      "post": {
+        "description": "Claims an email domain for the organization's SSO connection and returns it pending, with the DNS TXT record that verifies it; a domain the organization has already claimed is returned as it is, with status 200. The organization must have a connection. It acts on the caller's active organization, needs an Enterprise licence that includes SSO, and is available only in multi mode.",
+        "operationId": "create_sso_domain",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SsoDomainClaimRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SsoDomainJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SsoDomainJSON"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Claim an email domain for SSO",
+        "x-hints": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/sso/domains/{id}": {
+      "delete": {
+        "description": "Removes one of the organization's claimed domains. The last verified domain cannot be removed while the organization requires SSO. It acts on the caller's active organization, needs an Enterprise licence that includes SSO, and is available only in multi mode.",
+        "operationId": "delete_sso_domain",
+        "parameters": [
+          {
+            "description": "The domain claim's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SsoDomainDeleteResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Remove a claimed SSO domain",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/sso/domains/{id}/verify": {
+      "post": {
+        "description": "Looks up the domain's verification TXT record in DNS and, when it holds the expected value, marks the domain verified, so people with an address at it can join the organization by signing in through SSO. Returns the domain; one already verified is returned without a lookup. It acts on the caller's active organization, needs an Enterprise licence that includes SSO, and is available only in multi mode.",
+        "operationId": "verify_sso_domain",
+        "parameters": [
+          {
+            "description": "The domain claim's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SsoDomainJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Verify a claimed SSO domain",
+        "x-hints": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      }
+    },
     "/api/tasks/list": {
       "post": {
         "description": "Returns one page of the tasks the caller can see, narrowed by the body's filters and ordered by sort_key, or without one by attention and then priority. Each task says whether the caller may write it. A page_token resumes after the last task of the page that returned it, and is refused for different filters.",
@@ -1634,6 +5098,291 @@
           "destructiveHint": true,
           "idempotentHint": true,
           "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/teams/{team_id}/slack-channels": {
+      "put": {
+        "description": "Replaces the set of Slack channels the team tracks, each of which the organization's Slack connections must be able to see, joins the app's bot to each added public channel it is not in, and returns every channel of the team's list. A team's first tracked channel also gives it a default handler for Slack mentions when it has none. It needs an Enterprise licence that includes Slack, and is available only in multi mode.",
+        "operationId": "replace_team_slack_channels",
+        "parameters": [
+          {
+            "description": "The team's id.",
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutChannelsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelsResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Set the Slack channels a team tracks",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/teams/{team_id}/slack-channels/facets": {
+      "post": {
+        "description": "Counts the channels of the team's Slack channel list by whether the team tracks them and by whose primary they are, under the list's filters. It reads the same channels the list does, with the same gaps. It needs an Enterprise licence that includes Slack, and is available only in multi mode.",
+        "operationId": "get_team_slack_channel_facets",
+        "parameters": [
+          {
+            "description": "The team's id.",
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChannelsFacetsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelsFacetsResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Count a team's Slack channels",
+        "x-hints": {
+          "openWorldHint": true,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/teams/{team_id}/slack-channels/list": {
+      "post": {
+        "description": "Returns one page of the Slack channels the team can track: the ones it tracks, the ones the app has seen, and the ones the organization's Slack connections list, narrowed by the filters and ordered by sort_key. Slack's channels are read at most once a minute per organization, and the response's warnings say when that read was incomplete. It needs an Enterprise licence that includes Slack, and is available only in multi mode.",
+        "operationId": "list_team_slack_channels",
+        "parameters": [
+          {
+            "description": "The team's id.",
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChannelsListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelsListResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List a team's Slack channels",
+        "x-hints": {
+          "openWorldHint": true,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/teams/{team_id}/slack-channels/{channel_id}": {
+      "get": {
+        "description": "Returns one channel of the team's Slack channel list, as the list would return it, reading Slack's channels to build it. It needs an Enterprise licence that includes Slack, and is available only in multi mode.",
+        "operationId": "get_team_slack_channel",
+        "parameters": [
+          {
+            "description": "The team's id.",
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Slack's id for the channel. An id Slack has since replaced reads the channel under its current id.",
+            "in": "path",
+            "name": "channel_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelView"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get a channel of a team's Slack channel list",
+        "x-hints": {
+          "openWorldHint": true,
+          "readOnlyHint": true
+        }
+      },
+      "patch": {
+        "description": "Makes the team the primary of a channel it tracks, so the channel's mentions are routed to it, and returns the channel as the team's list shows it; the team must not be archived. An empty body writes nothing and returns the channel. It needs an Enterprise licence that includes Slack, and is available only in multi mode.",
+        "operationId": "update_team_slack_channel",
+        "parameters": [
+          {
+            "description": "The team's id.",
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Slack's id for the channel. An id Slack has since replaced reads the channel under its current id.",
+            "in": "path",
+            "name": "channel_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PatchChannelRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelView"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Update a team's tracking of a Slack channel",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": true,
           "readOnlyHint": false
         }
       }

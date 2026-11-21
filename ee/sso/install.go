@@ -33,21 +33,21 @@ func install(api server.ExtensionAPI) {
 		gotrueURL: api.GotrueAdminBaseURL,
 		publicURL: api.PublicURL,
 	}
-	api.API("GET /api/sso/connection", ssoc.handleSSOConnectionGet)
-	api.APIMutating("POST /api/sso/connection", ssoc.handleSSOConnectionCreate)
-	api.APIMutating("PATCH /api/sso/connection", ssoc.handleSSOConnectionUpdate)
-	api.APIMutating("PATCH /api/sso/connection/enforcement", ssoc.handleSSOEnforcementUpdate)
+	api.Op(opConnectionGet, ssoc.handleSSOConnectionGet)
+	api.Op(opConnectionCreate, ssoc.handleSSOConnectionCreate)
+	api.Op(opConnectionUpdate, ssoc.handleSSOConnectionUpdate)
+	api.Op(opEnforcementUpdate, ssoc.handleSSOEnforcementUpdate)
 
 	ssobg := &ssoBreakGlassHandler{tx: api.Tx(), az: api.Authz(), conn: ssoc}
-	api.API("GET /api/sso/break-glass", ssobg.handleBreakGlassList)
-	api.APIMutating("POST /api/sso/break-glass", ssobg.handleBreakGlassAdd)
-	api.APIMutating("DELETE /api/sso/break-glass/{user_id}", ssobg.handleBreakGlassRemove)
+	api.Op(opBreakGlassList, ssobg.handleBreakGlassList)
+	api.Op(opBreakGlassAdd, ssobg.handleBreakGlassAdd)
+	api.Op(opBreakGlassRemove, ssobg.handleBreakGlassRemove)
 
 	ssod := newSSODomainsHandler(api.Tx(), api.Authz())
-	api.API("GET /api/sso/domains", ssod.handleDomainList)
-	api.APIMutating("POST /api/sso/domains", ssod.handleDomainClaim)
-	api.APIMutating("POST /api/sso/domains/{id}/verify", ssod.handleDomainVerify)
-	api.APIMutating("DELETE /api/sso/domains/{id}", ssod.handleDomainDelete)
+	api.Op(opDomainList, ssod.handleDomainList)
+	api.Op(opDomainClaim, ssod.handleDomainClaim)
+	api.Op(opDomainVerify, ssod.handleDomainVerify)
+	api.Op(opDomainDelete, ssod.handleDomainDelete)
 
 	// Login-path SSO: the verify-before-enforce test-start (session-authed,
 	// admin-gated) and the pre-auth identifier-first discovery probe, plus the
@@ -56,5 +56,5 @@ func install(api server.ExtensionAPI) {
 	le := &loginExt{api: api, conn: ssoc}
 	api.SetLoginExtension(le)
 	api.API("GET /api/sso/connection/test", le.handleTestStart)
-	api.Raw("POST /api/sso/discover", api.PreAuthRateLimit(http.HandlerFunc(le.handleDiscover)))
+	api.RawOp(opDiscover, api.PreAuthRateLimit(http.HandlerFunc(le.handleDiscover)))
 }
