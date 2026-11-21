@@ -727,7 +727,7 @@ func TestNotificationDismiss(t *testing.T) {
 // TestNotificationAction runs an invoke action through the dispatcher: the
 // handler's effect and outcome, the row resolving when it reports the
 // condition resolved, the answer once the row is gone, a handler's own
-// refusal, and the route's 404s, 409 and body check.
+// refusal, the route's 404s and 409, and a body it ignores.
 func TestNotificationAction(t *testing.T) {
 	s, _ := newNotificationsServer(t)
 	var calls []notify.ActionCall[notificationTestParams]
@@ -758,7 +758,7 @@ func TestNotificationAction(t *testing.T) {
 		t.Errorf("after an unfixed invoke: %+v", ans)
 	}
 
-	// An empty object is no body; a handler's error is a 500.
+	// A handler's error is a 500.
 	refusal = errors.New("store down")
 	if code, _ := invoke(id, "fix", map[string]any{}); code != http.StatusInternalServerError {
 		t.Errorf("handler error = %d, want 500", code)
@@ -768,13 +768,14 @@ func TestNotificationAction(t *testing.T) {
 	assertFault(t, doJSON(t, s, http.MethodPost, meNotifications+"/"+id+"/actions/fix", nil), http.StatusForbidden, httpx.ReasonTeamArchived)
 	refusal = nil
 
-	// The route takes no body: anything with a field is refused, and the
-	// handler never runs.
+	// The route reads no body, so one it is sent is ignored and the handler
+	// runs as it does without one.
 	before := len(calls)
-	rec := doJSON(t, s, http.MethodPost, meNotifications+"/"+id+"/actions/fix", map[string]any{"confirm": true})
-	assertFault(t, rec, http.StatusBadRequest, httpx.ReasonUnknownField)
-	if len(calls) != before {
-		t.Error("a refused body ran the handler")
+	if code, body := invoke(id, "fix", map[string]any{"confirm": true}); code != http.StatusOK {
+		t.Errorf("invoke with a body = %d: %s", code, body)
+	}
+	if len(calls) != before+1 {
+		t.Errorf("a body changed whether the handler ran: %d calls, want %d", len(calls), before+1)
 	}
 
 	// Fixed: the row resolves for the handler's reason, says why, and its

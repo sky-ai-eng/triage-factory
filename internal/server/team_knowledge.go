@@ -54,11 +54,11 @@ const (
 // everywhere they are used again — the move body takes them apart, and the
 // raw-read path joins them itself.
 type knowledgeFileJSON struct {
-	Root    string    `json:"root"`
-	Path    string    `json:"path"`
-	Name    string    `json:"name"`
-	Size    int64     `json:"size"`
-	ModTime time.Time `json:"mod_time"`
+	Root    string    `json:"root" doc:"The root the document is in: private, which the team's members read, or shared, which every member of the organization reads."`
+	Path    string    `json:"path" doc:"The document's path within its root, its folders and name separated by slashes."`
+	Name    string    `json:"name" doc:"The document's name, the last segment of path."`
+	Size    int64     `json:"size" doc:"The document's size in bytes."`
+	ModTime time.Time `json:"mod_time" doc:"When the document was last written, as an RFC 3339 timestamp."`
 }
 
 func knowledgeFileToJSON(f kbstore.FileInfo) knowledgeFileJSON {
@@ -83,11 +83,11 @@ func knowledgeFileToJSON(f kbstore.FileInfo) knowledgeFileJSON {
 // is filed under it. sort_key/sort_dir order the answer
 // (knowledgeListSortKeys); absent is root, then path.
 type knowledgeListRequest struct {
-	Root       string `json:"root"`
-	PathPrefix string `json:"path_prefix"`
-	Search     string `json:"search"`
-	SortKey    string `json:"sort_key"`
-	SortDir    string `json:"sort_dir"`
+	Root       string `json:"root" doc:"private or shared, to include only the documents in that root; absent includes every root the caller may read."`
+	PathPrefix string `json:"path_prefix" doc:"A folder whose documents to include, matched by whole segments, so notes includes notes and everything under it but not notes-archive; absent includes every folder."`
+	Search     string `json:"search" doc:"Text the document's path must contain, matched without regard to case."`
+	SortKey    string `json:"sort_key" doc:"Orders the result by path, size, or mod_time; absent orders it by root and then path."`
+	SortDir    string `json:"sort_dir" doc:"The direction of sort_key, asc or desc; absent is asc for path and desc for size and mod_time, and it is refused without sort_key."`
 	httpx.PageRequest
 }
 
@@ -108,6 +108,15 @@ var knowledgeListSortKeys = []httpx.SortKey{
 	{Name: string(kbstore.SortSize), Default: db.SortDesc},
 	{Name: string(kbstore.SortModTime), Default: db.SortDesc},
 }
+
+var opTeamKnowledgeList = httpx.NewListOp[knowledgeListRequest, knowledgeFileJSON](httpx.OpSpec{
+	Pattern:     "POST /api/teams/{team_id}/kb/list",
+	ID:          "list_knowledge_files",
+	Summary:     "List a team's knowledge documents",
+	Description: "Lists one page of the documents in the team's knowledge base that the caller may read: both roots for a member of the team, and the shared root alone for any other member of the organization.",
+	PathParams:  map[string]string{"team_id": "The id of the team that owns the knowledge base."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleTeamKnowledgeList returns one page of the team's KB entries.
 //
@@ -131,8 +140,8 @@ func (s *Server) handleTeamKnowledgeList(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	var req knowledgeListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opTeamKnowledgeList.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -185,8 +194,23 @@ func (s *Server) handleTeamKnowledgeList(w http.ResponseWriter, r *http.Request)
 			items = append(items, knowledgeFileToJSON(f))
 		}
 	}
-	httpx.WriteList(w, page, items, total)
+	opTeamKnowledgeList.Write(w, page, items, total)
 }
+
+// knowledgePathParams documents the per-document routes' path.
+var knowledgePathParams = map[string]string{
+	"team_id": "The id of the team that owns the knowledge base.",
+	"path":    "The document's root and its path within the root, as <root>/<path>; it may contain slashes.",
+}
+
+var opTeamKnowledgeRead = httpx.NewBytesOp[httpx.NoBody](httpx.OpSpec{
+	Pattern:     "GET /api/teams/{team_id}/kb/{path...}",
+	ID:          "get_knowledge_file",
+	Summary:     "Download a knowledge document",
+	Description: "Returns the document's bytes as an attachment named for the document. A HEAD request gets the headers only.",
+	PathParams:  knowledgePathParams,
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+}, "application/octet-stream")
 
 // handleTeamKnowledgeRead streams one entry's bytes.
 //
@@ -253,16 +277,30 @@ func (s *Server) handleTeamKnowledgeRead(w http.ResponseWriter, r *http.Request)
 // distinguishes a new document from a replaced one so the page can say which
 // happened; a client that does not care ignores the field.
 type knowledgeUploadResultJSON struct {
-	Root    string `json:"root"`
-	Path    string `json:"path"`
-	Name    string `json:"name"`
-	Size    int64  `json:"size"`
-	Outcome string `json:"outcome"` // "created" | "replaced"
+	Root    string `json:"root" doc:"The root the document was written to, private or shared."`
+	Path    string `json:"path" doc:"The document's path within its root, its folders and name separated by slashes."`
+	Name    string `json:"name" doc:"The document's name, the last segment of path."`
+	Size    int64  `json:"size" doc:"How many bytes were written."`
+	Outcome string `json:"outcome" doc:"created when no document was at the path, or replaced when the upload overwrote one."` // "created" | "replaced"
 }
 
 type knowledgeUploadResponse struct {
-	Files []knowledgeUploadResultJSON `json:"files"`
+	Files []knowledgeUploadResultJSON `json:"files" doc:"What each uploaded file became, in the order the files were sent."`
 }
+
+var opTeamKnowledgeUpload = httpx.NewJSONOp[httpx.NoBody, knowledgeUploadResponse](httpx.OpSpec{
+	Pattern:     "POST /api/teams/{team_id}/kb/files",
+	ID:          "upload_knowledge_files",
+	Summary:     "Upload documents to a team's knowledge base",
+	Description: "Writes the uploaded files into the team's knowledge base, under the root and folder the form names, replacing any document already at a file's path, and returns what each file became. The root and path_prefix parts come before the files parts, and one request carries at most 100 files and 32 MiB.",
+	PathParams:  map[string]string{"team_id": "The id of the team that owns the knowledge base."},
+	Form: []httpx.FormPart{
+		{Name: "root", Doc: "The root to write into: private, which the team's members read, or shared, which every member of the organization reads."},
+		{Name: "path_prefix", Doc: "The folder to write into, its segments separated by slashes; absent writes at the root's top level."},
+		{Name: "files", File: true, Multiple: true, Doc: "A file to write, named by its filename, which may be a relative path with folders that are kept under path_prefix."},
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleTeamKnowledgeUpload writes one or more files into the team's own KB.
 //
@@ -406,8 +444,17 @@ func (s *Server) handleTeamKnowledgeUpload(w http.ResponseWriter, r *http.Reques
 	}
 
 	s.knowledgeNotifier().Publish(r.Context(), orgID, teamID, root)
-	writeJSON(w, http.StatusOK, knowledgeUploadResponse{Files: results})
+	opTeamKnowledgeUpload.Write(w, knowledgeUploadResponse{Files: results})
 }
+
+var opTeamKnowledgeDelete = httpx.NewJSONOp[httpx.NoBody, knowledgeDeleteResponse](httpx.OpSpec{
+	Pattern:     "DELETE /api/teams/{team_id}/kb/{path...}",
+	ID:          "delete_knowledge_file",
+	Summary:     "Delete a knowledge document or folder",
+	Description: "Deletes the document at the path, or the folder there and every document under it, and returns how many documents it deleted.",
+	PathParams:  knowledgePathParams,
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleTeamKnowledgeDelete removes the named path and everything beneath it.
 //
@@ -440,22 +487,22 @@ func (s *Server) handleTeamKnowledgeDelete(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	s.knowledgeNotifier().Publish(r.Context(), orgID, teamID, ref.Root)
-	writeJSON(w, http.StatusOK, knowledgeDeleteResponse{Removed: removed})
+	opTeamKnowledgeDelete.Write(w, knowledgeDeleteResponse{Removed: removed})
 }
 
 // knowledgeMoveRequest is the body of the move verb: where the subtree is now,
 // and where it should be.
 type knowledgeMoveRequest struct {
-	FromRoot string `json:"from_root"`
-	FromPath string `json:"from_path"`
-	ToRoot   string `json:"to_root"`
-	ToPath   string `json:"to_path"`
+	FromRoot string `json:"from_root" doc:"The root the document or folder is in, private or shared."`
+	FromPath string `json:"from_path" doc:"The path of the document or folder within from_root."`
+	ToRoot   string `json:"to_root" doc:"The root to move it to, private or shared."`
+	ToPath   string `json:"to_path" doc:"The path to move it to within to_root."`
 }
 
 type knowledgeMoveResponse struct {
 	// Moved is how many entries the transition touched — one for a document,
 	// the subtree's size for a folder.
-	Moved int `json:"moved"`
+	Moved int `json:"moved" doc:"How many documents moved: one for a document, and every document under it for a folder."`
 }
 
 // knowledgeDeleteResponse is the delete verb's own shape. It reports `removed`
@@ -464,8 +511,17 @@ type knowledgeMoveResponse struct {
 type knowledgeDeleteResponse struct {
 	// Removed is how many entries went away — one for a document, the
 	// subtree's size for a folder.
-	Removed int `json:"removed"`
+	Removed int `json:"removed" doc:"How many documents were deleted: one for a document, and every document under it for a folder."`
 }
+
+var opTeamKnowledgeMove = httpx.NewJSONOp[knowledgeMoveRequest, knowledgeMoveResponse](httpx.OpSpec{
+	Pattern:     "POST /api/teams/{team_id}/kb/move",
+	ID:          "move_knowledge_file",
+	Summary:     "Move a knowledge document or folder",
+	Description: "Moves a document or a folder to another path or root in the team's knowledge base, and returns how many documents moved. Moving to shared publishes it to the organization, and moving to private unpublishes it; a move that would overwrite a document is refused and moves nothing.",
+	PathParams:  map[string]string{"team_id": "The id of the team that owns the knowledge base."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleTeamKnowledgeMove relocates a document or a folder.
 //
@@ -487,8 +543,8 @@ func (s *Server) handleTeamKnowledgeMove(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	var req knowledgeMoveRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opTeamKnowledgeMove.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -509,7 +565,7 @@ func (s *Server) handleTeamKnowledgeMove(w http.ResponseWriter, r *http.Request)
 	// one listing and fills the other, and a page watching only the root it is
 	// showing must hear about whichever one that is.
 	s.knowledgeNotifier().Publish(r.Context(), orgID, teamID, from.Root, to.Root)
-	writeJSON(w, http.StatusOK, knowledgeMoveResponse{Moved: moved})
+	opTeamKnowledgeMove.Write(w, knowledgeMoveResponse{Moved: moved})
 }
 
 // --- gates and shared plumbing ------------------------------------------
@@ -869,9 +925,9 @@ func (s *Server) registerTeamKnowledgeRoutes() {
 	// and the roots they may read narrow to shared alone (team_knowledge.go).
 	// The per-file routes carry "<root>/<path…>" in one wildcard segment,
 	// which is the address a listing entry renders and a person can copy.
-	s.apiMutating("POST /api/teams/{team_id}/kb/list", s.handleTeamKnowledgeList)
-	s.apiMutating("POST /api/teams/{team_id}/kb/files", s.handleTeamKnowledgeUpload)
-	s.apiMutating("POST /api/teams/{team_id}/kb/move", s.handleTeamKnowledgeMove)
-	s.api("GET /api/teams/{team_id}/kb/{path...}", s.handleTeamKnowledgeRead)
-	s.apiMutating("DELETE /api/teams/{team_id}/kb/{path...}", s.handleTeamKnowledgeDelete)
+	s.op(opTeamKnowledgeList, s.handleTeamKnowledgeList)
+	s.op(opTeamKnowledgeUpload, s.handleTeamKnowledgeUpload)
+	s.op(opTeamKnowledgeMove, s.handleTeamKnowledgeMove)
+	s.op(opTeamKnowledgeRead, s.handleTeamKnowledgeRead)
+	s.op(opTeamKnowledgeDelete, s.handleTeamKnowledgeDelete)
 }
