@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 
 // The control renders only in multi mode, where useOptionalAuth is non-null.
@@ -35,10 +35,6 @@ function stubListing(status: 'published' | 'delisted') {
 }
 
 describe('MarketplacePublishControl', () => {
-  beforeEach(() => {
-    vi.unstubAllGlobals()
-  })
-
   it('delists a published listing by setting its status', async () => {
     const fetchMock = stubListing('published')
     render(<MarketplacePublishControl kind="prompt" sourceId="p1" defaultName="Fix CI" />)
