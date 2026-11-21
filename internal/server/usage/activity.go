@@ -74,9 +74,9 @@ type objectActivityJSON struct {
 // for the rest. The artifacts feeds here and a conversation's artifacts list
 // both carry it.
 type ArtifactDeliverableJSON struct {
-	ID    string `json:"id"`
-	Kind  string `json:"kind"`
-	State string `json:"state"`
+	ID    string `json:"id" doc:"The deliverable's id."`
+	Kind  string `json:"kind" doc:"The kind of deliverable: pull_request or review."`
+	State string `json:"state" doc:"Where the deliverable stands: pending, draft, open, merged, or closed for a pull request, and pending, submitted, or dismissed for a review."`
 }
 
 // orgObjectActivityJSON is the org feed's item: the teams whose runs changed
@@ -705,31 +705,31 @@ func (h *Handler) requireTeamOrOrgAdmin(w http.ResponseWriter, r *http.Request, 
 // /api/agent/conversations/{conversationID}/actions/list) serves the same shape
 // and sets none of the three.
 type ActionJSON struct {
-	ID             string `json:"id"`
-	Provider       string `json:"provider"`
-	Scope          string `json:"scope"`
-	Action         string `json:"action"`
-	Target         string `json:"target"`
-	ExternalID     string `json:"external_id,omitempty"`
-	URL            string `json:"url,omitempty"`
-	FromState      string `json:"from_state,omitempty"`
-	ToState        string `json:"to_state,omitempty"`
-	ConversationID string `json:"conversation_id,omitempty"`
-	ActorUserID    string `json:"actor_user_id,omitempty"`
-	PerformedBy    string `json:"performed_by"`
+	ID             string `json:"id" doc:"The action's id."`
+	Provider       string `json:"provider" doc:"The outside system the action was on: github, jira, linear, slack, or network for a refused network connection."`
+	Scope          string `json:"scope" doc:"Where in that system the action was: the GitHub host, the Jira site, the Linear workspace id, slack.com, or internet for a refused network connection."`
+	Action         string `json:"action" doc:"What was done, such as pr_created or branch_pushed, or what was refused or failed, such as git_denied or branch_push_failed."`
+	Target         string `json:"target" doc:"The key of what the action was on, as the action named it, such as owner/repo#42, owner/repo, or PROJ-123."`
+	ExternalID     string `json:"external_id,omitempty" doc:"The outside system's own id for the object the action was on, such as a pull request number or a comment id, absent when none was recorded."`
+	URL            string `json:"url,omitempty" doc:"The page of the object the action was on, under the object's current name, absent when none was recorded."`
+	FromState      string `json:"from_state,omitempty" doc:"The state a transition moved the object from, such as a Jira status, absent when the action is not a transition."`
+	ToState        string `json:"to_state,omitempty" doc:"The state a transition moved the object to, absent when the action is not a transition."`
+	ConversationID string `json:"conversation_id,omitempty" doc:"The id of the conversation the action was taken for, absent when it was taken for none or the conversation was deleted."`
+	ActorUserID    string `json:"actor_user_id,omitempty" doc:"The id of the person who took, authorized, or started the work behind the action, absent when no person did."`
+	PerformedBy    string `json:"performed_by" doc:"Who performed the action: agent, person, or system."`
 	// ObjectKind and ObjectID name the object the action changed; ObjectID
 	// is the value an artifact's object_id carries. A row that names no
 	// object has neither, and one whose kind's identifying columns are empty
 	// has no ObjectID.
-	ObjectKind string           `json:"object_kind,omitempty"`
-	ObjectID   domain.ObjectRef `json:"object_id,omitempty"`
-	Credential string           `json:"credential"`
-	Details    json.RawMessage  `json:"details,omitempty"`
-	OccurredAt time.Time        `json:"occurred_at"`
+	ObjectKind string           `json:"object_kind,omitempty" doc:"The kind of object the action changed, such as pull_request, branch, or comment, absent when it changed none."`
+	ObjectID   domain.ObjectRef `json:"object_id,omitempty" doc:"The id of the object the action changed, the value an artifact's object_id carries, absent when it changed none or the object cannot be identified."`
+	Credential string           `json:"credential" doc:"The organization credential the action was taken with: github_app, github_pat, jira_org, linear_org, slack_bot, or none when it used none."`
+	Details    json.RawMessage  `json:"details,omitempty" doc:"JSON details particular to the action, such as the commit sha of a branch push, absent when there are none."`
+	OccurredAt time.Time        `json:"occurred_at" doc:"When the action was taken, as an RFC 3339 timestamp."`
 	// org feed only:
-	TeamID    string `json:"team_id,omitempty"`
-	TeamName  string `json:"team_name,omitempty"`
-	ActorName string `json:"actor_name,omitempty"`
+	TeamID    string `json:"team_id,omitempty" doc:"The id of the team whose conversation took the action, set only on the organization's actions feed and absent there for an action with no team."`
+	TeamName  string `json:"team_name,omitempty" doc:"That team's name, set only on the organization's actions feed."`
+	ActorName string `json:"actor_name,omitempty" doc:"The name of the person in actor_user_id, set only on the organization's actions feed."`
 }
 
 // ToActionJSON projects a stored action onto the wire shape, emitting detail_json

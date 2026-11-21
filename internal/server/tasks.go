@@ -513,11 +513,21 @@ var taskListSortKeys = func() []httpx.SortKey {
 // There is deliberately no blueprint_id: firing a run is POST
 // /api/tasks/{id}/delegate, a second call on the row this one resolved.
 type taskCreateRequest struct {
-	EntityID  string `json:"entity_id"`
-	EventType string `json:"event_type"`
-	DedupKey  string `json:"dedup_key"`
-	TeamID    string `json:"team_id"`
+	EntityID  string `json:"entity_id" doc:"The id of the entity the task is about, which must be active. It is required."`
+	EventType string `json:"event_type" doc:"The event type the task is for, which an event recorded on the entity must have. It is required."`
+	DedupKey  string `json:"dedup_key" doc:"The value that tells apart tasks of one event type on one entity, such as a label name, which the event must also have; empty for most event types."`
+	TeamID    string `json:"team_id" doc:"The id of the team to create the task for; absent uses the team the caller last wrote to, or their only team."`
 }
+
+var opTaskCreate = httpx.NewJSONOp[taskCreateRequest, taskJSON](httpx.OpSpec{
+	Pattern:       "POST /api/tasks",
+	ID:            "create_task",
+	Summary:       "Create a task",
+	Description:   "Returns the open task for the entity, event type, and dedup key on the acting team, creating it when there is none, anchored on the newest matching event recorded on the entity. Answers 201 when it creates the task and 200 when it finds one. It starts no run; delegating the task is POST /api/tasks/{id}/delegate.",
+	Status:        http.StatusCreated,
+	OtherStatuses: []int{http.StatusOK},
+	Hints:         httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintNo, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleTaskCreate resolves the task at (entity_id, event_type, dedup_key) for
 // the acting team, creating it if the station has none — the write behind the
@@ -551,8 +561,8 @@ func (s *Server) handleTaskCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	var req taskCreateRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opTaskCreate.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -642,7 +652,7 @@ func (s *Server) handleTaskCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if standing != nil {
-		writeJSON(w, http.StatusOK, taskToJSON(*standing))
+		opTaskCreate.WriteStatus(w, http.StatusOK, taskToJSON(*standing))
 		return
 	}
 	if primaryEvent == nil {
@@ -717,7 +727,7 @@ func (s *Server) handleTaskCreate(w http.ResponseWriter, r *http.Request) {
 	if created {
 		status = http.StatusCreated
 	}
-	writeJSON(w, status, taskToJSON(*task))
+	opTaskCreate.WriteStatus(w, status, taskToJSON(*task))
 }
 
 // teamDefaultPriority is the priority a task gets at creation when no scorer has
@@ -945,14 +955,14 @@ func (s *Server) addTaskCanWrite(ctx context.Context, orgID, userID string, item
 type taskFacetsRequest struct {
 	taskLaneRequest
 
-	IDs           json.RawMessage `json:"ids"`
-	EventTypes    json.RawMessage `json:"event_types"`
-	Search        json.RawMessage `json:"search"`
-	SortKey       json.RawMessage `json:"sort_key"`
-	SortDir       json.RawMessage `json:"sort_dir"`
-	CreatedBefore json.RawMessage `json:"created_before"`
-	PageSize      json.RawMessage `json:"page_size"`
-	PageToken     json.RawMessage `json:"page_token"`
+	IDs           json.RawMessage `json:"ids" spec:"-"`
+	EventTypes    json.RawMessage `json:"event_types" spec:"-"`
+	Search        json.RawMessage `json:"search" spec:"-"`
+	SortKey       json.RawMessage `json:"sort_key" spec:"-"`
+	SortDir       json.RawMessage `json:"sort_dir" spec:"-"`
+	CreatedBefore json.RawMessage `json:"created_before" spec:"-"`
+	PageSize      json.RawMessage `json:"page_size" spec:"-"`
+	PageToken     json.RawMessage `json:"page_token" spec:"-"`
 }
 
 // taskFacetsResponse is the fixed schema of named cuts a synthetic read
@@ -964,9 +974,17 @@ type taskFacetsRequest struct {
 // choices show the kinds a reader just narrowed away, while event_types
 // counts the lane as narrowed, kind included.
 type taskFacetsResponse struct {
-	EventTypes  []httpx.FacetJSON `json:"event_types"`
-	EntityKinds []httpx.FacetJSON `json:"entity_kinds"`
+	EventTypes  []httpx.FacetJSON `json:"event_types" doc:"Each event type the lane's tasks have, with how many tasks have it, counted under every filter in the body."`
+	EntityKinds []httpx.FacetJSON `json:"entity_kinds" doc:"Each entity kind the lane's tasks are about, with how many tasks are about it, counted under every filter in the body except entity_kinds."`
 }
+
+var opTaskFacets = httpx.NewJSONOp[taskFacetsRequest, taskFacetsResponse](httpx.OpSpec{
+	Pattern:     "POST /api/tasks/facets",
+	ID:          "get_task_facets",
+	Summary:     "Count a lane's tasks by event type and entity kind",
+	Description: "Returns the event types and entity kinds among the tasks the caller can see in a lane, the set the lane filters of POST /api/tasks/list describe, with how many tasks have each. It takes only those lane filters, and refuses the list's other fields and its paging fields by name.",
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleTaskFacets is the tasks list's synthetic sibling: the event types and
 // the entity kinds present in a lane and how many rows carry each — the sets
@@ -995,8 +1013,8 @@ func (s *Server) handleTaskFacets(w http.ResponseWriter, r *http.Request) {
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 
-	var req taskFacetsRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opTaskFacets.Decode(w, r)
+	if !ok {
 		return
 	}
 
@@ -1040,11 +1058,20 @@ func (s *Server) handleTaskFacets(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "tasks", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, taskFacetsResponse{
+	opTaskFacets.Write(w, taskFacetsResponse{
 		EventTypes:  httpx.Facets(eventTypes),
 		EntityKinds: httpx.Facets(kinds),
 	})
 }
+
+var opTaskGet = httpx.NewJSONOp[httpx.NoBody, taskJSON](httpx.OpSpec{
+	Pattern:     "GET /api/tasks/{id}",
+	ID:          "get_task",
+	Summary:     "Get a task",
+	Description: "Returns one task the caller can see, with whether the caller may write it and the teams the caller's claim or delegation of it may put it on.",
+	PathParams:  map[string]string{"id": "The task's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 func (s *Server) handleTaskGet(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := s.requireOrg(w, r)
@@ -1090,7 +1117,7 @@ func (s *Server) handleTaskGet(w http.ResponseWriter, r *http.Request) {
 	} else {
 		out.ClaimTeamIDs = &candidates
 	}
-	writeJSON(w, http.StatusOK, out)
+	opTaskGet.Write(w, out)
 }
 
 // Task status vocabulary, split by who owns each write. Terminal statuses
@@ -1128,13 +1155,28 @@ func writeTaskTerminal(w http.ResponseWriter, verb string) {
 // and an explicit null (clear it) stay distinguishable — the repos PATCH is
 // the reference for the convention.
 type taskPatchRequest struct {
-	Status      json.RawMessage `json:"status,omitempty"`
-	SnoozeUntil json.RawMessage `json:"snooze_until,omitempty"`
+	Status      httpx.Patch[string] `json:"status" doc:"The lane to move the task to: done or dismissed, which close it, or in_progress, which needs the caller to hold the task. It cannot be null or sent with snooze_until."`
+	SnoozeUntil httpx.Patch[string] `json:"snooze_until" doc:"When the task returns to the queue, as an RFC 3339 timestamp in the future, which snoozes an open task nobody holds; null returns a snoozed task to the queue now. It cannot be sent with status."`
 	// Version is the task version the caller read (taskJSON.Version). Not a
 	// patch field: it cannot be cleared, and it says which task the fields
 	// above were decided against.
-	Version *int64 `json:"version"`
+	Version *int64 `json:"version" doc:"The version the caller's read of the task returned; the write is refused when the task has changed since. It is required."`
 }
+
+// taskWriter is a task write's operation, which answers with the task as the
+// reads serve it.
+type taskWriter interface {
+	Write(w http.ResponseWriter, resp taskJSON)
+}
+
+var opTaskUpdate = httpx.NewJSONOp[taskPatchRequest, taskJSON](httpx.OpSpec{
+	Pattern:     "PATCH /api/tasks/{id}",
+	ID:          "update_task",
+	Summary:     "Update a task",
+	Description: "Closes the task as done or dismissed, snoozes it until a time, returns a snoozed task to the queue, or confirms in_progress on a task the caller holds, and returns the task with the change applied. Closing a task tells any run working on it that it closed; the run is not stopped.",
+	PathParams:  map[string]string{"id": "The task's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // taskWriteVersion reads the version a task write names: the one the
 // caller's read of the task returned. Every task write route requires it,
@@ -1218,8 +1260,8 @@ func (s *Server) handleTaskPatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req taskPatchRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opTaskUpdate.Decode(w, r)
+	if !ok {
 		return
 	}
 
@@ -1230,7 +1272,13 @@ func (s *Server) handleTaskPatch(w http.ResponseWriter, r *http.Request) {
 	// shape pass goes first — a value can't be out of range until it parses.
 	var shape, semantic httpx.Validation
 	version := taskWriteVersion(&shape, req.Version)
-	if !httpx.PatchNamed(req.Status, req.SnoozeUntil) {
+	// Both fields are read before any of their faults are reported, since
+	// which fields the body names decides the first two refusals. Their
+	// faults then follow those refusals, in field order.
+	var statusShape, snoozeShape, snoozeSemantic httpx.Validation
+	status, statusState := req.Status.Read(&statusShape, "status")
+	snoozeUntil, snoozeState := parseSnoozeUntilPatch(&snoozeShape, &snoozeSemantic, req.SnoozeUntil)
+	if statusState == httpx.PatchAbsent && snoozeState == httpx.PatchAbsent {
 		shape.Add(httpx.ErrorItem{
 			Reason:  httpx.ReasonMissingField,
 			Message: "no fields to update: provide status or snooze_until (null clears the snooze)",
@@ -1242,18 +1290,19 @@ func (s *Server) handleTaskPatch(w http.ResponseWriter, r *http.Request) {
 	// things about where the task lands — snoozing moves it to 'snoozed', and
 	// status names something else — and picking a winner would make the other
 	// field a silently-dropped one.
-	if req.Status != nil && req.SnoozeUntil != nil {
+	if statusState != httpx.PatchAbsent && snoozeState != httpx.PatchAbsent {
 		shape.Invalid("status", "status and snooze_until can't be set in one request: snoozing moves the task to snoozed by itself")
 	}
 
-	status, statusState := httpx.PatchString(&shape, req.Status, "status")
+	addFaults(&shape, &statusShape)
 	if statusState == httpx.PatchClear {
 		shape.Invalid("status", "status can't be cleared: a task always has one")
 	}
 	if statusState == httpx.PatchSet && !slices.Contains(patchableTaskStatuses, status) {
 		shape.Invalid("status", "status must be one of: "+strings.Join(patchableTaskStatuses, ", "))
 	}
-	snoozeUntil, snoozeState := parseSnoozeUntilPatch(&shape, &semantic, req.SnoozeUntil)
+	addFaults(&shape, &snoozeShape)
+	addFaults(&semantic, &snoozeSemantic)
 	if shape.Flush(w, http.StatusBadRequest) {
 		return
 	}
@@ -1305,7 +1354,14 @@ func (s *Server) handleTaskPatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.writeTaskResource(w, r, orgID, userID, id, written)
+	s.writeTaskResource(w, r, opTaskUpdate, orgID, userID, id, written)
+}
+
+// addFaults appends src's faults to dst, in src's order.
+func addFaults(dst, src *httpx.Validation) {
+	for _, item := range src.Items() {
+		dst.Add(item)
+	}
 }
 
 // writtenTaskVersion is the version a task write left, read in the
@@ -1341,7 +1397,7 @@ func writtenTaskVersion(ctx context.Context, tx db.TxStores, orgID, id string) (
 // the fields but not in the version, so a client that chains its next write
 // on this answer is refused rather than writing over a change it did not
 // decide against.
-func (s *Server) writeTaskResource(w http.ResponseWriter, r *http.Request, orgID, userID, id string, written int64) bool {
+func (s *Server) writeTaskResource(w http.ResponseWriter, r *http.Request, op taskWriter, orgID, userID, id string, written int64) bool {
 	var updated *domain.Task
 	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -1357,7 +1413,7 @@ func (s *Server) writeTaskResource(w http.ResponseWriter, r *http.Request, orgID
 	}
 	body := taskToJSON(*updated)
 	body.Version = written
-	writeJSON(w, http.StatusOK, body)
+	op.Write(w, body)
 	return true
 }
 
@@ -1372,7 +1428,7 @@ func (s *Server) writeTaskResource(w http.ResponseWriter, r *http.Request, orgID
 // nothing new: reassignClaim's entry read proved the actor could see this
 // task under their own RLS within this same request. The version is the one
 // the write left, as on writeTaskResource.
-func (s *Server) writeTaskResourceSystem(w http.ResponseWriter, r *http.Request, orgID, userID, id string, written int64) bool {
+func (s *Server) writeTaskResourceSystem(w http.ResponseWriter, r *http.Request, op taskWriter, orgID, userID, id string, written int64) bool {
 	var updated *domain.Task
 	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -1388,7 +1444,7 @@ func (s *Server) writeTaskResourceSystem(w http.ResponseWriter, r *http.Request,
 	}
 	body := taskToJSON(*updated)
 	body.Version = written
-	writeJSON(w, http.StatusOK, body)
+	op.Write(w, body)
 	return true
 }
 
@@ -1576,8 +1632,17 @@ func (s *Server) broadcastTaskStatus(orgID string) {
 // taskRequeueRequest is the body of POST /api/tasks/{id}/requeue.
 type taskRequeueRequest struct {
 	// Version is the task version the caller read (taskJSON.Version).
-	Version *int64 `json:"version"`
+	Version *int64 `json:"version" doc:"The version the caller's read of the task returned; the requeue is refused when the task has changed since. It is required."`
 }
+
+var opTaskRequeue = httpx.NewJSONOp[taskRequeueRequest, taskJSON](httpx.OpSpec{
+	Pattern:     "POST /api/tasks/{id}/requeue",
+	ID:          "requeue_task",
+	Summary:     "Return a task to the queue",
+	Description: "Puts the task back in the queue whatever its status, unclaimed, and returns it. It stops every run working on the task and ends its conversations, keeps the deliverables they left, and, where the claim moved a Jira or Linear issue to the claimant, unassigns the issue and moves it back to the status it had before.",
+	PathParams:  map[string]string{"id": "The task's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // handleRequeue puts a task back in the queue, whatever its status, and
 // runs the cleanup that goes with it (finalizeRequeue). Used by Board's
@@ -1607,8 +1672,8 @@ func (s *Server) handleRequeue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req taskRequeueRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opTaskRequeue.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -1655,7 +1720,7 @@ func (s *Server) handleRequeue(w http.ResponseWriter, r *http.Request) {
 
 	s.finalizeRequeue(r, orgID, userID, id, task)
 
-	s.writeTaskResource(w, r, orgID, userID, id, written)
+	s.writeTaskResource(w, r, opTaskRequeue, orgID, userID, id, written)
 }
 
 // finalizeRequeue runs the side-effect cleanup /requeue needs after the task
@@ -1919,8 +1984,8 @@ func (s *Server) revertLinearStateIfApplicable(ctx context.Context, orgID, userI
 // and the value is simply outside the range a wake time can occupy, and the
 // row it would produce is one the wake sweep requeues on its next pass — a
 // snooze that reports success and does nothing.
-func parseSnoozeUntilPatch(shape, semantic *httpx.Validation, raw json.RawMessage) (time.Time, httpx.PatchState) {
-	value, state := httpx.PatchString(shape, raw, "snooze_until")
+func parseSnoozeUntilPatch(shape, semantic *httpx.Validation, field httpx.Patch[string]) (time.Time, httpx.PatchState) {
+	value, state := field.Read(shape, "snooze_until")
 	if state != httpx.PatchSet {
 		return time.Time{}, state
 	}
@@ -1946,7 +2011,7 @@ func (s *Server) registerTaskRoutes() {
 	// what you then do to it, so the in-between state — task resolved, run not
 	// started — is addressable rather than a partial success buried in one
 	// call's response.
-	s.apiMutating("POST /api/tasks", s.handleTaskCreate)
+	s.op(opTaskCreate, s.handleTaskCreate)
 	// The one tasks list read: every filtered view of the queue goes through
 	// it, so two spellings of the same read cannot drift into two different
 	// hidden filters. As a POST it mounts behind the CSRF check, which is
@@ -1956,16 +2021,16 @@ func (s *Server) registerTaskRoutes() {
 	// filters minus the reader's own — the chips a lane offers are about the
 	// lane, not about the page a filtered query happened to return. A POST
 	// for the same reason the list is: the filter is a structured body.
-	s.apiMutating("POST /api/tasks/facets", s.handleTaskFacets)
-	s.api("GET /api/tasks/{id}", s.handleTaskGet)
+	s.op(opTaskFacets, s.handleTaskFacets)
+	s.op(opTaskGet, s.handleTaskGet)
 	// The task's field-write path: the lifecycle axis and the wake time are
 	// columns, so they are PATCHed rather than given a route per value — a
 	// route per value is how one gesture grows arms with different required
 	// fields, different authz and different response shapes. Each verb below
 	// earns its own route by carrying an effect a field write cannot express:
 	// an external Jira write, a spawned run, a stopped one.
-	s.apiMutating("PATCH /api/tasks/{id}", s.handleTaskPatch)
-	s.apiMutating("POST /api/tasks/{id}/claim", s.handleTaskClaim)
-	s.apiMutating("POST /api/tasks/{id}/delegate", s.handleTaskDelegate)
-	s.apiMutating("POST /api/tasks/{id}/requeue", s.handleRequeue)
+	s.op(opTaskUpdate, s.handleTaskPatch)
+	s.op(opTaskClaim, s.handleTaskClaim)
+	s.op(opTaskDelegate, s.handleTaskDelegate)
+	s.op(opTaskRequeue, s.handleRequeue)
 }

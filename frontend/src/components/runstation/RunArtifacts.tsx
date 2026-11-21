@@ -138,11 +138,11 @@ export function RunArtifacts({ conversation, onOpenDeliverable, onDeliverableRes
     [conversation.pending_deliverable_ids],
   )
 
-  const dismiss = async (id: string, kind: string) => {
+  const dismiss = async (id: string) => {
     if (dismissing[id]) return
     setDismissing((m) => ({ ...m, [id]: true }))
     try {
-      await dismissDeliverable(id, kind)
+      await dismissDeliverable(id)
       setTick((t) => t + 1)
       onDeliverableResolved?.()
     } catch (err) {
@@ -182,7 +182,7 @@ export function RunArtifacts({ conversation, onOpenDeliverable, onDeliverableRes
             deliverable={d}
             highlighted={pending.has(d.id)}
             onOpenApproval={onOpenDeliverable}
-            onDismiss={dismissable(d.id) ? () => void dismiss(d.id, d.kind) : undefined}
+            onDismiss={dismissable(d.id) ? () => void dismiss(d.id) : undefined}
             dismissing={!!dismissing[d.id]}
           />
         ))}
@@ -195,7 +195,7 @@ export function RunArtifacts({ conversation, onOpenDeliverable, onDeliverableRes
               artifact={a}
               highlighted={!!d && pending.has(d.id)}
               onOpenDeliverable={onOpenDeliverable}
-              onDismiss={d && dismissable(d.id) ? () => void dismiss(d.id, d.kind) : undefined}
+              onDismiss={d && dismissable(d.id) ? () => void dismiss(d.id) : undefined}
               dismissing={!!(d && dismissing[d.id])}
             />
           )

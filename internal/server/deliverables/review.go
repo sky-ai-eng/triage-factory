@@ -115,23 +115,26 @@ func (ah *Handler) reviewDeliverableDetails(w http.ResponseWriter, r *http.Reque
 
 // patchReviewRequest is the body of PATCH /api/deliverables/{id}/review. The
 // fields carry no review_ prefix: the sub-resource in the path already says
-// which deliverable half they belong to.
-//
-// state is the review's own lifecycle position, and the only value it accepts
-// is "dismissed". Abandoning a staged review reaches nothing outside this
-// process — the draft never left it — so it is an honest field write here
-// rather than a verb, which is why /dismiss is now pull-request-only.
+// which deliverable half they belong to. Dismissing the review is POST
+// …/dismiss and submitting it is POST …/approve, since each ends the review.
 type patchReviewRequest struct {
-	Body  *string `json:"body"`
-	Event *string `json:"event"`
-	State *string `json:"state"`
+	Body  httpx.Patch[string] `json:"body" doc:"The review's new summary body, trimmed of surrounding whitespace, which may not be empty; absent keeps the current body, and null is refused."`
+	Event httpx.Patch[string] `json:"event" doc:"The event the review is to be submitted with: APPROVE, COMMENT, or REQUEST_CHANGES; absent keeps the current event, and null is refused."`
 }
 
+var opDeliverableReviewUpdate = httpx.NewNoContentOp[patchReviewRequest](httpx.OpSpec{
+	Pattern:     "PATCH /api/deliverables/{id}/review",
+	ID:          "update_deliverable_review",
+	Summary:     "Edit a pending review deliverable",
+	Description: "Stages a new summary body, event, or both on a pending review deliverable; they reach GitHub only when the review is approved. Dismissing the review is POST /api/deliverables/{id}/dismiss.",
+	PathParams:  map[string]string{"id": "The id of the review deliverable."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
+
 // handleDeliverableReviewUpdate stages a new review body and/or event into the
-// deliverable's details_json, or dismisses the staged draft. TF-side only: a
-// pending review's body + event are not live-editable on GitHub (the event
-// *is* the submit), so they stage here and apply atomically at approval. No
-// GitHub call on any arm.
+// deliverable's details_json. TF-side only: a pending review's body + event
+// are not live-editable on GitHub (the event *is* the submit), so they stage
+// here and apply atomically at approval. No GitHub call.
 //
 // PATCH /api/deliverables/{id}/review
 func (ah *Handler) handleDeliverableReviewUpdate(w http.ResponseWriter, r *http.Request) {
@@ -151,7 +154,7 @@ func (ah *Handler) handleDeliverableReviewUpdate(w http.ResponseWriter, r *http.
 	if !requireDeliverableKind(w, art, domain.DeliverableKindReview, "a review") {
 		return
 	}
-	// Only a still-pending review can be staged or dismissed. A PATCH on a
+	// Only a still-pending review can be staged. A PATCH on a
 	// submitted/dismissed deliverable would write body/event that can never be
 	// applied (approve guards state), so reject it as a conflict rather than
 	// return a misleading 200 on a deliverable the user can no longer act on.
@@ -161,48 +164,41 @@ func (ah *Handler) handleDeliverableReviewUpdate(w http.ResponseWriter, r *http.
 		return
 	}
 
-	var req patchReviewRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opDeliverableReviewUpdate.Decode(w, r)
+	if !ok {
 		return
 	}
 
 	var v httpx.Validation
-	if req.Body == nil && req.Event == nil && req.State == nil {
+	body, bodyState := req.Body.Read(&v, "body")
+	event, eventState := req.Event.Read(&v, "event")
+	if bodyState == httpx.PatchAbsent && eventState == httpx.PatchAbsent {
 		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
 			Reason:  httpx.ReasonMissingField,
-			Message: "no fields to update: provide body, event, or state",
+			Message: "no fields to update: provide body, event, or both",
 		})
 		return
 	}
-	if req.Body != nil && strings.TrimSpace(*req.Body) == "" {
+	if bodyState == httpx.PatchClear {
+		v.Invalid("body", "body can't be cleared: a review always has one")
+	}
+	if eventState == httpx.PatchClear {
+		v.Invalid("event", "event can't be cleared: a review is submitted with one")
+	}
+	if bodyState == httpx.PatchSet && strings.TrimSpace(body) == "" {
 		// The summary body is what the review says. A whitespace-only one is as
 		// empty as "" and would post a blank review at approval, so it is
 		// refused here and the trimmed value is what gets stored.
 		v.Invalid("body", "body cannot be empty or whitespace-only")
 	}
-	if req.Event != nil && !validReviewEvent(*req.Event) {
+	if eventState == httpx.PatchSet && !validReviewEvent(event) {
 		// Validate here rather than deferring to approval-time GitHub
 		// rejection. The event also doubles as the ready sentinel, so an empty
 		// or bogus value would silently un-park the conversation as well as
 		// fail the submit.
 		v.Invalid("event", "event must be one of APPROVE, COMMENT, REQUEST_CHANGES")
 	}
-	if req.State != nil {
-		if *req.State != domain.DeliverableStateReviewDismissed {
-			v.Invalid("state", `state accepts only "dismissed"; submitting a review is POST …/approve`)
-		} else if req.Body != nil || req.Event != nil {
-			// Dismissal retires the draft; staging edits into the same request
-			// asks for two different outcomes on one row. Say so rather than
-			// pick an order.
-			v.Invalid("state", "state cannot be combined with body or event — dismiss the review on its own")
-		}
-	}
 	if v.Flush(w, http.StatusBadRequest) {
-		return
-	}
-
-	if req.State != nil {
-		ah.reviewDismiss(w, r, orgID, userID, art)
 		return
 	}
 
@@ -211,17 +207,17 @@ func (ah *Handler) handleDeliverableReviewUpdate(w http.ResponseWriter, r *http.
 		httpx.InternalError(w, "deliverables", fmt.Errorf("parse review deliverable details: %w", err))
 		return
 	}
-	if req.Body != nil {
-		details.ReviewBody = strings.TrimSpace(*req.Body)
+	if bodyState == httpx.PatchSet {
+		details.ReviewBody = strings.TrimSpace(body)
 	}
-	if req.Event != nil {
-		details.ReviewEvent = *req.Event
+	if eventState == httpx.PatchSet {
+		details.ReviewEvent = event
 	}
 
 	if !ah.updateReviewDetailsPending(w, r, orgID, userID, art.ID, details) {
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"ok": true})
+	opDeliverableReviewUpdate.Write(w)
 }
 
 // updateReviewDetailsPending persists mutated review-draft details through the
@@ -522,11 +518,11 @@ func (ah *Handler) reviewApprove(w http.ResponseWriter, r *http.Request, orgID, 
 	// so the note references the id it already knows.
 	ah.injectDeliverableNote(orgID, submitted)
 
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{
-		"review_id": submitted.ExternalID,
-		"url":       submitted.URL,
-		"event":     submittedEvent,
-		"state":     domain.DeliverableStateReviewSubmitted,
+	opDeliverableApprove.Write(w, deliverableApproveResponse{
+		ReviewID: submitted.ExternalID,
+		URL:      submitted.URL,
+		Event:    submittedEvent,
+		State:    domain.DeliverableStateReviewSubmitted,
 	})
 }
 
@@ -540,9 +536,8 @@ func (ah *Handler) reviewApprove(w http.ResponseWriter, r *http.Request, orgID, 
 // reached the ready sentinel (a started-but-unfinalized review is still
 // abandonable).
 //
-// It is the state="dismissed" arm of the review PATCH, which has already
-// established the kind and the pending state; a terminal row never reaches
-// here.
+// It is POST …/dismiss on a review, which has already established the kind
+// and the pending state; a terminal row never reaches here.
 func (ah *Handler) reviewDismiss(w http.ResponseWriter, r *http.Request, orgID, userID string, art *domain.Deliverable) {
 	// Flip pending → dismissed, pessimistic — the flip is the resolution. A CAS,
 	// not an upsert: a dismiss racing an approve must lose cleanly (409) rather
@@ -576,10 +571,7 @@ func (ah *Handler) reviewDismiss(w http.ResponseWriter, r *http.Request, orgID, 
 	// Tell the drafting agent its review was dismissed.
 	ah.injectDeliverableNote(orgID, dismissed)
 
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{
-		"review_id": art.ExternalID,
-		"state":     domain.DeliverableStateReviewDismissed,
-	})
+	opDeliverableDismiss.Write(w, deliverableDismissResponse{State: domain.DeliverableStateReviewDismissed})
 }
 
 // reconcileForApprove forward-maps the staged comments to the PR's live head
@@ -634,6 +626,24 @@ func (ah *Handler) reconcileForApprove(ctx context.Context, gh *ghclient.Client,
 	}
 	return 0, nil
 }
+
+// reviewRefreshResponse is the body of POST
+// /api/deliverables/{id}/review/refresh.
+type reviewRefreshResponse struct {
+	Moved   int    `json:"moved" doc:"How many staged comments now sit on a different line or file of the current head."`
+	Dropped int    `json:"dropped" doc:"How many staged comments were removed because the code they commented on is no longer in the pull request's diff."`
+	Head    string `json:"head" doc:"The commit SHA of the pull request's head the review now matches."`
+	State   string `json:"state" doc:"The review deliverable's state: pending."`
+}
+
+var opReviewRefresh = httpx.NewJSONOp[httpx.NoBody, reviewRefreshResponse](httpx.OpSpec{
+	Pattern:     "POST /api/deliverables/{id}/review/refresh",
+	ID:          "refresh_deliverable_review",
+	Summary:     "Move a pending review to the pull request's head",
+	Description: "Reads a pending review deliverable's pull request from GitHub and moves the review's staged comments onto its current head: a comment whose code moved follows it, and a comment whose code is gone is removed. Refused when that would leave a review with no summary body and no comments.",
+	PathParams:  map[string]string{"id": "The id of the review deliverable."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // handleReviewRefresh re-reconciles a finalized review draft to the PR's current
 // head (POST /api/deliverables/{id}/review/refresh, TFAC-500) — the human-driven
@@ -756,13 +766,31 @@ func (ah *Handler) reviewRefresh(w http.ResponseWriter, r *http.Request, orgID, 
 		return
 	}
 
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{
-		"moved":   moved,
-		"dropped": dropped,
-		"head":    liveHead,
-		"state":   domain.DeliverableStateReviewPending,
+	opReviewRefresh.Write(w, reviewRefreshResponse{
+		Moved:   moved,
+		Dropped: dropped,
+		Head:    liveHead,
+		State:   domain.DeliverableStateReviewPending,
 	})
 }
+
+// reviewCommentUpdateRequest is the body of PATCH
+// /api/deliverables/{id}/comments/{commentId}.
+type reviewCommentUpdateRequest struct {
+	Body string `json:"body" doc:"The comment's new text, trimmed of surrounding whitespace, which may not be empty and may not start with a severity badge; the comment keeps the severity it was written with."`
+}
+
+var opDeliverableCommentUpdate = httpx.NewJSONOp[reviewCommentUpdateRequest, deliverableOKResponse](httpx.OpSpec{
+	Pattern:     "PATCH /api/deliverables/{id}/comments/{commentId}",
+	ID:          "update_deliverable_comment",
+	Summary:     "Edit a pending review's staged comment",
+	Description: "Replaces the text of one inline comment staged on a pending review deliverable. The comment reaches GitHub only when the review is approved.",
+	PathParams: map[string]string{
+		"id":        "The id of the review deliverable.",
+		"commentId": "The id of the staged comment, as the deliverable's details list it.",
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleDeliverableCommentUpdate edits one staged inline comment on the review
 // draft. Review-only, no GitHub call — the whole review is staged TF-side until
@@ -806,10 +834,8 @@ func (ah *Handler) handleDeliverableCommentUpdate(w http.ResponseWriter, r *http
 		return
 	}
 
-	var req struct {
-		Body string `json:"body"`
-	}
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opDeliverableCommentUpdate.Decode(w, r)
+	if !ok {
 		return
 	}
 	if strings.TrimSpace(req.Body) == "" {
@@ -854,8 +880,20 @@ func (ah *Handler) handleDeliverableCommentUpdate(w http.ResponseWriter, r *http
 	if !ah.updateReviewDetailsPending(w, r, orgID, userID, art.ID, details) {
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"ok": true})
+	opDeliverableCommentUpdate.Write(w, deliverableOKResponse{OK: true})
 }
+
+var opDeliverableCommentDelete = httpx.NewJSONOp[httpx.NoBody, deliverableOKResponse](httpx.OpSpec{
+	Pattern:     "DELETE /api/deliverables/{id}/comments/{commentId}",
+	ID:          "delete_deliverable_comment",
+	Summary:     "Delete a pending review's staged comment",
+	Description: "Removes one inline comment staged on a pending review deliverable, so it is not posted when the review is approved.",
+	PathParams: map[string]string{
+		"id":        "The id of the review deliverable.",
+		"commentId": "The id of the staged comment, as the deliverable's details list it.",
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleDeliverableCommentDelete removes one staged inline comment from the review
 // draft (DELETE /api/deliverables/{id}/comments/{commentId}). Review-only, no GitHub
@@ -904,7 +942,7 @@ func (ah *Handler) handleDeliverableCommentDelete(w http.ResponseWriter, r *http
 	if !ah.updateReviewDetailsPending(w, r, orgID, userID, art.ID, details) {
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"ok": true})
+	opDeliverableCommentDelete.Write(w, deliverableOKResponse{OK: true})
 }
 
 // derefInt returns the pointed-to int, or 0 for a nil pointer (a GitHub comment

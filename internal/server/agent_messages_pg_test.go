@@ -32,7 +32,7 @@ func TestHandleMessages_InvisibleConversationIs404(t *testing.T) {
 
 	read := func(sid, id string) (int, []byte) {
 		t.Helper()
-		resp := r.requestWithSid(http.MethodGet, "/api/agent/conversations/"+id+"/messages", sid)
+		resp := r.postJSONWithSid(http.MethodPost, "/api/agent/conversations/"+id+"/messages/list", sid, map[string]any{})
 		defer func() { _ = resp.Body.Close() }()
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
@@ -43,7 +43,7 @@ func TestHandleMessages_InvisibleConversationIs404(t *testing.T) {
 
 	code, body := read(r.signIn(alice), conversationID)
 	if code != http.StatusOK {
-		t.Fatalf("alice GET messages = %d, want 200; body=%s", code, body)
+		t.Fatalf("alice POST messages/list = %d, want 200; body=%s", code, body)
 	}
 	var page struct {
 		Items []struct {
@@ -66,7 +66,7 @@ func TestHandleMessages_InvisibleConversationIs404(t *testing.T) {
 	} {
 		code, body := read(sidBob, id)
 		if code != http.StatusNotFound || string(body) != want.Body.String() {
-			t.Errorf("%s: GET messages = %d %s, want 404 %s", desc, code, body, want.Body.String())
+			t.Errorf("%s: POST messages/list = %d %s, want 404 %s", desc, code, body, want.Body.String())
 		}
 	}
 }

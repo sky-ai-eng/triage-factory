@@ -270,8 +270,8 @@ func TestDeliverableWriteGate_Postgres(t *testing.T) {
 
 	t.Run("a_team_writer_gets_through", func(t *testing.T) {
 		rec := do(writer, http.MethodPatch, reviewPath+"/review", map[string]any{"body": "changed"})
-		if rec.Code != http.StatusOK {
-			t.Fatalf("writer PATCH review = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("writer PATCH review = %d, want 204; body=%s", rec.Code, rec.Body.String())
 		}
 		got, err := seed.Deliverables.Get(ctx, orgID, reviewRow.ID)
 		if err != nil || got == nil {

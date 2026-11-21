@@ -40,42 +40,42 @@ func entitySources() []string {
 // entityPullRequestJSON is a pull request entity's fields, read from its
 // snapshot.
 type entityPullRequestJSON struct {
-	Number    int    `json:"number"`
-	Repo      string `json:"repo"`
-	Author    string `json:"author"`
-	Draft     bool   `json:"draft"`
-	Additions int    `json:"additions"`
-	Deletions int    `json:"deletions"`
+	Number    int    `json:"number" doc:"The pull request's number in its repository."`
+	Repo      string `json:"repo" doc:"The repository, as owner/name."`
+	Author    string `json:"author" doc:"The GitHub login of the pull request's author."`
+	Draft     bool   `json:"draft" doc:"Whether the pull request is a draft."`
+	Additions int    `json:"additions" doc:"How many lines the pull request adds."`
+	Deletions int    `json:"deletions" doc:"How many lines the pull request removes."`
 }
 
 // entityJSON is the entity resource. Every key is always present: a value a
 // row does not have is null, never an absent key, so a client reads one
 // shape for every source.
 type entityJSON struct {
-	ID        string     `json:"id"`
-	Source    string     `json:"source"`
-	SourceID  string     `json:"source_id"`
-	Kind      string     `json:"kind"`
-	Title     string     `json:"title"`
-	URL       string     `json:"url"`
-	State     string     `json:"state"`
-	CreatedAt time.Time  `json:"created_at"`
-	ClosedAt  *time.Time `json:"closed_at"`
+	ID        string     `json:"id" doc:"The entity's id."`
+	Source    string     `json:"source" doc:"The system the entity comes from: github, jira, linear, or slack."`
+	SourceID  string     `json:"source_id" doc:"The entity's key in its source, such as owner/repo#42 for a pull request or PROJ-123 for a Jira issue."`
+	Kind      string     `json:"kind" doc:"The kind of entity: pr, issue, vulnerable_package, thread, or message."`
+	Title     string     `json:"title" doc:"The entity's title."`
+	URL       string     `json:"url" doc:"The entity's page in its source."`
+	State     string     `json:"state" doc:"Whether the entity is active or closed."`
+	CreatedAt time.Time  `json:"created_at" doc:"When the entity was first recorded, as an RFC 3339 timestamp."`
+	ClosedAt  *time.Time `json:"closed_at" doc:"When the entity closed, as an RFC 3339 timestamp, or null while it is active."`
 	// RepositoryID is a GitHub entity's repository registry row, the id a
 	// client groups pull requests by: a rename moves the repository's name
 	// and leaves the row. Null for every other source.
-	RepositoryID *string `json:"repository_id"`
+	RepositoryID *string `json:"repository_id" doc:"The id of a GitHub entity's repository, which a rename of the repository does not change, or null for an entity from any other source."`
 	// LatestEventType and LatestEventAt are the entity's newest recorded
 	// event, its type and detection time. Null when it has none.
-	LatestEventType *string    `json:"latest_event_type"`
-	LatestEventAt   *time.Time `json:"latest_event_at"`
+	LatestEventType *string    `json:"latest_event_type" doc:"The type of the entity's newest recorded event, or null when it has none."`
+	LatestEventAt   *time.Time `json:"latest_event_at" doc:"When the entity's newest event was recorded, as an RFC 3339 timestamp, or null when it has none."`
 	// Mine is whether the viewer wrote it: a pull request whose author is the
 	// viewer's GitHub identity on the org's host. False for every other kind,
 	// for which TF holds no author it can compare.
-	Mine bool `json:"mine"`
+	Mine bool `json:"mine" doc:"Whether the entity is a pull request the caller's GitHub identity on the organization's host wrote; false for every other kind of entity."`
 	// PullRequest is a pull request's fields from its last poll. Null for
 	// every other kind, and for a pull request no poll has read yet.
-	PullRequest *entityPullRequestJSON `json:"pull_request"`
+	PullRequest *entityPullRequestJSON `json:"pull_request" doc:"A pull request's fields as its last poll read them, or null for every other kind of entity and for a pull request no poll has read yet."`
 }
 
 // toEntityJSON projects a listed entity onto the wire, comparing a pull
@@ -116,20 +116,20 @@ func toEntityJSON(item domain.ListedEntity, me domain.GitHubAccount) entityJSON 
 type entityListRequest struct {
 	// IDs keeps the entities with these ids, each in canonical form, at most
 	// maxEntityListIDs.
-	IDs []string `json:"ids"`
+	IDs []string `json:"ids" doc:"Ids of the entities to include, at most 200, each a UUID in lowercase hyphenated form; empty includes every entity."`
 	// Sources keeps the entities of these sources (entitySources).
-	Sources []string `json:"sources"`
+	Sources []string `json:"sources" doc:"Sources whose entities to include, from github, jira, linear, and slack; empty includes every source."`
 	// Kinds keeps the entities of these kinds (domain.EntityKinds).
-	Kinds []string `json:"kinds"`
+	Kinds []string `json:"kinds" doc:"Kinds of entity to include, from issue, message, pr, thread, and vulnerable_package; empty includes every kind."`
 	// States keeps the entities in these states (domain.EntityStates).
-	States []string `json:"states"`
+	States []string `json:"states" doc:"States to include, from active and closed; empty includes both."`
 	// ClosedSince (RFC3339) drops an entity that closed before it; an entity
 	// that has not closed passes. With no states filter it is the active set
 	// plus whatever closed since then, in one read.
-	ClosedSince string `json:"closed_since"`
+	ClosedSince string `json:"closed_since" doc:"An RFC 3339 timestamp that leaves out entities that closed before it; an entity that has not closed is included."`
 	// TeamIDs narrows the tracked set to these teams'. Empty is every team
 	// of the viewer's, and a team the viewer is not on narrows to nothing.
-	TeamIDs []string `json:"team_ids"`
+	TeamIDs []string `json:"team_ids" doc:"Ids of the teams, at most 100, whose tracked repositories, projects, teams, and channels limit the result; empty uses every team the caller belongs to, and a team the caller is not on matches nothing."`
 
 	httpx.PageRequest
 }
@@ -174,6 +174,14 @@ func vocabularyList(v *httpx.Validation, field, noun string, raw, vocabulary []s
 	return values
 }
 
+var opEntityList = httpx.NewListOp[entityListRequest, entityJSON](httpx.OpSpec{
+	Pattern:     "POST /api/entities/list",
+	ID:          "list_entities",
+	Summary:     "List entities",
+	Description: "Returns one page of the entities the caller may read, newest first, narrowed by the body's filters: the pull requests, issues, vulnerable packages, and Slack threads and messages in the repositories, projects, teams, and channels the caller's teams track. Each entity carries its newest event's type and time.",
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
+
 // handleEntityList serves POST /api/entities/list: the entities the viewer
 // may read, newest first, each with its latest event.
 func (s *Server) handleEntityList(w http.ResponseWriter, r *http.Request) {
@@ -183,8 +191,8 @@ func (s *Server) handleEntityList(w http.ResponseWriter, r *http.Request) {
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 
-	var req entityListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opEntityList.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -225,8 +233,17 @@ func (s *Server) handleEntityList(w http.ResponseWriter, r *http.Request) {
 	for i, it := range items {
 		out[i] = toEntityJSON(it, me)
 	}
-	httpx.WriteList(w, page, out, total)
+	opEntityList.Write(w, page, out, total)
 }
+
+var opEntityGet = httpx.NewJSONOp[httpx.NoBody, entityJSON](httpx.OpSpec{
+	Pattern:     "GET /api/entities/{id}",
+	ID:          "get_entity",
+	Summary:     "Get an entity",
+	Description: "Returns one entity the caller may read, in the shape the entity list returns it.",
+	PathParams:  map[string]string{"id": "The entity's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleEntityGet serves GET /api/entities/{id}. An entity the viewer may not
 // read is 404, like one that does not exist: it is in none of their lists.
@@ -250,7 +267,7 @@ func (s *Server) handleEntityGet(w http.ResponseWriter, r *http.Request) {
 		notFound(w, "entity")
 		return
 	}
-	writeJSON(w, http.StatusOK, toEntityJSON(items[0], me))
+	opEntityGet.Write(w, toEntityJSON(items[0], me))
 }
 
 // listEntities reads one window of the entity list under the viewer's claims,
@@ -290,12 +307,12 @@ func (s *Server) listEntities(r *http.Request, orgID, userID string, f db.Entity
 // a review's submission) and null when the source reported none; CreatedAt is
 // when TF recorded it.
 type eventJSON struct {
-	ID         string     `json:"id"`
-	EntityID   string     `json:"entity_id"`
-	EventType  string     `json:"event_type"`
-	DedupKey   string     `json:"dedup_key"`
-	OccurredAt *time.Time `json:"occurred_at"`
-	CreatedAt  time.Time  `json:"created_at"`
+	ID         string     `json:"id" doc:"The event's id."`
+	EntityID   string     `json:"entity_id" doc:"The id of the entity the event happened on."`
+	EventType  string     `json:"event_type" doc:"The event's type, such as github:pr:ci_check_failed."`
+	DedupKey   string     `json:"dedup_key" doc:"The value that tells apart events of one type on one entity, such as a label name, or an empty string for most event types."`
+	OccurredAt *time.Time `json:"occurred_at" doc:"When the event happened in its source, as an RFC 3339 timestamp, such as a commit's or a review's time, or null when the source reported none."`
+	CreatedAt  time.Time  `json:"created_at" doc:"When the event was recorded, as an RFC 3339 timestamp."`
 }
 
 // eventListRequest is the body of POST /api/events/list. Every field is
@@ -303,13 +320,13 @@ type eventJSON struct {
 type eventListRequest struct {
 	// EntityIDs keeps the events of these entities, each in canonical form,
 	// at most maxEntityListIDs.
-	EntityIDs []string `json:"entity_ids"`
+	EntityIDs []string `json:"entity_ids" doc:"Ids of the entities whose events to include, at most 200, each a UUID in lowercase hyphenated form; empty includes the events of every entity the caller may read."`
 	// Since (RFC3339) keeps the events recorded at or after it.
-	Since string `json:"since"`
+	Since string `json:"since" doc:"An RFC 3339 timestamp that limits the result to events recorded at or after it."`
 	// PerEntity keeps each entity's newest per_entity recorded events, 1 to
 	// httpx.MaxPageSize, so a read naming many entities gets a tail of each
 	// however busy one of them is. Absent is no cap.
-	PerEntity *int `json:"per_entity"`
+	PerEntity *int `json:"per_entity" doc:"The most events to include for each entity, its newest, from 1 to 200; absent includes every event."`
 
 	httpx.PageRequest
 }
@@ -319,6 +336,14 @@ type eventListFilterKey struct {
 	Since     string   `json:"since"`
 	PerEntity int      `json:"per_entity"`
 }
+
+var opEventList = httpx.NewListOp[eventListRequest, eventJSON](httpx.OpSpec{
+	Pattern:     "POST /api/events/list",
+	ID:          "list_events",
+	Summary:     "List events",
+	Description: "Returns one page of the events recorded on the entities the caller may read, newest recorded first, narrowed by the body's filters. A page_token resumes after the last event of the page that returned it, so a walk neither repeats nor skips an event while new ones are recorded.",
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleEventList serves POST /api/events/list: the events of the entities
 // the viewer may read, newest recorded first. It pages by keyset on the
@@ -331,8 +356,8 @@ func (s *Server) handleEventList(w http.ResponseWriter, r *http.Request) {
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 
-	var req eventListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opEventList.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -385,7 +410,7 @@ func (s *Server) handleEventList(w http.ResponseWriter, r *http.Request) {
 	for i, row := range rows {
 		items[i] = toEventJSON(row.Event)
 	}
-	httpx.WriteListKeyset(w, page, items, total, nextKey)
+	opEventList.WriteKeyset(w, page, items, total, nextKey)
 }
 
 func toEventJSON(ev domain.Event) eventJSON {
@@ -399,6 +424,15 @@ func toEventJSON(ev domain.Event) eventJSON {
 	}
 	return out
 }
+
+var opEventGet = httpx.NewJSONOp[httpx.NoBody, eventJSON](httpx.OpSpec{
+	Pattern:     "GET /api/events/{id}",
+	ID:          "get_event",
+	Summary:     "Get an event",
+	Description: "Returns one event recorded on an entity the caller may read, in the shape the event list returns it.",
+	PathParams:  map[string]string{"id": "The event's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleEventGet serves GET /api/events/{id}. An event the viewer may not
 // read, including a system event, which has no entity, is 404 like one that
@@ -427,14 +461,14 @@ func (s *Server) handleEventGet(w http.ResponseWriter, r *http.Request) {
 		notFound(w, "event")
 		return
 	}
-	writeJSON(w, http.StatusOK, toEventJSON(rows[0].Event))
+	opEventGet.Write(w, toEventJSON(rows[0].Event))
 }
 
 func (s *Server) registerEntityRoutes() {
 	// The entity resource and its event log, under the tracked-set read rule.
 	// Lists are POST for their bodies, and so register as mutating for CSRF.
-	s.apiMutating("POST /api/entities/list", s.handleEntityList)
-	s.api("GET /api/entities/{id}", s.handleEntityGet)
-	s.apiMutating("POST /api/events/list", s.handleEventList)
-	s.api("GET /api/events/{id}", s.handleEventGet)
+	s.op(opEntityList, s.handleEntityList)
+	s.op(opEntityGet, s.handleEntityGet)
+	s.op(opEventList, s.handleEventList)
+	s.op(opEventGet, s.handleEventGet)
 }

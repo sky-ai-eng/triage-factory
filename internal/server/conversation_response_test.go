@@ -57,11 +57,6 @@ func TestConversationResponseKeysAreSnakeCase(t *testing.T) {
 	// action emits current_action, so every conditional key is present.
 	out := conversationResponse(conv, 0, nil, map[string]int{"pull_request": 1}, 1,
 		db.RunProgress{StepCount: 1, Status: domain.BlueprintRunStatusRunning}, "Editing x")
-	for _, key := range []string{"current_action", "queue_position", "ended_at", "stop_requested_at", "next_attempt_at", "claim_last_activity_at", "claim_current_op", "has_unresolved_deliverables"} {
-		if _, ok := out[key]; !ok {
-			t.Fatalf("fixture leaves %q unset, so the body under test is not the full one", key)
-		}
-	}
 	b, err := json.Marshal(out)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -69,6 +64,11 @@ func TestConversationResponseKeysAreSnakeCase(t *testing.T) {
 	var wire map[string]any
 	if err := json.Unmarshal(b, &wire); err != nil {
 		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, key := range []string{"current_action", "queue_position", "ended_at", "stop_requested_at", "next_attempt_at", "claim_last_activity_at", "claim_current_op", "has_unresolved_deliverables"} {
+		if _, ok := wire[key]; !ok {
+			t.Fatalf("fixture leaves %q unset, so the body under test is not the full one", key)
+		}
 	}
 	for key := range wire {
 		if key != strings.ToLower(key) {

@@ -4,7 +4,7 @@ import { render, screen, act, waitFor } from '@testing-library/react'
 import { useConversationDetail } from './useConversationDetail'
 import { TelemetryRail } from '../components/runstation/StationInstruments'
 import { stationState } from '../components/runstation/stationStyle'
-import type { Conversation, Message, Task, WSEvent } from '../types'
+import type { Conversation, Message, Task, TranscriptListRequest, WSEvent } from '../types'
 import { jsonBody } from '../test/apiResponse'
 
 // The hook's live updates arrive through the singleton websocket. Mocking the
@@ -58,16 +58,16 @@ function message(over: Partial<Message>): Message {
 }
 
 // The rows the server holds for this conversation, which both transcript
-// reads answer from: the unbounded one returns all of them, a `?since_id=N` one returns
+// reads answer from: the unbounded one returns all of them, an `after_id: N` one returns
 // what sits above the watermark. A test models a dropped websocket frame by
 // pushing here and never dispatching the event.
 let serverMessages: Message[]
 
-// A since_id read parked by a test, so a websocket frame can be made to land
+// An after_id read parked by a test, so a websocket frame can be made to land
 // while the repair request is in flight. null = answer from serverMessages.
 let pendingSince: Promise<Message[]> | null
 
-// Makes since_id reads answer 500, for the transient-failure paths.
+// Makes after_id reads answer 500, for the transient-failure paths.
 let failSinceReads: boolean
 
 // What POST …/deliverables/refresh reports it transitioned.
@@ -81,20 +81,22 @@ let olderPages: Record<string, { rows: Message[]; next: string }>
 // before this page". '' = the first read reached the beginning.
 let firstPageOlderToken: string
 
+// The token the first page of an after_id read hands back, i.e. "more rows
+// wait between this page and the watermark", answered from olderPages.
+let sincePageOlderToken: string
+
 // Route the reads the mounted view makes; everything but the conversation
 // row and the transcript is empty. `transcript` lets a test hold the initial transcript
 // read open — the conversation row lands first, so that read's duration is the
 // window in which the conversation's SUM is displayed without the ids inside it
 // being known yet.
 function mockFetch(transcript?: Promise<Message[]>) {
-  const fetchMock = vi.fn((url: string) => {
-    const [path, query] = url.split('?')
-    const params = query ? new URLSearchParams(query) : null
-    // Read the param's PRESENCE, not its coerced value: a page_token URL also
-    // has a query, and Number(null) is 0, which would send a back-page read
-    // down the since_id branch.
-    const rawSince = params?.get('since_id')
-    const sinceID = rawSince === null || rawSince === undefined ? null : Number(rawSince)
+  const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+    const path = url.split('?')[0]
+    const req = transcriptRequest(path, init)
+    // Read the field's PRESENCE, not its coerced value: a page_token read
+    // carries no after_id, and Number(undefined) is NaN.
+    const sinceID = req?.after_id ?? null
     if (sinceID !== null && failSinceReads) {
       return Promise.resolve({ ok: false, status: 500, ...jsonBody(null) })
     }
@@ -103,13 +105,19 @@ function mockFetch(transcript?: Promise<Message[]>) {
     const transcriptPage = async (rows: Message[] | Promise<Message[]>, next = '') => ({
       items: await rows,
       next_page_token: next,
+      total_count: (await rows).length,
     })
-    const pageToken = params?.get('page_token') ?? null
+    const pageToken = req?.page_token ?? null
     const body: unknown = path.endsWith('/deliverables/refresh')
       ? { updated: refreshUpdated }
-      : path.endsWith('/messages')
+      : path.endsWith('/messages/list')
         ? sinceID !== null
-          ? transcriptPage(pendingSince ?? serverMessages.filter((m) => m.id > sinceID))
+          ? pageToken
+            ? transcriptPage(olderPages[pageToken]?.rows ?? [], olderPages[pageToken]?.next ?? '')
+            : transcriptPage(
+                pendingSince ?? serverMessages.filter((m) => m.id > sinceID),
+                sincePageOlderToken,
+              )
           : pageToken
             ? transcriptPage(olderPages[pageToken]?.rows ?? [], olderPages[pageToken]?.next ?? '')
             : // A copy, like a real response body: the hook holds what a read
@@ -127,8 +135,18 @@ function mockFetch(transcript?: Promise<Message[]>) {
   return fetchMock
 }
 
-function sinceRequests(fetchMock: ReturnType<typeof mockFetch>): string[] {
-  return fetchMock.mock.calls.map(([url]) => String(url)).filter((url) => url.includes('since_id'))
+// transcriptRequest is the body of a transcript list read, or null for any
+// other request.
+function transcriptRequest(path: string, init?: RequestInit): TranscriptListRequest | null {
+  if (!path.endsWith('/messages/list')) return null
+  return JSON.parse(String(init?.body ?? '{}')) as TranscriptListRequest
+}
+
+// sinceRequests is the watermark of each repair read, in the order sent.
+function sinceRequests(fetchMock: ReturnType<typeof mockFetch>): number[] {
+  return fetchMock.mock.calls
+    .map(([url, init]) => transcriptRequest(String(url).split('?')[0], init)?.after_id)
+    .filter((afterID): afterID is number => afterID !== undefined)
 }
 
 // A promise a test resolves by hand, to park one of the mocked reads.
@@ -170,6 +188,7 @@ describe('useConversationDetail live cost accumulation', () => {
     failSinceReads = false
     olderPages = {}
     firstPageOlderToken = ''
+    sincePageOlderToken = ''
     mockFetch()
   })
 
@@ -309,6 +328,7 @@ describe('useConversationDetail live token accumulation', () => {
     failSinceReads = false
     olderPages = {}
     firstPageOlderToken = ''
+    sincePageOlderToken = ''
     mockFetch()
   })
 
@@ -469,6 +489,7 @@ describe('useConversationDetail transcript reconciliation', () => {
     failSinceReads = false
     olderPages = {}
     firstPageOlderToken = ''
+    sincePageOlderToken = ''
     mockFetch()
   })
   afterEach(() => {
@@ -490,6 +511,25 @@ describe('useConversationDetail transcript reconciliation', () => {
     expect(transcript()).toBe('first|second|third')
   })
 
+  it('walks down to the watermark when more than a page landed above it', async () => {
+    const fetchMock = mockFetch()
+    render(<TranscriptHarness />)
+    await waitFor(() => expect(transcript()).toBe('first'))
+
+    // Two rows landed while the socket was down, and the first page of the
+    // repair holds only the newer one: the older one waits on the page below.
+    const second = message({ id: 12, content: 'second' })
+    const third = message({ id: 13, content: 'third' })
+    serverMessages.push(second, third)
+    pendingSince = Promise.resolve([third])
+    sincePageOlderToken = 'below-third'
+    olderPages = { 'below-third': { rows: [second], next: '' } }
+    await tick()
+    expect(transcript()).toBe('first|second|third')
+    // Both pages were asked from the same watermark.
+    expect(sinceRequests(fetchMock)).toEqual([11, 11])
+  })
+
   it('asks from the last row it read, not the last one it was told about', async () => {
     const fetchMock = mockFetch()
     render(<TranscriptHarness />)
@@ -504,18 +544,13 @@ describe('useConversationDetail transcript reconciliation', () => {
       data: message({ id: 12, content: 'second' }),
     })
     await tick()
-    expect(sinceRequests(fetchMock)).toEqual([
-      `/api/agent/conversations/${CONVERSATION_ID}/messages?since_id=11`,
-    ])
+    expect(sinceRequests(fetchMock)).toEqual([11])
     expect(transcript()).toBe('first|second')
 
     // That repair verified through row 12, so the next one starts there —
     // the watermark only ever advances on a whole read.
     await tick()
-    expect(sinceRequests(fetchMock)).toEqual([
-      `/api/agent/conversations/${CONVERSATION_ID}/messages?since_id=11`,
-      `/api/agent/conversations/${CONVERSATION_ID}/messages?since_id=12`,
-    ])
+    expect(sinceRequests(fetchMock)).toEqual([11, 12])
     expect(transcript()).toBe('first|second')
   })
 
@@ -709,6 +744,7 @@ describe('useConversationDetail transcript back-paging', () => {
     failSinceReads = false
     olderPages = {}
     firstPageOlderToken = ''
+    sincePageOlderToken = ''
   })
 
   it('reports no earlier history when the first read reached the beginning', async () => {
@@ -787,6 +823,7 @@ describe('useConversationDetail deliverable refresh', () => {
     refreshUpdated = 0
     olderPages = {}
     firstPageOlderToken = ''
+    sincePageOlderToken = ''
   })
   afterEach(() => {
     refreshUpdated = 0
@@ -916,8 +953,8 @@ describe('useConversationDetail task refresh', () => {
       const body: unknown =
         path === '/api/tasks/t1'
           ? ({ id: 't1', memory_pending: false } as Task)
-          : path.endsWith('/messages')
-            ? { items: [], next_page_token: '' }
+          : path.endsWith('/messages/list')
+            ? { items: [], next_page_token: '', total_count: 0 }
             : conversation({ task_id: 't1', status: 'open' })
       return Promise.resolve({ ok: true, status: 200, ...jsonBody(body) })
     })
@@ -948,8 +985,8 @@ describe('useConversationDetail task refresh', () => {
         const body: unknown =
           path === '/api/tasks/t1'
             ? taskReads.shift()
-            : path.endsWith('/messages')
-              ? { items: [], next_page_token: '' }
+            : path.endsWith('/messages/list')
+              ? { items: [], next_page_token: '', total_count: 0 }
               : path.endsWith('/deliverables/refresh')
                 ? { updated: 0 }
                 : conversation({ task_id: 't1', status: 'open' })

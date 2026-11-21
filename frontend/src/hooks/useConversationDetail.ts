@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import type { Message, Conversation, Task, TranscriptPage, WSEvent } from '../types'
+import type {
+  Message,
+  Conversation,
+  Task,
+  TranscriptListRequest,
+  TranscriptPage,
+  WSEvent,
+} from '../types'
 import { apiJSON, HttpError, httpErrorMessage } from '../lib/apiClient'
 import { isActiveConversation, isPermissionTerminalStatus } from '../lib/conversationStatus'
 import { useWebSocket } from './useWebSocket'
@@ -55,6 +62,41 @@ function mergeMessages(prev: Message[], incoming: Message[]): Message[] {
   const fresh = incoming.filter((m) => !held.has(m.id))
   if (fresh.length === 0) return prev
   return [...prev, ...fresh].sort((a, b) => a.id - b.id)
+}
+
+// TRANSCRIPT_PAGE_SIZE is the most rows one transcript read asks for, the
+// list's maximum.
+const TRANSCRIPT_PAGE_SIZE = 200
+
+// readTranscript reads one page of the conversation's transcript.
+function readTranscript(conversationID: string, req: TranscriptListRequest = {}) {
+  return apiJSON<TranscriptPage>(
+    `/api/agent/conversations/${encodeURIComponent(conversationID)}/messages/list`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ page_size: TRANSCRIPT_PAGE_SIZE, ...req }),
+    },
+  )
+}
+
+// readTranscriptBelow follows a first page above a watermark down to the
+// watermark, and returns every row oldest-first. Pages run from the newest
+// rows down, so a repair that kept only the first page would move the
+// watermark over the rows the pages below it hold.
+async function readTranscriptBelow(
+  conversationID: string,
+  afterID: number,
+  first: TranscriptPage,
+): Promise<Message[]> {
+  const pages: Message[][] = [first.items]
+  let token = first.next_page_token ?? ''
+  while (token) {
+    const page = await readTranscript(conversationID, { after_id: afterID, page_token: token })
+    pages.unshift(page.items)
+    token = page.next_page_token ?? ''
+  }
+  return pages.flat()
 }
 
 // maxMessageID is the last id in a read, or 0 for an empty one.
@@ -204,6 +246,10 @@ export function useConversationDetail(conversationID: string | undefined): Conve
   // transcript the ids inside the SUM aren't known yet, so a row already counted
   // there would be folded a second time. Holding costs at worst under-reporting
   // until the next read, which is the bounded drift the rest of this accepts.
+  //
+  // TODO(TFAC-1542): a fold that lands after a conversation read whose sums
+  // already count the row adds it a second time; the read has to say which
+  // message id its sums run through for a fold to skip what it counted.
   const foldMessageUsage = useCallback((msg: Message) => {
     const cost = msg.cost_usd
     const costSeen = costBaseline.current
@@ -299,9 +345,7 @@ export function useConversationDetail(conversationID: string | undefined): Conve
     setLoadingOlder(true)
     const token = olderTokenRef.current
     try {
-      const page = await apiJSON<TranscriptPage>(
-        `/api/agent/conversations/${conversationID}/messages?page_token=${encodeURIComponent(token)}`,
-      )
+      const page = await readTranscript(conversationID, { page_token: token })
       // A conversation switch (or a refetch) while the page was in flight retires this
       // answer: its rows belong to a transcript the hook no longer holds, and
       // the token it carries was minted against that read.
@@ -387,7 +431,7 @@ export function useConversationDetail(conversationID: string | undefined): Conve
         // task 404 reject the pair would blank it.
         const taskRead = ++taskReadSeq.current
         const [transcript, taskRow] = await Promise.all([
-          apiJSON<TranscriptPage>(`/api/agent/conversations/${conversationID}/messages`),
+          readTranscript(conversationID),
           conversationData.task_id
             ? apiJSON<Task>(`/api/tasks/${conversationData.task_id}`).catch((err: unknown) => ({
                 taskError: httpErrorMessage(err, 'Could not load the task.'),
@@ -507,33 +551,38 @@ export function useConversationDetail(conversationID: string | undefined): Conve
       const settled = !isActiveConversation(current)
       if (settled && !sawActiveRef.current) return
       const sinceID = completeThroughRef.current
-      apiJSON<TranscriptPage>(
-        `/api/agent/conversations/${conversationID}/messages?since_id=${sinceID}`,
-      )
-        .then((page) => {
-          const rows = page.items
-          if (cancelled || conversationID !== lastConversationIDRef.current) return
-          // The closing read landed, so stop asking. Only a real response
-          // counts — a failed one leaves the flag up so the next tick retries,
-          // which is the difference between closing the transcript out and
-          // merely having tried to.
-          if (settled) sawActiveRef.current = false
-          if (rows.length === 0) return
-          // Another whole read landed, so the watermark moves up to its last
-          // row — but only forward, since a response that raced a fresher one
-          // (or a refetch) would otherwise walk it back over rows already
-          // reconciled and re-ask for them every tick from then on.
-          completeThroughRef.current = Math.max(completeThroughRef.current, maxMessageID(rows))
-          // Most of what comes back is already held — the socket delivered it
-          // in the seconds since the last repair. What is left is what the
-          // socket lost, and it folds its cost exactly as the frame that
-          // never arrived would have.
-          const seen = new Set(messagesRef.current.map((m) => m.id))
-          const repaired = rows.filter((m) => !seen.has(m.id))
-          if (repaired.length === 0) return
-          setMessages((prev) => mergeMessages(prev, repaired))
-          for (const m of repaired) foldMessageUsage(m)
-        })
+      const repair = (rows: Message[]) => {
+        if (cancelled || conversationID !== lastConversationIDRef.current) return
+        // The closing read landed, so stop asking. Only a real response
+        // counts — a failed one leaves the flag up so the next tick retries,
+        // which is the difference between closing the transcript out and
+        // merely having tried to.
+        if (settled) sawActiveRef.current = false
+        if (rows.length === 0) return
+        // Another whole read landed, so the watermark moves up to its last
+        // row — but only forward, since a response that raced a fresher one
+        // (or a refetch) would otherwise walk it back over rows already
+        // reconciled and re-ask for them every tick from then on.
+        completeThroughRef.current = Math.max(completeThroughRef.current, maxMessageID(rows))
+        // Most of what comes back is already held — the socket delivered it
+        // in the seconds since the last repair. What is left is what the
+        // socket lost, and it folds its cost exactly as the frame that
+        // never arrived would have.
+        const seen = new Set(messagesRef.current.map((m) => m.id))
+        const repaired = rows.filter((m) => !seen.has(m.id))
+        if (repaired.length === 0) return
+        setMessages((prev) => mergeMessages(prev, repaired))
+        for (const m of repaired) foldMessageUsage(m)
+      }
+      // A single page is applied in the read's own continuation; the walk
+      // below it runs only when a token says more rows wait above the
+      // watermark.
+      readTranscript(conversationID, { after_id: sinceID })
+        .then((page) =>
+          page.next_page_token
+            ? readTranscriptBelow(conversationID, sinceID, page).then(repair)
+            : repair(page.items),
+        )
         .catch(() => {})
     }
     // A live conversation's row is re-read every tick too. Its claim's

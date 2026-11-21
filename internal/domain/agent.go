@@ -852,39 +852,39 @@ type Message struct {
 // (delivered / window_state / seq) never cross the wire. ConversationID
 // links the row to its owning conversation.
 type MessageDTO struct {
-	ID                  int            `json:"id"`
-	ConversationID      string         `json:"conversation_id"`
-	Role                string         `json:"role"`
-	Subtype             string         `json:"subtype"`
-	Content             string         `json:"content"`
-	ToolCalls           []ToolCall     `json:"tool_calls,omitempty"`
-	ToolCallID          string         `json:"tool_call_id,omitempty"`
-	IsError             bool           `json:"is_error,omitempty"`
-	Metadata            map[string]any `json:"metadata,omitempty"`
-	Model               string         `json:"model,omitempty"`
-	InputTokens         *int           `json:"input_tokens,omitempty"`
-	OutputTokens        *int           `json:"output_tokens,omitempty"`
-	CacheReadTokens     *int           `json:"cache_read_tokens,omitempty"`
-	CacheCreationTokens *int           `json:"cache_creation_tokens,omitempty"`
+	ID                  int            `json:"id" doc:"The message's id."`
+	ConversationID      string         `json:"conversation_id" doc:"The id of the conversation the message belongs to."`
+	Role                string         `json:"role" doc:"Who the message is from: assistant, user, tool, or system."`
+	Subtype             string         `json:"subtype" doc:"A code naming a message that is not an ordinary turn, such as injection:memory for a note the system wrote into the transcript; empty for an assistant turn, a tool result, or a person's message."`
+	Content             string         `json:"content" doc:"The message's text."`
+	ToolCalls           []ToolCall     `json:"tool_calls,omitempty" doc:"The tool calls an assistant message makes, absent when it makes none."`
+	ToolCallID          string         `json:"tool_call_id,omitempty" doc:"On a tool message, the id of the tool call it answers, absent on any other message."`
+	IsError             bool           `json:"is_error,omitempty" doc:"Whether a tool message reports a failed call, absent when it does not."`
+	Metadata            map[string]any `json:"metadata,omitempty" doc:"Further details the agent runtime recorded on the message, absent when there are none."`
+	Model               string         `json:"model,omitempty" doc:"The model that wrote an assistant message, or the model a person's message runs on, absent when none is recorded."`
+	InputTokens         *int           `json:"input_tokens,omitempty" doc:"How many input tokens the model call that wrote the message used, absent when none are recorded."`
+	OutputTokens        *int           `json:"output_tokens,omitempty" doc:"How many output tokens the model call that wrote the message produced, absent when none are recorded."`
+	CacheReadTokens     *int           `json:"cache_read_tokens,omitempty" doc:"How many input tokens that model call read from the provider's prompt cache, absent when none are recorded."`
+	CacheCreationTokens *int           `json:"cache_creation_tokens,omitempty" doc:"How many input tokens that model call wrote to the provider's prompt cache, absent when none are recorded."`
 	// CostUSD carries the row's settlement stamp (see Message.CostUSD): absent
 	// = not a settlement row, 0 = genuinely free. A runtime that stamps as it
 	// streams makes the wire rows an accumulating spend signal, which is how a
 	// live surface keeps a cost readout current between reads of the
 	// conversation's SUM.
-	CostUSD   *float64  `json:"cost_usd,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
+	CostUSD   *float64  `json:"cost_usd,omitempty" doc:"The cost of the model calls settled at this message, in USD, absent when the message settles none."`
+	CreatedAt time.Time `json:"created_at" doc:"When the message was written, as an RFC 3339 timestamp."`
 	// DurationMs is how long this row's own work took (see
 	// Message.DurationMs). Pointer + omitempty so an unmeasured row is absent
 	// from the JSON rather than zero: a consumer has to be able to tell "took
 	// 0ms" from "nobody measured", and every row written before the runtime
 	// stamped timing is the latter.
-	DurationMs *int `json:"duration_ms,omitempty"`
+	DurationMs *int `json:"duration_ms,omitempty" doc:"How long the work the message records took, in milliseconds, absent when it was not measured."`
 	// StopReason is the provider's own reason for ending this turn (see
 	// Message.StopReason). Omitted rather than empty when the stream reported
 	// none, so a consumer can't read "not reported" as a reason of its own.
-	StopReason    string            `json:"stop_reason,omitempty"`
-	Reasoning     []ReasoningDetail `json:"reasoning,omitempty"`
-	ContentBlocks []ContentBlock    `json:"content_blocks,omitempty"`
+	StopReason    string            `json:"stop_reason,omitempty" doc:"Why the model provider ended the turn the message records, in the provider's spelling, such as end_turn or max_tokens, absent when it reported none."`
+	Reasoning     []ReasoningDetail `json:"reasoning,omitempty" doc:"The model's recorded reasoning for the message, absent when there is none."`
+	ContentBlocks []ContentBlock    `json:"content_blocks,omitempty" doc:"The message's images and files, absent when its text is its whole content."`
 }
 
 // MessageMetadataToolsFingerprint is the Message.Metadata key under which an
@@ -960,9 +960,9 @@ func MessageDTOs(msgs []Message) []MessageDTO {
 
 // ToolCall represents a single tool invocation within a message.
 type ToolCall struct {
-	ID    string         `json:"id"`
-	Name  string         `json:"name"`
-	Input map[string]any `json:"input"`
+	ID    string         `json:"id" doc:"The tool call's id, which the tool message answering it carries as tool_call_id."`
+	Name  string         `json:"name" doc:"The name of the tool called."`
+	Input map[string]any `json:"input" doc:"The input the tool is called with."`
 }
 
 // ReasoningDetailType discriminates a ReasoningDetail entry, mirroring
@@ -979,11 +979,11 @@ type ReasoningDetailType string
 // of a bifrost dependency until the P1 inference package wires the real
 // thing in.
 type ReasoningDetail struct {
-	Index     int                 `json:"index"`
-	Type      ReasoningDetailType `json:"type"`
-	Text      string              `json:"text,omitempty"`
-	Signature string              `json:"signature,omitempty"`
-	Data      string              `json:"data,omitempty"`
+	Index     int                 `json:"index" doc:"The entry's position among the message's reasoning entries."`
+	Type      ReasoningDetailType `json:"type" doc:"The kind of reasoning entry, in the model provider's spelling."`
+	Text      string              `json:"text,omitempty" doc:"The reasoning text, absent when the provider returned none."`
+	Signature string              `json:"signature,omitempty" doc:"A token the model provider issued with the entry to verify it, absent when it issued none."`
+	Data      string              `json:"data,omitempty" doc:"The entry in the encrypted form the model provider returned, absent when it returned none."`
 }
 
 // ContentBlockType discriminates a ContentBlock's payload, mirroring
@@ -1002,28 +1002,28 @@ const (
 // Content string can't carry. Defined in domain, not imported from bifrost,
 // for the same zero-bifrost-import reason as ReasoningDetail.
 type ContentBlock struct {
-	Type     ContentBlockType `json:"type"`
-	Text     string           `json:"text,omitempty"`
-	ImageURL *ContentImageURL `json:"image_url,omitempty"`
-	File     *ContentFile     `json:"file,omitempty"`
+	Type     ContentBlockType `json:"type" doc:"The kind of block: text, image_url, or file."`
+	Text     string           `json:"text,omitempty" doc:"The text of a text block, absent on any other block."`
+	ImageURL *ContentImageURL `json:"image_url,omitempty" doc:"The image of an image_url block, absent on any other block."`
+	File     *ContentFile     `json:"file,omitempty" doc:"The file of a file block, absent on any other block."`
 }
 
 // ContentImageURL is a ContentBlock's image payload — a remote URL or a
 // data: URI, mirroring bifrost's ChatInputImage.
 type ContentImageURL struct {
-	URL    string `json:"url,omitempty"`
-	FileID string `json:"file_id,omitempty"`
-	Detail string `json:"detail,omitempty"`
+	URL    string `json:"url,omitempty" doc:"The image's URL, which may be a data: URI, absent when file_id names the image."`
+	FileID string `json:"file_id,omitempty" doc:"The model provider's id for the image file, absent when url gives the image."`
+	Detail string `json:"detail,omitempty" doc:"The level of detail the model reads the image at, such as low or high, absent for the provider's default."`
 }
 
 // ContentFile is a ContentBlock's file payload, mirroring bifrost's
 // ChatInputFile.
 type ContentFile struct {
-	FileData string `json:"file_data,omitempty"`
-	FileURL  string `json:"file_url,omitempty"`
-	FileID   string `json:"file_id,omitempty"`
-	Filename string `json:"filename,omitempty"`
-	FileType string `json:"file_type,omitempty"`
+	FileData string `json:"file_data,omitempty" doc:"The file's contents, absent when file_url or file_id gives the file."`
+	FileURL  string `json:"file_url,omitempty" doc:"The file's URL, absent when file_data or file_id gives the file."`
+	FileID   string `json:"file_id,omitempty" doc:"The model provider's id for the file, absent when file_data or file_url gives the file."`
+	Filename string `json:"filename,omitempty" doc:"The file's name, absent when none is recorded."`
+	FileType string `json:"file_type,omitempty" doc:"The file's media type, absent when none is recorded."`
 }
 
 // MessageWindowState is messages.window_state's app-validated vocabulary

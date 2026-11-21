@@ -215,12 +215,10 @@ describe('DeliverableList', () => {
     fireEvent.click(await screen.findByRole('button', { name: /dismiss review/i }))
 
     await waitFor(() => expect(onResolved).toHaveBeenCalled())
-    // Abandoning a staged review reaches nothing outside the process, so it is
-    // a field write — the /dismiss verb is the draft PR's, and it closes a real
-    // PR on GitHub.
+    // A review is dismissed through the same verb as a draft pull request.
     expect(fetchMock).toHaveBeenCalledWith(
-      '/api/deliverables/rv1/review',
-      expect.objectContaining({ method: 'PATCH', body: JSON.stringify({ state: 'dismissed' }) }),
+      '/api/deliverables/rv1/dismiss',
+      expect.objectContaining({ method: 'POST' }),
     )
     expect(await screen.findByText('dismissed')).toBeInTheDocument()
   })

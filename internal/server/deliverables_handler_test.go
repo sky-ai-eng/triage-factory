@@ -100,7 +100,6 @@ func TestDeliverableWrites_KindScoped(t *testing.T) {
 		"comment edit on a PR deliverable":   {http.MethodPatch, "/api/deliverables/" + prID + "/comments/c_1", map[string]any{"body": "x"}, http.StatusConflict},
 		"comment delete on a PR deliverable": {http.MethodDelete, "/api/deliverables/" + prID + "/comments/c_1", nil, http.StatusConflict},
 		"refresh on a PR deliverable":        {http.MethodPost, "/api/deliverables/" + prID + "/review/refresh", nil, http.StatusConflict},
-		"dismiss on a review deliverable":    {http.MethodPost, "/api/deliverables/" + reviewID + "/dismiss", nil, http.StatusConflict},
 		// A zero-field PR patch names nothing to send GitHub.
 		"zero-field PR patch": {http.MethodPatch, "/api/deliverables/" + prID + "/pr", map[string]any{}, http.StatusBadRequest},
 	} {
@@ -463,6 +462,45 @@ func TestDeliverableUpdate_SingleField_UsesLiveBaseline(t *testing.T) {
 	}
 	if d.Proposed.Title != "Add thing" || d.Proposed.Body != "Body." {
 		t.Errorf("proposed = %+v, want frozen agent draft", d.Proposed)
+	}
+}
+
+// TestDeliverableUpdate_Null: null clears the body, which GitHub then holds
+// empty beside the live title, and null on the title is refused before any
+// GitHub call, since a pull request always has one.
+func TestDeliverableUpdate_Null(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	var patchBody map[string]any
+	patches := 0
+	mux := newAppAPIMux()
+	mux.HandleFunc("GET /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"number": 42, "state": "open", "draft": true, "title": "Live title", "body": "Live body"})
+	})
+	mux.HandleFunc("PATCH /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
+		patches++
+		_ = json.NewDecoder(r.Body).Decode(&patchBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{"number": 42})
+	})
+	stub := httptest.NewServer(mux)
+	t.Cleanup(stub.Close)
+	seedApp(t, srv, stub, acmeInstall())
+	artID := seedDraftPRDeliverable(t, srv, "acme", "api")
+
+	rec := doJSON(t, srv, http.MethodPatch, "/api/deliverables/"+artID+"/pr", map[string]any{"title": nil})
+	if rec.Code != http.StatusBadRequest || firstErrorReason(t, rec) != httpx.ReasonInvalidField {
+		t.Fatalf("null title = %d %s, want 400 INVALID_FIELD", rec.Code, rec.Body.String())
+	}
+	if patches != 0 {
+		t.Fatalf("a refused null title reached GitHub %d times", patches)
+	}
+
+	rec = doJSON(t, srv, http.MethodPatch, "/api/deliverables/"+artID+"/pr", map[string]any{"body": nil})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("null body = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if patchBody["title"] != "Live title" || patchBody["body"] != "" {
+		t.Errorf("UpdatePR = %v, want the live title and an empty body", patchBody)
 	}
 }
 
