@@ -52,19 +52,19 @@ type grantFindingListRequest struct {
 // tells one item from another; repository_id is the registry row TF holds for
 // it, "" when it holds none.
 type reachWithoutPurposeItem struct {
-	InstallationID string `json:"installation_id"`
-	AccountLogin   string `json:"account_login"`
-	SettingsURL    string `json:"settings_url"`
-	GitHubID       string `json:"github_id"`
-	RepositoryID   string `json:"repository_id"`
-	Owner          string `json:"owner"`
-	Repo           string `json:"repo"`
-	Slug           string `json:"slug"`
-	Private        bool   `json:"private"`
-	HTMLURL        string `json:"html_url"`
+	InstallationID string `json:"installation_id" doc:"GitHub's id for the installation whose grant reaches the repository."`
+	AccountLogin   string `json:"account_login" doc:"The login of the GitHub account the installation is on."`
+	SettingsURL    string `json:"settings_url" doc:"The installation's settings page on GitHub, where the repositories it grants are chosen."`
+	GitHubID       string `json:"github_id" doc:"GitHub's id for the repository, empty when GitHub's listing gave none."`
+	RepositoryID   string `json:"repository_id" doc:"The repository's id in Triage Factory, empty when Triage Factory holds no record of it."`
+	Owner          string `json:"owner" doc:"The account that owns the repository on GitHub."`
+	Repo           string `json:"repo" doc:"The repository's name without its owner."`
+	Slug           string `json:"slug" doc:"The repository's full name, as owner/name."`
+	Private        bool   `json:"private" doc:"Whether the repository is private on GitHub."`
+	HTMLURL        string `json:"html_url" doc:"The repository's page on GitHub."`
 	// ObservedAt is when the refresh that observed this reach ran, RFC3339 —
 	// the "as of" the finding is true at.
-	ObservedAt string `json:"observed_at"`
+	ObservedAt string `json:"observed_at" doc:"When the installation refresh that found the repository in the grant ran, as an RFC 3339 timestamp."`
 }
 
 // scopeDriftItem is one tracked repository outside the grant. installation_id
@@ -76,14 +76,14 @@ type reachWithoutPurposeItem struct {
 // repository_id is the tracked registry row the item is about, and github_id
 // its GitHub id ("" while TF has not learned it).
 type scopeDriftItem struct {
-	RepositoryID   string `json:"repository_id"`
-	GitHubID       string `json:"github_id"`
-	Owner          string `json:"owner"`
-	Repo           string `json:"repo"`
-	Slug           string `json:"slug"`
-	InstallationID string `json:"installation_id"`
-	AccountLogin   string `json:"account_login"`
-	SettingsURL    string `json:"settings_url"`
+	RepositoryID   string `json:"repository_id" doc:"The tracked repository's id in Triage Factory."`
+	GitHubID       string `json:"github_id" doc:"GitHub's id for the repository, empty while it is not yet known."`
+	Owner          string `json:"owner" doc:"The account that owns the repository on GitHub."`
+	Repo           string `json:"repo" doc:"The repository's name without its owner."`
+	Slug           string `json:"slug" doc:"The repository's full name, as owner/name."`
+	InstallationID string `json:"installation_id" doc:"GitHub's id for the installation on the repository's owner account, whose grant leaves the repository out, or empty when no installation is on that account."`
+	AccountLogin   string `json:"account_login" doc:"The login of the GitHub account the installation is on, empty when installation_id is."`
+	SettingsURL    string `json:"settings_url" doc:"The installation's settings page on GitHub, where the repository can be added to the grant, empty when installation_id is."`
 }
 
 // grantFindingsClass is what both routes do before reading: authorize the
@@ -133,6 +133,15 @@ func (s *Server) liveInstallationsByID(ctx context.Context, orgID, host string) 
 	return byID, nil
 }
 
+var opGitHubGrantReachWithoutPurposeList = httpx.NewListOp[grantFindingListRequest, reachWithoutPurposeItem](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/github/grant/reach-without-purpose/list",
+	ID:          "list_github_grant_reach_without_purpose",
+	Summary:     "List repositories the GitHub App reaches untracked",
+	Description: "Returns one page of the repositories the organization's GitHub App installations can reach that no team tracks, as the last installation refresh found them. It reads stored state and asks GitHub nothing.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
+
 // handleGitHubGrantReachWithoutPurposeList lists the repositories the org's
 // App grant reaches that no team tracks.
 //
@@ -142,8 +151,8 @@ func (s *Server) handleGitHubGrantReachWithoutPurposeList(w http.ResponseWriter,
 	if !ok {
 		return
 	}
-	var req grantFindingListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opGitHubGrantReachWithoutPurposeList.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -159,7 +168,7 @@ func (s *Server) handleGitHubGrantReachWithoutPurposeList(w http.ResponseWriter,
 	}
 	if host == "" {
 		// No GitHub URL: nothing is reachable, so nothing is a finding.
-		httpx.WriteList(w, page, []reachWithoutPurposeItem{}, 0)
+		opGitHubGrantReachWithoutPurposeList.Write(w, page, []reachWithoutPurposeItem{}, 0)
 		return
 	}
 	rows, total, err := s.reachableRepos.ListReachWithoutPurposeSystem(ctx, orgID, host, class,
@@ -172,7 +181,7 @@ func (s *Server) handleGitHubGrantReachWithoutPurposeList(w http.ResponseWriter,
 	// skips the lookup rather than paying for a decoration nothing wears.
 	items := make([]reachWithoutPurposeItem, 0, len(rows))
 	if page.CountOnly {
-		httpx.WriteList(w, page, items, total)
+		opGitHubGrantReachWithoutPurposeList.Write(w, page, items, total)
 		return
 	}
 	byID, err := s.liveInstallationsByID(ctx, orgID, host)
@@ -196,8 +205,17 @@ func (s *Server) handleGitHubGrantReachWithoutPurposeList(w http.ResponseWriter,
 			ObservedAt:     row.ObservedAt.UTC().Format(time.RFC3339),
 		})
 	}
-	httpx.WriteList(w, page, items, total)
+	opGitHubGrantReachWithoutPurposeList.Write(w, page, items, total)
 }
+
+var opGitHubGrantScopeDriftList = httpx.NewListOp[grantFindingListRequest, scopeDriftItem](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/github/grant/scope-drift/list",
+	ID:          "list_github_grant_scope_drift",
+	Summary:     "List tracked repositories the GitHub App cannot reach",
+	Description: "Returns one page of the repositories a team tracks that the organization's GitHub App installations do not grant, as the last installation refresh found them, so they are not polled. It reads stored state and asks GitHub nothing.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleGitHubGrantScopeDriftList lists the repositories some team tracks that
 // the org's App grant does not contain.
@@ -208,8 +226,8 @@ func (s *Server) handleGitHubGrantScopeDriftList(w http.ResponseWriter, r *http.
 	if !ok {
 		return
 	}
-	var req grantFindingListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opGitHubGrantScopeDriftList.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -224,7 +242,7 @@ func (s *Server) handleGitHubGrantScopeDriftList(w http.ResponseWriter, r *http.
 		return
 	}
 	if host == "" {
-		httpx.WriteList(w, page, []scopeDriftItem{}, 0)
+		opGitHubGrantScopeDriftList.Write(w, page, []scopeDriftItem{}, 0)
 		return
 	}
 	rows, total, err := s.reachableRepos.ListScopeDriftSystem(ctx, orgID, host, class,
@@ -236,7 +254,7 @@ func (s *Server) handleGitHubGrantScopeDriftList(w http.ResponseWriter, r *http.
 	// Same as the reach list: no rows, no decoration, no installation read.
 	items := make([]scopeDriftItem, 0, len(rows))
 	if page.CountOnly {
-		httpx.WriteList(w, page, items, total)
+		opGitHubGrantScopeDriftList.Write(w, page, items, total)
 		return
 	}
 	byID, err := s.liveInstallationsByID(ctx, orgID, host)
@@ -257,5 +275,5 @@ func (s *Server) handleGitHubGrantScopeDriftList(w http.ResponseWriter, r *http.
 		}
 		items = append(items, item)
 	}
-	httpx.WriteList(w, page, items, total)
+	opGitHubGrantScopeDriftList.Write(w, page, items, total)
 }

@@ -29,23 +29,23 @@ func (s *Server) registerGitHubRoutes() {
 	// unchanged). A JSON fetch from the SPA (not a top-level navigation like
 	// launch/callback), so it rides apiMutating (CSRF). Org-admin (gated
 	// inside the handler).
-	s.apiMutating("POST /api/orgs/{org_id}/github/app/import", s.handleGitHubAppImport)
+	s.op(opGitHubAppImport, s.handleGitHubAppImport)
 	// Read-only status + install deep-link for the organization settings panel.
 	// Any org member (read), so RequireOrgMember rather than RequireOrgAdmin.
-	s.api("GET /api/orgs/{org_id}/github/app", s.handleGitHubAppStatus)
-	s.api("GET /api/orgs/{org_id}/github/app/install-url", s.handleGitHubAppInstallURL)
+	s.op(opGitHubAppStatus, s.handleGitHubAppStatus)
+	s.op(opGitHubAppInstallURL, s.handleGitHubAppInstallURL)
 	// On-demand installation reconcile — the "UI panel refresh" half of
 	// installation discovery; the poller cycle is the other. Admin-only (the
 	// setup wizard's install step + the Settings App panel call it) and
 	// mode-agnostic. Mutating: it reconciles the installation mirror via the
 	// same API backfill the poller runs, so it rides apiMutating (CSRF).
-	s.apiMutating("POST /api/orgs/{org_id}/github/app/installations/refresh", s.handleGitHubAppInstallationsRefresh)
+	s.op(opGitHubAppInstallationsRefresh, s.handleGitHubAppInstallationsRefresh)
 	// Replay the App's failed installation webhook deliveries — the repair for
 	// an org whose receiver was rejecting them (no webhook secret, or the
 	// wrong one) while its installation mirror went stale. Admin-only, and
 	// mutating in the sense that matters: it asks GitHub to deliver again, so
 	// it rides apiMutating (CSRF).
-	s.apiMutating("POST /api/orgs/{org_id}/github/app/webhook/replay", s.handleGitHubAppWebhookReplay)
+	s.op(opGitHubAppWebhookReplay, s.handleGitHubAppWebhookReplay)
 	// The two grant findings, computed from the reachable-repo mirror: what
 	// the App can reach that nobody tracks, and what is tracked that the App
 	// cannot reach. Paginated list reads (POST because the paging pair is a
@@ -54,8 +54,8 @@ func (s *Server) registerGitHubRoutes() {
 	// grant is what they are about, whichever App holds it: an org on
 	// the deployment's App has no App resource of its own and the same two
 	// findings. See github_grant_findings.go.
-	s.apiMutating("POST /api/orgs/{org_id}/github/grant/reach-without-purpose/list", s.handleGitHubGrantReachWithoutPurposeList)
-	s.apiMutating("POST /api/orgs/{org_id}/github/grant/scope-drift/list", s.handleGitHubGrantScopeDriftList)
+	s.op(opGitHubGrantReachWithoutPurposeList, s.handleGitHubGrantReachWithoutPurposeList)
+	s.op(opGitHubGrantScopeDriftList, s.handleGitHubGrantScopeDriftList)
 
 	// The bind ceremony — how an org claims an installation of the
 	// DEPLOYMENT App, the one key that serves many orgs. Multi-mode only
@@ -78,7 +78,7 @@ func (s *Server) registerGitHubRoutes() {
 	// GitHub, who has no session at all and must not be answered with a JSON
 	// 401. The Connect and bind cookies decide which, before any session
 	// lookup.
-	s.apiMutating("POST /api/orgs/{org_id}/github/managed/connect-account", s.handleGitHubManagedConnectAccount)
+	s.op(opGitHubManagedConnectAccount, s.handleGitHubManagedConnectAccount)
 	// Leaving the class — the bind's mirror. Verb routes because each is a
 	// multi-row transition (soft-remove the rows, reset the class, record the
 	// change) serialized under the App-registration lock, rather than a field
@@ -88,8 +88,8 @@ func (s *Server) registerGitHubRoutes() {
 	// and is the full disconnect when that account was the last. JSON fetches
 	// from the Settings panel, so both ride apiMutating (CSRF). Org-admin,
 	// gated inside the handler.
-	s.apiMutating("POST /api/orgs/{org_id}/github/managed/disconnect", s.handleGitHubManagedDisconnect)
-	s.apiMutating("POST /api/orgs/{org_id}/github/managed/installations/{installation_id}/disconnect", s.handleGitHubManagedInstallationDisconnect)
+	s.op(opGitHubManagedDisconnect, s.handleGitHubManagedDisconnect)
+	s.op(opGitHubManagedInstallationDisconnect, s.handleGitHubManagedInstallationDisconnect)
 	// Spelled literally rather than built from ManagedBindCallbackPath: the
 	// pre-auth allowlist is audited by parsing this file, so a mount it cannot
 	// read as a constant string is a mount it cannot check. The two cannot
@@ -115,12 +115,12 @@ func (s *Server) registerGitHubRoutes() {
 	// cutover preflight is a read (api); the PAT preflight POSTs a token to
 	// probe reach but stores nothing — still apiMutating for the same-origin
 	// guard.
-	s.apiMutating("POST /api/orgs/{org_id}/github/app/cutover", s.handleGitHubAppCutover)
-	s.apiMutating("POST /api/orgs/{org_id}/github/pat/switch-to", s.handleGitHubAccessSwitchToPAT)
-	s.apiMutating("DELETE /api/orgs/{org_id}/github/app", s.handleGitHubAppDiscard)
-	s.apiMutating("POST /api/orgs/{org_id}/github/app/disconnect", s.handleGitHubAppDisconnect)
-	s.api("GET /api/orgs/{org_id}/github/app/cutover-preflight", s.handleGitHubAppCutoverPreflight)
-	s.apiMutating("POST /api/orgs/{org_id}/github/pat/preflight", s.handleGitHubAccessPATPreflight)
+	s.op(opGitHubAppCutover, s.handleGitHubAppCutover)
+	s.op(opGitHubAccessSwitchToPAT, s.handleGitHubAccessSwitchToPAT)
+	s.op(opGitHubAppDiscard, s.handleGitHubAppDiscard)
+	s.op(opGitHubAppDisconnect, s.handleGitHubAppDisconnect)
+	s.op(opGitHubAppCutoverPreflight, s.handleGitHubAppCutoverPreflight)
+	s.op(opGitHubAccessPATPreflight, s.handleGitHubAccessPATPreflight)
 
 	// The org integration credentials, each an addressable resource with an
 	// explicit bind + unbind rather than a field on the bulk settings save.
@@ -135,8 +135,8 @@ func (s *Server) registerGitHubRoutes() {
 	// credential flavor, and the flavor is the resource: its bind and unbind
 	// here, its preflight and the switch onto it beside them, all under
 	// github/pat as the App's routes sit under github/app.
-	s.apiMutating("PUT /api/orgs/{org_id}/github/pat", s.handleGitHubPATPut)
-	s.apiMutating("DELETE /api/orgs/{org_id}/github/pat", s.handleGitHubPATDelete)
+	s.op(opGitHubPATPut, s.handleGitHubPATPut)
+	s.op(opGitHubPATDelete, s.handleGitHubPATDelete)
 
 	// The org's commit signer: the GitHub user account its agents' commits
 	// are authored, committed and signed as, and the key pair TF signs with.
@@ -148,19 +148,19 @@ func (s *Server) registerGitHubRoutes() {
 	// the one field a PATCH writes. commit-identity is the resolution a run's
 	// commits take — the signer, or the identity the org commits as without
 	// one — and whether they sign. See github_commit_signer.go.
-	s.api("GET /api/orgs/{org_id}/github/commit-signer", s.handleCommitSignerGet)
-	s.apiMutating("POST /api/orgs/{org_id}/github/commit-signer", s.handleCommitSignerCreate)
-	s.apiMutating("PATCH /api/orgs/{org_id}/github/commit-signer", s.handleCommitSignerPatch)
-	s.apiMutating("DELETE /api/orgs/{org_id}/github/commit-signer", s.handleCommitSignerDelete)
-	s.apiMutating("POST /api/orgs/{org_id}/github/commit-signer/verify", s.handleCommitSignerVerify)
-	s.apiMutating("POST /api/orgs/{org_id}/github/commit-signer/rotate", s.handleCommitSignerRotate)
-	s.api("GET /api/orgs/{org_id}/github/commit-identity", s.handleCommitIdentityGet)
+	s.op(opCommitSignerGet, s.handleCommitSignerGet)
+	s.op(opCommitSignerCreate, s.handleCommitSignerCreate)
+	s.op(opCommitSignerPatch, s.handleCommitSignerPatch)
+	s.op(opCommitSignerDelete, s.handleCommitSignerDelete)
+	s.op(opCommitSignerVerify, s.handleCommitSignerVerify)
+	s.op(opCommitSignerRotate, s.handleCommitSignerRotate)
+	s.op(opCommitIdentityGet, s.handleCommitIdentityGet)
 
 	// How many of the org's tracked repositories its GitHub credential can
 	// read Dependabot alerts on, as the poll last found them: a statistic node,
 	// org-admin because it describes the org's credential. See
 	// github_dependabot_access.go.
-	s.api("GET /api/orgs/{org_id}/github/dependabot-access", s.handleGitHubDependabotAccess)
+	s.op(opGitHubDependabotAccess, s.handleGitHubDependabotAccess)
 
 	// "Connect GitHub" user-to-server OAuth — binds a host-verified GitHub
 	// login to the signed-in user (identity, not access, not login). start
@@ -183,18 +183,18 @@ func (s *Server) registerGitHubRoutes() {
 	// parent and moves with the callback or not at all.
 	s.api("GET /api/orgs/{org_id}/github/connect/start", s.handleGitHubConnectStart)
 	s.api("GET /api/orgs/{org_id}/github/connect/callback", s.handleGitHubConnectCallback)
-	s.api("GET /api/orgs/{org_id}/github/identity", s.handleGitHubIdentityStatus)
+	s.op(opGitHubIdentityStatus, s.handleGitHubIdentityStatus)
 	// Capture-and-discard per-user identity from a user-supplied PAT (PAT_2):
 	// validate → whoami → write user_github_identities → drop the token. Local
 	// mode only — the fallback to Connect there, and the only path when no App
 	// is registered; multi mode links identity through Connect alone, and the
 	// handler 404s. Never stores the token.
-	s.apiMutating("POST /api/orgs/{org_id}/github/identity/pat", s.handleGitHubIdentityPAT)
+	s.op(opGitHubIdentityPAT, s.handleGitHubIdentityPAT)
 	// GitHub accounts on the org's GitHub, read through the org's credential:
 	// a login resolved to the account id a GitHub predicate's identity filters
 	// take, and an id named by its current login.
-	s.api("GET /api/orgs/{org_id}/github/users/by-name/{login}", s.handleGitHubAccountByName)
-	s.api("GET /api/orgs/{org_id}/github/users/{github_user_id}", s.handleGitHubAccountByID)
+	s.op(opGitHubAccountByName, s.handleGitHubAccountByName)
+	s.op(opGitHubAccountByID, s.handleGitHubAccountByID)
 
 	// Per-org GitHub App webhook receiver. Pre-auth (GitHub has no
 	// session) and identified by org_id from the path; the handler

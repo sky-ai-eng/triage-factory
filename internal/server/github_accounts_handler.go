@@ -16,9 +16,33 @@ import (
 // GitHub's id for it, which the GitHub predicates' identity filters
 // (author_id_in and its siblings) take, and the login it is called now.
 type gitHubAccountJSON struct {
-	GitHubUserID string `json:"github_user_id"`
-	Login        string `json:"login"`
+	GitHubUserID string `json:"github_user_id" doc:"GitHub's id for the account, which the identity filters of a GitHub event handler's predicate take."`
+	Login        string `json:"login" doc:"The account's current login."`
 }
+
+var opGitHubAccountByName = httpx.NewJSONOp[httpx.NoBody, gitHubAccountJSON](httpx.OpSpec{
+	Pattern:     "GET /api/orgs/{org_id}/github/users/by-name/{login}",
+	ID:          "get_github_user_by_name",
+	Summary:     "Look up a GitHub account by login",
+	Description: "Asks the organization's GitHub host, through the organization's GitHub credential, for the account a login names, and returns its id and login.",
+	PathParams: map[string]string{
+		"org_id": "The organization's id.",
+		"login":  "The account's login on the organization's GitHub host, with a [bot] suffix for a bot.",
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
+
+var opGitHubAccountByID = httpx.NewJSONOp[httpx.NoBody, gitHubAccountJSON](httpx.OpSpec{
+	Pattern:     "GET /api/orgs/{org_id}/github/users/{github_user_id}",
+	ID:          "get_github_user",
+	Summary:     "Get a GitHub account",
+	Description: "Asks the organization's GitHub host, through the organization's GitHub credential, for the account an id names, and returns its id and the login it has now.",
+	PathParams: map[string]string{
+		"org_id":         "The organization's id.",
+		"github_user_id": "GitHub's id for the account.",
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // gitHubLoginPattern is the shape of a GitHub login as a path value: the
 // characters a user or Enterprise login is made of, and a bot's "[bot]"
@@ -44,7 +68,7 @@ func (s *Server) handleGitHubAccountByName(w http.ResponseWriter, r *http.Reques
 		})
 		return
 	}
-	s.answerGitHubAccount(w, r, orgID, fmt.Sprintf("no GitHub account is called %q", login),
+	s.answerGitHubAccount(w, r, opGitHubAccountByName, orgID, fmt.Sprintf("no GitHub account is called %q", login),
 		func(ctx context.Context, c *ghclient.Client) (ghclient.Account, error) {
 			return c.GetAccountByLogin(ctx, login)
 		})
@@ -67,17 +91,17 @@ func (s *Server) handleGitHubAccountByID(w http.ResponseWriter, r *http.Request)
 		})
 		return
 	}
-	s.answerGitHubAccount(w, r, orgID, fmt.Sprintf("no GitHub account has id %s", id),
+	s.answerGitHubAccount(w, r, opGitHubAccountByID, orgID, fmt.Sprintf("no GitHub account has id %s", id),
 		func(ctx context.Context, c *ghclient.Client) (ghclient.Account, error) {
 			return c.GetAccountByID(ctx, id)
 		})
 }
 
 // answerGitHubAccount runs read with the org's GitHub client and answers its
-// account, a 404 naming notFoundMessage when GitHub has none, 409
+// account through op, a 404 naming notFoundMessage when GitHub has none, 409
 // NOT_CONFIGURED when the org has no GitHub credential, and 502 when GitHub
 // fails otherwise.
-func (s *Server) answerGitHubAccount(w http.ResponseWriter, r *http.Request, orgID, notFoundMessage string,
+func (s *Server) answerGitHubAccount(w http.ResponseWriter, r *http.Request, op *httpx.JSONOp[httpx.NoBody, gitHubAccountJSON], orgID, notFoundMessage string,
 	read func(context.Context, *ghclient.Client) (ghclient.Account, error)) {
 	client, err := s.gitHubAccountClient(r.Context(), orgID)
 	if err != nil {
@@ -97,7 +121,7 @@ func (s *Server) answerGitHubAccount(w http.ResponseWriter, r *http.Request, org
 		httpx.WriteUpstreamUnavailable(w, "could not read the account from GitHub", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, gitHubAccountJSON{GitHubUserID: account.ID, Login: account.Login})
+	op.Write(w, gitHubAccountJSON{GitHubUserID: account.ID, Login: account.Login})
 }
 
 // gitHubAccountClient resolves a client on the org's GitHub credential for

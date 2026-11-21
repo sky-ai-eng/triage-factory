@@ -107,12 +107,12 @@ func appFingerprint(app *domain.OrgGitHubApp) string {
 // secret's VALUE is never carried in any form — secret_configured is GitHub's
 // masked presence bit and nothing more.
 type githubAppWebhookHealth struct {
-	State                  string `json:"state"`
-	HookHost               string `json:"hook_host"`
-	SecretConfigured       bool   `json:"secret_configured"`
-	LastDeliveryAt         string `json:"last_delivery_at"`
-	LastDeliveryStatusCode int    `json:"last_delivery_status_code"`
-	CheckedAt              string `json:"checked_at"`
+	State                  string `json:"state" doc:"What GitHub reports about the App's webhook: not_configured when the App has none, pointing_elsewhere when it delivers to another URL, delivering_rejected when it delivers here and the deliveries are refused, no_deliveries when it points here and GitHub has recorded no delivery in the last 30 days, healthy when the last delivery was accepted, or unavailable when the GitHub host does not report webhook deliveries."`
+	HookHost               string `json:"hook_host" doc:"The scheme and host of the App's webhook URL, empty when the App has no webhook."`
+	SecretConfigured       bool   `json:"secret_configured" doc:"Whether the App's webhook on GitHub has a secret set."`
+	LastDeliveryAt         string `json:"last_delivery_at" doc:"When GitHub made the most recent delivery, as an RFC 3339 timestamp, empty when it has made none."`
+	LastDeliveryStatusCode int    `json:"last_delivery_status_code" doc:"The HTTP status the receiver answered the most recent delivery with, 0 when GitHub could not connect or has made no delivery."`
+	CheckedAt              string `json:"checked_at" doc:"When GitHub was last asked, as an RFC 3339 timestamp."`
 }
 
 // webhookHealthDTO returns the org's last known webhook health for the status
@@ -373,10 +373,19 @@ func replayCandidates(ds []githubapp.HookDelivery, limit int) (attempt []githuba
 // the number that makes "replayed: 0" legible — nothing to replay reads very
 // differently from nothing accepted.
 type githubWebhookReplayResponse struct {
-	Candidates int `json:"candidates"`
-	Replayed   int `json:"replayed"`
-	Failed     int `json:"failed"`
+	Candidates int `json:"candidates" doc:"How many failed installation deliveries were among the App's 200 most recent failed webhook deliveries; the newest 50 of them are sent again."`
+	Replayed   int `json:"replayed" doc:"How many of them GitHub accepted to deliver again."`
+	Failed     int `json:"failed" doc:"How many of them GitHub refused to deliver again."`
 }
+
+var opGitHubAppWebhookReplay = httpx.NewJSONOp[httpx.NoBody, githubWebhookReplayResponse](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/github/app/webhook/replay",
+	ID:          "replay_github_app_webhook",
+	Summary:     "Replay the GitHub App's failed installation webhooks",
+	Description: "Asks GitHub to deliver again the newest 50 failed installation deliveries of the organization's own GitHub App, from the 30 days of deliveries GitHub keeps, and returns how many there were and how many GitHub accepted. GitHub makes the deliveries afterwards, and the next App status read checks the webhook again.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintNo, Idempotent: httpx.HintNo, OpenWorld: httpx.HintYes},
+})
 
 // handleGitHubAppWebhookReplay asks GitHub to redeliver the App's failed
 // installation deliveries, healing an installation mirror that went stale while
@@ -473,5 +482,5 @@ func (s *Server) handleGitHubAppWebhookReplay(w http.ResponseWriter, r *http.Req
 	// pre-repair answer for the rest of the TTL.
 	s.invalidateWebhookHealth(orgID)
 
-	writeJSON(w, http.StatusOK, out)
+	opGitHubAppWebhookReplay.Write(w, out)
 }

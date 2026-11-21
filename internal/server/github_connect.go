@@ -574,11 +574,20 @@ func (s *Server) finishGitHubConnect(w http.ResponseWriter, r *http.Request, org
 // bit; `connect_available` says whether Connect has an OAuth client to run
 // for this org, its own App's or the deployment App's.
 type githubIdentityStatusResponse struct {
-	Connected        bool   `json:"connected"`
-	Login            string `json:"login,omitempty"`
-	Host             string `json:"host"`
-	ConnectAvailable bool   `json:"connect_available"`
+	Connected        bool   `json:"connected" doc:"Whether the caller has a GitHub account linked on the organization's GitHub host."`
+	Login            string `json:"login,omitempty" doc:"The login of the caller's linked GitHub account, absent when none is linked."`
+	Host             string `json:"host" doc:"The GitHub host accounts are linked on: the organization's, or the deployment GitHub App's host when the organization has none and that App serves it."`
+	ConnectAvailable bool   `json:"connect_available" doc:"Whether the caller can link an account by signing in to GitHub, through the organization's own GitHub App or the deployment's."`
 }
+
+var opGitHubIdentityStatus = httpx.NewJSONOp[httpx.NoBody, githubIdentityStatusResponse](httpx.OpSpec{
+	Pattern:     "GET /api/orgs/{org_id}/github/identity",
+	ID:          "get_github_identity",
+	Summary:     "Get the caller's linked GitHub account",
+	Description: "Returns whether the caller has a GitHub account linked on the organization's GitHub host, its login, and whether the caller can link one by signing in to GitHub.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleGitHubIdentityStatus reports whether the caller has a host-verified
 // GitHub identity for the active org's host — the gate's "is this user set
@@ -639,7 +648,7 @@ func (s *Server) handleGitHubIdentityStatus(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	writeJSON(w, http.StatusOK, githubIdentityStatusResponse{
+	opGitHubIdentityStatus.Write(w, githubIdentityStatusResponse{
 		Connected:        login != "",
 		Login:            login,
 		Host:             host,
@@ -651,16 +660,25 @@ func (s *Server) handleGitHubIdentityStatus(w http.ResponseWriter, r *http.Reque
 // discard identity path (PAT_2). The token proves the caller's login and is
 // then thrown away — never stored.
 type githubIdentityPATRequest struct {
-	PAT string `json:"pat"`
+	PAT string `json:"pat" doc:"A GitHub personal access token of the caller's own, which needs read access to the account's email addresses; it is used once and not stored."`
 }
 
 // githubIdentityCaptureResponse is the success shape of the PAT-capture path:
 // the bound login and the host it's keyed under, so the caller can reflect the
 // just-captured identity without re-reading the status endpoint.
 type githubIdentityCaptureResponse struct {
-	Login string `json:"login"`
-	Host  string `json:"host"`
+	Login string `json:"login" doc:"The login of the GitHub account linked to the caller."`
+	Host  string `json:"host" doc:"The GitHub host the account is linked on."`
 }
+
+var opGitHubIdentityPAT = httpx.NewJSONOp[githubIdentityPATRequest, githubIdentityCaptureResponse](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/github/identity/pat",
+	ID:          "create_github_identity_pat",
+	Summary:     "Link the caller's GitHub account with a token",
+	Description: "Asks the organization's GitHub host which account the personal access token belongs to, links that account to the caller on that host, replacing any linked there before, and discards the token. Local mode only.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // errGitHubNoLogin is returned by validateGitHubIdentityPAT when the host
 // accepts the token but yields no username — distinct from a rejected token so
@@ -724,13 +742,12 @@ func (s *Server) handleGitHubIdentityPAT(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	var req githubIdentityPATRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opGitHubIdentityPAT.Decode(w, r)
+	if !ok {
 		return
 	}
-	pat := strings.TrimSpace(req.PAT)
-	if pat == "" {
-		badRequest(w, "A GitHub personal access token is required.")
+	pat, ok := requiredGitHubPAT(w, req.PAT)
+	if !ok {
 		return
 	}
 
@@ -745,9 +762,13 @@ func (s *Server) handleGitHubIdentityPAT(w http.ResponseWriter, r *http.Request)
 		internalError(w, "github-identity", err)
 		return
 	}
+	if ghbase.CanonicalBaseURL(orgSet.GitHubBaseURL) == "" {
+		writeNotConfigured(w, "Your organization has no GitHub URL yet. Ask your admin to set it in organization settings.")
+		return
+	}
 	ghWeb, okHost := resolveGitHubHost(orgSet.GitHubBaseURL)
 	if !okHost {
-		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonNotConfigured, Message: "Your organization's GitHub URL looks misconfigured. Ask your admin to fix it in organization settings.", Field: "github_pat"})
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonNotConfigured, Message: "Your organization's GitHub URL looks misconfigured. Ask your admin to fix it in organization settings."})
 		return
 	}
 
@@ -756,22 +777,22 @@ func (s *Server) handleGitHubIdentityPAT(w http.ResponseWriter, r *http.Request)
 		// Keep the two failure shapes distinct, like the Connect flow: a host we
 		// couldn't reach (infra) vs. a token the host rejected (your action).
 		if errors.Is(err, auth.ErrGitHubHostUnreachable) {
-			httpx.WriteErrors(w, http.StatusBadGateway, httpx.ErrorItem{Reason: httpx.ReasonUpstreamUnavailable, Message: fmt.Sprintf("Couldn't reach %s. This is a connectivity issue between Triage Factory and your GitHub server, not the token — try again.", ghWeb), Field: "github_pat"})
+			httpx.WriteErrors(w, http.StatusBadGateway, httpx.ErrorItem{Reason: httpx.ReasonUpstreamUnavailable, Message: fmt.Sprintf("Couldn't reach %s. This is a connectivity issue between Triage Factory and your GitHub server, not the token — try again.", ghWeb)})
 			return
 		}
 		if errors.Is(err, errGitHubNoLogin) {
-			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "GitHub didn't return a username for that token.", Field: "github_pat"})
+			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "GitHub didn't return a username for that token.", Field: "pat"})
 			return
 		}
 		if errors.Is(err, auth.ErrGitHubEmailPermission) {
-			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "That token needs read access to your GitHub email addresses. For a classic token, add the user:email scope.", Field: "github_pat"})
+			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "That token needs read access to your GitHub email addresses. For a classic token, add the user:email scope.", Field: "pat"})
 			return
 		}
 		if errors.Is(err, auth.ErrGitHubPrimaryEmailUnavailable) {
-			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "GitHub did not return a verified primary email for that account.", Field: "github_pat"})
+			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "GitHub did not return a verified primary email for that account.", Field: "pat"})
 			return
 		}
-		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "That token didn't validate against " + ghWeb + ". Double-check it and try again.", Field: "github_pat"})
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "That token didn't validate against " + ghWeb + ". Double-check it and try again.", Field: "pat"})
 		return
 	}
 
@@ -790,7 +811,7 @@ func (s *Server) handleGitHubIdentityPAT(w http.ResponseWriter, r *http.Request)
 	// Seed this login's trailing-window PR history for the dashboard (TFAC-396).
 	s.kickDashboardBackfill(orgID, userID, ghUser.Login, ghWeb)
 
-	writeJSON(w, http.StatusOK, githubIdentityCaptureResponse{Login: ghUser.Login, Host: ghWeb})
+	opGitHubIdentityPAT.Write(w, githubIdentityCaptureResponse{Login: ghUser.Login, Host: ghWeb})
 }
 
 // redirectConnect bounces a failed/aborted Connect flow back to the FE gate

@@ -402,8 +402,22 @@ func (b bindRefusal) withHosts(orgHost, deploymentHost string) bindRefusal {
 // one that already has the deployment App installed, so GitHub's install page
 // would offer nothing but Configure.
 type connectAccountRequest struct {
-	Account string `json:"account"`
+	Account string `json:"account" doc:"The login of the GitHub account to connect, which has the deployment's GitHub App installed."`
 }
+
+// connectAccountResponse is the body of POST …/github/managed/connect-account.
+type connectAccountResponse struct {
+	AuthorizeURL string `json:"authorize_url" doc:"The GitHub page the browser goes to next, where the person authorizes the deployment's GitHub App to confirm they can act for the account."`
+}
+
+var opGitHubManagedConnectAccount = httpx.NewJSONOp[connectAccountRequest, connectAccountResponse](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/github/managed/connect-account",
+	ID:          "connect_github_managed_account",
+	Summary:     "Start connecting a GitHub account",
+	Description: "Starts connecting the organization to an installation of the deployment's GitHub App on the named GitHub account, and returns the GitHub authorization page the caller's browser must open to finish it. It sets a cookie the finish reads, expiring with the attempt. Multi mode only.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintNo, Idempotent: httpx.HintNo, OpenWorld: httpx.HintYes},
+})
 
 // githubLoginPattern is the shape of a GitHub login: runs of alphanumerics
 // joined by single hyphens, so no leading, trailing or consecutive hyphen.
@@ -437,8 +451,8 @@ func (s *Server) handleGitHubManagedConnectAccount(w http.ResponseWriter, r *htt
 	if !ok {
 		return
 	}
-	var req connectAccountRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opGitHubManagedConnectAccount.Decode(w, r)
+	if !ok {
 		return
 	}
 	account := strings.TrimSpace(req.Account)
@@ -489,8 +503,8 @@ func (s *Server) handleGitHubManagedConnectAccount(w http.ResponseWriter, r *htt
 	q.Set("client_id", identity.ClientID)
 	q.Set("redirect_uri", s.deployCfg.publicURL+ManagedBindCallbackPath)
 	q.Set("state", nonceHash)
-	writeJSON(w, http.StatusOK, map[string]any{
-		"authorize_url": ghWeb + "/login/oauth/authorize?" + q.Encode(),
+	opGitHubManagedConnectAccount.Write(w, connectAccountResponse{
+		AuthorizeURL: ghWeb + "/login/oauth/authorize?" + q.Encode(),
 	})
 }
 

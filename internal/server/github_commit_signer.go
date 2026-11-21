@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -53,36 +52,36 @@ var commitSigningKeys = []string{integrations.KeyGitHubCommitSigningKey, integra
 type commitSignerJSON struct {
 	// Host is the GitHub the account is on: the org's host when the signer
 	// was registered.
-	Host         string `json:"host"`
-	GitHubUserID string `json:"github_user_id"`
-	Login        string `json:"login"`
+	Host         string `json:"host" doc:"The GitHub host the account is on, which was the organization's GitHub host when the signer was registered."`
+	GitHubUserID string `json:"github_user_id" doc:"GitHub's id for the account."`
+	Login        string `json:"login" doc:"The account's login."`
 	// Name is the account's profile name, "" when it has none.
-	Name string `json:"name"`
+	Name string `json:"name" doc:"The account's profile name on GitHub, empty when it has none."`
 	// Email is the committer address the signer was given, null when its
 	// commits carry the derived noreply address. PATCH writes it.
-	Email *string `json:"email"`
+	Email *string `json:"email" doc:"The committer email address the signer was given, or null when its commits carry the account's noreply address on github.com."`
 	// CommitName and CommitEmail are what the signer's commits carry.
-	CommitName  string `json:"commit_name"`
-	CommitEmail string `json:"commit_email"`
+	CommitName  string `json:"commit_name" doc:"The author and committer name the signer's commits carry."`
+	CommitEmail string `json:"commit_email" doc:"The author and committer email address the signer's commits carry."`
 	// PublicKey is the key TF signs with; PendingPublicKey is a rotation's
 	// new key, null outside one. KeyTitle is the title to give whichever of
 	// them is being added to the account.
-	PublicKey        string  `json:"public_key"`
-	PendingPublicKey *string `json:"pending_public_key"`
-	KeyTitle         string  `json:"key_title"`
-	Status           string  `json:"status"`
+	PublicKey        string  `json:"public_key" doc:"The public half of the SSH key Triage Factory signs commits with, in the form GitHub lists keys."`
+	PendingPublicKey *string `json:"pending_public_key" doc:"The public half of the new key a rotation is moving to, or null when no rotation is under way."`
+	KeyTitle         string  `json:"key_title" doc:"The title to give the key when adding it to the account as a signing key."`
+	Status           string  `json:"status" doc:"The signer's state: pending until its key is found on the account, active while it signs, or broken once a check fails."`
 	// StatusReason says why a broken signer is broken: GitHub's verification
 	// reason for a pushed commit, or key_missing.
-	StatusReason *string   `json:"status_reason"`
-	StatusSince  time.Time `json:"status_since"`
+	StatusReason *string   `json:"status_reason" doc:"Why a broken signer is broken: key_missing when its key is no longer on the account, or the reason GitHub gave for not verifying a pushed commit; null otherwise."`
+	StatusSince  time.Time `json:"status_since" doc:"When the signer entered its status, as an RFC 3339 timestamp."`
 	// CheckedAt is when a check last read the account's signing keys: a
 	// Verify that found the key, or the periodic check, whatever it found.
-	CheckedAt *time.Time `json:"checked_at"`
-	CreatedAt time.Time  `json:"created_at"`
-	UpdatedAt time.Time  `json:"updated_at"`
+	CheckedAt *time.Time `json:"checked_at" doc:"When a check last read the account's signing keys from GitHub, as an RFC 3339 timestamp, or null when none has."`
+	CreatedAt time.Time  `json:"created_at" doc:"When the signer was registered, as an RFC 3339 timestamp."`
+	UpdatedAt time.Time  `json:"updated_at" doc:"When the signer was last changed, as an RFC 3339 timestamp."`
 	// CreatedBy is the user who registered the signer, null once that user
 	// is deleted.
-	CreatedBy *string `json:"created_by"`
+	CreatedBy *string `json:"created_by" doc:"The id of the person who registered the signer, or null once that person is deleted."`
 }
 
 func toCommitSignerJSON(s domain.OrgCommitSigner) commitSignerJSON {
@@ -114,6 +113,15 @@ func nilIfEmpty[T ~string](s T) *T {
 	return &s
 }
 
+var opCommitSignerGet = httpx.NewJSONOp[httpx.NoBody, commitSignerJSON](httpx.OpSpec{
+	Pattern:     "GET /api/orgs/{org_id}/github/commit-signer",
+	ID:          "get_github_commit_signer",
+	Summary:     "Get the organization's commit signer",
+	Description: "Returns the GitHub user account the organization's agents' commits are authored, committed, and signed as, with the public key Triage Factory signs with and the signer's status.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
+
 // handleCommitSignerGet answers the org's signer, 404 when it has none.
 //
 // GET /api/orgs/{org_id}/github/commit-signer
@@ -135,16 +143,26 @@ func (s *Server) handleCommitSignerGet(w http.ResponseWriter, r *http.Request) {
 		notFound(w, "commit signer")
 		return
 	}
-	writeJSON(w, http.StatusOK, toCommitSignerJSON(*signer))
+	opCommitSignerGet.Write(w, toCommitSignerJSON(*signer))
 }
 
 // commitSignerCreateRequest is the registration body: the account's login,
 // and the committer address its commits carry when they are not to carry the
 // derived one. Absent and null both mean the derived address.
 type commitSignerCreateRequest struct {
-	Login string  `json:"login"`
-	Email *string `json:"email"`
+	Login string  `json:"login" doc:"The login of the GitHub user account to sign as, on the organization's GitHub host."`
+	Email *string `json:"email" doc:"The committer email address the signer's commits carry, which must be verified on the account; absent or null commits under the account's noreply address, which only github.com has."`
 }
+
+var opCommitSignerCreate = httpx.NewJSONOp[commitSignerCreateRequest, commitSignerJSON](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/github/commit-signer",
+	ID:          "create_github_commit_signer",
+	Summary:     "Register the organization's commit signer",
+	Description: "Looks up the GitHub user account on the organization's GitHub host, generates an SSH key pair, and registers the account as the organization's commit signer, pending until its key is verified. The answer carries the public key and the title to add it to the account under as a signing key.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Status:      http.StatusCreated,
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintNo, Idempotent: httpx.HintNo, OpenWorld: httpx.HintYes},
+})
 
 // errGitHubHostMovedDuringSigner refuses a registration whose account was
 // resolved on a GitHub the org no longer has.
@@ -165,8 +183,8 @@ func (s *Server) handleCommitSignerCreate(w http.ResponseWriter, r *http.Request
 	}
 	ctx := r.Context()
 
-	var req commitSignerCreateRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opCommitSignerCreate.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -320,7 +338,7 @@ func (s *Server) handleCommitSignerCreate(w http.ResponseWriter, r *http.Request
 		}
 		return
 	}
-	writeJSON(w, http.StatusCreated, toCommitSignerJSON(created))
+	opCommitSignerCreate.Write(w, toCommitSignerJSON(created))
 }
 
 // writeCommitSignerExists answers a registration for an org that has a
@@ -399,6 +417,15 @@ func upstreamFault(msg string, err error) *signerCheckFault {
 		Reason: httpx.ReasonUpstreamUnavailable, Message: msg + httpx.LocalDetail(err),
 	}}
 }
+
+var opCommitSignerVerify = httpx.NewJSONOp[httpx.NoBody, commitSignerJSON](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/github/commit-signer/verify",
+	ID:          "verify_github_commit_signer",
+	Summary:     "Verify the commit signer's key on GitHub",
+	Description: "Looks for the signer's key among the account's signing keys on GitHub, or for a rotation's new key while one is under way, and for a broken signer checks the commit that broke it again. When the check passes the signer becomes active, and a rotation's new key, when it was the one found, replaces the old key, whose private half is deleted.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // handleCommitSignerVerify checks the signer against GitHub and, when it
 // passes, makes it active. The key it looks for is a rotation's pending key
@@ -491,7 +518,7 @@ func (s *Server) handleCommitSignerVerify(w http.ResponseWriter, r *http.Request
 		}
 		return
 	}
-	writeJSON(w, http.StatusOK, toCommitSignerJSON(updated))
+	opCommitSignerVerify.Write(w, toCommitSignerJSON(updated))
 }
 
 // promotePendingSigningKey makes a rotation's private half the signer's and
@@ -607,6 +634,15 @@ func (s *Server) checkCommitSigner(ctx context.Context, client *ghclient.Client,
 	}}, nil
 }
 
+var opCommitSignerRotate = httpx.NewJSONOp[httpx.NoBody, commitSignerJSON](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/github/commit-signer/rotate",
+	ID:          "rotate_github_commit_signer",
+	Summary:     "Start rotating the commit signer's key",
+	Description: "Generates a new SSH key pair for the signer and returns it as the pending key, replacing any pending key an earlier rotation left. The current key keeps signing until a verify finds the new one on the account.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintNo, OpenWorld: httpx.HintNo},
+})
+
 // handleCommitSignerRotate starts a key rotation: it generates a new key pair
 // and stores it as the signer's pending key. The current key keeps signing
 // until Verify finds the new one on the account, which then replaces it. A
@@ -663,14 +699,23 @@ func (s *Server) handleCommitSignerRotate(w http.ResponseWriter, r *http.Request
 		internalError(w, "commit-signer", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, toCommitSignerJSON(updated))
+	opCommitSignerRotate.Write(w, toCommitSignerJSON(updated))
 }
 
 // commitSignerPatch is the PATCH body: the committer address, null restoring
 // the derived one.
 type commitSignerPatch struct {
-	Email json.RawMessage `json:"email"`
+	Email httpx.Patch[string] `json:"email" doc:"The committer email address the signer's commits carry, which must be verified on the account, or null to commit under the account's noreply address, which only github.com has."`
 }
+
+var opCommitSignerPatch = httpx.NewJSONOp[commitSignerPatch, commitSignerJSON](httpx.OpSpec{
+	Pattern:     "PATCH /api/orgs/{org_id}/github/commit-signer",
+	ID:          "update_github_commit_signer",
+	Summary:     "Update the commit signer",
+	Description: "Sets or clears the committer email address the signer's commits carry, and returns the signer with the change applied. GitHub's verified addresses for the account cannot be read, so a wrong address shows when a pushed commit fails GitHub's verification.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // errCommitEmailNotDerivable refuses clearing the address of a signer whose
 // host has no noreply address to derive in its place.
@@ -689,19 +734,19 @@ func (s *Server) handleCommitSignerPatch(w http.ResponseWriter, r *http.Request)
 	}
 	ctx := r.Context()
 
-	var req commitSignerPatch
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opCommitSignerPatch.Decode(w, r)
+	if !ok {
 		return
 	}
-	if !httpx.PatchNamed(req.Email) {
+	var v httpx.Validation
+	email, state := req.Email.Read(&v, "email")
+	if state == httpx.PatchAbsent {
 		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
 			Reason:  httpx.ReasonMissingField,
 			Message: "no fields to update: name email (null restores the derived noreply address)",
 		})
 		return
 	}
-	var v httpx.Validation
-	email, state := httpx.PatchString(&v, req.Email, "email")
 	if state == httpx.PatchSet {
 		if msg := commitEmailProblem(email); msg != "" {
 			v.Invalid("email", msg)
@@ -756,8 +801,17 @@ func (s *Server) handleCommitSignerPatch(w http.ResponseWriter, r *http.Request)
 		}
 		return
 	}
-	writeJSON(w, http.StatusOK, toCommitSignerJSON(updated))
+	opCommitSignerPatch.Write(w, toCommitSignerJSON(updated))
 }
+
+var opCommitSignerDelete = httpx.NewNoContentOp[httpx.NoBody](httpx.OpSpec{
+	Pattern:     "DELETE /api/orgs/{org_id}/github/commit-signer",
+	ID:          "delete_github_commit_signer",
+	Summary:     "Remove the organization's commit signer",
+	Description: "Removes the organization's commit signer and deletes its private keys, and clears the organization's GitHub host when no other GitHub credential is on it. The public keys stay on the account until someone removes them on GitHub.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleCommitSignerDelete removes the signer and both of its private keys.
 // The public keys stay on the account until someone removes them there:
@@ -824,7 +878,7 @@ func (s *Server) handleCommitSignerDelete(w http.ResponseWriter, r *http.Request
 		internalError(w, "commit-signer", err)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	opCommitSignerDelete.Write(w)
 }
 
 // clearGitHubHostIfUnheld clears the org's GitHub host when no GitHub
@@ -858,28 +912,28 @@ func clearGitHubHostIfUnheld(ctx context.Context, tx db.TxStores, orgID string) 
 type commitIdentityJSON struct {
 	// Identity is the author and committer of every commit, null when the
 	// org has none and its runs commit under the agent's own git config.
-	Identity *commitIdentityAccountJSON `json:"identity"`
+	Identity *commitIdentityAccountJSON `json:"identity" doc:"The author and committer of the organization's agents' commits, or null when it has none and agents commit under their own git configuration."`
 	// Signing is how the commits are signed: none, org (the org's own
 	// signer) or deployment (the deployment's signer).
-	Signing string `json:"signing"`
+	Signing string `json:"signing" doc:"How the commits are signed: none, org with the organization's own commit signer, or deployment with the deployment's commit signer."`
 	// UnsignedReason says why an org whose signer is active still commits
 	// unsigned, null when it does not: git_too_old (local mode, this host's
 	// git predates SSH signing, 2.34) or git_unavailable (local mode, git
 	// could not be run). GitVersion is the version the reason was read from,
 	// null without one.
-	UnsignedReason *string `json:"unsigned_reason"`
-	GitVersion     *string `json:"git_version"`
+	UnsignedReason *string `json:"unsigned_reason" doc:"Why the commits are unsigned although a commit signer is active, or null when that is not the case: git_too_old when this machine's git predates SSH signing, which came in 2.34, or git_unavailable when git could not be run. Only local mode reports one."`
+	GitVersion     *string `json:"git_version" doc:"The version of this machine's git that unsigned_reason was read from, or null when there is none."`
 }
 
 type commitIdentityAccountJSON struct {
-	Name  string `json:"name"`
-	Email string `json:"email"`
+	Name  string `json:"name" doc:"The name the commits carry."`
+	Email string `json:"email" doc:"The email address the commits carry."`
 	// GitHubUserID is the account the identity belongs to, null when it is
 	// not known.
-	GitHubUserID *string `json:"github_user_id"`
+	GitHubUserID *string `json:"github_user_id" doc:"GitHub's id for the account the identity belongs to, or null when it is not known."`
 	// Login is the signer's GitHub login when the identity is a signer's,
 	// null otherwise.
-	Login *string `json:"login"`
+	Login *string `json:"login" doc:"The commit signer's GitHub login when the identity is a signer's, or null otherwise."`
 }
 
 // SetDeploymentCommitSigner gives the server this control pod's deployment
@@ -900,6 +954,15 @@ func (s *Server) commitIdentityResolver() commitsigner.Resolver {
 	}
 	return r
 }
+
+var opCommitIdentityGet = httpx.NewJSONOp[httpx.NoBody, commitIdentityJSON](httpx.OpSpec{
+	Pattern:     "GET /api/orgs/{org_id}/github/commit-identity",
+	ID:          "get_github_commit_identity",
+	Summary:     "Get who the organization's agents commit as",
+	Description: "Returns the name and email address the organization's agents' commits carry, and whether and how they are signed, resolved the way an agent's commits are.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleCommitIdentityGet answers who this org's runs commit as and whether
 // and how they sign, from the same resolution a run's commits take.
@@ -929,5 +992,5 @@ func (s *Server) handleCommitIdentityGet(w http.ResponseWriter, r *http.Request)
 	if id.Name != "" {
 		out.Identity = &commitIdentityAccountJSON{Name: id.Name, Email: id.Email, GitHubUserID: nilIfEmpty(id.AccountID), Login: nilIfEmpty(id.Login)}
 	}
-	writeJSON(w, http.StatusOK, out)
+	opCommitIdentityGet.Write(w, out)
 }

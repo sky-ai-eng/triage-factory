@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -84,6 +85,28 @@ func TestOrgTokenRoutes_MultiModeIs404(t *testing.T) {
 	}
 }
 
+// TestOrgTokenUnbind_KeepsADeploymentAppOrgsHost: the token unbind leaves the
+// GitHub host of an org connected through the deployment's App, whose
+// installations work only on that host.
+func TestOrgTokenUnbind_KeepsADeploymentAppOrgsHost(t *testing.T) {
+	rig := newBindRig(t, newFakeGitHub())
+	rig.bindManaged(t, 4242)
+	host := rig.githubHost(t)
+	if host == "" {
+		t.Fatal("the bind left the org with no GitHub host")
+	}
+
+	if rec := rig.sendOrg(t, http.MethodDelete, "/github/pat", nil); rec.Code != http.StatusOK {
+		t.Fatalf("DELETE /github/pat = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if got := rig.githubHost(t); got != host {
+		t.Errorf("GitHub host = %q after the token unbind, want %q kept", got, host)
+	}
+	if live := rig.liveInstallations(t); fmt.Sprint(live) != "[4242]" {
+		t.Errorf("live installations = %v after the token unbind, want [4242]", live)
+	}
+}
+
 func TestGitHubAppImport_MultiModeRequiresClientSecret(t *testing.T) {
 	importRig := func(t *testing.T, tokenStatus int) *bindRig {
 		t.Helper()
@@ -98,6 +121,7 @@ func TestGitHubAppImport_MultiModeRequiresClientSecret(t *testing.T) {
 		extra map[string]any
 	}{
 		{"absent", nil},
+		{"null", map[string]any{"client_secret": nil}},
 		{"empty", map[string]any{"client_secret": ""}},
 		{"blank", map[string]any{"client_secret": "   "}},
 	} {
@@ -135,6 +159,22 @@ func TestGitHubAppImport_MultiModeRequiresClientSecret(t *testing.T) {
 		}
 		if got := strings.Join(fields, ","); got != "app_id,pem,client_secret" {
 			t.Errorf("missing fields = %s, want app_id,pem,client_secret", got)
+		}
+	})
+
+	t.Run("blank_webhook_secret_is_invalid", func(t *testing.T) {
+		rig := importRig(t, 0)
+		rec := rig.sendOrg(t, http.MethodPost, "/github/app/import",
+			importBody("11", testRSAPEM(t), map[string]any{"client_secret": "cs", "webhook_secret": " "}))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("import with a blank webhook secret = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
+		}
+		items := errorItems(t, rec)
+		if len(items) != 1 || items[0].Reason != httpx.ReasonInvalidField || items[0].Field != "webhook_secret" {
+			t.Fatalf("errors = %+v, want one INVALID_FIELD on webhook_secret", items)
+		}
+		if rig.hasAppRow(t) {
+			t.Error("an import refused for a blank webhook secret wrote an App row")
 		}
 	})
 

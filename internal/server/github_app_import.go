@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/rsa"
 	"errors"
 	"fmt"
 	"net/http"
@@ -37,14 +38,31 @@ import (
 // with GitHub to link their accounts, and every multi org's App is held to
 // being able to (local can skip it and capture identity from a token instead).
 // webhook_secret and accept_partial are optional: the webhook secret is
-// multi-mode only (local is hookless/backfill); accept_partial acknowledges
-// soft permission gaps.
+// stored in either mode, though only multi mode receives webhooks (local is
+// backfill); accept_partial acknowledges soft permission gaps. The secrets are
+// pointers so an absent one and a blank one stay apart: absent stores none,
+// and blank is refused rather than read as absent, since a secret pasted as
+// whitespace would otherwise import an App that silently has none.
 type githubAppImportRequest struct {
-	AppID         string `json:"app_id"`
-	PEM           string `json:"pem"`
-	ClientSecret  string `json:"client_secret"`
-	WebhookSecret string `json:"webhook_secret"`
-	AcceptPartial bool   `json:"accept_partial"`
+	AppID         string  `json:"app_id" doc:"The App's numeric id on GitHub, not its client id."`
+	PEM           string  `json:"pem" doc:"The full contents of a private key file generated for the App, including the BEGIN and END lines."`
+	ClientSecret  *string `json:"client_secret" doc:"A client secret generated for the App, which lets people connect their GitHub accounts through it; required in multi mode, and in local mode absent or null imports the App without one. A blank value is refused."`
+	WebhookSecret *string `json:"webhook_secret" doc:"The secret the App's webhook signs its deliveries with; absent or null stores none, and this deployment then refuses the App's webhook deliveries. A blank value is refused."`
+	AcceptPartial bool    `json:"accept_partial" doc:"Whether to import an App that lacks some optional permissions, which turns off the features they serve; an App that lacks a required permission is refused either way."`
+}
+
+// optionalImportSecret is an optional secret from the import body, trimmed:
+// "" when the field is absent or null, and a fault on field when it is present
+// but blank. name is how the fault's message refers to the secret.
+func optionalImportSecret(v *httpx.Validation, raw *string, field, name string) string {
+	if raw == nil {
+		return ""
+	}
+	secret := strings.TrimSpace(*raw)
+	if secret == "" {
+		v.Invalid(field, "The "+name+" must not be blank; leave "+field+" out to import the App without one.")
+	}
+	return secret
 }
 
 // githubAppPermissionRow is one entry in the import preflight's granted-vs-
@@ -52,12 +70,12 @@ type githubAppImportRequest struct {
 // "optional" (a soft gap blocks only until accept_partial acknowledges it);
 // Feature names the degraded capability for an unmet optional permission.
 type githubAppPermissionRow struct {
-	Permission string `json:"permission"`
-	Required   string `json:"required"`
-	Granted    string `json:"granted"`
-	Satisfied  bool   `json:"satisfied"`
-	Severity   string `json:"severity"`
-	Feature    string `json:"feature,omitempty"`
+	Permission string `json:"permission" doc:"The name of the GitHub App permission, such as contents or pull_requests."`
+	Required   string `json:"required" doc:"The level Triage Factory needs: read or write."`
+	Granted    string `json:"granted" doc:"The level the App has, such as read, write, or admin, empty when it has none."`
+	Satisfied  bool   `json:"satisfied" doc:"Whether the granted level meets the required one."`
+	Severity   string `json:"severity" doc:"How much the permission matters: required when the App cannot be imported without it, or optional when only the feature named in feature is turned off without it."`
+	Feature    string `json:"feature,omitempty" doc:"The feature that is turned off without an optional permission, absent for a required one."`
 }
 
 // githubAppImportErrorResponse is the 422 body for a permission gap: the
@@ -87,10 +105,19 @@ func permissionGapErrors(msg string) []httpx.ErrorItem {
 // inconclusive) — see checkAppClientSecret.
 type githubAppImportResponse struct {
 	githubAppStatusResponse
-	Permissions           []githubAppPermissionRow `json:"permissions"`
-	ClientSecretStored    bool                     `json:"client_secret_stored"`
-	ClientSecretValidated bool                     `json:"client_secret_validated"`
+	Permissions           []githubAppPermissionRow `json:"permissions" doc:"Each permission Triage Factory asks of a GitHub App, beside the level the imported App has."`
+	ClientSecretStored    bool                     `json:"client_secret_stored" doc:"Whether a client secret was stored with the App."`
+	ClientSecretValidated bool                     `json:"client_secret_validated" doc:"Whether GitHub confirmed the stored client secret; false when none was stored or GitHub's answer was inconclusive."`
 }
+
+var opGitHubAppImport = httpx.NewJSONOp[githubAppImportRequest, githubAppImportResponse](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/github/app/import",
+	ID:          "import_github_app",
+	Summary:     "Import an existing GitHub App",
+	Description: "Connects a GitHub App that already exists to the organization, from its id and private key, after checking the pair, the App's permissions, and any client secret with GitHub. The App is staged while the organization's personal access token stays live, and is live at once otherwise; the answer is the App status with the permissions check beside it.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintNo, Idempotent: httpx.HintNo, OpenWorld: httpx.HintYes},
+})
 
 // importRequiredPermission is one permission the manifest path requests, with
 // the minimum level and whether a gap is hard (blocks) or soft (degrades a named
@@ -277,36 +304,58 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 
-	var req githubAppImportRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opGitHubAppImport.Decode(w, r)
+	if !ok {
 		return
 	}
+	// Every check on the body's own values runs here, before any read of the
+	// org or of GitHub, so one 400 names every field at fault.
 	appIDStr := strings.TrimSpace(req.AppID)
-	clientSecret := strings.TrimSpace(req.ClientSecret)
 	var v httpx.Validation
+	var appID int64
 	if appIDStr == "" {
 		v.Add(httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "An App ID is required.", Field: "app_id"})
+	} else if n, err := strconv.ParseInt(appIDStr, 10, 64); err != nil || n <= 0 {
+		v.Add(httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: "App ID must be a positive number (the numeric App ID, not the client ID).", Field: "app_id"})
+	} else {
+		appID = n
 	}
+	var key *rsa.PrivateKey
 	if strings.TrimSpace(req.PEM) == "" {
 		v.Add(httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "The App's private key (PEM) is required.", Field: "pem"})
+	} else if k, err := githubapp.ParsePrivateKey([]byte(req.PEM)); err != nil {
+		v.Add(httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: "That private key (PEM) couldn't be parsed. Paste the full contents of the App's .pem file, including the BEGIN/END lines.", Field: "pem"})
+	} else {
+		key = k
 	}
 	// Every org App in multi mode can run OAuth, so every member of a
 	// setup-complete org has a way to link their GitHub account. The
 	// manifest flow always returns a client secret; this is the import's half.
-	if clientSecret == "" && runmode.Current() == runmode.ModeMulti {
-		v.Add(httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "The App's client secret is required: it is what lets members sign in with GitHub to link their accounts.", Field: "client_secret"})
+	// Required there, a blank secret is as missing as an absent one, the way a
+	// blank app_id or pem is.
+	var clientSecret string
+	if runmode.Current() == runmode.ModeMulti {
+		if req.ClientSecret != nil {
+			clientSecret = strings.TrimSpace(*req.ClientSecret)
+		}
+		if clientSecret == "" {
+			v.Add(httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "The App's client secret is required: it is what lets members sign in with GitHub to link their accounts.", Field: "client_secret"})
+		}
+	} else {
+		clientSecret = optionalImportSecret(&v, req.ClientSecret, "client_secret", "App's client secret")
 	}
+	webhookSecret := optionalImportSecret(&v, req.WebhookSecret, "webhook_secret", "webhook secret")
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
 
 	// One-slot rule, checked unlocked here as a fast bail-out for the common
 	// case (resubmitting against an org that's already registered) before
-	// spending a PEM parse and several GitHub API round-trips on a request
-	// that's going to be rejected anyway. Non-authoritative — a concurrent
-	// registration racing this read is still caught below. A staged app
-	// occupies the slot too — the discard endpoint frees it. System read:
-	// the admin gate already authorized orgID.
+	// spending several GitHub API round-trips on a request that's going to be
+	// rejected anyway. Non-authoritative — a concurrent registration racing
+	// this read is still caught below. A staged app occupies the slot too — the
+	// discard endpoint frees it. System read: the admin gate already
+	// authorized orgID.
 	existing, err := s.githubApps.GetForOrgSystem(ctx, orgID)
 	if err != nil {
 		internalError(w, "github-app", err)
@@ -337,19 +386,6 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	apiBase := ghbase.APIBase(base)
-
-	// Parse the PEM (garbage → 422).
-	key, err := githubapp.ParsePrivateKey([]byte(req.PEM))
-	if err != nil {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: "That private key (PEM) couldn't be parsed. Paste the full contents of the App's .pem file, including the BEGIN/END lines.", Field: "pem"})
-		return
-	}
-
-	appID, err := strconv.ParseInt(appIDStr, 10, 64)
-	if err != nil || appID <= 0 {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: "App ID must be a positive number (the numeric App ID, not the client ID).", Field: "app_id"})
-		return
-	}
 
 	// Mint an app JWT (off the submitted key, iss=appID) and GET /app. GitHub 401s
 	// a JWT whose iss doesn't match the signing key, so a successful fetch proves
@@ -416,7 +452,6 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	webhookSecret := strings.TrimSpace(req.WebhookSecret)
 	hasWebhookSecret := webhookSecret != ""
 
 	canonicalAppID := strconv.FormatInt(app.ID, 10)
@@ -590,7 +625,7 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, githubAppImportResponse{
+	opGitHubAppImport.Write(w, githubAppImportResponse{
 		// The class the transaction above just committed for this org — passed
 		// as the literal rather than re-read, since the import IS what put the
 		// org in the BYO-App system.

@@ -21,6 +21,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 	"github.com/zalando/go-keyring"
 )
 
@@ -763,29 +765,32 @@ func TestGitHubIdentityPAT_BindsIdentityAndDiscardsToken(t *testing.T) {
 }
 
 // TestGitHubIdentityPAT_Refusals: an empty token is a 400 before any host call,
-// a token the host rejects is the caller's 422, an unreachable host is a 502,
-// and none of them writes an identity.
+// an org whose GitHub URL is malformed is a 409, a token the host rejects is the caller's
+// 422, an unreachable host is a 502, and none of them writes an identity. Only
+// the faults that are the token's name it as the field.
 func TestGitHubIdentityPAT_Refusals(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		host   func(t *testing.T) string
 		pat    string
 		status int
+		field  string
 	}{
-		{"empty token", func(t *testing.T) string { return "" }, "   ", http.StatusBadRequest},
+		{"empty token", func(t *testing.T) string { return "" }, "   ", http.StatusBadRequest, "pat"},
+		{"malformed GitHub URL", func(t *testing.T) string { return "ftp://github.example" }, "ghp_whatever", http.StatusConflict, ""},
 		{"token rejected", func(t *testing.T) string {
 			ghStub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)
 			}))
 			t.Cleanup(ghStub.Close)
 			return ghStub.URL
-		}, "ghp_bad", http.StatusUnprocessableEntity},
+		}, "ghp_bad", http.StatusUnprocessableEntity, "pat"},
 		{"host unreachable", func(t *testing.T) string {
 			// Claim a port, then close it so dials are refused.
 			dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 			dead.Close()
 			return dead.URL
-		}, "ghp_whatever", http.StatusBadGateway},
+		}, "ghp_whatever", http.StatusBadGateway, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			runmode.SetForTest(t, runmode.ModeLocal)
@@ -802,6 +807,11 @@ func TestGitHubIdentityPAT_Refusals(t *testing.T) {
 			if rec.Code != tc.status {
 				t.Fatalf("status=%d body=%s, want %d", rec.Code, rec.Body.String(), tc.status)
 			}
+			if items := errorItems(t, rec); len(items) == 0 {
+				t.Errorf("no errors in the body: %s", rec.Body.String())
+			} else if items[0].Field != tc.field {
+				t.Errorf("field = %q, want %q", items[0].Field, tc.field)
+			}
 			if host == "" {
 				return
 			}
@@ -809,5 +819,25 @@ func TestGitHubIdentityPAT_Refusals(t *testing.T) {
 				t.Errorf("a refused capture wrote an identity: login=%q", login)
 			}
 		})
+	}
+}
+
+// TestGitHubIdentityPAT_NoGitHubURL: an org with no GitHub URL is told it has
+// none, before any host is asked, rather than that its URL is malformed.
+func TestGitHubIdentityPAT_NoGitHubURL(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+	seedLocalOrgGitHubHost(t, s, "")
+
+	rec := doJSON(t, s, "POST",
+		"/api/orgs/"+runmode.LocalDefaultOrgID+"/github/identity/pat",
+		map[string]any{"pat": "ghp_whatever"})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status=%d body=%s, want 409", rec.Code, rec.Body.String())
+	}
+	httpxtest.AssertFirstError(t, rec, httpx.ReasonNotConfigured, "")
+	if msg := errorItems(t, rec)[0].Message; !strings.Contains(msg, "no GitHub URL") {
+		t.Errorf("message = %q, want it to say the organization has no GitHub URL", msg)
 	}
 }
