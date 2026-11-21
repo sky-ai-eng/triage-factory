@@ -39,6 +39,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -358,7 +359,8 @@ func DBPath() string {
 // --- home resolution (confined to this package) --------------------------
 
 // ExpandHome expands a leading "~" or "~/" in p against the user's home
-// directory and returns every other form unchanged. It exists so the
+// directory and returns every other form unchanged. On Windows the
+// backslash form "~\" expands too. It exists so the
 // few callers that legitimately resolve a non-state, home-relative path
 // — the install/uninstall binary destination — can do so without
 // reaching for os.UserHomeDir
@@ -366,7 +368,8 @@ func DBPath() string {
 // through the resolvers above; this is only for those one-off
 // user-facing paths.
 func ExpandHome(p string) (string, error) {
-	if p != "~" && !strings.HasPrefix(p, "~/") {
+	backslashForm := runtime.GOOS == "windows" && strings.HasPrefix(p, `~\`)
+	if p != "~" && !strings.HasPrefix(p, "~/") && !backslashForm {
 		return p, nil
 	}
 	home, err := os.UserHomeDir()
@@ -377,4 +380,22 @@ func ExpandHome(p string) (string, error) {
 		return home, nil
 	}
 	return filepath.Join(home, p[2:]), nil
+}
+
+// WindowsInstallPath is where `triagefactory install` places the binary on
+// Windows: %LOCALAPPDATA%\Programs\triagefactory\triagefactory.exe, the
+// per-user programs directory that needs no elevation. When LOCALAPPDATA is
+// unset it falls back to <home>\AppData\Local. It is a pure path computation
+// with no GOOS check so cmd/install and cmd/uninstall share one answer and
+// tests can exercise it anywhere; callers decide whether it applies.
+func WindowsInstallPath() (string, error) {
+	base := os.Getenv("LOCALAPPDATA")
+	if base == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("resolve LOCALAPPDATA: %w", err)
+		}
+		base = filepath.Join(home, "AppData", "Local")
+	}
+	return filepath.Join(base, "Programs", "triagefactory", "triagefactory.exe"), nil
 }

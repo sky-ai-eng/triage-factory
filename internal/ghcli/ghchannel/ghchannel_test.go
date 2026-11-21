@@ -104,14 +104,18 @@ func TestStart_TrustFileIsPrivateAndComplete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat trust file: %v", err)
 	}
-	if perm := info.Mode().Perm(); perm != 0o600 {
+	// Windows reports POSIX mode bits as 0666; the file inherits the
+	// user-profile ACL instead.
+	if perm := info.Mode().Perm(); runtime.GOOS != "windows" && perm != 0o600 {
 		t.Errorf("trust file mode = %v, want 0600", perm)
 	}
 	body, err := os.ReadFile(ch.CertPath)
 	if err != nil {
 		t.Fatalf("read trust file: %v", err)
 	}
-	if n := strings.Count(string(body), "BEGIN CERTIFICATE"); n < 2 {
+	// cabundle reads the Linux single-file CA bundles; Windows keeps its roots
+	// in the certificate store, with no file to concatenate.
+	if n := strings.Count(string(body), "BEGIN CERTIFICATE"); runtime.GOOS != "windows" && n < 2 {
 		t.Errorf("trust file carries %d certificates, want the system roots alongside the run's leaf", n)
 	}
 

@@ -57,7 +57,7 @@ func TestLiveRun_CleanupRunsOncePerExitPath(t *testing.T) {
 			defer cancel()
 
 			cmd := c.build(runCtx)
-			proc, err := newExecProc(cmd)
+			proc, err := newExecProc(cmd, nil)
 			if err != nil {
 				t.Fatalf("newExecProc: %v", err)
 			}

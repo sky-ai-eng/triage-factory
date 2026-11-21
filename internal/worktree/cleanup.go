@@ -377,7 +377,7 @@ func isRunsBase(dir string) bool {
 	if runmode.Current() == runmode.ModeMulti {
 		return filepath.Clean(dir) == RunsBase()
 	}
-	return filepath.Base(dir) == runsDir
+	return sameFileName(filepath.Base(dir), runsDir)
 }
 
 // isTFRunWorktreePath reports whether p is one of TF's own ephemeral run

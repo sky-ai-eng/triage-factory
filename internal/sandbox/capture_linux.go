@@ -268,3 +268,11 @@ func openPinnedCaptureStagingMember(pathFD int, name string, wantUID int) (*os.F
 func validCaptureStagingMemberStat(st *unix.Stat_t, wantUID int) bool {
 	return st.Mode&unix.S_IFMT == unix.S_IFREG && st.Mode&0o7777 == 0o600 && int(st.Uid) == wantUID && st.Nlink == 1
 }
+
+// jailSubnetIdx inverts JailUID for a uid inside the band.
+func jailSubnetIdx(uid int) (uint8, bool) {
+	if !IsJailUID(uid) {
+		return 0, false
+	}
+	return uint8(uid - JailUIDBase), true
+}

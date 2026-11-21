@@ -63,7 +63,7 @@ func seedSQLiteDashboardPR(t *testing.T, conn *sql.DB, fx dbtest.DashboardPRFixt
 	}
 	now := time.Now().UTC()
 	entityID := uuid.New().String()
-	sourceID := fmt.Sprintf("octo/dashboard-conformance#%d-%d", fx.Snapshot.Number, now.UnixNano())
+	sourceID := fmt.Sprintf("octo/dashboard-conformance#%d-%s", fx.Snapshot.Number, uuid.New().String())
 	repoID := dbseed.GitHubEntityRepository(t, conn, runmode.LocalDefaultOrgID, "https://github.com", sourceID)
 	if _, err := conn.Exec(`
 		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, state,

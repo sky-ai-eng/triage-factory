@@ -409,7 +409,7 @@ func buildBlueprintStepWrapperPrompt(taskTitle string, step domain.BlueprintStep
 	fmt.Fprintf(&b, "You are step %d of %d in a blueprint firing on this task.\n\n", step.StepIndex+1, total)
 	fmt.Fprintf(&b, "Task: %s\n", strings.TrimSpace(taskTitle))
 	fmt.Fprintf(&b, "Mission for this step: %s\n\n", mission)
-	fmt.Fprintf(&b, "Skill slug: %q (materialized at %s)\n", slug, filepath.Join(agentRunRoot, ".claude", "skills", slug, "SKILL.md"))
+	fmt.Fprintf(&b, "Skill slug: %q (materialized at %s)\n", slug, agentproc.AgentVisiblePath(filepath.Join(agentRunRoot, ".claude", "skills", slug, "SKILL.md")))
 	isFinal := step.StepIndex+1 == total
 	fmt.Fprintf(&b, "Is final step: %v\n", isFinal)
 	if !isFinal {

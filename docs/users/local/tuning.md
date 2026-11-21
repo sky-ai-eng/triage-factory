@@ -9,7 +9,7 @@ self-hosted deployment.
 | Variable                   | Default | Effect                                                                                                       |
 | -------------------------- | ------- | ------------------------------------------------------------------------------------------------------------ |
 | `TF_MAX_CONCURRENT_CLAIMS` | `8`     | Most agent runs at once. Each costs about 256 MB of RAM plus API spend. Values above 256 are clamped to 256. |
-| `TF_DISPATCH_MEM_FLOOR_MB` | `4096`  | No new run starts while available memory is below this. Ignored where memory can't be read (macOS).          |
+| `TF_DISPATCH_MEM_FLOOR_MB` | `4096`  | No new run starts while available memory is below this. Ignored where memory can't be read (macOS, Windows). |
 
 Runs past the cap wait in a queue for slots to free up. Their card and run
 page show **QUEUED** with the time spent waiting. The startup log prints
@@ -29,7 +29,9 @@ sooner:
 | `TF_DISPATCH_DISK_FLOOR_MB`    | While free disk is below this many MiB, start no new runs and delete parked worktrees without waiting for the idle time. |
 
 A worktree is only deleted once its snapshot is saved and no live run is using
-it. Resuming afterwards rebuilds the workspace from the snapshot: slower, but
+it. Free disk can't be read on macOS or Windows, so there
+`TF_DISPATCH_DISK_FLOOR_MB` has no effect; `TF_WORKSPACE_EVICT_AFTER_SEC` still
+does. Resuming afterwards rebuilds the workspace from the snapshot: slower, but
 nothing is lost.
 
 ## Logging
@@ -99,8 +101,8 @@ Agents run the Claude binary bundled with Triage Factory. To use another one
 export TF_CLAUDE_BINARY=/path/to/claude
 ```
 
-A path that doesn't exist or isn't executable fails the run with an error.
-Local mode only.
+A path that doesn't exist or isn't executable fails the run with an error. On
+Windows it must be a regular `.exe` or `.js` file. Local mode only.
 
 ## Agent engine JIT
 

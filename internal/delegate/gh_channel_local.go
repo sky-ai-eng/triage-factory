@@ -221,7 +221,10 @@ func (s *Spawner) startLocalGHChannel(ctx context.Context, orgID, conversationID
 // the user's own installation, which the allowlist must not name at all.
 func sdkAllowedTools(selfBin, extras string, gh *agentproc.GHChannelParams) string {
 	return agentproc.BuildAllowedToolsFor(agentproc.AllowedToolsOptions{
-		SelfBin: selfBin,
+		// The name the agent types, which on Windows is the bare
+		// `triagefactory` rather than the host path, so the rule matches the
+		// command the prompt tells the model to write.
+		SelfBin: agentproc.LocalAgentBinary(selfBin),
 		Extras:  extras,
 		GH:      gh.Live(),
 	})

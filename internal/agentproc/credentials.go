@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/llm/modelcatalog"
@@ -754,7 +755,7 @@ func mergeEnv(parentEnv, extraEnv []string, creds map[string]string) []string {
 func filterEnv(env, remove []string) []string {
 	skip := make(map[string]struct{}, len(remove))
 	for _, k := range remove {
-		skip[k] = struct{}{}
+		skip[envNameForMatch(k)] = struct{}{}
 	}
 	return filterEnvFunc(env, func(key string) bool {
 		_, found := skip[key]
@@ -762,14 +763,28 @@ func filterEnv(env, remove []string) []string {
 	})
 }
 
+// envNamesFoldCase is whether the OS resolves environment names without
+// regard to case. A variable for tests; production reads the platform.
+var envNamesFoldCase = runtime.GOOS == "windows"
+
+// envNameForMatch is the form of an environment name filterEnvFunc's drop
+// predicate sees: the name itself where names are case-sensitive, and its upper
+// case on Windows, where "anthropic_base_url" IS ANTHROPIC_BASE_URL to the
+// child. filterEnv folds its own list the same way; a drop predicate written
+// directly (isCredentialEnvKey) must compare against upper-case names.
+func envNameForMatch(name string) string {
+	if envNamesFoldCase {
+		return strings.ToUpper(name)
+	}
+	return name
+}
+
 // filterEnvFunc returns a copy of env with any KEY=... entry whose KEY
-// drop reports dropped. Case-sensitive match on the key — matches
-// POSIX env semantics (the load-bearing target since multi-mode
-// + gVisor requires Linux). Windows env var names are case-
-// insensitive at the OS layer, so a parent's "Anthropic_Api_Key"
-// would slip past the leak guard there; that's acceptable because
-// Windows is only a local-mode target where the leak guard's
-// multi-tenant rationale doesn't apply.
+// drop reports dropped. The key is matched as envNameForMatch spells it:
+// exactly on POSIX, and case-insensitively on Windows. Local mode reads an
+// org's stored credential on Windows too, so an operator's lower-case
+// "anthropic_base_url" slipping past the guard would send the stored key to
+// a gateway the org never configured.
 func filterEnvFunc(env []string, drop func(key string) bool) []string {
 	out := make([]string, 0, len(env))
 	for _, e := range env {
@@ -780,7 +795,7 @@ func filterEnvFunc(env []string, drop func(key string) bool) []string {
 			out = append(out, e)
 			continue
 		}
-		if drop(e[:eq]) {
+		if drop(envNameForMatch(e[:eq])) {
 			continue
 		}
 		out = append(out, e)

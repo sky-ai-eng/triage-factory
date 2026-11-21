@@ -2,6 +2,7 @@ package cell
 
 import (
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -9,10 +10,22 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
+// skipOnWindowsPOSIXRunTree skips a test whose run-tree inputs are POSIX
+// paths such as /data/runs/task-1. A jail runs only on Linux, where those are
+// absolute host paths; on Windows filepath.IsAbs refuses them, so the
+// translation under test never engages.
+func skipOnWindowsPOSIXRunTree(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("jail env translation is Linux-only: its host run-tree paths are POSIX")
+	}
+}
+
 // TestJailEnv_AssemblesEveryInputInOrder pins the whole environment for one
 // launch. The order is what decides a repeated key under first-wins, and the
 // value is what every backend must deliver, so both are asserted exactly.
 func TestJailEnv_AssemblesEveryInputInOrder(t *testing.T) {
+	skipOnWindowsPOSIXRunTree(t)
 	got := JailEnv(LaunchSpec{
 		RunTree: "/data/runs/task-1",
 		Env: []string{
@@ -131,6 +144,7 @@ func TestJailEnv_DropsCatalogEnvKeys(t *testing.T) {
 }
 
 func TestTranslateEnv(t *testing.T) {
+	skipOnWindowsPOSIXRunTree(t)
 	cases := []struct {
 		name    string
 		env     []string

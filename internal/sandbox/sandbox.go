@@ -3,7 +3,6 @@ package sandbox
 import (
 	"context"
 	"io"
-	"sync"
 
 	"github.com/sky-ai-eng/triage-factory/internal/cell"
 )
@@ -131,57 +130,6 @@ type Config struct {
 	// the network, runs ConfigureProxies, and owns the teardown — the
 	// all/local and one-shot system-job callers.
 	Network *RunNetwork
-}
-
-// RunNetwork is a per-run network (subnet index + netns + veth + iptables
-// MASQUERADE) stood up independently of Wrap, so the caller can bind proxies
-// — and launch the credential sidecar — on HostIP before the sandbox itself
-// exists. Wrap consumes one via Config.Network. The caller owns Close(),
-// ordered AFTER the sidecar's Close and the run's (the veth the proxies
-// bound must outlive both), and BEFORE nothing else reclaims the subnet idx.
-//
-// Fields are read-only from outside the package. HostIP is the host-side
-// veth IP the proxies bind on — reachable both from the host (the delegate's
-// own clone) and from inside the sandbox (the jailed agent). Idx is the
-// allocated subnet index, which also derives the run's sidecar uid
-// (SidecarUID), so one index ties the network and the sidecar together.
-//
-// The index is also the run's jail identity (JailUID/JailGID), and every file
-// grant made under that identity is made through the RunNetwork —
-// PrepareSockets, HandOffRunTree, GrantStaging — so Close can take each one
-// back before it releases the index. That is the release rule for the jail
-// identity, the file-side counterpart of the sidecar being killed before the
-// index goes: an index's uids are handed to another run only once no process
-// and no file still carries them.
-//
-// The gateway ports the jail is admitted to (AdmitJailPorts) are removed with
-// the network.
-type RunNetwork struct {
-	Idx       uint8
-	Subnet    string
-	HostIP    string
-	NetnsPath string
-
-	// conversationID is the conversation the network was built for, which
-	// the privileged side re-derives the network's names from.
-	conversationID string
-
-	// netSt holds the platform-specific teardown state (a NetworkState on
-	// Linux) so Close can reverse exactly what SetupRunNetwork created,
-	// without re-deriving names. Typed as any so the cross-platform struct
-	// doesn't drag the Linux-only NetworkState into other builds — the same
-	// convention Sandbox.teardown uses.
-	netSt  any
-	closed bool
-
-	// The grants made under this index's jail identity, recorded as they are
-	// made and taken back by Close. grantsMu guards them: a mid-run grant and
-	// Close can run on different goroutines.
-	grantsMu       sync.Mutex
-	socketsFor     string
-	handedOffTrees []string
-	grantedStaging []string
-	admittedPorts  []int
 }
 
 // Mount declares an additional bind mount in the sandbox. Source is

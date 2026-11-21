@@ -1,9 +1,14 @@
 package instance
 
 import (
+	"bufio"
 	"errors"
+	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -118,6 +123,103 @@ func TestEnsureIdentity_SecondProcessFailsFast(t *testing.T) {
 	if !errors.Is(err, ErrLocked) {
 		t.Fatalf("expected ErrLocked, got: %v", err)
 	}
+}
+
+// TestEnsureIdentity_IDReadableWhileLocked pins that the lock does not hide
+// the id from other handles, which a mandatory-lock platform would do if it
+// locked the byte range the id lives in.
+func TestEnsureIdentity_IDReadableWhileLocked(t *testing.T) {
+	if !flockEnforced {
+		t.Skip("this platform's flockExclusive is a no-op — nothing is locked, see lock_other.go")
+	}
+	root := t.TempDir()
+	first, err := EnsureIdentity(root)
+	if err != nil {
+		t.Fatalf("EnsureIdentity: %v", err)
+	}
+	defer first.Close()
+
+	raw, err := os.ReadFile(filepath.Join(root, idFileName))
+	if err != nil {
+		t.Fatalf("read id file through a second handle while locked: %v", err)
+	}
+	if string(raw) != first.ID {
+		t.Fatalf("second handle read %q, want %q", raw, first.ID)
+	}
+}
+
+const lockHolderEnv = "INSTANCE_TEST_LOCK_HOLDER_ROOT"
+
+// TestHelperHoldIdentity is the child half of
+// TestEnsureIdentity_SecondOSProcessFailsFast: it takes the identity, reports
+// readiness on stdout and holds the lock until stdin closes.
+func TestHelperHoldIdentity(t *testing.T) {
+	root := os.Getenv(lockHolderEnv)
+	if root == "" {
+		t.Skip("helper for TestEnsureIdentity_SecondOSProcessFailsFast, not a test of its own")
+	}
+	id, err := EnsureIdentity(root)
+	if err != nil {
+		t.Fatalf("holder EnsureIdentity: %v", err)
+	}
+	defer id.Close()
+	fmt.Println("HELD " + id.ID)
+	_, _ = io.Copy(io.Discard, os.Stdin)
+}
+
+func TestEnsureIdentity_SecondOSProcessFailsFast(t *testing.T) {
+	if !flockEnforced {
+		t.Skip("this platform's flockExclusive is a no-op — a second opener never fails fast, see lock_other.go")
+	}
+	root := t.TempDir()
+	child := exec.Command(os.Args[0], "-test.run=^TestHelperHoldIdentity$", "-test.v")
+	child.Env = append(os.Environ(), lockHolderEnv+"="+root)
+	stdin, err := child.StdinPipe()
+	if err != nil {
+		t.Fatalf("child stdin: %v", err)
+	}
+	stdout, err := child.StdoutPipe()
+	if err != nil {
+		t.Fatalf("child stdout: %v", err)
+	}
+	if err := child.Start(); err != nil {
+		t.Fatalf("start holder process: %v", err)
+	}
+	defer func() {
+		stdin.Close()
+		_ = child.Wait()
+	}()
+
+	var heldID string
+	sc := bufio.NewScanner(stdout)
+	for sc.Scan() {
+		if rest, ok := strings.CutPrefix(sc.Text(), "HELD "); ok {
+			heldID = rest
+			break
+		}
+	}
+	if heldID == "" {
+		t.Fatalf("holder process never reported holding the lock (scan err: %v)", sc.Err())
+	}
+
+	_, err = EnsureIdentity(root)
+	if !errors.Is(err, ErrLocked) {
+		t.Fatalf("expected ErrLocked while another OS process holds the lock, got: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(root, idFileName))
+	if err != nil || string(raw) != heldID {
+		t.Fatalf("id file read while another process holds the lock = %q, %v; want %q", raw, err, heldID)
+	}
+
+	stdin.Close()
+	if err := child.Wait(); err != nil {
+		t.Fatalf("holder process: %v", err)
+	}
+	again, err := EnsureIdentity(root)
+	if err != nil {
+		t.Fatalf("expected the lock to be free once the holder exited, got: %v", err)
+	}
+	again.Close()
 }
 
 func TestEnsureIdentity_LockReleasedAfterClose(t *testing.T) {

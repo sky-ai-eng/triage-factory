@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -135,6 +136,9 @@ func TestFileBackend_CiphertextAtRest(t *testing.T) {
 }
 
 func TestFileBackend_Perms(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows reports POSIX mode bits as 0666; the file inherits the user-profile ACL instead")
+	}
 	path := useFileBackend(t, testKeyHex)
 	if err := PutSecret(keyGitHubPAT, "v"); err != nil {
 		t.Fatalf("PutSecret: %v", err)

@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -182,7 +183,9 @@ func TestStart_ServesGHOnThePrivateSocket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat socket: %v", err)
 	}
-	if info.Mode()&fs.ModeSocket == 0 || info.Mode().Perm() != 0o600 {
+	// Windows keeps no POSIX permission bits on a socket file; the per-run
+	// directory's ACL is what restricts it there.
+	if info.Mode()&fs.ModeSocket == 0 || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o600) {
 		t.Errorf("socket mode = %v, want a socket with mode 0600", info.Mode())
 	}
 

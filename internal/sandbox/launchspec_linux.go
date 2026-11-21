@@ -17,6 +17,16 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 )
 
+// agentHostSocketName, caBundleName and allowedSignersName are the files a
+// run's sidecar creates inside the run's socket directory. Mirrored by
+// cmd/exec/agenthost, which creates them; a drift test there cross-checks the
+// derived paths.
+const (
+	agentHostSocketName = "agenthost.sock"
+	caBundleName        = "ca-bundle.crt"
+	allowedSignersName  = "allowed-signers"
+)
+
 // TrustedGitHooksDir is the broker-owned git-hooks bind-mount source
 // (destination githooks.SandboxDir): the broker resolves the host hooks
 // dir itself rather than trusting the orchestrator's claimed source for

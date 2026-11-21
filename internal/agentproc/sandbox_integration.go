@@ -80,19 +80,28 @@ func AgentVisibleRoot(hostRoot string) string {
 	if shouldSandbox() {
 		return cell.WorkDir
 	}
-	return hostRoot
+	return AgentVisiblePath(hostRoot)
 }
 
 // AgentVisibleBinary returns the path the agent must use to invoke the TF
 // CLI. Under the sandbox the host binary is presented at cell.TFBinaryPath
 // and the host path doesn't exist inside the rootfs, so the agent sees that
-// path; un-sandboxed it runs the host binary directly. This is the
-// {{BINARY_PATH}} value prompts interpolate.
+// path; un-sandboxed it is LocalAgentBinary. This is the {{BINARY_PATH}}
+// value prompts interpolate.
 func AgentVisibleBinary(hostBin string) string {
 	if shouldSandbox() {
 		return cell.TFBinaryPath
 	}
-	return hostBin
+	return LocalAgentBinary(hostBin)
+}
+
+// LocalAgentBinary is the name an un-sandboxed agent invokes the TF CLI by:
+// the host binary's path, except on Windows where it is the bare name
+// `triagefactory`, found through the PATH entry newDirectCommand adds. It is
+// the single source for both the prompt's `triagefactory exec` and the
+// allowlist's `Bash(<name> exec *)` rule, so they cannot disagree.
+func LocalAgentBinary(hostBin string) string {
+	return localAgentBinary(hostBin)
 }
 
 // ChownWorkspaceCheckoutForSandbox chowns a checkout materialized into the run

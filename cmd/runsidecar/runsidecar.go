@@ -187,9 +187,12 @@ func adoptSharedOriginListener() net.Listener {
 	// the Go runtime allocated next (its netpoll epoll instance is the likely
 	// occupant, since stdio takes 0-2), and wrapping that in an os.File we then
 	// Close would tear out the runtime's own poller. fstat only reads.
-	var st syscall.Stat_t
-	if err := syscall.Fstat(sandbox.SharedOriginListenerFD, &st); err != nil ||
-		st.Mode&syscall.S_IFMT != syscall.S_IFSOCK {
+	isSock, sockErr := fdIsSocket(sandbox.SharedOriginListenerFD)
+	if sockErr != nil {
+		sidecarLog.Warn("cannot inspect the shared-origin descriptor; the gh channel will bind an ephemeral port and repo inference will not resolve", "error", sockErr)
+		return nil
+	}
+	if !isSock {
 		sidecarLog.Info("no shared-origin listener passed; the gh channel will bind an ephemeral port and repo inference will not resolve")
 		return nil
 	}

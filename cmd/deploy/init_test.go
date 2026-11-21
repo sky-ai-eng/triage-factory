@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -118,7 +119,9 @@ func TestInit_RendersLayout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if mode := info.Mode().Perm(); mode != 0o600 {
+	// Windows reports POSIX mode bits as 0666 (files) and 0777 (directories);
+	// access there comes from the parent directory's ACL.
+	if mode := info.Mode().Perm(); runtime.GOOS != "windows" && mode != 0o600 {
 		t.Errorf(".env mode = %o; want 600", mode)
 	}
 	for _, sub := range []string{"docker", "docker/observability"} {
@@ -126,7 +129,7 @@ func TestInit_RendersLayout(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if mode := info.Mode().Perm(); mode != 0o755 {
+		if mode := info.Mode().Perm(); runtime.GOOS != "windows" && mode != 0o755 {
 			t.Errorf("%s mode = %o; want 755 so the containers that mount it can read it", sub, mode)
 		}
 	}

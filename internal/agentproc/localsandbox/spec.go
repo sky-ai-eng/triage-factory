@@ -68,17 +68,6 @@ const Binary = "bwrap"
 // the two spellings agree.
 const AgentHostSocketDest = "/run/tf.sock"
 
-// claudeCredentialsFile is the Claude Code credential file under ~/.claude,
-// bound back rw by itself. It has to be writable: an OAuth refresh rewrites
-// it, and a refresh that never reached the host would leave the operator's own
-// sessions holding the pre-refresh tokens. Claude Code writes it by staging a
-// file beside it and renaming that into place. The rename onto a bind-mounted
-// file fails with EBUSY, Claude Code falls back to writing the file in place,
-// and that write reaches the host; the staged file is created on the home
-// tmpfs and never does. The fallback is Claude Code's, not ours, so an SDK
-// bump has to keep it: without it a refresh during a run lands nowhere.
-const claudeCredentialsFile = ".credentials.json"
-
 // ErrNotInstalled and ErrNamespaceRefused are the two ways the probe fails,
 // and they are separate sentinels because the operator fixes them differently
 // and a message that names the wrong fix is worse than no message: someone

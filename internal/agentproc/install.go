@@ -61,6 +61,12 @@ func EnsureSDK() (string, error) {
 }
 
 func doInstall() (string, error) {
+	// Before anything that can return early: a host whose SDK is already
+	// installed still cannot run an agent without a shell for it, and the
+	// install-skipping path below would otherwise never ask.
+	if err := checkGitBash(); err != nil {
+		return "", err
+	}
 	// Surface a missing $HOME as an error (the pre-paths behavior) rather
 	// than letting the error-free SDKDir panic underneath. Pre-flight the
 	// toolchain root specifically: with TF_TOOLCHAIN_ROOT set the SDK dir

@@ -346,13 +346,22 @@ func TestRunWorkspaceEvictor_DisabledKnobNeverSweeps(t *testing.T) {
 
 // --- helpers ---------------------------------------------------------------
 
-// isolateRunNamespace points $TMPDIR (and so worktree.RunRoot) and the state
-// root at this test's own directories, so a sweep that walks the run namespace
-// can only ever see this test's trees.
+// isolateRunNamespace points the temp dir (and so worktree.RunRoot) and the
+// state root at this test's own directories, so a sweep that walks the run
+// namespace can only ever see this test's trees.
 func isolateRunNamespace(t *testing.T) {
 	t.Helper()
 	paths.SetForTest(t, t.TempDir())
-	t.Setenv("TMPDIR", t.TempDir())
+	setTestTmp(t, t.TempDir())
+}
+
+// setTestTmp points every spelling of the temp directory at dir: TMPDIR for
+// Unix and TMP/TEMP, which is what os.TempDir reads on Windows.
+func setTestTmp(t *testing.T, dir string) {
+	t.Helper()
+	t.Setenv("TMPDIR", dir)
+	t.Setenv("TMP", dir)
+	t.Setenv("TEMP", dir)
 }
 
 // restoreRemoveSeam swaps the privileged removal seam for the duration of the

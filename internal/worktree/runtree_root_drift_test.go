@@ -24,7 +24,7 @@ func TestRunRoot_MatchesBrokerTrustedRoot(t *testing.T) {
 	for _, mode := range []runmode.Mode{runmode.ModeLocal, runmode.ModeMulti} {
 		t.Run(string(mode), func(t *testing.T) {
 			runmode.SetForTest(t, mode)
-			t.Setenv("TMPDIR", t.TempDir())
+			setTestTmp(t, longTestTempDir(t))
 			paths.SetForTest(t, t.TempDir())
 			for _, rootKey := range []string{"run-1", "00000000-0000-0000-0000-0000000000aa", "itest-abc"} {
 				if got, want := RunRoot(rootKey), sandbox.RunTreeRoot(rootKey); got != want {

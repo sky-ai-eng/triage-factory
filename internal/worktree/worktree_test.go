@@ -12,10 +12,10 @@ import (
 // should still run — those leaks compound fast and aren't
 // session-state-sensitive.
 func TestCleanupWithOptions_SkipClaudeProjectCleanup(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := longTestTempDir(t)
 	home := t.TempDir()
-	t.Setenv("TMPDIR", tmp)
-	t.Setenv("HOME", home)
+	setTestTmp(t, tmp)
+	setTestHome(t, home)
 
 	// One worktree dir + a corresponding ~/.claude/projects entry.
 	wtDir := filepath.Join(tmp, runsDir, "run-skip")
@@ -91,10 +91,10 @@ func TestRemoveAt_EmptyPath(t *testing.T) {
 // expression `opts.PreserveClaudeProjectFor[conversationID]` returns false and
 // every run is treated as non-preserved.
 func TestCleanupWithOptions_NilPreserveSet(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := longTestTempDir(t)
 	home := t.TempDir()
-	t.Setenv("TMPDIR", tmp)
-	t.Setenv("HOME", home)
+	setTestTmp(t, tmp)
+	setTestHome(t, home)
 
 	runDir := filepath.Join(tmp, runsDir, "run-nil")
 	if err := os.MkdirAll(runDir, 0755); err != nil {

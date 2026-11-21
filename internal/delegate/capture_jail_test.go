@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -151,6 +152,10 @@ func TestCaptureTreeInJail_UnpacksWhatTheJailStreamed(t *testing.T) {
 		fi, err := os.Stat(path)
 		if err != nil {
 			t.Fatalf("stat %s: %v", path, err)
+		}
+		// Windows keeps no POSIX permission bits, so every file reads 0666.
+		if runtime.GOOS == "windows" {
+			continue
 		}
 		if got := fi.Mode().Perm(); got != want {
 			t.Errorf("%s staged at %v, want %v", path, got, want)

@@ -3,6 +3,7 @@ package githooks
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -169,7 +170,7 @@ func TestDirectAgentEnv_WithIdentity(t *testing.T) {
 	assertEnv(t, env, "GIT_CONFIG_VALUE_1", "acme-bot[bot]")
 	assertEnv(t, env, "GIT_CONFIG_KEY_2", "user.email")
 	assertEnv(t, env, "GIT_CONFIG_VALUE_2", "acme-bot[bot]@users.noreply.github.com")
-	assertEnv(t, env, "GIT_CONFIG_COUNT", "3")
+	assertEnv(t, env, "GIT_CONFIG_COUNT", strconv.Itoa(3+len(platformGitConfigPairs())))
 	assertSingleCount(t, env)
 }
 

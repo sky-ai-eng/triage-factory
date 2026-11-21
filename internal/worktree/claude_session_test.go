@@ -66,9 +66,9 @@ func TestRemoveClaudeProjectDir_OnlyUnderTempDir(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	t.Setenv("TMPDIR", tmp)
+	setTestTmp(t, tmp)
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 
 	projectDir := func(cwd string) string {
 		resolved, err := filepath.EvalSymlinks(cwd)

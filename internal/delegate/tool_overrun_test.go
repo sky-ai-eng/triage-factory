@@ -100,6 +100,9 @@ func TestRestartableJail_EndOverrunCallStopsOnlyTheCallThatOverran(t *testing.T)
 	j.restarting = false
 
 	seen := time.Now()
+	// The call must begin after seen by more than the clock's tick, which is
+	// coarse on Windows.
+	time.Sleep(50 * time.Millisecond)
 	go func() { _, _ = j.toolHost().Call("bash", nil) }()
 	for deadline := time.Now().Add(5 * time.Second); ; {
 		j.mu.Lock()

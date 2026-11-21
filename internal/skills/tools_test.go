@@ -125,7 +125,7 @@ func TestNormalizeToolList(t *testing.T) {
 
 func TestImportAll_PersistsAllowedTools(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	chdir(t, t.TempDir())
 
 	content := `---

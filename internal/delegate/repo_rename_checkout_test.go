@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -235,6 +236,9 @@ func TestEnsureWorkspace_WarmTreeRepointsRemotesOfARenamedRepository(t *testing.
 // script that does what the host-side rewrite does, and a tree with nothing
 // to move costs no call at all.
 func TestRepointRenamedRemotesInJail_RunsTheRewriteThroughTheToolHost(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the script addresses checkouts at the gVisor jail's mount path, which exists only on Linux (multi mode)")
+	}
 	f := newSnapshotFixture(t, "task-renamed-jail-remotes")
 	pr := renamedRemoteCheckout(t, f)
 

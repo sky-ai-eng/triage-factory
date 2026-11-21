@@ -382,8 +382,9 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// and the TF binary at cell.TFBinaryPath. The prompt states both concretely,
 	// which is what makes the agent's file tools (no shell expansion) and its
 	// `triagefactory exec ...` invocations resolve regardless of sandbox mode.
-	// selfBin itself stays the host path below for BuildAllowedToolsWithExtras,
-	// whose only reader is the SDK loop, which never runs in a jail.
+	// The allowlist is read only by the SDK loop, which never runs in a jail, so
+	// it takes agentproc.LocalAgentBinary rather than the jail's path: the host
+	// path on unix, the bare name on Windows.
 	agentRunRoot := agentproc.AgentVisibleRoot(cfg.runRoot)
 	agentPRCheckout := agentVisibleCheckout(cfg.runRoot, cfg.prCheckout)
 	agentBin := agentproc.AgentVisibleBinary(selfBin)

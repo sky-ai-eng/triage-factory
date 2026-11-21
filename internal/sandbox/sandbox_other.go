@@ -6,6 +6,16 @@ import (
 	"context"
 )
 
+// RunNetwork is a per-run network. Nothing builds one off Linux, so only the
+// fields every platform reads exist here; the Linux definition documents the
+// type and carries the teardown state.
+type RunNetwork struct {
+	Idx       uint8
+	Subnet    string
+	HostIP    string
+	NetnsPath string
+}
+
 // wrap on non-Linux returns ErrUnsupportedPlatform. The agentproc
 // caller gates on runtime.GOOS == "linux" so this should never fire
 // in production — it's the safety net for misconfigured deployment

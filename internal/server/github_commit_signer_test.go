@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -781,7 +782,12 @@ func TestCommitIdentity_LocalGitTooOldToSign(t *testing.T) {
 	}
 
 	bin := t.TempDir()
-	if err := os.WriteFile(filepath.Join(bin, "git"), []byte("#!/bin/sh\necho 'git version 2.33.8'\n"), 0o755); err != nil {
+	// Windows resolves a command through PATHEXT, so the stand-in is a batch file.
+	name, script := "git", "#!/bin/sh\necho 'git version 2.33.8'\n"
+	if runtime.GOOS == "windows" {
+		name, script = "git.bat", "@echo git version 2.33.8\r\n"
+	}
+	if err := os.WriteFile(filepath.Join(bin, name), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin)

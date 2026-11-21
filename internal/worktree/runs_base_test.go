@@ -3,6 +3,7 @@ package worktree
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
@@ -29,8 +30,8 @@ func TestEnsureRunsBase_ModeByRunMode(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			runmode.SetForTest(t, tc.mode)
-			tmp := t.TempDir()
-			t.Setenv("TMPDIR", tmp)
+			tmp := longTestTempDir(t)
+			setTestTmp(t, tmp)
 			stateRoot := t.TempDir()
 			paths.SetForTest(t, stateRoot)
 			base := filepath.Join(tmp, "triagefactory-runs")
@@ -57,7 +58,8 @@ func TestEnsureRunsBase_ModeByRunMode(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if fi.Mode().Perm() != tc.want {
+			// Windows reports 0o777 for every directory: there are no mode bits to pin.
+			if runtime.GOOS != "windows" && fi.Mode().Perm() != tc.want {
 				t.Errorf("runs base mode = %o, want %o", fi.Mode().Perm(), tc.want)
 			}
 		})
@@ -70,8 +72,8 @@ func TestEnsureRunsBase_ModeByRunMode(t *testing.T) {
 // the temp dir, where an executor builds nothing. Locally it is any directory
 // named triagefactory-runs, whatever $TMPDIR the tree was made under.
 func TestIsRunTreeFor_ByRunMode(t *testing.T) {
-	tmp := t.TempDir()
-	t.Setenv("TMPDIR", tmp)
+	tmp := longTestTempDir(t)
+	setTestTmp(t, tmp)
 	stateRoot := t.TempDir()
 	paths.SetForTest(t, stateRoot)
 
@@ -111,9 +113,9 @@ func TestIsRunTreeFor_ByRunMode(t *testing.T) {
 // alone, since that one belongs to whatever local install shares the host.
 func TestCleanupWithOptions_MultiSweepsTheStateRootRunsBase(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
-	tmp := t.TempDir()
-	t.Setenv("TMPDIR", tmp)
-	t.Setenv("HOME", t.TempDir())
+	tmp := longTestTempDir(t)
+	setTestTmp(t, tmp)
+	setTestHome(t, t.TempDir())
 	stateRoot := t.TempDir()
 	paths.SetForTest(t, stateRoot)
 

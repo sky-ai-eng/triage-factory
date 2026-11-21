@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -22,7 +23,9 @@ func TestEnsure_WritesTheSignProgram(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat %s: %v", SignProgram, err)
 	}
-	if info.Mode().Perm()&0o111 == 0 {
+	// Windows has no execute bit: git for Windows runs the program by its
+	// #! line, so the mode it reports carries nothing to assert.
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o111 == 0 {
 		t.Errorf("%s is %v; git cannot run a gpg.ssh.program that is not executable", SignProgram, info.Mode().Perm())
 	}
 	got, err := os.ReadFile(path)
@@ -58,8 +61,14 @@ func TestSignProgram_RoutesSigningToTFAndTheRestToSSHKeygen(t *testing.T) {
 
 	run := func(args ...string) {
 		t.Helper()
-		cmd := exec.Command(filepath.Join(HostDir(), SignProgram), args...)
-		cmd.Env = append(sanitizeEnv(os.Environ()), "PATH="+binDir+string(os.PathListSeparator)+"/usr/bin:/bin",
+		// Through sh by name: Windows cannot exec a #! script directly, and
+		// git for Windows reaches it the same way, through its own sh.
+		cmd := exec.Command("sh", append([]string{filepath.Join(HostDir(), SignProgram)}, args...)...)
+		path := binDir + string(os.PathListSeparator) + "/usr/bin:/bin"
+		if runtime.GOOS == "windows" {
+			path = binDir + string(os.PathListSeparator) + os.Getenv("PATH")
+		}
+		cmd.Env = append(sanitizeEnv(os.Environ()), "PATH="+path,
 			BinEnvVar+"="+filepath.Join(binDir, "triagefactory"))
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("%s %s: %v\n%s", SignProgram, strings.Join(args, " "), err, out)
