@@ -469,16 +469,22 @@
             "type": "string"
           },
           "client_secret": {
-            "description": "A client secret generated for the App, which lets people connect their GitHub accounts through it; required in multi mode, and an empty value stores none in local mode.",
-            "type": "string"
+            "description": "A client secret generated for the App, which lets people connect their GitHub accounts through it; required in multi mode, and in local mode absent or null imports the App without one. A blank value is refused.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "pem": {
             "description": "The full contents of a private key file generated for the App, including the BEGIN and END lines.",
             "type": "string"
           },
           "webhook_secret": {
-            "description": "The secret the App's webhook signs its deliveries with; an empty value stores none, and this deployment then refuses the App's webhook deliveries.",
-            "type": "string"
+            "description": "The secret the App's webhook signs its deliveries with; absent or null stores none, and this deployment then refuses the App's webhook deliveries. A blank value is refused.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "type": "object"

@@ -388,6 +388,67 @@ func TestGitHubAppImport_BadClientSecret(t *testing.T) {
 	}
 }
 
+// TestGitHubAppImport_BlankSecretRefused: an optional secret sent blank is a
+// 400 naming it, every blank one at once, and writes no row, where leaving it
+// out or sending null imports the App without it.
+func TestGitHubAppImport_BlankSecretRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		extra  map[string]any
+		fields string
+	}{
+		{"empty client secret", map[string]any{"client_secret": ""}, "client_secret"},
+		{"blank client secret", map[string]any{"client_secret": "   "}, "client_secret"},
+		{"blank webhook secret", map[string]any{"client_secret": "cs", "webhook_secret": " "}, "webhook_secret"},
+		{"both blank", map[string]any{"client_secret": "", "webhook_secret": ""}, "client_secret,webhook_secret"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			keyring.MockInit()
+			runmode.SetForTest(t, runmode.ModeLocal)
+			s := newTestServer(t)
+			stub := newImportStub(t, importStubCfg{appID: 12, slug: "b", clientID: "Iv1.x"})
+			setOrgGitHubBase(t, s, stub.URL)
+
+			rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/import",
+				importBody("12", testRSAPEM(t), tc.extra))
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("import = %d, want 400; body=%s", rec.Code, rec.Body.String())
+			}
+			var fields []string
+			for _, it := range errorItems(t, rec) {
+				if it.Reason != httpx.ReasonInvalidField {
+					t.Errorf("reason = %q for %q, want INVALID_FIELD", it.Reason, it.Field)
+				}
+				fields = append(fields, it.Field)
+			}
+			if got := strings.Join(fields, ","); got != tc.fields {
+				t.Errorf("fields = %s, want %s", got, tc.fields)
+			}
+			if app, _ := s.githubApps.GetForOrgSystem(context.Background(), runmode.LocalDefaultOrgID); app != nil {
+				t.Errorf("app written despite a blank secret: %+v", app)
+			}
+		})
+	}
+
+	t.Run("null secrets", func(t *testing.T) {
+		keyring.MockInit()
+		runmode.SetForTest(t, runmode.ModeLocal)
+		s := newTestServer(t)
+		stub := newImportStub(t, importStubCfg{appID: 13, slug: "b", clientID: "Iv1.x"})
+		setOrgGitHubBase(t, s, stub.URL)
+
+		rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/import",
+			importBody("13", testRSAPEM(t), map[string]any{"client_secret": nil, "webhook_secret": nil}))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("import = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		app, _ := s.githubApps.GetForOrgSystem(context.Background(), runmode.LocalDefaultOrgID)
+		if app == nil || app.ClientSecretRef != "" || app.WebhookSecretRef != "" {
+			t.Fatalf("app = %+v, want a row with no client or webhook secret", app)
+		}
+	})
+}
+
 // TestGitHubAppImport_ClientSecretUnknown_StoresUnvalidated: a check-token
 // status that is neither 401 (bad) nor 404 (valid) stores the secret anyway
 // and reports client_secret_validated=false.

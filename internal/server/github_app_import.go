@@ -38,13 +38,30 @@ import (
 // being able to (local can skip it and capture identity from a token instead).
 // webhook_secret and accept_partial are optional: the webhook secret is
 // multi-mode only (local is hookless/backfill); accept_partial acknowledges
-// soft permission gaps.
+// soft permission gaps. The secrets are pointers so an absent one and a blank
+// one stay apart: absent stores none, and blank is refused rather than read as
+// absent, since a secret pasted as whitespace would otherwise import an App
+// that silently has none.
 type githubAppImportRequest struct {
-	AppID         string `json:"app_id" doc:"The App's numeric id on GitHub, not its client id."`
-	PEM           string `json:"pem" doc:"The full contents of a private key file generated for the App, including the BEGIN and END lines."`
-	ClientSecret  string `json:"client_secret" doc:"A client secret generated for the App, which lets people connect their GitHub accounts through it; required in multi mode, and an empty value stores none in local mode."`
-	WebhookSecret string `json:"webhook_secret" doc:"The secret the App's webhook signs its deliveries with; an empty value stores none, and this deployment then refuses the App's webhook deliveries."`
-	AcceptPartial bool   `json:"accept_partial" doc:"Whether to import an App that lacks some optional permissions, which turns off the features they serve; an App that lacks a required permission is refused either way."`
+	AppID         string  `json:"app_id" doc:"The App's numeric id on GitHub, not its client id."`
+	PEM           string  `json:"pem" doc:"The full contents of a private key file generated for the App, including the BEGIN and END lines."`
+	ClientSecret  *string `json:"client_secret" doc:"A client secret generated for the App, which lets people connect their GitHub accounts through it; required in multi mode, and in local mode absent or null imports the App without one. A blank value is refused."`
+	WebhookSecret *string `json:"webhook_secret" doc:"The secret the App's webhook signs its deliveries with; absent or null stores none, and this deployment then refuses the App's webhook deliveries. A blank value is refused."`
+	AcceptPartial bool    `json:"accept_partial" doc:"Whether to import an App that lacks some optional permissions, which turns off the features they serve; an App that lacks a required permission is refused either way."`
+}
+
+// optionalImportSecret is an optional secret from the import body, trimmed:
+// "" when the field is absent or null, and a fault on field when it is present
+// but blank. name is how the fault's message refers to the secret.
+func optionalImportSecret(v *httpx.Validation, raw *string, field, name string) string {
+	if raw == nil {
+		return ""
+	}
+	secret := strings.TrimSpace(*raw)
+	if secret == "" {
+		v.Invalid(field, "The "+name+" must not be blank; leave "+field+" out to import the App without one.")
+	}
+	return secret
 }
 
 // githubAppPermissionRow is one entry in the import preflight's granted-vs-
@@ -291,7 +308,6 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	appIDStr := strings.TrimSpace(req.AppID)
-	clientSecret := strings.TrimSpace(req.ClientSecret)
 	var v httpx.Validation
 	if appIDStr == "" {
 		v.Add(httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "An App ID is required.", Field: "app_id"})
@@ -302,9 +318,20 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 	// Every org App in multi mode can run OAuth, so every member of a
 	// setup-complete org has a way to link their GitHub account. The
 	// manifest flow always returns a client secret; this is the import's half.
-	if clientSecret == "" && runmode.Current() == runmode.ModeMulti {
-		v.Add(httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "The App's client secret is required: it is what lets members sign in with GitHub to link their accounts.", Field: "client_secret"})
+	// Required there, a blank secret is as missing as an absent one, the way a
+	// blank app_id or pem is.
+	var clientSecret string
+	if runmode.Current() == runmode.ModeMulti {
+		if req.ClientSecret != nil {
+			clientSecret = strings.TrimSpace(*req.ClientSecret)
+		}
+		if clientSecret == "" {
+			v.Add(httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "The App's client secret is required: it is what lets members sign in with GitHub to link their accounts.", Field: "client_secret"})
+		}
+	} else {
+		clientSecret = optionalImportSecret(&v, req.ClientSecret, "client_secret", "App's client secret")
 	}
+	webhookSecret := optionalImportSecret(&v, req.WebhookSecret, "webhook_secret", "webhook secret")
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
@@ -425,7 +452,6 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	webhookSecret := strings.TrimSpace(req.WebhookSecret)
 	hasWebhookSecret := webhookSecret != ""
 
 	canonicalAppID := strconv.FormatInt(app.ID, 10)
