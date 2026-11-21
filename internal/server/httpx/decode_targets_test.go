@@ -78,7 +78,7 @@ func TestDecodeTargets_EveryFaultIsReportable(t *testing.T) {
 		t.Fatal("found no decode targets; the scan no longer matches the decode doors")
 	}
 	for _, f := range findings {
-		t.Errorf("%s: %s, so a bad value there reaches the client as an INVALID_BODY naming no field; "+
+		t.Errorf("%s: %s, so the error a bad value there gets neither names the field at fault nor says what is wrong with it; "+
 			"take it as a plain JSON type and parse it in the handler", f.target, f.describe())
 	}
 }

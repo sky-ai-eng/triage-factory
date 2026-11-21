@@ -8,28 +8,31 @@ import (
 // ParseWindow resolves the [since, until) read window of a statistic node
 // from the query string. Both absent → the current calendar month (UTC) up to
 // now. Each present value parses as RFC3339 or YYYY-MM-DD (a bare date → UTC
-// midnight). Returns a non-empty errMsg on a malformed value (the handler 400s
-// with it). q is the request's query: url.Values, or the QueryValues an op
-// hands its handler.
-func ParseWindow(q interface{ Get(string) string }, now time.Time) (since, until time.Time, errMsg string) {
+// midnight). A malformed value, or an until not after since, is recorded on v
+// as an INVALID_PARAM naming its parameter, and the handler flushes v. q is
+// the request's query: the QueryValues an op hands its handler, or what
+// StrictQuery reads.
+func ParseWindow(v *Validation, q interface{ Get(string) string }, now time.Time) (since, until time.Time) {
 	sinceStr := strings.TrimSpace(q.Get("since"))
 	untilStr := strings.TrimSpace(q.Get("until"))
 	if sinceStr == "" && untilStr == "" {
 		since = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
-		until = now
-		return since, until, ""
+		return since, now
 	}
+	parsed := true
 	if sinceStr != "" {
 		t, err := ParseWindowTime(sinceStr)
 		if err != nil {
-			return time.Time{}, time.Time{}, "invalid 'since': want RFC3339 or YYYY-MM-DD"
+			v.Param("since", "since must be an RFC 3339 timestamp or a YYYY-MM-DD date")
+			parsed = false
 		}
 		since = t
 	}
 	if untilStr != "" {
 		t, err := ParseWindowTime(untilStr)
 		if err != nil {
-			return time.Time{}, time.Time{}, "invalid 'until': want RFC3339 or YYYY-MM-DD"
+			v.Param("until", "until must be an RFC 3339 timestamp or a YYYY-MM-DD date")
+			parsed = false
 		}
 		until = t
 	}
@@ -38,10 +41,10 @@ func ParseWindow(q interface{ Get(string) string }, now time.Time) (since, until
 	// and since > until is inverted — both would otherwise return a misleading
 	// 200 with no rows and mask a client bug. Single-bound requests leave the
 	// other side open (zero), so there's no ordering to check.
-	if !since.IsZero() && !until.IsZero() && !since.Before(until) {
-		return time.Time{}, time.Time{}, "'since' must be before 'until'"
+	if parsed && !since.IsZero() && !until.IsZero() && !since.Before(until) {
+		v.Param("until", "until must be after since")
 	}
-	return since, until, ""
+	return since, until
 }
 
 // ParseWindowTime accepts a full RFC3339 timestamp or a bare YYYY-MM-DD date

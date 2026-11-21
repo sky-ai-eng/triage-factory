@@ -458,7 +458,7 @@
             "type": "string"
           },
           "entity_ids": {
-            "description": "Ids of the entities whose tasks to include; empty includes every entity.",
+            "description": "Ids of the entities whose tasks to include, at most 200, each a UUID in lowercase hyphenated form; empty includes every entity.",
             "items": {
               "type": "string"
             },
@@ -488,7 +488,7 @@
             ]
           },
           "ids": {
-            "description": "Ids of the tasks to include, at most 200; empty includes every task.",
+            "description": "Ids of the tasks to include, at most 200, each a UUID in lowercase hyphenated form; empty includes every task.",
             "items": {
               "type": "string"
             },

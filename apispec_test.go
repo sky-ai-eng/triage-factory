@@ -21,7 +21,7 @@ const apiSpecPath = "api/openapi.json"
 
 // notInSpec are the /api routes no API client calls: a browser navigates to
 // them and they answer with a redirect or an HTML page, or only a third party
-// calls them. Each is complete, so no route is added here later.
+// calls them. The list is complete: no route is added to it.
 var notInSpec = map[string]string{
 	"GET /api/auth/oauth/{provider}":                      "starts a browser sign-in with a redirect to the provider",
 	"GET /api/auth/callback":                              "the provider's redirect back after a sign-in",

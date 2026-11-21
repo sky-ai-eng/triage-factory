@@ -2,6 +2,7 @@ package httpx
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -136,7 +137,7 @@ func TestOp_MethodsRefuseWhatTheSpecDoesNotDeclare(t *testing.T) {
 		Query:         []QueryParam{{Name: "q", Type: ParamString}},
 		OtherStatuses: []int{http.StatusCreated},
 	})
-	req := httptest.NewRequest(http.MethodPost, "/api/things?q=1&other=2", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/things?q=1", nil)
 	query := func() QueryValues {
 		q, ok := noBody.Query(httptest.NewRecorder(), req)
 		if !ok {
@@ -180,43 +181,73 @@ func TestOp_MethodsRefuseWhatTheSpecDoesNotDeclare(t *testing.T) {
 	}
 }
 
-// TestOp_QueryRefusesAPairItCannotRead pins that a malformed pair is a 400
-// naming the parameter, where url.Values would drop it and widen the read.
-func TestOp_QueryRefusesAPairItCannotRead(t *testing.T) {
+// TestOp_QueryRefusesWhatItCannotRead pins that a malformed pair or an
+// undeclared name is a 400, where url.Values would drop or ignore it and widen
+// the read, and that the refusal stays small whatever the query string holds.
+func TestOp_QueryRefusesWhatItCannotRead(t *testing.T) {
 	op := NewJSONOp[NoBody, opTestBody](OpSpec{
 		Pattern: "GET /api/things", ID: "get_things", Hints: Hints{ReadOnly: HintYes, OpenWorld: HintNo},
 		Query: WindowQuery(),
 	})
+	badName := ErrorItem{Reason: ReasonInvalidParam,
+		Message: "a query parameter's name is not percent-encoded correctly or contains a semicolon; parameters are joined with &"}
+	badSince := ErrorItem{Reason: ReasonInvalidParam, Field: "since", Message: "since is not percent-encoded correctly"}
+	var unknowns []string
+	var unknownFaults []ErrorItem
+	for i := range maxQueryFaults + 5 {
+		name := fmt.Sprintf("p%02d", i)
+		unknowns = append(unknowns, name+"=1")
+		if i < maxQueryFaults {
+			unknownFaults = append(unknownFaults, ErrorItem{Reason: ReasonInvalidParam, Field: name, Message: name + " is not a parameter of this route"})
+		}
+	}
+	unknownFaults = append(unknownFaults, ErrorItem{Reason: ReasonInvalidParam,
+		Message: fmt.Sprintf("5 more query parameters are refused; a refusal lists at most %d", maxQueryFaults)})
 	cases := []struct {
+		name  string
 		query string
 		want  []ErrorItem
 	}{
-		{"since=2026-01-01&until=2026-02-01;x", []ErrorItem{{Reason: ReasonInvalidParam, Field: "until",
+		{"semicolon in a value", "since=2026-01-01&until=2026-02-01;x", []ErrorItem{{Reason: ReasonInvalidParam, Field: "until",
 			Message: "until contains a semicolon; parameters are joined with &, and a semicolon in a value is written %3B"}}},
-		{"since=%zz&until=2026-02-01", []ErrorItem{{Reason: ReasonInvalidParam, Field: "since", Message: "since is not percent-encoded correctly"}}},
-		{"%zz=1&since=%zz", []ErrorItem{
-			{Reason: ReasonInvalidParam, Message: `the query string's pair "%zz=1" has a name that is not percent-encoded, or contains a semicolon; parameters are joined with &`},
-			{Reason: ReasonInvalidParam, Field: "since", Message: "since is not percent-encoded correctly"},
-		}},
+		{"bad escape in a value", "since=%zz&until=2026-02-01", []ErrorItem{badSince}},
+		{"undeclared name", "since=2026-01-01&end=2026-02-01", []ErrorItem{{Reason: ReasonInvalidParam, Field: "end", Message: "end is not a parameter of this route"}}},
+		{"each fault once", "%zz=1&a;&since=%zz&since=%zz", []ErrorItem{badName, badSince}},
+		{"at most maxQueryFaults", strings.Join(unknowns, "&"), unknownFaults},
+		{"over the parameter limit", strings.Repeat("since=x&", maxQueryParams), []ErrorItem{{Reason: ReasonInvalidParam,
+			Message: fmt.Sprintf("the query string has more than %d parameters", maxQueryParams)}}},
 	}
 	for _, tc := range cases {
 		rec := httptest.NewRecorder()
 		if _, ok := op.Query(rec, httptest.NewRequest(http.MethodGet, "/api/things?"+tc.query, nil)); ok {
-			t.Errorf("%s: Query accepted it", tc.query)
+			t.Errorf("%s: Query accepted it", tc.name)
 			continue
 		}
 		var body errorEnvelope
 		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-			t.Fatalf("%s: decode the error body: %v", tc.query, err)
+			t.Fatalf("%s: decode the error body: %v", tc.name, err)
 		}
 		if rec.Code != http.StatusBadRequest || !slices.Equal(body.Errors, tc.want) {
-			t.Errorf("%s: %d %+v, want 400 %+v", tc.query, rec.Code, body.Errors, tc.want)
+			t.Errorf("%s: %d %+v, want 400 %+v", tc.name, rec.Code, body.Errors, tc.want)
 		}
 	}
 
 	q, ok := op.Query(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/things?since=2026-01-01&&until=a+b%2Bc", nil))
 	if !ok || q.Get("since") != "2026-01-01" || q.Get("until") != "a b+c" {
 		t.Errorf("Query of a well-formed string = (%+v, %v)", q, ok)
+	}
+}
+
+// TestStrictQuery: a route with no declared operation has no names to hold
+// a parameter to, so only a pair that does not parse is refused.
+func TestStrictQuery(t *testing.T) {
+	values, ok := StrictQuery(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/x?since=2026-01-01&other=1", nil))
+	if !ok || values.Get("since") != "2026-01-01" || values.Get("other") != "1" {
+		t.Errorf("StrictQuery of a well-formed string = (%v, %v)", values, ok)
+	}
+	rec := httptest.NewRecorder()
+	if _, ok := StrictQuery(rec, httptest.NewRequest(http.MethodGet, "/api/x?until=2026-02-01;x", nil)); ok || rec.Code != http.StatusBadRequest {
+		t.Errorf("StrictQuery of a semicolon pair: ok=%v status=%d, want a 400", ok, rec.Code)
 	}
 }
 

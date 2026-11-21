@@ -192,9 +192,9 @@ func (h *Handler) handleUsageMe(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	since, until, errMsg := httpx.ParseWindow(q, time.Now().UTC())
-	if errMsg != "" {
-		httpx.BadRequest(w, errMsg)
+	var v httpx.Validation
+	since, until := httpx.ParseWindow(&v, q, time.Now().UTC())
+	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
 
@@ -284,9 +284,9 @@ func (h *Handler) handleUsageTeam(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	since, until, errMsg := httpx.ParseWindow(q, time.Now().UTC())
-	if errMsg != "" {
-		httpx.BadRequest(w, errMsg)
+	var v httpx.Validation
+	since, until := httpx.ParseWindow(&v, q, time.Now().UTC())
+	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
 
@@ -377,9 +377,9 @@ func (h *Handler) handleUsageOrg(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	since, until, errMsg := httpx.ParseWindow(q, time.Now().UTC())
-	if errMsg != "" {
-		httpx.BadRequest(w, errMsg)
+	var v httpx.Validation
+	since, until := httpx.ParseWindow(&v, q, time.Now().UTC())
+	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
 

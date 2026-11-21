@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
@@ -1124,6 +1125,10 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 	// An explicit null reads as the empty branch, which clears it.
 	var v httpx.Validation
 	branch, state := req.BaseBranch.Read(&v, "base_branch")
+	// null is the one way to clear it: an empty value would be a second.
+	if state == httpx.PatchSet && strings.TrimSpace(branch) == "" {
+		v.Invalid("base_branch", "base_branch must name a branch, or be null to clear it")
+	}
 	// A PATCH that names no field wrote nothing, so it must not answer
 	// "updated" — the one response a client cannot tell from a real write.
 	if state == httpx.PatchAbsent {

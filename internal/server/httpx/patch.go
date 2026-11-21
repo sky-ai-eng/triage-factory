@@ -11,10 +11,9 @@ import (
 // The PATCH field vocabulary. A partial update has to distinguish three things
 // a client can say about one field — leave it alone, clear it, set it to this —
 // and a typed pointer can only express two: both `absent` and `null` decode to
-// nil. So a PATCH body keeps each field's raw bytes: as a Patch[T], which also
-// names the type the field takes (PATCH /api/repos/{id} is the reference), or
-// as a json.RawMessage read through the helpers here, as the settings PATCHes
-// do.
+// nil. So a PATCH body keeps each field's raw bytes, as a Patch[T], which also
+// names the type the field takes for the API spec, or as a json.RawMessage
+// read through the helpers here.
 //
 // The helpers all take the request's Validation, so a body with several bad
 // fields reports all of them at once instead of the first one hit.

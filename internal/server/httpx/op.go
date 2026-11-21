@@ -144,23 +144,62 @@ type opCore struct {
 func (o *opCore) Spec() OpSpec { return o.spec }
 
 // Query reads the request's query parameters, readable only by the names the
-// spec declares. A query string with a pair that does not parse is refused,
-// rather than read without that pair as URL.Query reads it: a filter
-// dropped that way widens the read. On a refusal the error is already
-// written and ok is false.
+// spec declares. A parameter the spec does not declare is refused, as an
+// unknown body field is, and so is a pair that does not parse, which
+// URL.Query would skip: a filter misspelled or dropped either way widens the
+// read. On a refusal the error is already written and ok is false.
 func (o *opCore) Query(w http.ResponseWriter, r *http.Request) (q QueryValues, ok bool) {
-	values, v := parseQueryStrict(r.URL.RawQuery)
+	values, v := parseQueryStrict(r.URL.RawQuery, o.query)
 	if v.Flush(w, http.StatusBadRequest) {
 		return QueryValues{}, false
 	}
 	return QueryValues{values: values, declared: o.query, pattern: o.spec.Pattern}, true
 }
 
+// StrictQuery reads the query string of a route with no declared operation,
+// refusing a pair that does not parse rather than skipping it as URL.Query
+// does. On a refusal the error is already written and ok is false.
+func StrictQuery(w http.ResponseWriter, r *http.Request) (url.Values, bool) {
+	values, v := parseQueryStrict(r.URL.RawQuery, nil)
+	if v.Flush(w, http.StatusBadRequest) {
+		return nil, false
+	}
+	return values, true
+}
+
+const (
+	// maxQueryParams is url.ParseQuery's own limit, so the strict reader
+	// accepts no query string the standard one refuses.
+	maxQueryParams = 10000
+	// maxQueryFaults caps the faults one refusal lists. Without it the
+	// error body grows with the query string, which a caller controls.
+	maxQueryFaults = 20
+)
+
 // parseQueryStrict parses a raw query string as url.ParseQuery does, and
-// records every pair it cannot read instead of skipping it.
-func parseQueryStrict(raw string) (url.Values, *Validation) {
-	values := url.Values{}
+// records what it cannot read instead of skipping it: a pair that does not
+// decode and, when declared is non-nil, a name it does not hold. Each name is
+// reported once.
+func parseQueryStrict(raw string, declared map[string]bool) (url.Values, *Validation) {
 	v := &Validation{}
+	if strings.Count(raw, "&")+1 > maxQueryParams {
+		v.Add(ErrorItem{Reason: ReasonInvalidParam, Message: fmt.Sprintf("the query string has more than %d parameters", maxQueryParams)})
+		return nil, v
+	}
+	values := url.Values{}
+	reported := map[string]bool{}
+	unlisted := 0
+	fault := func(key string, item ErrorItem) {
+		if reported[key] {
+			return
+		}
+		reported[key] = true
+		if len(v.items) == maxQueryFaults {
+			unlisted++
+			return
+		}
+		v.Add(item)
+	}
 	for _, pair := range strings.Split(raw, "&") {
 		if pair == "" {
 			continue
@@ -170,15 +209,24 @@ func parseQueryStrict(raw string) (url.Values, *Validation) {
 		value, valueErr := url.QueryUnescape(rawValue)
 		switch {
 		case nameErr != nil || strings.Contains(rawName, ";"):
-			v.Add(ErrorItem{Reason: ReasonInvalidParam, Message: fmt.Sprintf(
-				"the query string's pair %q has a name that is not percent-encoded, or contains a semicolon; parameters are joined with &", pair)})
+			// The name is unreadable, so there is no field to name, and one
+			// fault covers every such pair.
+			fault("", ErrorItem{Reason: ReasonInvalidParam,
+				Message: "a query parameter's name is not percent-encoded correctly or contains a semicolon; parameters are joined with &"})
+		case declared != nil && !declared[name]:
+			fault(name, ErrorItem{Reason: ReasonInvalidParam, Field: name, Message: name + " is not a parameter of this route"})
 		case strings.Contains(rawValue, ";"):
-			v.Param(name, fmt.Sprintf("%s contains a semicolon; parameters are joined with &, and a semicolon in a value is written %%3B", name))
+			fault(name, ErrorItem{Reason: ReasonInvalidParam, Field: name,
+				Message: name + " contains a semicolon; parameters are joined with &, and a semicolon in a value is written %3B"})
 		case valueErr != nil:
-			v.Param(name, fmt.Sprintf("%s is not percent-encoded correctly", name))
+			fault(name, ErrorItem{Reason: ReasonInvalidParam, Field: name, Message: name + " is not percent-encoded correctly"})
 		default:
 			values[name] = append(values[name], value)
 		}
+	}
+	if unlisted > 0 {
+		v.Add(ErrorItem{Reason: ReasonInvalidParam,
+			Message: fmt.Sprintf("%d more query parameters are refused; a refusal lists at most %d", unlisted, maxQueryFaults)})
 	}
 	return values, v
 }

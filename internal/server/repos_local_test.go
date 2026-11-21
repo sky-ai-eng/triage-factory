@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,6 +22,28 @@ import (
 // repoJSON carries ProfiledAt as a *string and each decode allocates its own,
 // so DeepEqual is what compares the values.
 func sameRepoJSON(a, b repoJSON) bool { return reflect.DeepEqual(a, b) }
+
+// TestHandleRepoUpdate_NullIsTheOnlyClear: an empty or blank base_branch is
+// refused, not read as a clear, and the stored branch is left as it was.
+func TestHandleRepoUpdate_NullIsTheOnlyClear(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	repoID := seedConfiguredRepo(t, s, "acme", "api")
+	if rec := doJSON(t, s, http.MethodPatch, "/api/repos/"+repoID, map[string]any{"base_branch": "develop"}); rec.Code != http.StatusOK {
+		t.Fatalf("set base_branch: status = %d; body=%s", rec.Code, rec.Body.String())
+	}
+	for _, blank := range []string{"", "  "} {
+		rec := doJSON(t, s, http.MethodPatch, "/api/repos/"+repoID, map[string]any{"base_branch": blank})
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), `"reason":"INVALID_FIELD"`) || !strings.Contains(rec.Body.String(), `"field":"base_branch"`) {
+			t.Errorf("base_branch %q: %d %s, want 400 INVALID_FIELD on base_branch", blank, rec.Code, rec.Body.String())
+		}
+	}
+	var got repoJSON
+	rec := doJSON(t, s, http.MethodPatch, "/api/repos/"+repoID, map[string]any{"base_branch": nil})
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); rec.Code != http.StatusOK || err != nil || got.BaseBranch != "" {
+		t.Errorf("base_branch null: %d %s, want 200 with base_branch cleared", rec.Code, rec.Body.String())
+	}
+}
 
 // TestHandleRepoUpdate_LocalMode: local mode's single user is the org admin, so
 // it writes base_branch and reads can_edit true; the PATCH answers the stored

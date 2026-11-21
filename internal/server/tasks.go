@@ -342,11 +342,11 @@ type taskListRequest struct {
 	// IDs narrows to the tasks with these ids, for a caller that already
 	// holds the ids of the tasks it shows. Validated by taskListIDs. Empty =
 	// every id.
-	IDs []string `json:"ids" doc:"Ids of the tasks to include, at most 200; empty includes every task."`
+	IDs []string `json:"ids" doc:"Ids of the tasks to include, at most 200, each a UUID in lowercase hyphenated form; empty includes every task."`
 	// EntityIDs narrows to the tasks on these entities, for a caller that
 	// holds the entities it shows and wants their work. Validated like IDs.
 	// Empty = every entity.
-	EntityIDs []string `json:"entity_ids" doc:"Ids of the entities whose tasks to include; empty includes every entity."`
+	EntityIDs []string `json:"entity_ids" doc:"Ids of the entities whose tasks to include, at most 200, each a UUID in lowercase hyphenated form; empty includes every entity."`
 	// CreatedBefore (RFC3339) is CreatedSince's other half: rows created at
 	// or before it. The pair is how a lane asks for a window rather than a
 	// ray, and either end may stand alone. It sits with the reader's own
