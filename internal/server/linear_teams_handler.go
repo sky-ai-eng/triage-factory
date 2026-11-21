@@ -52,7 +52,7 @@ type linearTeamListRequest struct {
 	// literal substring (httpx.Search). Absent matches every team the
 	// credential can see. Linear applies it upstream, and each page it serves
 	// is re-checked here (readLinearScannedPage).
-	Search string `json:"search"`
+	Search string `json:"search" doc:"Text the team's key or name must contain, matched without regard to case; absent matches every team the credential can see."`
 	httpx.PageRequest
 }
 
@@ -97,15 +97,24 @@ func readLinearScannedPage[T any](from httpx.ScanCursor, limit int, needle strin
 // and name are what a person recognizes the team by; private says it is
 // visible to its members only.
 type linearTeamJSON struct {
-	ID      string `json:"id"`
-	Key     string `json:"key"`
-	Name    string `json:"name"`
-	Private bool   `json:"private"`
+	ID      string `json:"id" doc:"Linear's id for the team, a UUID."`
+	Key     string `json:"key" doc:"The team's key, such as ENG."`
+	Name    string `json:"name" doc:"The team's name."`
+	Private bool   `json:"private" doc:"Whether the team is visible only to its members in Linear."`
 }
 
 func toLinearTeamJSON(t linear.Team) linearTeamJSON {
 	return linearTeamJSON{ID: t.ID, Key: t.Key, Name: t.Name, Private: t.Private}
 }
+
+var opLinearTeamsList = httpx.NewListOp[linearTeamListRequest, linearTeamJSON](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/linear/teams/list",
+	ID:          "list_linear_teams",
+	Summary:     "List the Linear workspace's teams",
+	Description: "Reads one page of the Linear teams the organization's Linear credential can see, live from Linear. A page may hold fewer than page_size teams and still have a next_page_token. total_count is always null, and page_size 0 is refused, because Linear reports no total.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // POST /api/orgs/{org_id}/linear/teams/list
 func (s *Server) handleLinearTeamsList(w http.ResponseWriter, r *http.Request) {
@@ -114,8 +123,8 @@ func (s *Server) handleLinearTeamsList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req linearTeamListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opLinearTeamsList.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -146,8 +155,20 @@ func (s *Server) handleLinearTeamsList(w http.ResponseWriter, r *http.Request) {
 	for _, t := range teams {
 		items = append(items, toLinearTeamJSON(t))
 	}
-	httpx.WriteScannedProxyList(w, page, items, next)
+	opLinearTeamsList.WriteScannedProxy(w, page, items, next)
 }
+
+var opLinearTeamGet = httpx.NewJSONOp[httpx.NoBody, linearTeamJSON](httpx.OpSpec{
+	Pattern:     "GET /api/orgs/{org_id}/linear/teams/{linear_team_id}",
+	ID:          "get_linear_team",
+	Summary:     "Get a Linear team",
+	Description: "Reads one Linear team live from Linear, under the organization's Linear credential.",
+	PathParams: map[string]string{
+		"org_id":         "The organization's id.",
+		"linear_team_id": "Linear's id for the team, a lowercase UUID.",
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // GET /api/orgs/{org_id}/linear/teams/{linear_team_id}
 func (s *Server) handleLinearTeamGet(w http.ResponseWriter, r *http.Request) {
@@ -172,7 +193,7 @@ func (s *Server) handleLinearTeamGet(w http.ResponseWriter, r *http.Request) {
 		writeLinearUpstream(w, orgID, "Linear team "+teamID, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, toLinearTeamJSON(team))
+	opLinearTeamGet.Write(w, toLinearTeamJSON(team))
 }
 
 // linearStateListRequest is the states list's body: a search over the state
@@ -181,7 +202,7 @@ type linearStateListRequest struct {
 	// Search is matched against the state name as a case-insensitive literal
 	// substring (httpx.Search), applied to the team's workflow in hand before
 	// the window. Absent matches every state.
-	Search string `json:"search"`
+	Search string `json:"search" doc:"Text the state's name must contain, matched without regard to case; absent matches every state."`
 	httpx.PageRequest
 }
 
@@ -199,15 +220,27 @@ type linearStateListFilterKey struct {
 // the settings editor pre-fills a team's rules from. Position is the state's
 // place on the team's board, which is the order the list serves.
 type linearStateJSON struct {
-	ID       string  `json:"id"`
-	Name     string  `json:"name"`
-	Type     string  `json:"type"`
-	Position float64 `json:"position"`
+	ID       string  `json:"id" doc:"Linear's id for the workflow state, a UUID."`
+	Name     string  `json:"name" doc:"The state's name."`
+	Type     string  `json:"type" doc:"The kind of state in Linear: triage, backlog, unstarted, started, completed, or canceled."`
+	Position float64 `json:"position" doc:"The state's position on the team's board, lower first."`
 }
 
 func toLinearStateJSON(st linear.WorkflowState) linearStateJSON {
 	return linearStateJSON{ID: st.ID, Name: st.Name, Type: st.Type, Position: st.Position}
 }
+
+var opLinearStatesList = httpx.NewListOp[linearStateListRequest, linearStateJSON](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/linear/teams/{linear_team_id}/states/list",
+	ID:          "list_linear_team_states",
+	Summary:     "List a Linear team's workflow states",
+	Description: "Reads one page of a Linear team's workflow states, live from Linear, in board order: by position and then id. total_count is always null, and page_size 0 is refused.",
+	PathParams: map[string]string{
+		"org_id":         "The organization's id.",
+		"linear_team_id": "Linear's id for the team, a lowercase UUID.",
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // POST /api/orgs/{org_id}/linear/teams/{linear_team_id}/states/list
 //
@@ -226,8 +259,8 @@ func (s *Server) handleLinearStatesList(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	var req linearStateListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opLinearStatesList.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -255,8 +288,21 @@ func (s *Server) handleLinearStatesList(w http.ResponseWriter, r *http.Request) 
 	}
 	states = slices.DeleteFunc(states, func(st linear.WorkflowState) bool { return !httpx.SearchMatches(search, st.Name) })
 	items, next := jiraWindow(states, startAt, page.Limit, toLinearStateJSON)
-	httpx.WriteProxyList(w, page, items, next)
+	opLinearStatesList.WriteProxy(w, page, items, next)
 }
+
+var opLinearStateGet = httpx.NewJSONOp[httpx.NoBody, linearStateJSON](httpx.OpSpec{
+	Pattern:     "GET /api/orgs/{org_id}/linear/teams/{linear_team_id}/states/{state_id}",
+	ID:          "get_linear_team_state",
+	Summary:     "Get a Linear team's workflow state",
+	Description: "Reads one workflow state of a Linear team live from Linear. A state that belongs to another team's workflow is not found.",
+	PathParams: map[string]string{
+		"org_id":         "The organization's id.",
+		"linear_team_id": "Linear's id for the team, a lowercase UUID.",
+		"state_id":       "Linear's id for the workflow state, a lowercase UUID.",
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // GET /api/orgs/{org_id}/linear/teams/{linear_team_id}/states/{state_id}
 //
@@ -288,7 +334,7 @@ func (s *Server) handleLinearStateGet(w http.ResponseWriter, r *http.Request) {
 		writeLinearUpstream(w, orgID, "Linear workflow state "+stateID, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, toLinearStateJSON(state))
+	opLinearStateGet.Write(w, toLinearStateJSON(state))
 }
 
 // refuseLinearCountOnly refuses page_size: 0. A proxy list's total is null by

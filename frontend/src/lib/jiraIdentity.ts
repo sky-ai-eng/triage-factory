@@ -7,10 +7,11 @@
 // themselves on board claims, so it must be retained). The end state is a bound
 // account with a stored per-user credential.
 //
-// The credential shape follows the org's deployment: a Data Center org binds a
-// personal access token (captureJiraIdentityPat); a Cloud org binds the
-// Atlassian account email + API token (captureJiraIdentityApiToken). The route
-// is the same — the server branches on the org's deployment.
+// The credential shape follows the org's deployment, and each has its own
+// route: a Data Center org binds a personal access token at /pat
+// (captureJiraIdentityPat); a Cloud org binds the Atlassian account email + API
+// token at /api-token (captureJiraIdentityApiToken). Each route refuses an org
+// on the other deployment.
 //
 // Resolves to the bound account on success; rejects with an Error carrying the
 // endpoint's user-facing `error` message (a bad credential, or a host TF
@@ -24,15 +25,17 @@ export interface JiraIdentityCaptured {
   host: string
 }
 
-// postJiraIdentity is the shared poster: it sends the credential body and maps a
-// non-2xx into an Error carrying the endpoint's user-facing `error` message.
+// postJiraIdentity is the shared poster: it sends the credential body to the
+// deployment's route and maps a non-2xx into an Error carrying the endpoint's
+// user-facing `error` message.
 async function postJiraIdentity(
   orgId: string,
+  route: 'pat' | 'api-token',
   body: Record<string, string>,
 ): Promise<JiraIdentityCaptured> {
   try {
     return await apiJSON<JiraIdentityCaptured>(
-      `/api/orgs/${encodeURIComponent(orgId)}/jira/identity/pat`,
+      `/api/orgs/${encodeURIComponent(orgId)}/jira/identity/${route}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -51,7 +54,7 @@ export async function captureJiraIdentityPat(
   orgId: string,
   pat: string,
 ): Promise<JiraIdentityCaptured> {
-  return postJiraIdentity(orgId, { pat })
+  return postJiraIdentity(orgId, 'pat', { pat })
 }
 
 // captureJiraIdentityApiToken binds a Cloud Atlassian email + API token pair.
@@ -60,5 +63,5 @@ export async function captureJiraIdentityApiToken(
   email: string,
   token: string,
 ): Promise<JiraIdentityCaptured> {
-  return postJiraIdentity(orgId, { email, token })
+  return postJiraIdentity(orgId, 'api-token', { email, token })
 }

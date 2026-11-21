@@ -132,6 +132,786 @@
         ],
         "type": "object"
       },
+      "JiraAppImportRequest": {
+        "properties": {
+          "client_id": {
+            "description": "The Atlassian OAuth app's client id.",
+            "type": "string"
+          },
+          "client_secret": {
+            "description": "The Atlassian OAuth app's client secret.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "JiraAppInfo": {
+        "properties": {
+          "client_id": {
+            "description": "The Atlassian OAuth app's client id.",
+            "type": "string"
+          },
+          "registered_at": {
+            "description": "When the app was first stored for the organization, as an RFC 3339 timestamp.",
+            "type": "string"
+          },
+          "registered_by_display_name": {
+            "description": "The display name of the person who last stored the app, empty when it cannot be read.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "client_id",
+          "registered_at",
+          "registered_by_display_name"
+        ],
+        "type": "object"
+      },
+      "JiraAppStatusResponse": {
+        "properties": {
+          "app": {
+            "description": "The organization's own Atlassian OAuth app, or null when the organization uses the deployment's app or has none.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/JiraAppInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "connect_available": {
+            "description": "Whether an Atlassian OAuth app is available to the organization, the organization's own or the deployment's, so that people can connect Jira Cloud with one click.",
+            "type": "boolean"
+          },
+          "connect_callback_url": {
+            "description": "The redirect URL to register on the Atlassian OAuth app.",
+            "type": "string"
+          },
+          "using_deployment_default": {
+            "description": "Whether the app available to the organization is the deployment's rather than its own.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "app",
+          "connect_available",
+          "using_deployment_default",
+          "connect_callback_url"
+        ],
+        "type": "object"
+      },
+      "JiraIdentityCaptureResponse": {
+        "properties": {
+          "account": {
+            "description": "The Jira account the credential belongs to, by its display name, or by its account id when it has none.",
+            "type": "string"
+          },
+          "host": {
+            "description": "The organization's Jira site the credential is stored for, as a URL.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "account",
+          "host"
+        ],
+        "type": "object"
+      },
+      "JiraIdentityCloudToken": {
+        "properties": {
+          "email": {
+            "description": "The email address of the caller's Atlassian account.",
+            "type": "string"
+          },
+          "token": {
+            "description": "An Atlassian API token created by that account.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "JiraIdentityDataCenterPAT": {
+        "properties": {
+          "pat": {
+            "description": "A Jira Data Center personal access token belonging to the caller.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "JiraIdentityStatusResponse": {
+        "properties": {
+          "account": {
+            "description": "The caller's Jira account, by its display name or else its account id, absent when connected is false.",
+            "type": "string"
+          },
+          "connect_available": {
+            "description": "Whether an Atlassian OAuth app is available to the organization, so the caller can connect Jira Cloud with one click.",
+            "type": "boolean"
+          },
+          "connected": {
+            "description": "Whether the caller has a stored Jira credential that works for the organization's Jira site and deployment.",
+            "type": "boolean"
+          },
+          "deployment": {
+            "description": "The organization's Jira deployment, cloud or data_center, which decides the credential the caller binds: an email and API token for cloud, a personal access token for data_center. Absent when the organization has no valid Jira site.",
+            "type": "string"
+          },
+          "disconnected_reason": {
+            "description": "Why a connection the caller had stopped working: refused when Jira refused the stored grant, or app_removed when no Atlassian OAuth app the organization has can renew it. Present only when connected is false, and absent when the caller never connected.",
+            "type": "string"
+          },
+          "host": {
+            "description": "The organization's Jira site as a URL, the stored value as written when it is not a valid URL, or empty when the organization has no Jira site.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "connected",
+          "host",
+          "connect_available"
+        ],
+        "type": "object"
+      },
+      "JiraIssueFieldListRequest": {
+        "properties": {
+          "page_size": {
+            "description": "How many rows to return, 50 when absent; 0 returns no rows and only total_count, and a value above the list's maximum, 200 unless the route says otherwise, is refused.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "page_token": {
+            "description": "The next_page_token of the previous page, which reads the page after it; it is refused for a request with different filters.",
+            "type": "string"
+          },
+          "search": {
+            "description": "Text the name must contain, matched without regard to case; absent matches every row.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "JiraIssueTypeJSON": {
+        "properties": {
+          "id": {
+            "description": "Jira's id for the issue type.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The issue type's name.",
+            "type": "string"
+          },
+          "subtask": {
+            "description": "Whether issues of this type are subtasks.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "subtask"
+        ],
+        "type": "object"
+      },
+      "JiraPriorityJSON": {
+        "properties": {
+          "id": {
+            "description": "Jira's id for the priority.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The priority's name.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "type": "object"
+      },
+      "JiraProjectJSON": {
+        "properties": {
+          "jira_id": {
+            "description": "Jira's id for the project, which stays the same when the project's key changes.",
+            "type": "string"
+          },
+          "key": {
+            "description": "The project's key, such as PROJ.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The project's name.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "jira_id",
+          "key",
+          "name"
+        ],
+        "type": "object"
+      },
+      "JiraProjectListRequest": {
+        "properties": {
+          "page_size": {
+            "description": "How many rows to return, 50 when absent; 0 returns no rows and only total_count, and a value above the list's maximum, 200 unless the route says otherwise, is refused.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "page_token": {
+            "description": "The next_page_token of the previous page, which reads the page after it; it is refused for a request with different filters.",
+            "type": "string"
+          },
+          "search": {
+            "description": "Text the project's key or name must contain, matched without regard to case; absent matches every project.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "JiraStatusJSON": {
+        "properties": {
+          "id": {
+            "description": "Jira's id for the status.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The status's name.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "type": "object"
+      },
+      "JiraStatusListRequest": {
+        "properties": {
+          "page_size": {
+            "description": "How many rows to return, 50 when absent; 0 returns no rows and only total_count, and a value above the list's maximum, 200 unless the route says otherwise, is refused.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "page_token": {
+            "description": "The next_page_token of the previous page, which reads the page after it; it is refused for a request with different filters.",
+            "type": "string"
+          },
+          "search": {
+            "description": "Text the status's name must contain, matched without regard to case; absent matches every status.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "LinearAccessStatus": {
+        "properties": {
+          "auth_method": {
+            "description": "What the credential is: api_key for a personal API key, or app_install for an installed Linear app; empty when connected is false.",
+            "type": "string"
+          },
+          "bound_as": {
+            "description": "The Linear user the credential acts as, or null when connected is false or it is not known.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LinearBoundAsJSON"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "connect_available": {
+            "description": "Whether a Linear OAuth app is available to the organization, so Triage Factory can be installed in the workspace.",
+            "type": "boolean"
+          },
+          "connected": {
+            "description": "Whether the organization has a Linear credential.",
+            "type": "boolean"
+          },
+          "last_error": {
+            "description": "Why the organization lost a connection it did not remove: install_revoked when the app was removed from the workspace in Linear. Absent otherwise.",
+            "type": "string"
+          },
+          "using_deployment_default": {
+            "description": "Whether the Linear OAuth app available to the organization is the deployment's rather than its own.",
+            "type": "boolean"
+          },
+          "workspace_name": {
+            "description": "The Linear workspace's name, absent when it is not known.",
+            "type": "string"
+          },
+          "workspace_url_key": {
+            "description": "The URL key of the organization's Linear workspace, as in linear.app/<key>; empty when connected is false.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "connected",
+          "auth_method",
+          "workspace_url_key",
+          "bound_as",
+          "connect_available",
+          "using_deployment_default"
+        ],
+        "type": "object"
+      },
+      "LinearAppImportRequest": {
+        "properties": {
+          "client_id": {
+            "description": "The Linear OAuth app's client id, at most 256 characters.",
+            "type": "string"
+          },
+          "client_secret": {
+            "description": "The Linear OAuth app's client secret, at most 256 characters.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "LinearAppInfo": {
+        "properties": {
+          "client_id": {
+            "description": "The Linear OAuth app's client id.",
+            "type": "string"
+          },
+          "registered_at": {
+            "description": "When the app was first stored for the organization, as an RFC 3339 timestamp.",
+            "type": "string"
+          },
+          "registered_by_display_name": {
+            "description": "The display name of the person who last stored the app, empty when it cannot be read.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "client_id",
+          "registered_at",
+          "registered_by_display_name"
+        ],
+        "type": "object"
+      },
+      "LinearAppStatusResponse": {
+        "properties": {
+          "app": {
+            "description": "The organization's own Linear OAuth app, or null when the organization uses the deployment's app or has none.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LinearAppInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "create_url": {
+            "description": "A link to Linear's app-creation page with the form filled in for this organization, absent while the deployment's app is available to the organization.",
+            "type": "string"
+          },
+          "install_available": {
+            "description": "Whether a Linear OAuth app is available to the organization, its own or the deployment's, so Triage Factory can be installed in the workspace.",
+            "type": "boolean"
+          },
+          "redirect_uris": {
+            "description": "The redirect URIs to register on the Linear OAuth app: the install callback, then the connect callback.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "using_deployment_default": {
+            "description": "Whether the app available to the organization is the deployment's rather than its own.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "app",
+          "install_available",
+          "using_deployment_default",
+          "redirect_uris"
+        ],
+        "type": "object"
+      },
+      "LinearBoundAsJSON": {
+        "properties": {
+          "display_name": {
+            "description": "That user's display name.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The full name of the Linear user the credential acts as.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "display_name"
+        ],
+        "type": "object"
+      },
+      "LinearCredentialRequest": {
+        "properties": {
+          "api_key": {
+            "description": "A personal Linear API key, which decides the Linear workspace the organization is connected to.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "LinearDisconnectResponse": {
+        "properties": {
+          "status": {
+            "description": "Always disconnected.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
+      "LinearIdentityAPIKeyRequest": {
+        "properties": {
+          "api_key": {
+            "description": "A personal Linear API key belonging to the caller, from the organization's Linear workspace.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "LinearIdentityCaptureResponse": {
+        "properties": {
+          "account": {
+            "description": "The Linear account the key belongs to, by its display name, else its name, else its id.",
+            "type": "string"
+          },
+          "workspace_url_key": {
+            "description": "The URL key of the Linear workspace the key belongs to.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "account",
+          "workspace_url_key"
+        ],
+        "type": "object"
+      },
+      "LinearIdentityStatusResponse": {
+        "properties": {
+          "account": {
+            "description": "The caller's Linear account, by its display name or else its id, absent when connected is false.",
+            "type": "string"
+          },
+          "connect_available": {
+            "description": "Whether a Linear OAuth app is available to the organization, so the caller can connect Linear with one click.",
+            "type": "boolean"
+          },
+          "connected": {
+            "description": "Whether the caller has a stored Linear credential that works for the organization's Linear workspace.",
+            "type": "boolean"
+          },
+          "disconnected_reason": {
+            "description": "Why a connection the caller had stopped working: refused when Linear refused the stored grant, or app_removed when the organization no longer has the Linear OAuth app that issued it. Present only when connected is false, and absent when the caller never connected.",
+            "type": "string"
+          },
+          "workspace_url_key": {
+            "description": "The URL key of the organization's Linear workspace, empty when the organization has not connected Linear.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "connected",
+          "workspace_url_key",
+          "connect_available"
+        ],
+        "type": "object"
+      },
+      "LinearLabelJSON": {
+        "properties": {
+          "group": {
+            "description": "The label group the label sits in, or null when it is in none.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LinearLabelRefJSON"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "id": {
+            "description": "Linear's id for the label, a UUID.",
+            "type": "string"
+          },
+          "is_group": {
+            "description": "Whether the label is a group of other labels, which an issue cannot carry.",
+            "type": "boolean"
+          },
+          "name": {
+            "description": "The label's name.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "group",
+          "is_group"
+        ],
+        "type": "object"
+      },
+      "LinearLabelListRequest": {
+        "properties": {
+          "is_group": {
+            "description": "Narrows the list to label groups when true and to the labels an issue can carry when false; absent or null does not narrow it.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "page_size": {
+            "description": "How many rows to return, 50 when absent; 0 returns no rows and only total_count, and a value above the list's maximum, 200 unless the route says otherwise, is refused.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "page_token": {
+            "description": "The next_page_token of the previous page, which reads the page after it; it is refused for a request with different filters.",
+            "type": "string"
+          },
+          "search": {
+            "description": "Text the label's name or its group's name must contain, matched without regard to case, so a group's name finds the group and every label in it; absent matches every label.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "LinearLabelRefJSON": {
+        "properties": {
+          "id": {
+            "description": "Linear's id for the label group, a UUID.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The label group's name.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "type": "object"
+      },
+      "LinearStateJSON": {
+        "properties": {
+          "id": {
+            "description": "Linear's id for the workflow state, a UUID.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The state's name.",
+            "type": "string"
+          },
+          "position": {
+            "description": "The state's position on the team's board, lower first.",
+            "type": "number"
+          },
+          "type": {
+            "description": "The kind of state in Linear: triage, backlog, unstarted, started, completed, or canceled.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "type",
+          "position"
+        ],
+        "type": "object"
+      },
+      "LinearStateListRequest": {
+        "properties": {
+          "page_size": {
+            "description": "How many rows to return, 50 when absent; 0 returns no rows and only total_count, and a value above the list's maximum, 200 unless the route says otherwise, is refused.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "page_token": {
+            "description": "The next_page_token of the previous page, which reads the page after it; it is refused for a request with different filters.",
+            "type": "string"
+          },
+          "search": {
+            "description": "Text the state's name must contain, matched without regard to case; absent matches every state.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "LinearTeamJSON": {
+        "properties": {
+          "id": {
+            "description": "Linear's id for the team, a UUID.",
+            "type": "string"
+          },
+          "key": {
+            "description": "The team's key, such as ENG.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The team's name.",
+            "type": "string"
+          },
+          "private": {
+            "description": "Whether the team is visible only to its members in Linear.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "key",
+          "name",
+          "private"
+        ],
+        "type": "object"
+      },
+      "LinearTeamListRequest": {
+        "properties": {
+          "page_size": {
+            "description": "How many rows to return, 50 when absent; 0 returns no rows and only total_count, and a value above the list's maximum, 200 unless the route says otherwise, is refused.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "page_token": {
+            "description": "The next_page_token of the previous page, which reads the page after it; it is refused for a request with different filters.",
+            "type": "string"
+          },
+          "search": {
+            "description": "Text the team's key or name must contain, matched without regard to case; absent matches every team the credential can see.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "LinearTeamVisibility": {
+        "properties": {
+          "private": {
+            "description": "The tracked teams the credential can read that are visible only to their members in Linear, which another credential may not be able to read, with their key and name as Linear gives them now.",
+            "items": {
+              "$ref": "#/components/schemas/LinearTrackedTeamJSON"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "unreadable": {
+            "description": "The tracked teams the credential cannot read, whose issues are not refreshed and in which no new issues are found, with their key and name as recorded when the team was tracked.",
+            "items": {
+              "$ref": "#/components/schemas/LinearTrackedTeamJSON"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "private",
+          "unreadable"
+        ],
+        "type": "object"
+      },
+      "LinearTrackedTeamJSON": {
+        "properties": {
+          "id": {
+            "description": "Linear's id for the team, a UUID.",
+            "type": "string"
+          },
+          "key": {
+            "description": "The team's key.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The team's name.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "key",
+          "name"
+        ],
+        "type": "object"
+      },
+      "LinearUserJSON": {
+        "properties": {
+          "active": {
+            "description": "Whether the user is active; a deactivated user is returned only by the single-user read.",
+            "type": "boolean"
+          },
+          "app": {
+            "description": "Whether the user is an integration's app user rather than a person.",
+            "type": "boolean"
+          },
+          "display_name": {
+            "description": "The user's display name, which is unique in the workspace.",
+            "type": "string"
+          },
+          "id": {
+            "description": "Linear's id for the user, a UUID.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The user's full name.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "display_name",
+          "active",
+          "app"
+        ],
+        "type": "object"
+      },
+      "LinearUserListRequest": {
+        "properties": {
+          "page_size": {
+            "description": "How many rows to return, 50 when absent; 0 returns no rows and only total_count, and a value above the list's maximum, 200 unless the route says otherwise, is refused.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "page_token": {
+            "description": "The next_page_token of the previous page, which reads the page after it; it is refused for a request with different filters.",
+            "type": "string"
+          },
+          "search": {
+            "description": "Text the user's name, display name, or email must contain, matched without regard to case; absent matches every active user.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "MemoryAttemptJSON": {
         "properties": {
           "error_kind": {
@@ -1318,6 +2098,1930 @@
         "summary": "Get your LLM spend",
         "x-hints": {
           "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/jira/app": {
+      "delete": {
+        "description": "Removes the organization's own Atlassian OAuth app and its client secret, and returns the app status, which then names the deployment's app when there is one. Removing an app the organization does not have succeeds and changes nothing.",
+        "operationId": "delete_jira_app",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JiraAppStatusResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Remove the organization's Atlassian OAuth app",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      },
+      "get": {
+        "description": "Returns which Atlassian OAuth app the organization's one-click Jira Cloud connection runs against, the organization's own or the deployment's, and the redirect URL to register on it. The client secret is never returned.",
+        "operationId": "get_jira_app",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JiraAppStatusResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get the organization's Atlassian OAuth app",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      },
+      "post": {
+        "description": "Stores an Atlassian OAuth app's client id and secret as the organization's own app, replacing any it had, and returns the app status. The credentials are stored without being checked against Atlassian.",
+        "operationId": "create_jira_app",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JiraAppImportRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JiraAppStatusResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Store the organization's Atlassian OAuth app",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/orgs/{org_id}/jira/identity": {
+      "get": {
+        "description": "Reports whether the caller has a working Jira credential stored for the organization's Jira site, which account it belongs to, and which credential the organization's deployment takes.",
+        "operationId": "get_jira_identity",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JiraIdentityStatusResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get your Jira connection",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/jira/identity/api-token": {
+      "post": {
+        "description": "Checks the caller's Atlassian account email and API token against the organization's Jira Cloud site, stores them as the caller's Jira credential in place of any they had, and returns the account they belong to. An organization on Jira Data Center binds a personal access token through POST /api/orgs/{org_id}/jira/identity/pat instead.",
+        "operationId": "create_jira_identity_api_token",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JiraIdentityCloudToken"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JiraIdentityCaptureResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Store your Jira Cloud email and API token",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/orgs/{org_id}/jira/identity/pat": {
+      "post": {
+        "description": "Checks the caller's personal access token against the organization's Jira Data Center site, stores it as the caller's Jira credential in place of any they had, and returns the account it belongs to. An organization on Jira Cloud binds an email and API token through POST /api/orgs/{org_id}/jira/identity/api-token instead.",
+        "operationId": "create_jira_identity_pat",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JiraIdentityDataCenterPAT"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JiraIdentityCaptureResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Store your Jira Data Center personal access token",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/orgs/{org_id}/jira/priorities/list": {
+      "post": {
+        "description": "Reads one page of the priorities of the organization's Jira instance, live from Jira, in Jira's order from highest to lowest. total_count is always null, and page_size 0 is refused.",
+        "operationId": "list_jira_priorities",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JiraIssueFieldListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "items": {
+                      "description": "The rows of this page, as an empty array when it has none.",
+                      "items": {
+                        "$ref": "#/components/schemas/JiraPriorityJSON"
+                      },
+                      "type": "array"
+                    },
+                    "next_page_token": {
+                      "description": "The page_token that reads the next page, absent on the last page.",
+                      "type": "string"
+                    },
+                    "total_count": {
+                      "description": "How many rows match the request's filters across every page, or null for a list whose upstream cannot count them.",
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "total_count"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List the Jira instance's priorities",
+        "x-hints": {
+          "openWorldHint": true,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/jira/priorities/{priority_id}": {
+      "get": {
+        "description": "Reads one priority of the organization's Jira instance, live from Jira.",
+        "operationId": "get_jira_priority",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Jira's id for the priority, a decimal number.",
+            "in": "path",
+            "name": "priority_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JiraPriorityJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get a Jira priority",
+        "x-hints": {
+          "openWorldHint": true,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/jira/projects/list": {
+      "post": {
+        "description": "Reads one page of the Jira projects the organization's Jira credential can see, live from Jira. total_count is always null, and page_size 0 is refused, because Jira reports no total.",
+        "operationId": "list_jira_projects",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JiraProjectListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "items": {
+                      "description": "The rows of this page, as an empty array when it has none.",
+                      "items": {
+                        "$ref": "#/components/schemas/JiraProjectJSON"
+                      },
+                      "type": "array"
+                    },
+                    "next_page_token": {
+                      "description": "The page_token that reads the next page, absent on the last page.",
+                      "type": "string"
+                    },
+                    "total_count": {
+                      "description": "How many rows match the request's filters across every page, or null for a list whose upstream cannot count them.",
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "total_count"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List the organization's Jira projects",
+        "x-hints": {
+          "openWorldHint": true,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/jira/projects/{jira_id}": {
+      "get": {
+        "description": "Reads one Jira project live from Jira, under the organization's Jira credential.",
+        "operationId": "get_jira_project",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Jira's id for the project, a decimal number; a project key is not accepted.",
+            "in": "path",
+            "name": "jira_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JiraProjectJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get a Jira project",
+        "x-hints": {
+          "openWorldHint": true,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/jira/projects/{jira_id}/issue-types/list": {
+      "post": {
+        "description": "Reads one page of the issue types of a Jira project, live from Jira, ordered by name and then id. total_count is always null, and page_size 0 is refused.",
+        "operationId": "list_jira_project_issue_types",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Jira's id for the project, a decimal number; a project key is not accepted.",
+            "in": "path",
+            "name": "jira_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JiraIssueFieldListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "items": {
+                      "description": "The rows of this page, as an empty array when it has none.",
+                      "items": {
+                        "$ref": "#/components/schemas/JiraIssueTypeJSON"
+                      },
+                      "type": "array"
+                    },
+                    "next_page_token": {
+                      "description": "The page_token that reads the next page, absent on the last page.",
+                      "type": "string"
+                    },
+                    "total_count": {
+                      "description": "How many rows match the request's filters across every page, or null for a list whose upstream cannot count them.",
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "total_count"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List a Jira project's issue types",
+        "x-hints": {
+          "openWorldHint": true,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/jira/projects/{jira_id}/issue-types/{issue_type_id}": {
+      "get": {
+        "description": "Reads one issue type of a Jira project live from Jira. An issue type that exists in Jira but is not one of this project's is not found.",
+        "operationId": "get_jira_project_issue_type",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Jira's id for the project, a decimal number; a project key is not accepted.",
+            "in": "path",
+            "name": "jira_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Jira's id for the issue type, a decimal number.",
+            "in": "path",
+            "name": "issue_type_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JiraIssueTypeJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get a Jira project's issue type",
+        "x-hints": {
+          "openWorldHint": true,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/jira/projects/{jira_id}/statuses/list": {
+      "post": {
+        "description": "Reads one page of the statuses the project's workflows use, live from Jira, ordered by name and then id. total_count is always null, and page_size 0 is refused.",
+        "operationId": "list_jira_project_statuses",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Jira's id for the project, a decimal number; a project key is not accepted.",
+            "in": "path",
+            "name": "jira_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JiraStatusListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "items": {
+                      "description": "The rows of this page, as an empty array when it has none.",
+                      "items": {
+                        "$ref": "#/components/schemas/JiraStatusJSON"
+                      },
+                      "type": "array"
+                    },
+                    "next_page_token": {
+                      "description": "The page_token that reads the next page, absent on the last page.",
+                      "type": "string"
+                    },
+                    "total_count": {
+                      "description": "How many rows match the request's filters across every page, or null for a list whose upstream cannot count them.",
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "total_count"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List a Jira project's workflow statuses",
+        "x-hints": {
+          "openWorldHint": true,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/jira/projects/{jira_id}/statuses/{status_id}": {
+      "get": {
+        "description": "Reads one status of the project's workflows live from Jira. A status that exists in Jira but is not in this project's workflows is not found.",
+        "operationId": "get_jira_project_status",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Jira's id for the project, a decimal number; a project key is not accepted.",
+            "in": "path",
+            "name": "jira_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Jira's id for the status, a decimal number.",
+            "in": "path",
+            "name": "status_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JiraStatusJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get a Jira project's workflow status",
+        "x-hints": {
+          "openWorldHint": true,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/linear/access": {
+      "get": {
+        "description": "Reports whether the organization has a Linear credential, what kind it is, the workspace and the Linear user it belongs to, and whether a Linear OAuth app is available to install. No credential is returned.",
+        "operationId": "get_linear_access",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinearAccessStatus"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get the organization's Linear connection",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/linear/access/credential": {
+      "delete": {
+        "description": "Removes the organization's Linear credential and its workspace, whether an API key or an installed app; for an installed app it also revokes the app's access in Linear. People's own Linear credentials are kept. Disconnecting an organization with no credential succeeds and changes nothing.",
+        "operationId": "delete_linear_access_credential",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinearDisconnectResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Disconnect the organization's Linear",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      },
+      "put": {
+        "description": "Checks a personal Linear API key against Linear, stores it as the organization's Linear credential in place of any API key it had, connects the organization to the key's workspace, and returns the connection status. A key cannot replace an installed Linear app, which is disconnected first.",
+        "operationId": "replace_linear_access_credential",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LinearCredentialRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinearAccessStatus"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Set the organization's Linear API key",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/orgs/{org_id}/linear/access/team-visibility": {
+      "get": {
+        "description": "Reads, live from Linear, which of the Linear teams the organization's teams track its Linear credential can read, and returns the readable ones that are private and the ones it cannot read. Both lists are complete and unpaginated, bounded by the tracked teams.",
+        "operationId": "get_linear_team_visibility",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinearTeamVisibility"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get which tracked Linear teams the credential reads",
+        "x-hints": {
+          "openWorldHint": true,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/linear/app": {
+      "delete": {
+        "description": "Removes the organization's own Linear OAuth app and its client secret, and returns the app status. It is refused while Triage Factory is installed in Linear with that app, and removing an app the organization does not have succeeds and changes nothing.",
+        "operationId": "delete_linear_app",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinearAppStatusResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Remove the organization's Linear OAuth app",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      },
+      "get": {
+        "description": "Returns which Linear OAuth app installing Triage Factory in the organization's Linear workspace runs against, the organization's own or the deployment's, and the redirect URIs to register on it. The client secret is never returned.",
+        "operationId": "get_linear_app",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinearAppStatusResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get the organization's Linear OAuth app",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      },
+      "post": {
+        "description": "Stores a Linear OAuth app's client id and secret as the organization's own app, replacing any it had, and returns the app status. The credentials are stored without being checked against Linear, and an app with another client id is refused while Triage Factory is installed in Linear with the current one.",
+        "operationId": "create_linear_app",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LinearAppImportRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinearAppStatusResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Store the organization's Linear OAuth app",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/orgs/{org_id}/linear/identity": {
+      "delete": {
+        "description": "Removes the caller's own Linear credential for the organization's workspace, and revokes it in Linear when it came from one-click Connect. Disconnecting with no credential stored succeeds and changes nothing.",
+        "operationId": "delete_linear_identity",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinearDisconnectResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Disconnect your Linear account",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      },
+      "get": {
+        "description": "Reports whether the caller has a working Linear credential stored for the organization's Linear workspace, and which account it belongs to.",
+        "operationId": "get_linear_identity",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinearIdentityStatusResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get your Linear connection",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/linear/identity/api-key": {
+      "post": {
+        "description": "Checks the caller's personal Linear API key against Linear, stores it as the caller's Linear credential in place of any they had, and returns the account it belongs to. A key from another workspace than the organization's, or one that acts as an app user, is refused.",
+        "operationId": "create_linear_identity_api_key",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LinearIdentityAPIKeyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinearIdentityCaptureResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Store your Linear API key",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/orgs/{org_id}/linear/teams/list": {
+      "post": {
+        "description": "Reads one page of the Linear teams the organization's Linear credential can see, live from Linear. A page may hold fewer than page_size teams and still have a next_page_token. total_count is always null, and page_size 0 is refused, because Linear reports no total.",
+        "operationId": "list_linear_teams",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LinearTeamListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "items": {
+                      "description": "The rows of this page, as an empty array when it has none.",
+                      "items": {
+                        "$ref": "#/components/schemas/LinearTeamJSON"
+                      },
+                      "type": "array"
+                    },
+                    "next_page_token": {
+                      "description": "The page_token that reads the next page, absent on the last page.",
+                      "type": "string"
+                    },
+                    "total_count": {
+                      "description": "How many rows match the request's filters across every page, or null for a list whose upstream cannot count them.",
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "total_count"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List the Linear workspace's teams",
+        "x-hints": {
+          "openWorldHint": true,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/linear/teams/{linear_team_id}": {
+      "get": {
+        "description": "Reads one Linear team live from Linear, under the organization's Linear credential.",
+        "operationId": "get_linear_team",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Linear's id for the team, a lowercase UUID.",
+            "in": "path",
+            "name": "linear_team_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinearTeamJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get a Linear team",
+        "x-hints": {
+          "openWorldHint": true,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/linear/teams/{linear_team_id}/labels/list": {
+      "post": {
+        "description": "Reads one page of the labels an issue in the Linear team can carry, the team's own and the workspace's, live from Linear, ordered by name and then id. total_count is always null, and page_size 0 is refused.",
+        "operationId": "list_linear_team_labels",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Linear's id for the team, a lowercase UUID.",
+            "in": "path",
+            "name": "linear_team_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LinearLabelListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "items": {
+                      "description": "The rows of this page, as an empty array when it has none.",
+                      "items": {
+                        "$ref": "#/components/schemas/LinearLabelJSON"
+                      },
+                      "type": "array"
+                    },
+                    "next_page_token": {
+                      "description": "The page_token that reads the next page, absent on the last page.",
+                      "type": "string"
+                    },
+                    "total_count": {
+                      "description": "How many rows match the request's filters across every page, or null for a list whose upstream cannot count them.",
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "total_count"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List the labels of a Linear team's issues",
+        "x-hints": {
+          "openWorldHint": true,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/linear/teams/{linear_team_id}/labels/{label_id}": {
+      "get": {
+        "description": "Reads one label an issue in the Linear team can carry, live from Linear. A label that belongs to another team is not found.",
+        "operationId": "get_linear_team_label",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Linear's id for the team, a lowercase UUID.",
+            "in": "path",
+            "name": "linear_team_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Linear's id for the label, a lowercase UUID.",
+            "in": "path",
+            "name": "label_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinearLabelJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get a label of a Linear team's issues",
+        "x-hints": {
+          "openWorldHint": true,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/linear/teams/{linear_team_id}/states/list": {
+      "post": {
+        "description": "Reads one page of a Linear team's workflow states, live from Linear, in board order: by position and then id. total_count is always null, and page_size 0 is refused.",
+        "operationId": "list_linear_team_states",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Linear's id for the team, a lowercase UUID.",
+            "in": "path",
+            "name": "linear_team_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LinearStateListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "items": {
+                      "description": "The rows of this page, as an empty array when it has none.",
+                      "items": {
+                        "$ref": "#/components/schemas/LinearStateJSON"
+                      },
+                      "type": "array"
+                    },
+                    "next_page_token": {
+                      "description": "The page_token that reads the next page, absent on the last page.",
+                      "type": "string"
+                    },
+                    "total_count": {
+                      "description": "How many rows match the request's filters across every page, or null for a list whose upstream cannot count them.",
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "total_count"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List a Linear team's workflow states",
+        "x-hints": {
+          "openWorldHint": true,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/linear/teams/{linear_team_id}/states/{state_id}": {
+      "get": {
+        "description": "Reads one workflow state of a Linear team live from Linear. A state that belongs to another team's workflow is not found.",
+        "operationId": "get_linear_team_state",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Linear's id for the team, a lowercase UUID.",
+            "in": "path",
+            "name": "linear_team_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Linear's id for the workflow state, a lowercase UUID.",
+            "in": "path",
+            "name": "state_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinearStateJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get a Linear team's workflow state",
+        "x-hints": {
+          "openWorldHint": true,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/linear/users/list": {
+      "post": {
+        "description": "Reads one page of the active users of the organization's Linear workspace, live from Linear. Emails are matched by search but never returned. A page may hold fewer than page_size users and still have a next_page_token; total_count is always null, and page_size 0 is refused.",
+        "operationId": "list_linear_users",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LinearUserListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "items": {
+                      "description": "The rows of this page, as an empty array when it has none.",
+                      "items": {
+                        "$ref": "#/components/schemas/LinearUserJSON"
+                      },
+                      "type": "array"
+                    },
+                    "next_page_token": {
+                      "description": "The page_token that reads the next page, absent on the last page.",
+                      "type": "string"
+                    },
+                    "total_count": {
+                      "description": "How many rows match the request's filters across every page, or null for a list whose upstream cannot count them.",
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "total_count"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List the Linear workspace's users",
+        "x-hints": {
+          "openWorldHint": true,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/linear/users/{linear_user_id}": {
+      "get": {
+        "description": "Reads one user of the organization's Linear workspace live from Linear, including a deactivated one.",
+        "operationId": "get_linear_user",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Linear's id for the user, a lowercase UUID.",
+            "in": "path",
+            "name": "linear_user_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinearUserJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get a Linear user",
+        "x-hints": {
+          "openWorldHint": true,
           "readOnlyHint": true
         }
       }

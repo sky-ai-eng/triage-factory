@@ -242,7 +242,7 @@ func TestJiraIdentityStatus_RefusedMarker(t *testing.T) {
 		t.Fatalf("status over a refused marker = %+v, want not connected, reason %q", got, jiraDisconnectedRefused)
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/jira/identity/pat",
+	rec := doJSON(t, s, http.MethodPost, jiraIdentityAPITokenRoute,
 		map[string]any{"email": "me@acme.com", "token": "cloud-tok"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("bind over the marker: %d: %s", rec.Code, rec.Body.String())

@@ -490,9 +490,9 @@ func (se *settingsHandler) handleJiraConnect(w http.ResponseWriter, r *http.Requ
 	//
 	// This is org-level Jira ACCESS (PAT_1) only — it deliberately does NOT
 	// write the caller's per-user Jira identity. That is captured solely by
-	// the dedicated bind surface (POST .../jira/identity/pat), so org access
-	// and user identity stay independent even when the same token connects
-	// the org.
+	// the dedicated bind routes (POST .../jira/identity/api-token and
+	// .../jira/identity/pat), so org access and user identity stay
+	// independent even when the same token connects the org.
 	if err := se.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		// A rotation stays on the site its credential was issued for: a Jira
 		// credential works only on its own site, and the org's site is the one

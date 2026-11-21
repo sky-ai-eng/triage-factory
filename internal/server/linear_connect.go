@@ -91,12 +91,21 @@ const (
 // linearDisconnectedAppRemoved. It is absent when the user never connected or
 // the cause is not one of those.
 type linearIdentityStatusResponse struct {
-	Connected          bool   `json:"connected"`
-	Account            string `json:"account,omitempty"`
-	WorkspaceURLKey    string `json:"workspace_url_key"`
-	ConnectAvailable   bool   `json:"connect_available"`
-	DisconnectedReason string `json:"disconnected_reason,omitempty"`
+	Connected          bool   `json:"connected" doc:"Whether the caller has a stored Linear credential that works for the organization's Linear workspace."`
+	Account            string `json:"account,omitempty" doc:"The caller's Linear account, by its display name or else its id, absent when connected is false."`
+	WorkspaceURLKey    string `json:"workspace_url_key" doc:"The URL key of the organization's Linear workspace, empty when the organization has not connected Linear."`
+	ConnectAvailable   bool   `json:"connect_available" doc:"Whether a Linear OAuth app is available to the organization, so the caller can connect Linear with one click."`
+	DisconnectedReason string `json:"disconnected_reason,omitempty" doc:"Why a connection the caller had stopped working: refused when Linear refused the stored grant, or app_removed when the organization no longer has the Linear OAuth app that issued it. Present only when connected is false, and absent when the caller never connected."`
 }
+
+var opLinearIdentityStatus = httpx.NewJSONOp[httpx.NoBody, linearIdentityStatusResponse](httpx.OpSpec{
+	Pattern:     "GET /api/orgs/{org_id}/linear/identity",
+	ID:          "get_linear_identity",
+	Summary:     "Get your Linear connection",
+	Description: "Reports whether the caller has a working Linear credential stored for the organization's Linear workspace, and which account it belongs to.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // The disconnected_reason values.
 const (
@@ -112,15 +121,33 @@ const (
 
 // linearIdentityAPIKeyRequest is the key-paste body.
 type linearIdentityAPIKeyRequest struct {
-	APIKey string `json:"api_key"`
+	APIKey string `json:"api_key" doc:"A personal Linear API key belonging to the caller, from the organization's Linear workspace."`
 }
 
 // linearIdentityCaptureResponse is a successful paste: the bound account and
 // the workspace it belongs to.
 type linearIdentityCaptureResponse struct {
-	Account         string `json:"account"`
-	WorkspaceURLKey string `json:"workspace_url_key"`
+	Account         string `json:"account" doc:"The Linear account the key belongs to, by its display name, else its name, else its id."`
+	WorkspaceURLKey string `json:"workspace_url_key" doc:"The URL key of the Linear workspace the key belongs to."`
 }
+
+var opLinearIdentityAPIKey = httpx.NewJSONOp[linearIdentityAPIKeyRequest, linearIdentityCaptureResponse](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/linear/identity/api-key",
+	ID:          "create_linear_identity_api_key",
+	Summary:     "Store your Linear API key",
+	Description: "Checks the caller's personal Linear API key against Linear, stores it as the caller's Linear credential in place of any they had, and returns the account it belongs to. A key from another workspace than the organization's, or one that acts as an app user, is refused.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
+
+var opLinearIdentityDelete = httpx.NewJSONOp[httpx.NoBody, linearDisconnectResponse](httpx.OpSpec{
+	Pattern:     "DELETE /api/orgs/{org_id}/linear/identity",
+	ID:          "delete_linear_identity",
+	Summary:     "Disconnect your Linear account",
+	Description: "Removes the caller's own Linear credential for the organization's workspace, and revokes it in Linear when it came from one-click Connect. Disconnecting with no credential stored succeeds and changes nothing.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // linearAccountName is the label a Linear user is shown by: their display
 // name, else their name, else their id.
@@ -177,7 +204,7 @@ func (s *Server) handleLinearIdentityStatus(w http.ResponseWriter, r *http.Reque
 	if workspaceID == "" {
 		// No Linear in this org, so nothing to gate. urlKey is cleared with
 		// the id, so the two cannot disagree here.
-		writeJSON(w, http.StatusOK, linearIdentityStatusResponse{ConnectAvailable: s.resolveLinearAppSource(ctx, orgID) != linear.SourceNone})
+		opLinearIdentityStatus.Write(w, linearIdentityStatusResponse{ConnectAvailable: s.resolveLinearAppSource(ctx, orgID) != linear.SourceNone})
 		return
 	}
 
@@ -220,7 +247,7 @@ func (s *Server) handleLinearIdentityStatus(w http.ResponseWriter, r *http.Reque
 	if resp.Connected {
 		resp.Account = account
 	}
-	writeJSON(w, http.StatusOK, resp)
+	opLinearIdentityStatus.Write(w, resp)
 }
 
 // handleLinearIdentityAPIKey binds the caller's Linear access from a personal
@@ -236,8 +263,8 @@ func (s *Server) handleLinearIdentityAPIKey(w http.ResponseWriter, r *http.Reque
 	}
 	ctx := r.Context()
 
-	var req linearIdentityAPIKeyRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opLinearIdentityAPIKey.Decode(w, r)
+	if !ok {
 		return
 	}
 	key := strings.TrimSpace(req.APIKey)
@@ -291,7 +318,7 @@ func (s *Server) handleLinearIdentityAPIKey(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	linearConnectLog.Info("bound user, api key stored", "org", orgID, "user", userID, "linear_user", viewer.ID, "workspace", org.URLKey)
-	writeJSON(w, http.StatusOK, linearIdentityCaptureResponse{
+	opLinearIdentityAPIKey.Write(w, linearIdentityCaptureResponse{
 		Account:         linearAccountName(viewer.DisplayName, viewer.Name, viewer.ID),
 		WorkspaceURLKey: urlKey,
 	})
@@ -327,7 +354,7 @@ func (s *Server) handleLinearIdentityDelete(w http.ResponseWriter, r *http.Reque
 		s.revokeLinearUserGrant(ctx, orgID, userID, raw)
 		linearConnectLog.Info("unbound user", "org", orgID, "user", userID, "workspace", urlKey)
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "disconnected"})
+	opLinearIdentityDelete.Write(w, linearDisconnectResponse{Status: "disconnected"})
 }
 
 // handleLinearConnectStart sends the caller to Linear's consent page for the

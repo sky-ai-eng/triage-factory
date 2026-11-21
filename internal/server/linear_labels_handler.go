@@ -32,10 +32,10 @@ type linearLabelListRequest struct {
 	// sits in, as a case-insensitive literal substring (httpx.Search), so a
 	// group's name finds the group and every label in it. Absent matches every
 	// label.
-	Search string `json:"search"`
+	Search string `json:"search" doc:"Text the label's name or its group's name must contain, matched without regard to case, so a group's name finds the group and every label in it; absent matches every label."`
 	// IsGroup narrows the list to the groups (true) or to the labels an issue
 	// can carry (false). Absent is no narrowing.
-	IsGroup *bool `json:"is_group"`
+	IsGroup *bool `json:"is_group" doc:"Narrows the list to label groups when true and to the labels an issue can carry when false; absent or null does not narrow it."`
 	httpx.PageRequest
 }
 
@@ -53,17 +53,42 @@ type linearLabelListFilterKey struct {
 // is the label group it sits in, null for none; is_group says it is a group
 // itself, which an issue cannot carry and label_group_id_in names.
 type linearLabelJSON struct {
-	ID      string              `json:"id"`
-	Name    string              `json:"name"`
-	Group   *linearLabelRefJSON `json:"group"`
-	IsGroup bool                `json:"is_group"`
+	ID      string              `json:"id" doc:"Linear's id for the label, a UUID."`
+	Name    string              `json:"name" doc:"The label's name."`
+	Group   *linearLabelRefJSON `json:"group" doc:"The label group the label sits in, or null when it is in none."`
+	IsGroup bool                `json:"is_group" doc:"Whether the label is a group of other labels, which an issue cannot carry."`
 }
 
 // linearLabelRefJSON names a label group by its id and name.
 type linearLabelRefJSON struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID   string `json:"id" doc:"Linear's id for the label group, a UUID."`
+	Name string `json:"name" doc:"The label group's name."`
 }
+
+var opLinearLabelsList = httpx.NewListOp[linearLabelListRequest, linearLabelJSON](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/linear/teams/{linear_team_id}/labels/list",
+	ID:          "list_linear_team_labels",
+	Summary:     "List the labels of a Linear team's issues",
+	Description: "Reads one page of the labels an issue in the Linear team can carry, the team's own and the workspace's, live from Linear, ordered by name and then id. total_count is always null, and page_size 0 is refused.",
+	PathParams: map[string]string{
+		"org_id":         "The organization's id.",
+		"linear_team_id": "Linear's id for the team, a lowercase UUID.",
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
+
+var opLinearLabelGet = httpx.NewJSONOp[httpx.NoBody, linearLabelJSON](httpx.OpSpec{
+	Pattern:     "GET /api/orgs/{org_id}/linear/teams/{linear_team_id}/labels/{label_id}",
+	ID:          "get_linear_team_label",
+	Summary:     "Get a label of a Linear team's issues",
+	Description: "Reads one label an issue in the Linear team can carry, live from Linear. A label that belongs to another team is not found.",
+	PathParams: map[string]string{
+		"org_id":         "The organization's id.",
+		"linear_team_id": "Linear's id for the team, a lowercase UUID.",
+		"label_id":       "Linear's id for the label, a lowercase UUID.",
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // POST /api/orgs/{org_id}/linear/teams/{linear_team_id}/labels/list
 func (s *Server) handleLinearLabelsList(w http.ResponseWriter, r *http.Request) {
@@ -75,8 +100,8 @@ func (s *Server) handleLinearLabelsList(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	var req linearLabelListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opLinearLabelsList.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -103,7 +128,7 @@ func (s *Server) handleLinearLabelsList(w http.ResponseWriter, r *http.Request) 
 	items, next := jiraWindow(labels, startAt, page.Limit, func(l linear.Label) linearLabelJSON {
 		return toLinearLabelJSON(l, groups)
 	})
-	httpx.WriteProxyList(w, page, items, next)
+	opLinearLabelsList.WriteProxy(w, page, items, next)
 }
 
 // GET /api/orgs/{org_id}/linear/teams/{linear_team_id}/labels/{label_id}
@@ -132,7 +157,7 @@ func (s *Server) handleLinearLabelGet(w http.ResponseWriter, r *http.Request) {
 		httpx.NotFound(w, "linear label")
 		return
 	}
-	writeJSON(w, http.StatusOK, toLinearLabelJSON(labels[i], linearLabelGroupIDs(labels)))
+	opLinearLabelGet.Write(w, toLinearLabelJSON(labels[i], linearLabelGroupIDs(labels)))
 }
 
 // readLinearTeamLabels reads every label an issue in teamID can carry, sorted

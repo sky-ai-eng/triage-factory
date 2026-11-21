@@ -114,10 +114,17 @@ func seedLocalOrgJiraAuthMethod(t *testing.T, s *Server, method string) {
 	}
 }
 
-// TestJiraIdentityPAT_Cloud_StoresEnvelopeAndBindsIdentity: on a cloud_api_token
+// jiraIdentityAPITokenRoute and jiraIdentityPATRoute are the local org's two
+// paste routes: Cloud's email + API token, and Data Center's PAT.
+var (
+	jiraIdentityAPITokenRoute = "/api/orgs/" + runmode.LocalDefaultOrgID + "/jira/identity/api-token"
+	jiraIdentityPATRoute      = "/api/orgs/" + runmode.LocalDefaultOrgID + "/jira/identity/pat"
+)
+
+// TestJiraIdentityAPIToken_StoresEnvelopeAndBindsIdentity: on a cloud_api_token
 // org the email and API token are validated with Basic auth against REST v3
 // /myself, stored as a cloud_api_token envelope, and bind the identity it names.
-func TestJiraIdentityPAT_Cloud_StoresEnvelopeAndBindsIdentity(t *testing.T) {
+func TestJiraIdentityAPIToken_StoresEnvelopeAndBindsIdentity(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
 	s := newTestServer(t)
@@ -128,8 +135,7 @@ func TestJiraIdentityPAT_Cloud_StoresEnvelopeAndBindsIdentity(t *testing.T) {
 	seedLocalOrgJiraHost(t, s, jiraStub.URL)
 	seedLocalOrgJiraAuthMethod(t, s, "cloud_api_token")
 
-	rec := doJSON(t, s, "POST",
-		"/api/orgs/"+runmode.LocalDefaultOrgID+"/jira/identity/pat",
+	rec := doJSON(t, s, "POST", jiraIdentityAPITokenRoute,
 		map[string]any{"email": "me@acme.com", "token": "cloud-tok"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s, want 200", rec.Code, rec.Body.String())
@@ -168,16 +174,21 @@ func TestJiraIdentityPAT_Cloud_StoresEnvelopeAndBindsIdentity(t *testing.T) {
 	}
 }
 
-// TestJiraIdentityPAT_Cloud_MissingHalf_Returns400 pins that a Cloud org bind
+// TestJiraIdentityAPIToken_MissingHalf_Returns400 pins that a Cloud org bind
 // missing EITHER half of the email + token pair is rejected before any host
-// round-trip (both halves are required, symmetrically).
-func TestJiraIdentityPAT_Cloud_MissingHalf_Returns400(t *testing.T) {
-	cases := map[string]map[string]any{
-		"no token": {"email": "me@acme.com"},
-		"no email": {"token": "cloud-tok"},
-		"empty":    {},
+// round-trip (both halves are required, symmetrically), naming the half that
+// is missing, or email first when both are.
+func TestJiraIdentityAPIToken_MissingHalf_Returns400(t *testing.T) {
+	cases := map[string]struct {
+		body  map[string]any
+		field string
+	}{
+		"no token":    {map[string]any{"email": "me@acme.com"}, "token"},
+		"blank token": {map[string]any{"email": "me@acme.com", "token": "  "}, "token"},
+		"no email":    {map[string]any{"token": "cloud-tok"}, "email"},
+		"empty":       {map[string]any{}, "email"},
 	}
-	for name, body := range cases {
+	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			runmode.SetForTest(t, runmode.ModeLocal)
 			keyring.MockInit()
@@ -185,10 +196,46 @@ func TestJiraIdentityPAT_Cloud_MissingHalf_Returns400(t *testing.T) {
 			seedLocalOrgJiraHost(t, s, "https://acme.atlassian.net")
 			seedLocalOrgJiraAuthMethod(t, s, "cloud_api_token")
 
-			rec := doJSON(t, s, "POST",
-				"/api/orgs/"+runmode.LocalDefaultOrgID+"/jira/identity/pat", body)
+			rec := doJSON(t, s, "POST", jiraIdentityAPITokenRoute, tc.body)
 			if rec.Code != http.StatusBadRequest {
 				t.Fatalf("status=%d body=%s, want 400", rec.Code, rec.Body.String())
+			}
+			httpxtest.AssertFirstError(t, rec, httpx.ReasonMissingField, tc.field)
+		})
+	}
+}
+
+// TestJiraIdentity_OtherDeploymentsRoute_Returns409: each paste route takes
+// the credential of one deployment, so a well-formed body sent to the route
+// for the deployment the org is not on is a 409 CONFLICT naming the route it
+// belongs on, and no credential is stored.
+func TestJiraIdentity_OtherDeploymentsRoute_Returns409(t *testing.T) {
+	for _, tc := range []struct {
+		name, method, host, route, wantRoute string
+		body                                 map[string]any
+	}{
+		{"pat on a Cloud org", "cloud_api_token", "https://acme.atlassian.net", jiraIdentityPATRoute, "/jira/identity/api-token",
+			map[string]any{"pat": "tok"}},
+		{"api token on a Data Center org", "dc_pat", "https://jira.corp.example.com", jiraIdentityAPITokenRoute, "/jira/identity/pat",
+			map[string]any{"email": "me@acme.com", "token": "cloud-tok"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runmode.SetForTest(t, runmode.ModeLocal)
+			keyring.MockInit()
+			s := newTestServer(t)
+			seedLocalOrgJiraHost(t, s, tc.host)
+			seedLocalOrgJiraAuthMethod(t, s, tc.method)
+
+			rec := doJSON(t, s, "POST", tc.route, tc.body)
+			if rec.Code != http.StatusConflict {
+				t.Fatalf("status=%d body=%s, want 409", rec.Code, rec.Body.String())
+			}
+			httpxtest.AssertFirstError(t, rec, httpx.ReasonConflict, "")
+			if !strings.Contains(rec.Body.String(), tc.wantRoute) {
+				t.Errorf("body=%s, want a message naming %s", rec.Body.String(), tc.wantRoute)
+			}
+			if stored, _ := s.secrets.GetUserSystem(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "jira_token/"+tc.host); stored != "" {
+				t.Errorf("credential stored by a refused bind: %q", stored)
 			}
 		})
 	}
@@ -207,8 +254,7 @@ func TestJiraIdentityPAT_StoresCredentialAndBindsIdentity(t *testing.T) {
 	jiraStub := jiraMyselfStub(t, `{"key":"jdoe","accountId":"acc-123","displayName":"Jane Doe"}`, &gotAuth)
 	seedLocalOrgJiraHost(t, s, jiraStub.URL)
 
-	rec := doJSON(t, s, "POST",
-		"/api/orgs/"+runmode.LocalDefaultOrgID+"/jira/identity/pat",
+	rec := doJSON(t, s, "POST", jiraIdentityPATRoute,
 		map[string]any{"pat": "jira_secret_token"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s, want 200", rec.Code, rec.Body.String())
@@ -267,8 +313,7 @@ func TestJiraIdentityStatus_StaleCrossSchemeCredential_NotConnected(t *testing.T
 	// No marker yet, so the host shape resolves Data Center.
 	jiraStub := jiraMyselfStub(t, `{"accountId":"acc-9","displayName":"Octo Jira"}`, nil)
 	seedLocalOrgJiraHost(t, s, jiraStub.URL)
-	rec := doJSON(t, s, "POST",
-		"/api/orgs/"+runmode.LocalDefaultOrgID+"/jira/identity/pat",
+	rec := doJSON(t, s, "POST", jiraIdentityPATRoute,
 		map[string]any{"pat": "tok"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("capture status=%d body=%s, want 200", rec.Code, rec.Body.String())
@@ -366,8 +411,7 @@ func TestJiraIdentityPAT_RefusalsStoreNothing(t *testing.T) {
 			host := tc.host(t)
 			seedLocalOrgJiraHost(t, s, host)
 
-			rec := doJSON(t, s, "POST",
-				"/api/orgs/"+runmode.LocalDefaultOrgID+"/jira/identity/pat",
+			rec := doJSON(t, s, "POST", jiraIdentityPATRoute,
 				map[string]any{"pat": "tok"})
 			if rec.Code != tc.want {
 				t.Fatalf("status=%d body=%s, want %d", rec.Code, rec.Body.String(), tc.want)
@@ -388,12 +432,12 @@ func TestJiraIdentityPAT_EmptyToken_Returns400(t *testing.T) {
 	// A DC-shaped host (not *.atlassian.net) → DC branch, which expects a PAT.
 	seedLocalOrgJiraHost(t, s, "https://jira.example.com")
 
-	rec := doJSON(t, s, "POST",
-		"/api/orgs/"+runmode.LocalDefaultOrgID+"/jira/identity/pat",
+	rec := doJSON(t, s, "POST", jiraIdentityPATRoute,
 		map[string]any{"pat": "   "})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d, want 400", rec.Code)
 	}
+	httpxtest.AssertFirstError(t, rec, httpx.ReasonMissingField, "pat")
 }
 
 // TestJiraIdentityPAT_NoJiraHost_ReturnsNotConfigured: a bind before the org has
@@ -403,13 +447,19 @@ func TestJiraIdentityPAT_NoJiraHost_ReturnsNotConfigured(t *testing.T) {
 	keyring.MockInit()
 	s := newTestServer(t)
 
-	rec := doJSON(t, s, "POST",
-		"/api/orgs/"+runmode.LocalDefaultOrgID+"/jira/identity/pat",
+	rec := doJSON(t, s, "POST", jiraIdentityPATRoute,
 		map[string]any{"pat": "tok"})
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status=%d body=%s, want 409", rec.Code, rec.Body.String())
 	}
-	httpxtest.AssertFirstError(t, rec, httpx.ReasonNotConfigured, "jira_pat")
+	httpxtest.AssertFirstError(t, rec, httpx.ReasonNotConfigured, "pat")
+
+	rec = doJSON(t, s, "POST", jiraIdentityAPITokenRoute,
+		map[string]any{"email": "me@acme.com", "token": "cloud-tok"})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("api-token status=%d body=%s, want 409", rec.Code, rec.Body.String())
+	}
+	httpxtest.AssertFirstError(t, rec, httpx.ReasonNotConfigured, "token")
 }
 
 // TestJiraConnectStart_DataCenterOrg_BouncesToPaste: a Data Center org has no

@@ -393,9 +393,9 @@ func TestSetupWizardSequence_KicksThePoller(t *testing.T) {
 	findCredAudit(t, rows, domain.AccessActionCredentialSet, domain.CredentialKindJiraOrg)
 }
 
-// TestJiraIdentityPAT_RejectsWrongDeploymentFields: the credential shape a user
-// may bind is set by the ORG's deployment, so a Data Center org's identity route
-// rejects Cloud fields by name and still takes a PAT.
+// TestJiraIdentityPAT_RejectsWrongDeploymentFields: the Data Center paste route
+// takes a PAT alone, so Cloud fields sent to it on a Data Center org are
+// rejected by name, and a PAT is still taken.
 func TestJiraIdentityPAT_RejectsWrongDeploymentFields(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -409,8 +409,7 @@ func TestJiraIdentityPAT_RejectsWrongDeploymentFields(t *testing.T) {
 		t.Fatalf("org jira bind = %d, body=%s", rec.Code, rec.Body.String())
 	}
 
-	identityRoute := "/api/orgs/" + runmode.LocalDefaultOrgID + "/jira/identity/pat"
-	rec := doJSON(t, s, http.MethodPost, identityRoute, map[string]any{
+	rec := doJSON(t, s, http.MethodPost, jiraIdentityPATRoute, map[string]any{
 		"email": "me@acme.com", "token": "cloud_tok",
 	})
 	if rec.Code != http.StatusBadRequest {
@@ -420,7 +419,7 @@ func TestJiraIdentityPAT_RejectsWrongDeploymentFields(t *testing.T) {
 
 	// The right shape still works, so the rejection is about the field set and
 	// not about the route.
-	ok := doJSON(t, s, http.MethodPost, identityRoute, map[string]any{"pat": "user_pat"})
+	ok := doJSON(t, s, http.MethodPost, jiraIdentityPATRoute, map[string]any{"pat": "user_pat"})
 	if ok.Code != http.StatusOK {
 		t.Fatalf("Data Center PAT against a Data Center org = %d, want 200; body=%s", ok.Code, ok.Body.String())
 	}

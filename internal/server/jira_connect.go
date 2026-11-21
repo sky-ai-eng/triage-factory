@@ -75,16 +75,16 @@ func jiraTokenKey(host string) string {
 // resolves for the org (per-org override / the deployment app) — the gate
 // for offering the one-click Cloud "Connect" button.
 type jiraIdentityStatusResponse struct {
-	Connected        bool   `json:"connected"`
-	Account          string `json:"account,omitempty"`
-	Host             string `json:"host"`
-	ConnectAvailable bool   `json:"connect_available"`
+	Connected        bool   `json:"connected" doc:"Whether the caller has a stored Jira credential that works for the organization's Jira site and deployment."`
+	Account          string `json:"account,omitempty" doc:"The caller's Jira account, by its display name or else its account id, absent when connected is false."`
+	Host             string `json:"host" doc:"The organization's Jira site as a URL, the stored value as written when it is not a valid URL, or empty when the organization has no Jira site."`
+	ConnectAvailable bool   `json:"connect_available" doc:"Whether an Atlassian OAuth app is available to the organization, so the caller can connect Jira Cloud with one click."`
 	// Deployment is the org's Jira backend ("cloud" / "data_center"), resolved
 	// from the org's stored auth-method marker (falling back to host shape for a
 	// pre-Cloud org). The bind surfaces key off it to render the right paste
 	// fields — a Cloud org pastes an email + API token, a Data Center org a
 	// single PAT. Empty when no Jira host is configured.
-	Deployment string `json:"deployment,omitempty"`
+	Deployment string `json:"deployment,omitempty" doc:"The organization's Jira deployment, cloud or data_center, which decides the credential the caller binds: an email and API token for cloud, a personal access token for data_center. Absent when the organization has no valid Jira site."`
 	// DisconnectedReason says why a user who had a connection no longer has
 	// one, so the Connect page can tell them instead of showing the page a
 	// new member sees: "refused" when Jira refused the stored grant (revoked
@@ -92,8 +92,17 @@ type jiraIdentityStatusResponse struct {
 	// refresh it. Set only while Connected is false, and absent when there is
 	// no such reason: never connected, or a credential that is unreadable,
 	// incomplete or for the other deployment.
-	DisconnectedReason string `json:"disconnected_reason,omitempty"`
+	DisconnectedReason string `json:"disconnected_reason,omitempty" doc:"Why a connection the caller had stopped working: refused when Jira refused the stored grant, or app_removed when no Atlassian OAuth app the organization has can renew it. Present only when connected is false, and absent when the caller never connected."`
 }
+
+var opJiraIdentityStatus = httpx.NewJSONOp[httpx.NoBody, jiraIdentityStatusResponse](httpx.OpSpec{
+	Pattern:     "GET /api/orgs/{org_id}/jira/identity",
+	ID:          "get_jira_identity",
+	Summary:     "Get your Jira connection",
+	Description: "Reports whether the caller has a working Jira credential stored for the organization's Jira site, which account it belongs to, and which credential the organization's deployment takes.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // The values of jiraIdentityStatusResponse.DisconnectedReason.
 const (
@@ -253,7 +262,7 @@ func (s *Server) handleJiraIdentityStatus(w http.ResponseWriter, r *http.Request
 	// authorize/callback flow below (handleJiraConnectStart /
 	// handleJiraConnectCallback) — this endpoint just advertises that the
 	// app credential it needs is in place.
-	writeJSON(w, http.StatusOK, jiraIdentityStatusResponse{
+	opJiraIdentityStatus.Write(w, jiraIdentityStatusResponse{
 		Connected:          connected,
 		Account:            account,
 		Host:               host,
@@ -264,49 +273,109 @@ func (s *Server) handleJiraIdentityStatus(w http.ResponseWriter, r *http.Request
 }
 
 // The user-supplied Jira credential for the capture-and-STORE access path, one
-// struct per deployment. Which shape applies is the ORG's deployment, not the
-// caller's choice — a user cannot bind a Cloud API token against a Data Center
-// site — so unlike the org-credential bind there is no discriminator in the
-// body. The struct is still picked before the decode rather than after, so the
-// other deployment's fields are rejected by name instead of being accepted and
-// silently ignored, which is what a single both-shapes struct did.
+// route and one struct per deployment. Which shape applies is the ORG's
+// deployment, not the caller's choice — a user cannot bind a Cloud API token
+// against a Data Center site — so each route checks the org's deployment and
+// refuses the other one's, naming the route that takes it. A body holding the
+// other deployment's fields is refused by strict decoding, by name.
 //
 // Unlike the GitHub sibling, the credential is retained (per-user vault scope):
 // the user acts as themselves on board claims, so it must outlive the request.
 type jiraIdentityDataCenterPAT struct {
-	PAT string `json:"pat"`
+	PAT string `json:"pat" doc:"A Jira Data Center personal access token belonging to the caller."`
 }
 
 type jiraIdentityCloudToken struct {
-	Email string `json:"email"`
-	Token string `json:"token"`
+	Email string `json:"email" doc:"The email address of the caller's Atlassian account."`
+	Token string `json:"token" doc:"An Atlassian API token created by that account."`
 }
 
-// jiraIdentityCaptureResponse is the success shape of the PAT-capture path: the
+// jiraIdentityCaptureResponse is the success shape of both capture routes: the
 // bound account (display name) and the host it's keyed under, so the caller can
 // reflect the just-captured identity without re-reading the status endpoint.
 type jiraIdentityCaptureResponse struct {
-	Account string `json:"account"`
-	Host    string `json:"host"`
+	Account string `json:"account" doc:"The Jira account the credential belongs to, by its display name, or by its account id when it has none."`
+	Host    string `json:"host" doc:"The organization's Jira site the credential is stored for, as a URL."`
 }
 
-// handleJiraIdentityPAT binds the caller's Jira access from a credential they
-// supply, STORING it (per-user vault scope) as a UserCredential
-// envelope. It resolves the org's Jira host + deployment, validates the
-// credential against it (GET /myself), persists the envelope under
-// "jira_token/<host>", and derives the user's Jira identity from the validated
-// /myself response. This is the Jira mirror of handleGitHubIdentityPAT with one
-// difference: GitHub discards the token (identity only); Jira keeps it (access).
-//
-// The credential shape follows the org's deployment, the same dispatch the
-// system resolver uses: a Data Center org binds a PAT (Bearer, REST v2); a Cloud
-// org binds an Atlassian email + API token (Basic, REST v3). The route is stable
-// across both — the branch is internal. Cloud OAuth (one-click Connect, see
+var opJiraIdentityAPIToken = httpx.NewJSONOp[jiraIdentityCloudToken, jiraIdentityCaptureResponse](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/jira/identity/api-token",
+	ID:          "create_jira_identity_api_token",
+	Summary:     "Store your Jira Cloud email and API token",
+	Description: "Checks the caller's Atlassian account email and API token against the organization's Jira Cloud site, stores them as the caller's Jira credential in place of any they had, and returns the account they belong to. An organization on Jira Data Center binds a personal access token through POST /api/orgs/{org_id}/jira/identity/pat instead.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
+
+var opJiraIdentityPAT = httpx.NewJSONOp[jiraIdentityDataCenterPAT, jiraIdentityCaptureResponse](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/jira/identity/pat",
+	ID:          "create_jira_identity_pat",
+	Summary:     "Store your Jira Data Center personal access token",
+	Description: "Checks the caller's personal access token against the organization's Jira Data Center site, stores it as the caller's Jira credential in place of any they had, and returns the account it belongs to. An organization on Jira Cloud binds an email and API token through POST /api/orgs/{org_id}/jira/identity/api-token instead.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
+
+// handleJiraIdentityAPIToken binds the caller's Jira access on a Cloud org
+// from an Atlassian account email and API token (Basic, REST v3), STORING them
+// as a cloud_api_token envelope. The Data Center sibling is
+// handleJiraIdentityPAT; Cloud OAuth (one-click Connect, see
 // handleJiraConnectCallback) is the third method, extending the same stored
 // envelope shape.
 //
-// Distinct failure shapes, like the GitHub handler: a host TF couldn't reach is
-// a 502 (infra), a credential the host rejected is a 422 (your action).
+// POST /api/orgs/{org_id}/jira/identity/api-token
+func (s *Server) handleJiraIdentityAPIToken(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := s.az.RequireOrgMember(w, r)
+	if !ok {
+		return
+	}
+	req, ok := opJiraIdentityAPIToken.Decode(w, r)
+	if !ok {
+		return
+	}
+	email := strings.TrimSpace(req.Email)
+	token := strings.TrimSpace(req.Token)
+	var v httpx.Validation
+	if email == "" {
+		v.Add(httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "Your Atlassian account email is required.", Field: "email"})
+	}
+	if token == "" {
+		v.Add(httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "An Atlassian API token is required.", Field: "token"})
+	}
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+	host, ok := s.jiraIdentityHost(w, r, orgID, userID, jira.DeploymentCloud, "token")
+	if !ok {
+		return
+	}
+	envelope, err := jira.MarshalUserCredential(jira.UserCredential{
+		Method: jira.AuthMethodCloudAPIToken,
+		Email:  email,
+		Token:  token,
+	})
+	if err != nil {
+		internalError(w, "jira-identity", err)
+		return
+	}
+	resp, ok := s.bindJiraIdentity(w, r, orgID, userID, jiraIdentityBind{
+		host:     host,
+		cfg:      jira.CloudAPIToken(host, email, token),
+		envelope: envelope,
+		source:   string(jira.AuthMethodCloudAPIToken),
+		field:    "token",
+	})
+	if !ok {
+		return
+	}
+	opJiraIdentityAPIToken.Write(w, resp)
+}
+
+// handleJiraIdentityPAT binds the caller's Jira access on a Data Center org
+// from a personal access token (Bearer, REST v2), STORING it as a dc_pat
+// envelope. This is the Jira mirror of handleGitHubIdentityPAT with one
+// difference: GitHub discards the token (identity only); Jira keeps it
+// (access).
 //
 // POST /api/orgs/{org_id}/jira/identity/pat
 func (s *Server) handleJiraIdentityPAT(w http.ResponseWriter, r *http.Request) {
@@ -314,19 +383,51 @@ func (s *Server) handleJiraIdentityPAT(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	// The body is read but not yet decoded: which struct it has to satisfy is
-	// the ORG's deployment, which the read below resolves.
-	body, ok := httpx.BodyBytes(w, r)
+	req, ok := opJiraIdentityPAT.Decode(w, r)
 	if !ok {
 		return
 	}
+	pat := strings.TrimSpace(req.PAT)
+	if pat == "" {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "A Jira personal access token is required.", Field: "pat"})
+		return
+	}
+	host, ok := s.jiraIdentityHost(w, r, orgID, userID, jira.DeploymentDataCenter, "pat")
+	if !ok {
+		return
+	}
+	envelope, err := jira.MarshalUserCredential(jira.UserCredential{
+		Method: jira.AuthMethodDCPAT,
+		Token:  pat,
+	})
+	if err != nil {
+		internalError(w, "jira-identity", err)
+		return
+	}
+	resp, ok := s.bindJiraIdentity(w, r, orgID, userID, jiraIdentityBind{
+		host:     host,
+		cfg:      jira.DataCenterPAT(host, pat),
+		envelope: envelope,
+		// The identity source marker for Data Center is "pat".
+		source: "pat",
+		field:  "pat",
+	})
+	if !ok {
+		return
+	}
+	opJiraIdentityPAT.Write(w, resp)
+}
 
-	// Resolve the org's Jira host + deployment the same way the status reader
-	// does, so the (user, host) credential key always agrees across surfaces and
-	// the scheme we validate matches the one the resolver will rebuild. The
-	// deployment comes from the org's stored auth-method marker (falling back to
-	// host shape for a pre-Cloud org) — a claims-scoped org-secret read, the same
-	// door integrations.Load uses on the request path.
+// jiraIdentityHost resolves the org's Jira host and checks that the org's
+// deployment is want, writing the refusal and reporting false when it is not.
+// It resolves both the way the status reader does, so the (user, host)
+// credential key always agrees across surfaces and the scheme the capture
+// validates matches the one the resolver will rebuild: the deployment comes
+// from the org's stored auth-method marker, falling back to host shape for a
+// pre-Cloud org — a claims-scoped org-secret read, the same door
+// integrations.Load uses on the request path. field is the route's credential
+// field, which a refusal names.
+func (s *Server) jiraIdentityHost(w http.ResponseWriter, r *http.Request, orgID, userID string, want jira.Deployment, field string) (string, bool) {
 	var (
 		orgSet     domain.OrgSettings
 		authMethod string
@@ -341,94 +442,61 @@ func (s *Server) handleJiraIdentityPAT(w http.ResponseWriter, r *http.Request) {
 		return lerr
 	}); err != nil {
 		internalError(w, "jira-identity", err)
-		return
+		return "", false
 	}
 	host, okHost := resolveJiraHost(orgSet.JiraBaseURL)
 	if !okHost {
-		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonNotConfigured, Message: "Your organization's Jira URL isn't set up yet. Ask your admin to connect Jira in organization settings first.", Field: "jira_pat"})
-		return
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonNotConfigured, Message: "Your organization's Jira URL isn't set up yet. Ask your admin to connect Jira in organization settings first.", Field: field})
+		return "", false
 	}
-	cloud := jira.DeploymentForMarker(jira.AuthMethod(authMethod), host) == jira.DeploymentCloud
-
-	// Build the validation Config + the credential envelope from the right
-	// fields. `field` names the form input an error points at, so the surface can
-	// highlight the offending field per deployment.
-	var (
-		cfg      jira.Config
-		envelope string
-		source   string
-		field    string
-	)
-	if cloud {
-		// Strict decode against the Cloud struct: a `pat` in the body is a 400
-		// naming the field, not a value quietly dropped on the floor because
-		// this org happens to be Cloud.
-		var req jiraIdentityCloudToken
-		if !httpx.DecodeJSONStrictBytes(w, body, &req) {
-			return
-		}
-		email := strings.TrimSpace(req.Email)
-		token := strings.TrimSpace(req.Token)
-		field = "jira_api_token"
-		if email == "" || token == "" {
-			badRequest(w, "Your Atlassian account email and an API token are both required.")
-			return
-		}
-		cfg = jira.CloudAPIToken(host, email, token)
-		env, err := jira.MarshalUserCredential(jira.UserCredential{
-			Method: jira.AuthMethodCloudAPIToken,
-			Email:  email,
-			Token:  token,
-		})
-		if err != nil {
-			internalError(w, "jira-identity", err)
-			return
-		}
-		envelope = env
-		source = string(jira.AuthMethodCloudAPIToken)
-	} else {
-		// The Data Center mirror: an `email`/`token` pair here is rejected by
-		// name rather than ignored.
-		var req jiraIdentityDataCenterPAT
-		if !httpx.DecodeJSONStrictBytes(w, body, &req) {
-			return
-		}
-		pat := strings.TrimSpace(req.PAT)
-		field = "jira_pat"
-		if pat == "" {
-			badRequest(w, "A Jira personal access token is required.")
-			return
-		}
-		cfg = jira.DataCenterPAT(host, pat)
-		env, err := jira.MarshalUserCredential(jira.UserCredential{
-			Method: jira.AuthMethodDCPAT,
-			Token:  pat,
-		})
-		if err != nil {
-			internalError(w, "jira-identity", err)
-			return
-		}
-		envelope = env
-		// Identity source marker stays "pat" for Data Center (unchanged).
-		source = "pat"
+	deployment := jira.DeploymentForMarker(jira.AuthMethod(authMethod), host)
+	switch deployment {
+	case want:
+		return host, true
+	case jira.DeploymentCloud:
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "Your organization uses Jira Cloud, which takes your Atlassian account email and an API token: send them to POST /api/orgs/" + orgID + "/jira/identity/api-token."})
+	default:
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "Your organization uses Jira Data Center, which takes a personal access token: send it to POST /api/orgs/" + orgID + "/jira/identity/pat."})
 	}
+	return "", false
+}
 
+// jiraIdentityBind is one capture: the org's host, the validation Config and
+// the stored envelope built from the credential, the identity source marker,
+// and the route's credential field, which a refusal names.
+type jiraIdentityBind struct {
+	host     string
+	cfg      jira.Config
+	envelope string
+	source   string
+	field    string
+}
+
+// bindJiraIdentity validates a captured credential against the org's host
+// (GET /myself), persists its envelope under "jira_token/<host>", and derives
+// the user's Jira identity from the validated /myself response. On a refusal
+// the error is already written and ok is false.
+//
+// Distinct failure shapes, like the GitHub handler: a host TF couldn't reach is
+// a 502 (infra), a credential the host rejected is a 422 (your action).
+func (s *Server) bindJiraIdentity(w http.ResponseWriter, r *http.Request, orgID, userID string, b jiraIdentityBind) (jiraIdentityCaptureResponse, bool) {
+	host := b.host
 	// Validate against the org's host using the scheme its deployment dictates —
 	// the same scheme + version the resolver will use at request time.
-	jiraUser, err := auth.ValidateJira(r.Context(), cfg)
+	jiraUser, err := auth.ValidateJira(r.Context(), b.cfg)
 	if err != nil {
 		// Keep the two failure shapes distinct, like the GitHub flow: a host we
 		// couldn't reach (infra) vs. a credential the host rejected (your action).
 		if errors.Is(err, auth.ErrJiraHostUnreachable) {
-			httpx.WriteErrors(w, http.StatusBadGateway, httpx.ErrorItem{Reason: httpx.ReasonUpstreamUnavailable, Message: fmt.Sprintf("Couldn't reach %s. This is a connectivity issue between Triage Factory and your Jira server, not the credential — try again.", host), Field: field})
-			return
+			httpx.WriteErrors(w, http.StatusBadGateway, httpx.ErrorItem{Reason: httpx.ReasonUpstreamUnavailable, Message: fmt.Sprintf("Couldn't reach %s. This is a connectivity issue between Triage Factory and your Jira server, not the credential — try again.", host), Field: b.field})
+			return jiraIdentityCaptureResponse{}, false
 		}
-		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "That credential didn't validate against " + host + ". Double-check it and try again.", Field: field})
-		return
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "That credential didn't validate against " + host + ". Double-check it and try again.", Field: b.field})
+		return jiraIdentityCaptureResponse{}, false
 	}
 	if jiraUser.StableID() == "" {
-		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "Jira didn't return an account for that credential.", Field: field})
-		return
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "Jira didn't return an account for that credential.", Field: b.field})
+		return jiraIdentityCaptureResponse{}, false
 	}
 
 	// Store the credential AND derive the identity in one tx — all-or-nothing,
@@ -443,13 +511,13 @@ func (s *Server) handleJiraIdentityPAT(w http.ResponseWriter, r *http.Request) {
 	// router and assignee routing would silently drop tasks — keep this host
 	// derivation and that lookup's in agreement.
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		if err := tx.Secrets.PutUser(r.Context(), orgID, userID, jiraTokenKey(host), envelope, "Jira user access token"); err != nil {
+		if err := tx.Secrets.PutUser(r.Context(), orgID, userID, jiraTokenKey(host), b.envelope, "Jira user access token"); err != nil {
 			return fmt.Errorf("store jira credential: %w", err)
 		}
-		if err := tx.Users.UpsertJiraIdentity(r.Context(), userID, host, jiraUser.StableID(), jiraUser.DisplayName, source); err != nil {
+		if err := tx.Users.UpsertJiraIdentity(r.Context(), userID, host, jiraUser.StableID(), jiraUser.DisplayName, b.source); err != nil {
 			return fmt.Errorf("persist jira identity: %w", err)
 		}
-		// TFAC-471: audit the per-user Jira credential bind/rotate in the same
+		// Audit the per-user Jira credential bind/rotate in the same
 		// tx; actor is the user binding their own access, host carries the org's
 		// Jira host. No target_user_id — that column is for membership/role
 		// actions; the per-user credential's subject is the actor.
@@ -463,7 +531,7 @@ func (s *Server) handleJiraIdentityPAT(w http.ResponseWriter, r *http.Request) {
 		return nil
 	}); err != nil {
 		internalError(w, "jira-identity", err)
-		return
+		return jiraIdentityCaptureResponse{}, false
 	}
 
 	// If this user previously bound via OAuth, an access token may be cached
@@ -475,9 +543,8 @@ func (s *Server) handleJiraIdentityPAT(w http.ResponseWriter, r *http.Request) {
 	if account == "" {
 		account = jiraUser.StableID()
 	}
-	jiraIdentityLog.Info("bound user, credential stored", "user", userID, "account", jiraUser.StableID(), "host", host, "org", orgID, "source", source)
-
-	writeJSON(w, http.StatusOK, jiraIdentityCaptureResponse{Account: account, Host: host})
+	jiraIdentityLog.Info("bound user, credential stored", "user", userID, "account", jiraUser.StableID(), "host", host, "org", orgID, "source", b.source)
+	return jiraIdentityCaptureResponse{Account: account, Host: host}, true
 }
 
 // ---- Cloud OAuth 3LO "Connect" (per-user) ----

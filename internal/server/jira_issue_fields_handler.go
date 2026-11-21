@@ -40,7 +40,7 @@ type jiraIssueFieldListRequest struct {
 	// case-insensitive literal substring (httpx.Search). Neither Jira read
 	// takes a filter, so it is applied to the list in hand, before the window.
 	// Absent matches every row.
-	Search string `json:"search"`
+	Search string `json:"search" doc:"Text the name must contain, matched without regard to case; absent matches every row."`
 	httpx.PageRequest
 }
 
@@ -63,21 +63,30 @@ type jiraIssueTypeListFilterKey struct {
 // jiraPriorityJSON is one priority. The id is what a predicate names it by;
 // the name is what a person recognizes it by.
 type jiraPriorityJSON struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID   string `json:"id" doc:"Jira's id for the priority."`
+	Name string `json:"name" doc:"The priority's name."`
 }
 
 // jiraIssueTypeJSON is one issue type of a project. Subtask says issues of
 // this type are subtasks.
 type jiraIssueTypeJSON struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Subtask bool   `json:"subtask"`
+	ID      string `json:"id" doc:"Jira's id for the issue type."`
+	Name    string `json:"name" doc:"The issue type's name."`
+	Subtask bool   `json:"subtask" doc:"Whether issues of this type are subtasks."`
 }
 
 // jiraNumericIDRe is a Jira priority or issue type id as both deployments
 // write one: a decimal integer, carried as a string.
 var jiraNumericIDRe = regexp.MustCompile(`^[0-9]+$`)
+
+var opJiraPrioritiesList = httpx.NewListOp[jiraIssueFieldListRequest, jiraPriorityJSON](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/jira/priorities/list",
+	ID:          "list_jira_priorities",
+	Summary:     "List the Jira instance's priorities",
+	Description: "Reads one page of the priorities of the organization's Jira instance, live from Jira, in Jira's order from highest to lowest. total_count is always null, and page_size 0 is refused.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // POST /api/orgs/{org_id}/jira/priorities/list
 //
@@ -88,8 +97,8 @@ func (s *Server) handleJiraPrioritiesList(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
-	var req jiraIssueFieldListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opJiraPrioritiesList.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -114,8 +123,20 @@ func (s *Server) handleJiraPrioritiesList(w http.ResponseWriter, r *http.Request
 	items, next := jiraWindow(priorities, startAt, page.Limit, func(p jira.Priority) jiraPriorityJSON {
 		return jiraPriorityJSON{ID: p.ID, Name: p.Name}
 	})
-	httpx.WriteProxyList(w, page, items, next)
+	opJiraPrioritiesList.WriteProxy(w, page, items, next)
 }
+
+var opJiraPriorityGet = httpx.NewJSONOp[httpx.NoBody, jiraPriorityJSON](httpx.OpSpec{
+	Pattern:     "GET /api/orgs/{org_id}/jira/priorities/{priority_id}",
+	ID:          "get_jira_priority",
+	Summary:     "Get a Jira priority",
+	Description: "Reads one priority of the organization's Jira instance, live from Jira.",
+	PathParams: map[string]string{
+		"org_id":      "The organization's id.",
+		"priority_id": "Jira's id for the priority, a decimal number.",
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // GET /api/orgs/{org_id}/jira/priorities/{priority_id}
 //
@@ -145,8 +166,20 @@ func (s *Server) handleJiraPriorityGet(w http.ResponseWriter, r *http.Request) {
 		httpx.NotFound(w, "jira priority")
 		return
 	}
-	writeJSON(w, http.StatusOK, jiraPriorityJSON{ID: priorities[i].ID, Name: priorities[i].Name})
+	opJiraPriorityGet.Write(w, jiraPriorityJSON{ID: priorities[i].ID, Name: priorities[i].Name})
 }
+
+var opJiraIssueTypesList = httpx.NewListOp[jiraIssueFieldListRequest, jiraIssueTypeJSON](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/jira/projects/{jira_id}/issue-types/list",
+	ID:          "list_jira_project_issue_types",
+	Summary:     "List a Jira project's issue types",
+	Description: "Reads one page of the issue types of a Jira project, live from Jira, ordered by name and then id. total_count is always null, and page_size 0 is refused.",
+	PathParams: map[string]string{
+		"org_id":  "The organization's id.",
+		"jira_id": "Jira's id for the project, a decimal number; a project key is not accepted.",
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // POST /api/orgs/{org_id}/jira/projects/{jira_id}/issue-types/list
 //
@@ -161,8 +194,8 @@ func (s *Server) handleJiraIssueTypesList(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
-	var req jiraIssueFieldListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opJiraIssueTypesList.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -192,8 +225,21 @@ func (s *Server) handleJiraIssueTypesList(w http.ResponseWriter, r *http.Request
 		return cmp.Or(cmp.Compare(a.Name, b.Name), cmp.Compare(a.ID, b.ID))
 	})
 	items, next := jiraWindow(types, startAt, page.Limit, toJiraIssueTypeJSON)
-	httpx.WriteProxyList(w, page, items, next)
+	opJiraIssueTypesList.WriteProxy(w, page, items, next)
 }
+
+var opJiraIssueTypeGet = httpx.NewJSONOp[httpx.NoBody, jiraIssueTypeJSON](httpx.OpSpec{
+	Pattern:     "GET /api/orgs/{org_id}/jira/projects/{jira_id}/issue-types/{issue_type_id}",
+	ID:          "get_jira_project_issue_type",
+	Summary:     "Get a Jira project's issue type",
+	Description: "Reads one issue type of a Jira project live from Jira. An issue type that exists in Jira but is not one of this project's is not found.",
+	PathParams: map[string]string{
+		"org_id":        "The organization's id.",
+		"jira_id":       "Jira's id for the project, a decimal number; a project key is not accepted.",
+		"issue_type_id": "Jira's id for the issue type, a decimal number.",
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // GET /api/orgs/{org_id}/jira/projects/{jira_id}/issue-types/{issue_type_id}
 //
@@ -232,7 +278,7 @@ func (s *Server) handleJiraIssueTypeGet(w http.ResponseWriter, r *http.Request) 
 		httpx.NotFound(w, "jira issue type")
 		return
 	}
-	writeJSON(w, http.StatusOK, toJiraIssueTypeJSON(types[i]))
+	opJiraIssueTypeGet.Write(w, toJiraIssueTypeJSON(types[i]))
 }
 
 func toJiraIssueTypeJSON(it jira.IssueType) jiraIssueTypeJSON {

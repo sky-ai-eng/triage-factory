@@ -7,27 +7,29 @@ func (s *Server) registerJiraRoutes() {
 	// moving their active org. Member-gated; both lists are proxy lists, so
 	// total_count is null. Its GitHub sibling reads a mirror instead; see the
 	// handler file for why the two differ.
-	s.apiMutating("POST /api/orgs/{org_id}/jira/projects/list", s.handleJiraProjectsList)
-	s.api("GET /api/orgs/{org_id}/jira/projects/{jira_id}", s.handleJiraProjectGet)
-	s.apiMutating("POST /api/orgs/{org_id}/jira/projects/{jira_id}/statuses/list", s.handleJiraStatusesList)
-	s.api("GET /api/orgs/{org_id}/jira/projects/{jira_id}/statuses/{status_id}", s.handleJiraStatusGet)
+	s.op(opJiraProjectsList, s.handleJiraProjectsList)
+	s.op(opJiraProjectGet, s.handleJiraProjectGet)
+	s.op(opJiraStatusesList, s.handleJiraStatusesList)
+	s.op(opJiraStatusGet, s.handleJiraStatusGet)
 	// The instance's priorities and each project's issue types, which Jira
 	// event predicates name by id. Proxied and member-gated like the routes
 	// above; see jira_issue_fields_handler.go.
-	s.apiMutating("POST /api/orgs/{org_id}/jira/priorities/list", s.handleJiraPrioritiesList)
-	s.api("GET /api/orgs/{org_id}/jira/priorities/{priority_id}", s.handleJiraPriorityGet)
-	s.apiMutating("POST /api/orgs/{org_id}/jira/projects/{jira_id}/issue-types/list", s.handleJiraIssueTypesList)
-	s.api("GET /api/orgs/{org_id}/jira/projects/{jira_id}/issue-types/{issue_type_id}", s.handleJiraIssueTypeGet)
+	s.op(opJiraPrioritiesList, s.handleJiraPrioritiesList)
+	s.op(opJiraPriorityGet, s.handleJiraPriorityGet)
+	s.op(opJiraIssueTypesList, s.handleJiraIssueTypesList)
+	s.op(opJiraIssueTypeGet, s.handleJiraIssueTypeGet)
 
 	// Per-user Jira access — the Jira sibling of the GitHub identity flow
 	// (jira_connect.go). status reports connected from a STORED credential
-	// (Jira's user level holds access, not just identity); the PAT path
-	// validates the token, STORES it (per-user vault scope), and derives the
-	// user's Jira identity. DC = paste-a-PAT; connect_available now reflects
-	// whether an Atlassian OAuth app resolves (the Cloud Connect gate). Any
-	// org member binds their own access.
-	s.api("GET /api/orgs/{org_id}/jira/identity", s.handleJiraIdentityStatus)
-	s.apiMutating("POST /api/orgs/{org_id}/jira/identity/pat", s.handleJiraIdentityPAT)
+	// (Jira's user level holds access, not just identity); the two paste
+	// paths, one per deployment, validate the credential, STORE it (per-user
+	// vault scope), and derive the user's Jira identity. Cloud = email + API
+	// token, DC = a PAT; each refuses an org on the other deployment.
+	// connect_available reflects whether an Atlassian OAuth app resolves (the
+	// Cloud Connect gate). Any org member binds their own access.
+	s.op(opJiraIdentityStatus, s.handleJiraIdentityStatus)
+	s.op(opJiraIdentityAPIToken, s.handleJiraIdentityAPIToken)
+	s.op(opJiraIdentityPAT, s.handleJiraIdentityPAT)
 
 	// Per-user "Connect Jira" Cloud OAuth (3LO) — the one-click counterpart of
 	// the paste path, gated on connect_available (an Atlassian app resolves).
@@ -53,7 +55,7 @@ func (s *Server) registerJiraRoutes() {
 	// (the card renders for everyone); import + delete are admin (gated inside
 	// the handler). The two mutators are JSON fetches from the SPA, so they
 	// ride apiMutating (CSRF).
-	s.api("GET /api/orgs/{org_id}/jira/app", s.handleJiraAppStatus)
-	s.apiMutating("POST /api/orgs/{org_id}/jira/app", s.handleJiraAppImport)
-	s.apiMutating("DELETE /api/orgs/{org_id}/jira/app", s.handleJiraAppDelete)
+	s.op(opJiraAppStatus, s.handleJiraAppStatus)
+	s.op(opJiraAppImport, s.handleJiraAppImport)
+	s.op(opJiraAppDelete, s.handleJiraAppDelete)
 }
