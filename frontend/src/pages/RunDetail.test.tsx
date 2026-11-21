@@ -162,7 +162,7 @@ describe('RunDetail send', () => {
       if (url.endsWith('/settings'))
         return {
           ok: true,
-          ...jsonBody({ team_settings: { DefaultModel: 'opus', EnabledModels: null } }),
+          ...jsonBody({ team_settings: { ai_model: 'opus', enabled_models: null } }),
         }
       return { ok: true, status: 200, ...jsonBody({}) }
     })

@@ -45,10 +45,11 @@ type bedrockRoleSetupResponse struct {
 }
 
 var opBedrockRoleSetup = httpx.NewJSONOp[httpx.NoBody, bedrockRoleSetupResponse](httpx.OpSpec{
-	Pattern:     "POST /api/bedrock/role-setup",
+	Pattern:     "POST /api/orgs/{org_id}/llm/bedrock/role-setup",
 	ID:          "setup_bedrock_role",
 	Summary:     "Get the trust policy for a Bedrock IAM role",
 	Description: "Returns the AWS identity Triage Factory assumes an IAM role as, the organization's External ID, and a trust policy that pins both, for setting up Bedrock role mode. The first call generates and stores the External ID. Multi mode only.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
 	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintNo, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
 })
 
@@ -59,9 +60,11 @@ var opBedrockRoleSetup = httpx.NewJSONOp[httpx.NoBody, bedrockRoleSetupResponse]
 // thereafter). When the control service has no ambient AWS identity it
 // returns the operator-remediation error, so the org admin sees it BEFORE
 // building anything in AWS.
+//
+// Org-admin gated from the {org_id} path segment, like the role bind it
+// prepares: generating the External ID writes the org's Bedrock material.
 func (se *settingsHandler) handleBedrockRoleSetup(w http.ResponseWriter, r *http.Request) {
-	userID := ClaimsFrom(r.Context()).Subject
-	orgID, ok := requireOrg(w, r)
+	orgID, userID, ok := se.az.RequireOrgAdmin(w, r)
 	if !ok {
 		return
 	}

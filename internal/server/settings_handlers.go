@@ -298,16 +298,11 @@ func resolveUserSettingsPatch(w http.ResponseWriter, req userSettingsFields) (ap
 // --------------------------------------------------------------------
 
 type teamSettingsResponse struct {
-	TeamSettings domain.TeamSettings   `json:"team_settings" doc:"The team's settings. Its keys are spelled in PascalCase, unlike every other key in the response."`
+	TeamSettings teamSettingsJSON      `json:"team_settings" doc:"The team's settings, under the names PATCH /api/teams/{team_id}/settings writes them by."`
 	JiraProjects []jiraProjectSettings `json:"jira_projects" doc:"The Jira projects the team tracks on the organization's current Jira site, in display order, with their workflow status rules."`
 	// LinearTeams is the team's tracked Linear teams in display order, the
 	// shape PUT /api/teams/{team_id}/linear-teams answers with.
 	LinearTeams []linearTeamSettings `json:"linear_teams" doc:"The Linear teams the team tracks in the organization's current Linear workspace, in display order, with their workflow state rules."`
-	// Warning is advisory prose about a save that SUCCEEDED — today, that the
-	// org's model cap clamps the default the team just picked. Only the PATCH
-	// response ever carries it; the GET leaves it empty and omitempty drops it,
-	// so the read and the write answer one shape.
-	Warning string `json:"warning,omitempty" doc:"Advisory text about a save that succeeded. Neither the read nor the update sets it, so it is always absent."`
 	// MemberCount + Role describe the caller's relationship to this team,
 	// so the frontend can collapse to the flat N=1 layout and gate the
 	// write-side fields without a second round trip. They live on the
@@ -323,6 +318,54 @@ type teamSettingsResponse struct {
 	// of hardcoding it.
 	PermissionAbsentGraceMinSeconds int `json:"permission_absent_grace_min_seconds" doc:"The smallest value permission_absent_grace_seconds accepts, in seconds."`
 	PermissionAbsentGraceMaxSeconds int `json:"permission_absent_grace_max_seconds" doc:"The largest value permission_absent_grace_seconds accepts, in seconds."`
+}
+
+// teamSettingsJSON is the team's settings row as the API renders it: each
+// field the PATCH writes, under the PATCH's own name and unit, so a client
+// reads and writes one vocabulary. The tracked Jira projects and Linear teams
+// are not here; the response's jira_projects and linear_teams carry them in
+// the same order.
+type teamSettingsJSON struct {
+	AIModel                         string   `json:"ai_model" doc:"The model key the team's steps run on when they name no model, empty when the team has none."`
+	EnabledModels                   []string `json:"enabled_models" doc:"The model keys the team may choose from, or null when every model the organization enables is allowed."`
+	AIAutoDelegate                  bool     `json:"ai_auto_delegate_enabled" doc:"Whether event handlers in automate mode may start runs for the team."`
+	AutoModeEnabled                 bool     `json:"auto_mode_enabled" doc:"Whether the team's delegated runs on the Claude Code SDK start in its auto permission mode in local mode."`
+	ClaudeAIConnectorsEnabled       bool     `json:"claude_ai_connectors_enabled" doc:"Whether the team's delegated runs on the operator's own Claude Code login keep that login's claude.ai connectors."`
+	AIReprioritizeThreshold         int      `json:"ai_reprioritize_threshold" doc:"A stored scoring setting that nothing acts on."`
+	AIPreferenceUpdateInterval      int      `json:"ai_preference_update_interval" doc:"A stored scoring setting that nothing acts on."`
+	BranchTemplate                  string   `json:"branch_template" doc:"The branch name convention the team's agents are asked to follow, in which <ticket-id> stands for the run's ticket id."`
+	ReviewPosture                   string   `json:"review_posture" doc:"How the team's delegated reviews reach GitHub: identity, draft, auto, or auto_unless_blocking."`
+	BaseBranchPushPolicy            string   `json:"base_branch_push_policy" doc:"Whether the team's agents may push to a repository's base branch: never, manual_only, or always."`
+	PermissionAbsentAutodenyEnabled bool     `json:"permission_absent_autodeny_enabled" doc:"Whether a delegated run's permission prompt is denied after permission_absent_grace_seconds when nobody who could answer it has the app open."`
+	PermissionAbsentGraceSeconds    int      `json:"permission_absent_grace_seconds" doc:"How long an unanswered permission prompt waits, in seconds, before it is denied while nobody who could answer it has the app open."`
+	// MaxDailyCostUSD is the one field here the PATCH does not write: the cap
+	// has its own route, PUT /api/teams/{team_id}/usage/cap.
+	MaxDailyCostUSD *float64 `json:"max_daily_cost_usd" doc:"The most the team's runs may spend in one UTC day, in USD, or null when the team has no cap; PUT /api/teams/{team_id}/usage/cap sets it."`
+}
+
+// toTeamSettingsJSON renders a settings row for the wire. The grace window is
+// stored in milliseconds and read in seconds, rounded to the nearest one, which
+// is exact for every row the API wrote: the PATCH stores whole seconds.
+func toTeamSettingsJSON(t domain.TeamSettings) teamSettingsJSON {
+	out := teamSettingsJSON{
+		AIModel:                         t.DefaultModel,
+		EnabledModels:                   t.EnabledModels,
+		AIAutoDelegate:                  t.AutoDelegateEnabled,
+		AutoModeEnabled:                 t.AutoModeEnabled,
+		ClaudeAIConnectorsEnabled:       t.ClaudeAIConnectorsEnabled,
+		AIReprioritizeThreshold:         t.AIReprioritizeThreshold,
+		AIPreferenceUpdateInterval:      t.AIPreferenceUpdateInterval,
+		BranchTemplate:                  t.BranchTemplate,
+		ReviewPosture:                   t.ReviewPosture,
+		BaseBranchPushPolicy:            t.BaseBranchPushPolicy,
+		PermissionAbsentAutodenyEnabled: t.PermissionAbsentAutodenyEnabled,
+		PermissionAbsentGraceSeconds:    (t.PermissionAbsentGraceMS + 500) / 1000,
+	}
+	if t.MaxDailyCostUSD > 0 {
+		capUSD := t.MaxDailyCostUSD
+		out.MaxDailyCostUSD = &capUSD
+	}
+	return out
 }
 
 var opTeamSettingsGet = httpx.NewJSONOp[httpx.NoBody, teamSettingsResponse](httpx.OpSpec{
@@ -376,7 +419,7 @@ func (s *Server) readTeamSettings(w http.ResponseWriter, r *http.Request, orgID,
 				return fmt.Errorf("team settings: %w", err)
 			}
 		}
-		resp.TeamSettings = settings
+		resp.TeamSettings = toTeamSettingsJSON(settings)
 
 		// Only the org's current Jira site's and Linear workspace's rules: a
 		// rule saved under another names a project or team this one does not
@@ -661,12 +704,12 @@ func resolveTeamSettingsPatch(w http.ResponseWriter, req teamSettingsPatch) (app
 		selectionNamed = true
 		universe := models.DeploymentUniverse()
 		switch {
-		case st == httpx.PatchClear || strings.TrimSpace(v) == "":
+		case st == httpx.PatchClear || v == "":
 			shape.Invalid("ai_model", "ai_model must name a model this deployment offers and cannot be cleared — a team with no default has no model to run its unpinned steps on: "+strings.Join(universe.Keys(), ", "))
-		case !universe.Offers(strings.TrimSpace(v)):
+		case !universe.Offers(v):
 			shape.Invalid("ai_model", "ai_model must name a model this deployment offers: "+strings.Join(universe.Keys(), ", "))
 		default:
-			set(func(t *domain.TeamSettings) { t.DefaultModel = strings.TrimSpace(v) })
+			set(func(t *domain.TeamSettings) { t.DefaultModel = v })
 		}
 	}
 	// enabled_models is the team's own enable-set — which of the models its org
@@ -1527,10 +1570,10 @@ func (s *Server) resolveOrgSettingsPatch(w http.ResponseWriter, r *http.Request,
 		switch {
 		case st == httpx.PatchClear:
 			set(func(o *domain.OrgSettings) { o.BackgroundJobsModel = "" })
-		case !universe.Offers(strings.TrimSpace(v)):
+		case !universe.Offers(v):
 			shape.Invalid("background_jobs_model", "background_jobs_model must name a model this deployment offers, or be null to stop running background jobs: "+strings.Join(universe.Keys(), ", "))
 		default:
-			set(func(o *domain.OrgSettings) { o.BackgroundJobsModel = strings.TrimSpace(v) })
+			set(func(o *domain.OrgSettings) { o.BackgroundJobsModel = v })
 		}
 	}
 	// llm_auth_method names where the org's Claude credentials come from, and
@@ -1548,7 +1591,7 @@ func (s *Server) resolveOrgSettingsPatch(w http.ResponseWriter, r *http.Request,
 	// checked in the transaction below, against the row this write is landing
 	// on.
 	if v, st := req.LLMAuthMethod.Read(&shape, "llm_auth_method"); names.named(st) {
-		method := strings.TrimSpace(v)
+		method := v
 		switch {
 		case st == httpx.PatchClear:
 			shape.Invalid("llm_auth_method", "llm_auth_method cannot be cleared: an organization's Claude credentials come from the host (\"system\") or from its own bound material (\"byok\")")

@@ -299,16 +299,18 @@ function CopyButton({ value, label }: { value: string; label: string }) {
 
 // BedrockRoleFields — the IAM-role method body: the editable Role ARN, the
 // read-only (server-generated) External ID, and a manual "generate setup"
-// action that POSTs /api/bedrock/role-setup and renders the returned trust
-// policy in a copyable block. Manual (a button, not an on-mount effect) so a
-// controlled component stays effect-free and the wizard + Settings share the
-// exact same behavior. The External ID lands in form state via onChange so it
-// round-trips with the rest of the Bedrock config on connect.
+// action that POSTs /api/orgs/{org}/llm/bedrock/role-setup and renders the
+// returned trust policy in a copyable block. Manual (a button, not an on-mount
+// effect) so a controlled component stays effect-free and the wizard + Settings
+// share the exact same behavior. The External ID lands in form state via
+// onChange so it round-trips with the rest of the Bedrock config on connect.
 function BedrockRoleFields({
+  orgId,
   form,
   onChange,
   invalid,
 }: {
+  orgId: string | null
   form: OrgConfigForm
   onChange: (patch: Partial<OrgConfigForm>) => void
   invalid?: boolean
@@ -319,9 +321,10 @@ function BedrockRoleFields({
   const [callerArn, setCallerArn] = useState('')
 
   const runSetup = async () => {
+    if (!orgId) return
     setLoading(true)
     setSetupError(null)
-    const r = await fetchBedrockRoleSetup()
+    const r = await fetchBedrockRoleSetup(orgId)
     setLoading(false)
     if (!r.ok) {
       setSetupError(r.error)
@@ -372,7 +375,7 @@ function BedrockRoleFields({
         <button
           type="button"
           onClick={() => void runSetup()}
-          disabled={loading}
+          disabled={loading || !orgId}
           className="inline-flex items-center gap-1.5 rounded-xl border border-warm/20 px-4 py-2 text-body text-warm transition-colors hover:border-warm/30 hover:text-warm/80 disabled:opacity-40"
         >
           {loading
@@ -422,11 +425,13 @@ function BedrockRoleFields({
 // that changes only the region still re-enters the secret. Shared by the wizard
 // key step and the Settings section.
 export function BedrockFields({
+  orgId,
   form,
   onChange,
   hasStored,
   invalid,
 }: {
+  orgId: string | null
   form: OrgConfigForm
   onChange: (patch: Partial<OrgConfigForm>) => void
   hasStored: boolean
@@ -442,7 +447,7 @@ export function BedrockFields({
         onChoose={(kind: BedrockAuthMethod) => onChange({ bedrock_auth_method: kind })}
       />
       {form.bedrock_auth_method === 'role' ? (
-        <BedrockRoleFields form={form} onChange={onChange} invalid={invalid} />
+        <BedrockRoleFields orgId={orgId} form={form} onChange={onChange} invalid={invalid} />
       ) : form.bedrock_auth_method === 'bearer' ? (
         <LabeledInput
           label={`Bedrock API key${keep}`}
@@ -515,7 +520,7 @@ export function BedrockFields({
 // connectAnthropic / connectBedrock and patches the connected flags on
 // success), so there's no Connect button here. `error` reddens the fields on
 // a failed validation.
-export function OrgClaudeKeyStep({ state, patch, error }: StepContext) {
+export function OrgClaudeKeyStep({ orgId, state, patch, error }: StepContext) {
   return (
     <div className="space-y-5">
       <div className="space-y-1.5">
@@ -537,6 +542,7 @@ export function OrgClaudeKeyStep({ state, patch, error }: StepContext) {
         />
       ) : (
         <BedrockFields
+          orgId={orgId}
           form={state.org}
           onChange={(p) => patch({ org: { ...state.org, ...p } })}
           hasStored={

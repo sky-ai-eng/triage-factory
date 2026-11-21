@@ -409,14 +409,10 @@ export async function loadTeam(teamId: string): Promise<Partial<WizardState>> {
 // settings row via PATCH /api/teams/{id}/settings (the team's default model).
 // It refuses to write when the team load (the Repositories step's)
 // failed — `state.team` would be the empty default form, and saving it would
-// clobber the stored model / thresholds. Returns the backend's model-cap clamp
-// notice (if any) so the caller can surface it. The Jira project rules, the
-// repos and the GitHub-team mappings each ride their own replace-set PUT,
-// persisted by their own steps; this writes only the settings row.
-async function persistTeamSettings(
-  teamId: string,
-  state: WizardState,
-): Promise<string | undefined> {
+// clobber the stored model / thresholds. The Jira project rules, the repos and
+// the GitHub-team mappings each ride their own replace-set PUT, persisted by
+// their own steps; this writes only the settings row.
+async function persistTeamSettings(teamId: string, state: WizardState): Promise<void> {
   if (!state.teamLoaded) {
     throw new Error(
       'Team settings didn’t load — reopen the Repositories step and retry before saving.',
@@ -424,7 +420,6 @@ async function persistTeamSettings(
   }
   const result = await saveTeamSettings(teamId, state.team, false)
   if (!result.ok) throw new Error(result.error)
-  return result.warning
 }
 
 // gateModelPick holds a step's Continue to the same save gate every other model
@@ -1697,8 +1692,7 @@ const teamModelStep: WizardStep = {
   validate: (s) => (s.team.default_model.trim() === '' ? 'Choose a default model.' : null),
   persist: async ({ state, teamId, orgId }) => {
     await gateModelPick(orgId, state.team.default_model)
-    const warning = await persistTeamSettings(teamId, state)
-    if (warning) toast.info(warning)
+    await persistTeamSettings(teamId, state)
   },
   collapsedSummary: (s) =>
     `Default model: ${s.team.default_model ? modelDisplayName(s.team.default_model) : 'Not chosen'}`,

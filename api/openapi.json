@@ -3083,41 +3083,41 @@
         },
         "type": "object"
       },
-      "TeamSettings": {
+      "TeamSettingsJSON": {
         "properties": {
-          "AIPreferenceUpdateInterval": {
-            "description": "A stored scoring setting that nothing acts on.",
-            "type": "integer"
-          },
-          "AIReprioritizeThreshold": {
-            "description": "A stored scoring setting that nothing acts on.",
-            "type": "integer"
-          },
-          "AutoDelegateEnabled": {
+          "ai_auto_delegate_enabled": {
             "description": "Whether event handlers in automate mode may start runs for the team.",
             "type": "boolean"
           },
-          "AutoModeEnabled": {
+          "ai_model": {
+            "description": "The model key the team's steps run on when they name no model, empty when the team has none.",
+            "type": "string"
+          },
+          "ai_preference_update_interval": {
+            "description": "A stored scoring setting that nothing acts on.",
+            "type": "integer"
+          },
+          "ai_reprioritize_threshold": {
+            "description": "A stored scoring setting that nothing acts on.",
+            "type": "integer"
+          },
+          "auto_mode_enabled": {
             "description": "Whether the team's delegated runs on the Claude Code SDK start in its auto permission mode in local mode.",
             "type": "boolean"
           },
-          "BaseBranchPushPolicy": {
+          "base_branch_push_policy": {
             "description": "Whether the team's agents may push to a repository's base branch: never, manual_only, or always.",
             "type": "string"
           },
-          "BranchTemplate": {
+          "branch_template": {
             "description": "The branch name convention the team's agents are asked to follow, in which <ticket-id> stands for the run's ticket id.",
             "type": "string"
           },
-          "ClaudeAIConnectorsEnabled": {
+          "claude_ai_connectors_enabled": {
             "description": "Whether the team's delegated runs on the operator's own Claude Code login keep that login's claude.ai connectors.",
             "type": "boolean"
           },
-          "DefaultModel": {
-            "description": "The model key the team's steps run on when they name no model.",
-            "type": "string"
-          },
-          "EnabledModels": {
+          "enabled_models": {
             "description": "The model keys the team may choose from, or null when every model the organization enables is allowed.",
             "items": {
               "type": "string"
@@ -3127,59 +3127,40 @@
               "null"
             ]
           },
-          "JiraProjects": {
-            "description": "The ids of the team's tracked Jira projects in Triage Factory, in display order; jira_projects in the same response lists the projects the team tracks.",
-            "items": {
-              "type": "string"
-            },
+          "max_daily_cost_usd": {
+            "description": "The most the team's runs may spend in one UTC day, in USD, or null when the team has no cap; PUT /api/teams/{team_id}/usage/cap sets it.",
             "type": [
-              "array",
+              "number",
               "null"
             ]
           },
-          "LinearTeams": {
-            "description": "The Linear ids of the team's tracked Linear teams, in display order; linear_teams in the same response lists the Linear teams the team tracks.",
-            "items": {
-              "type": "string"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          },
-          "MaxDailyCostUSD": {
-            "description": "The team's LLM spend cap per UTC day, in USD, 0 when there is no cap; an organization admin sets it.",
-            "type": "number"
-          },
-          "PermissionAbsentAutodenyEnabled": {
-            "description": "Whether a delegated run's permission prompt is denied after PermissionAbsentGraceMS when nobody who could answer it has the app open.",
+          "permission_absent_autodeny_enabled": {
+            "description": "Whether a delegated run's permission prompt is denied after permission_absent_grace_seconds when nobody who could answer it has the app open.",
             "type": "boolean"
           },
-          "PermissionAbsentGraceMS": {
-            "description": "How long an unanswered permission prompt waits, in milliseconds, before it is denied while nobody who could answer it has the app open.",
+          "permission_absent_grace_seconds": {
+            "description": "How long an unanswered permission prompt waits, in seconds, before it is denied while nobody who could answer it has the app open.",
             "type": "integer"
           },
-          "ReviewPosture": {
+          "review_posture": {
             "description": "How the team's delegated reviews reach GitHub: identity, draft, auto, or auto_unless_blocking.",
             "type": "string"
           }
         },
         "required": [
-          "JiraProjects",
-          "LinearTeams",
-          "AIReprioritizeThreshold",
-          "AIPreferenceUpdateInterval",
-          "DefaultModel",
-          "AutoDelegateEnabled",
-          "AutoModeEnabled",
-          "ClaudeAIConnectorsEnabled",
-          "PermissionAbsentGraceMS",
-          "PermissionAbsentAutodenyEnabled",
-          "MaxDailyCostUSD",
-          "BranchTemplate",
-          "ReviewPosture",
-          "EnabledModels",
-          "BaseBranchPushPolicy"
+          "ai_model",
+          "enabled_models",
+          "ai_auto_delegate_enabled",
+          "auto_mode_enabled",
+          "claude_ai_connectors_enabled",
+          "ai_reprioritize_threshold",
+          "ai_preference_update_interval",
+          "branch_template",
+          "review_posture",
+          "base_branch_push_policy",
+          "permission_absent_autodeny_enabled",
+          "permission_absent_grace_seconds",
+          "max_daily_cost_usd"
         ],
         "type": "object"
       },
@@ -3314,12 +3295,8 @@
             "type": "string"
           },
           "team_settings": {
-            "$ref": "#/components/schemas/TeamSettings",
-            "description": "The team's settings. Its keys are spelled in PascalCase, unlike every other key in the response."
-          },
-          "warning": {
-            "description": "Advisory text about a save that succeeded. Neither the read nor the update sets it, so it is always absent.",
-            "type": "string"
+            "$ref": "#/components/schemas/TeamSettingsJSON",
+            "description": "The team's settings, under the names PATCH /api/teams/{team_id}/settings writes them by."
           }
         },
         "required": [
@@ -4182,78 +4159,6 @@
         }
       }
     },
-    "/api/bedrock/role-setup": {
-      "post": {
-        "description": "Returns the AWS identity Triage Factory assumes an IAM role as, the organization's External ID, and a trust policy that pins both, for setting up Bedrock role mode. The first call generates and stores the External ID. Multi mode only.",
-        "operationId": "setup_bedrock_role",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/BedrockRoleSetupResponse"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "$ref": "#/components/responses/Error"
-          }
-        },
-        "security": [
-          {
-            "session": []
-          },
-          {
-            "token": []
-          }
-        ],
-        "summary": "Get the trust policy for a Bedrock IAM role",
-        "x-hints": {
-          "destructiveHint": false,
-          "idempotentHint": true,
-          "openWorldHint": true,
-          "readOnlyHint": false
-        }
-      }
-    },
-    "/api/github/preflight-ssh": {
-      "post": {
-        "description": "Runs ssh against the organization's GitHub host and reports whether the machine's SSH key signed in, adding the host's key to known_hosts if it is not there yet. A probe that fails is reported with ok false rather than as an error. Local mode only.",
-        "operationId": "preflight_github_ssh",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SshPreflightResponse"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "$ref": "#/components/responses/Error"
-          }
-        },
-        "security": [
-          {
-            "session": []
-          },
-          {
-            "token": []
-          }
-        ],
-        "summary": "Test this machine's SSH access to GitHub",
-        "x-hints": {
-          "destructiveHint": false,
-          "idempotentHint": true,
-          "openWorldHint": true,
-          "readOnlyHint": false
-        }
-      }
-    },
     "/api/health": {
       "get": {
         "description": "Reports status ok once the server accepts requests. It needs no credential and checks no database or integration, so it says only that the process is serving.",
@@ -4827,6 +4732,53 @@
         }
       }
     },
+    "/api/orgs/{org_id}/github/ssh/preflight": {
+      "post": {
+        "description": "Runs ssh against the organization's GitHub host and reports whether the machine's SSH key signed in, adding the host's key to known_hosts if it is not there yet. A probe that fails is reported with ok false rather than as an error. Local mode only.",
+        "operationId": "preflight_github_ssh",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SshPreflightResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Test this machine's SSH access to GitHub",
+        "x-hints": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      }
+    },
     "/api/orgs/{org_id}/jira/access/credential": {
       "delete": {
         "description": "Deletes the organization's Jira credential for either deployment, clears its Jira site, and stops its Jira polling. It succeeds when no credential is stored, and leaves each person's own Jira credential as it is.",
@@ -5302,6 +5254,53 @@
         "summary": "Connect the organization to Bedrock with an IAM role",
         "x-hints": {
           "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/orgs/{org_id}/llm/bedrock/role-setup": {
+      "post": {
+        "description": "Returns the AWS identity Triage Factory assumes an IAM role as, the organization's External ID, and a trust policy that pins both, for setting up Bedrock role mode. The first call generates and stores the External ID. Multi mode only.",
+        "operationId": "setup_bedrock_role",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BedrockRoleSetupResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get the trust policy for a Bedrock IAM role",
+        "x-hints": {
+          "destructiveHint": false,
           "idempotentHint": true,
           "openWorldHint": true,
           "readOnlyHint": false

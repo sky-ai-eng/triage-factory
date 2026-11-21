@@ -605,21 +605,21 @@ func EffectiveCloneProtocol(stored string, multiMode bool) string {
 // DefaultModel + AutoDelegateEnabled moved off user_settings:
 // the team owns the AI behavior policy, users do not override in v1.
 type TeamSettings struct {
-	JiraProjects []string `doc:"The ids of the team's tracked Jira projects in Triage Factory, in display order; jira_projects in the same response lists the projects the team tracks."`
+	JiraProjects []string
 	// LinearTeams is the display order of the Linear teams (by UUID) this team
 	// tracks. Like JiraProjects it is an order, not the membership:
 	// linear_team_rules, owned by LinearTeamRulesStore, is the source of truth
 	// for which Linear teams are tracked.
-	LinearTeams                []string `doc:"The Linear ids of the team's tracked Linear teams, in display order; linear_teams in the same response lists the Linear teams the team tracks."`
-	AIReprioritizeThreshold    int      `doc:"A stored scoring setting that nothing acts on."`
-	AIPreferenceUpdateInterval int      `doc:"A stored scoring setting that nothing acts on."`
-	DefaultModel               string   `doc:"The model key the team's steps run on when they name no model."` // a model catalog key; "" inherits
-	AutoDelegateEnabled        bool     `doc:"Whether event handlers in automate mode may start runs for the team."`
+	LinearTeams                []string
+	AIReprioritizeThreshold    int
+	AIPreferenceUpdateInterval int
+	DefaultModel               string // a model catalog key; "" inherits
+	AutoDelegateEnabled        bool
 	// AutoModeEnabled starts SDK-runtime delegated conversations in Claude
 	// Code's auto permission mode. Local mode honors the stored team choice;
 	// multi-mode SDK conversations always enable auto mode, and the native
 	// runtime ignores this field entirely.
-	AutoModeEnabled bool `doc:"Whether the team's delegated runs on the Claude Code SDK start in its auto permission mode in local mode."`
+	AutoModeEnabled bool
 	// ClaudeAIConnectorsEnabled leaves the claude.ai connectors of the
 	// operator's Claude Code login connected in this team's SDK-runtime
 	// delegated conversations. It matters only to a run on that login (the
@@ -627,7 +627,7 @@ type TeamSettings struct {
 	// system job, has them off whatever this says. Off by default, because a
 	// run reads untrusted text and a connector's tools act on the operator's
 	// account. The native runtime has no such connectors and ignores it.
-	ClaudeAIConnectorsEnabled bool `doc:"Whether the team's delegated runs on the operator's own Claude Code login keep that login's claude.ai connectors."`
+	ClaudeAIConnectorsEnabled bool
 
 	// PermissionAbsentGraceMS + PermissionAbsentAutodenyEnabled gate the
 	// presence-aware fast auto-deny for unattended permission prompts (TFAC-392).
@@ -637,8 +637,8 @@ type TeamSettings struct {
 	// permTimeout(). When off, the prompt keeps the full-timeout behavior exactly.
 	// The grace is clamped at spawn to [1s, permTimeout()) so the absent wait
 	// can never outlast the full one.
-	PermissionAbsentGraceMS         int  `doc:"How long an unanswered permission prompt waits, in milliseconds, before it is denied while nobody who could answer it has the app open."`
-	PermissionAbsentAutodenyEnabled bool `doc:"Whether a delegated run's permission prompt is denied after PermissionAbsentGraceMS when nobody who could answer it has the app open."`
+	PermissionAbsentGraceMS         int
+	PermissionAbsentAutodenyEnabled bool
 
 	// MaxDailyCostUSD is the per-team daily LLM spend cap (TFAC-482), the
 	// team-scoped sibling of OrgSettings.MaxDailyCostUSD. 0 = no cap (round-trips
@@ -649,7 +649,7 @@ type TeamSettings struct {
 	// configured: a team admin cannot set their own team's cap (the team-settings
 	// write path never touches this field — only the org-admin cap endpoint does),
 	// so a team-admin save round-trips the stored value untouched.
-	MaxDailyCostUSD float64 `doc:"The team's LLM spend cap per UTC day, in USD, 0 when there is no cap; an organization admin sets it."`
+	MaxDailyCostUSD float64
 
 	// BranchTemplate is the team's branch-name convention (TFAC-498), rendered
 	// into the delegated agent's prompt as envelope guidance — it is NOT
@@ -657,7 +657,7 @@ type TeamSettings struct {
 	// id at prompt-render time. NOT NULL with a schema DEFAULT; defaults to
 	// DefaultBranchTemplate. The write path coalesces an empty string to the
 	// default so a blank never persists.
-	BranchTemplate string `doc:"The branch name convention the team's agents are asked to follow, in which <ticket-id> stands for the run's ticket id."`
+	BranchTemplate string
 
 	// ReviewPosture is how this team's delegated reviews reach GitHub — one of
 	// ValidReviewPostures, read at finalize time by the agenthost's review
@@ -666,7 +666,7 @@ type TeamSettings struct {
 	// The write path coalesces an empty string to the default so a blank never
 	// persists. Deliberately team-grained, with no per-prompt override: a
 	// prompt author must not be able to opt their conversations out of the team's gate.
-	ReviewPosture string `doc:"How the team's delegated reviews reach GitHub: identity, draft, auto, or auto_unless_blocking."`
+	ReviewPosture string
 
 	// EnabledModels is the team's enable-set: which of the models its org
 	// enables this team may pick from, stored as a JSON array of model keys in
@@ -682,7 +682,7 @@ type TeamSettings struct {
 	// pinned on its prompts or stored as its default — those are caught at the
 	// next dispatch, which refuses by name rather than substituting a model
 	// nobody chose.
-	EnabledModels []string `doc:"The model keys the team may choose from, or null when every model the organization enables is allowed."`
+	EnabledModels []string
 
 	// BaseBranchPushPolicy is whether this team's delegated agents may push to
 	// a repo's base / default branch — one of ValidBaseBranchPushPolicies, read
@@ -694,7 +694,7 @@ type TeamSettings struct {
 	// as ReviewPosture and more sharply: task context is minted from PR bodies,
 	// issue comments and labels, so task text saying "push to main" must never
 	// be sufficient authority to unlock a base-branch push.
-	BaseBranchPushPolicy string `doc:"Whether the team's agents may push to a repository's base branch: never, manual_only, or always."`
+	BaseBranchPushPolicy string
 }
 
 // DefaultTeamSettingsFor returns the NOT NULL DEFAULT values from the

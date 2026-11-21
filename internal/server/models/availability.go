@@ -328,7 +328,7 @@ func (h *Handler) handleModelTestSweep(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	provider := strings.TrimSpace(req.Provider)
+	provider := req.Provider
 	switch {
 	case provider == "":
 		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
@@ -483,7 +483,7 @@ const noProberConfigured = "this deployment has no model prober configured"
 // exist, and probing an arbitrary caller-supplied string would let anyone spend
 // the org's money on requests to models TF never named.
 func offeredModel(w http.ResponseWriter, rawKey string) (modelcatalog.Model, bool) {
-	model, ok := DeploymentUniverse().Lookup(strings.TrimSpace(rawKey))
+	model, ok := DeploymentUniverse().Lookup(rawKey)
 	if !ok {
 		httpx.NotFound(w, "model")
 		return modelcatalog.Model{}, false

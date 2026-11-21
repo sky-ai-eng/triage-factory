@@ -208,10 +208,10 @@ func TestTeamSettingsPatch_NullClearsEveryClearableField(t *testing.T) {
 	patchTeamSettingsOK(t, s, "default", body)
 
 	got := teamSettingsSnapshot(t, s)
-	if got.DefaultModel != domain.ModelAliasOpus {
-		t.Errorf("ai_model after clearing everything around it = %q, want %q untouched", got.DefaultModel, domain.ModelAliasOpus)
+	if got.AIModel != domain.ModelAliasOpus {
+		t.Errorf("ai_model after clearing everything around it = %q, want %q untouched", got.AIModel, domain.ModelAliasOpus)
 	}
-	if got.AutoDelegateEnabled != defaults.AutoDelegateEnabled ||
+	if got.AIAutoDelegate != defaults.AutoDelegateEnabled ||
 		got.AutoModeEnabled != defaults.AutoModeEnabled ||
 		got.ClaudeAIConnectorsEnabled != defaults.ClaudeAIConnectorsEnabled ||
 		got.AIReprioritizeThreshold != defaults.AIReprioritizeThreshold ||
@@ -220,7 +220,7 @@ func TestTeamSettingsPatch_NullClearsEveryClearableField(t *testing.T) {
 		got.ReviewPosture != defaults.ReviewPosture ||
 		got.BaseBranchPushPolicy != defaults.BaseBranchPushPolicy ||
 		got.PermissionAbsentAutodenyEnabled != defaults.PermissionAbsentAutodenyEnabled ||
-		got.PermissionAbsentGraceMS != defaults.PermissionAbsentGraceMS {
+		got.PermissionAbsentGraceSeconds*1000 != defaults.PermissionAbsentGraceMS {
 		t.Errorf("null did not reset every field to its default:\n got: %+v\nwant: %+v", got, defaults)
 	}
 }
@@ -250,8 +250,8 @@ func TestTeamSettingsPatch_AIModelCannotBeCleared(t *testing.T) {
 			}
 		})
 	}
-	if got := teamSettingsSnapshot(t, s); got.DefaultModel != domain.ModelAliasOpus {
-		t.Errorf("a refused clear changed the stored default to %q", got.DefaultModel)
+	if got := teamSettingsSnapshot(t, s); got.AIModel != domain.ModelAliasOpus {
+		t.Errorf("a refused clear changed the stored default to %q", got.AIModel)
 	}
 }
 
@@ -487,15 +487,15 @@ func orgSettingsSnapshot(t *testing.T, s *Server) map[string]any {
 	return out
 }
 
-// teamSettingsSnapshot reads the team settings row back off its GET.
-func teamSettingsSnapshot(t *testing.T, s *Server) domain.TeamSettings {
+// teamSettingsSnapshot reads the team settings back off their GET.
+func teamSettingsSnapshot(t *testing.T, s *Server) teamSettingsJSON {
 	t.Helper()
 	rec := doJSON(t, s, http.MethodGet, teamSettingsPath("default"), nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET %s: %d: %s", teamSettingsPath("default"), rec.Code, rec.Body.String())
 	}
 	var out struct {
-		TeamSettings domain.TeamSettings `json:"team_settings"`
+		TeamSettings teamSettingsJSON `json:"team_settings"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatalf("decode team settings: %v", err)

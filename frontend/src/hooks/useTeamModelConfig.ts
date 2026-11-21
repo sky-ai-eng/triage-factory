@@ -6,12 +6,12 @@ import { apiJSON } from '../lib/apiClient'
 // surfaced here: the rest of the settings row belongs to the settings stack,
 // and a second full-form reader would be a second copy of its mapping.
 
-/** The settings resource's model slice, under the wire's own field names —
- * the resource embeds the Go domain struct, so the casing is its. */
+/** The settings resource's model slice, under the wire's own field names,
+ * which the PATCH below writes by. */
 type TeamSettingsResource = {
   team_settings: {
-    DefaultModel: string
-    EnabledModels: string[] | null
+    ai_model: string
+    enabled_models: string[] | null
   }
 }
 
@@ -33,8 +33,8 @@ export type TeamModelPatch = {
 
 function slice(resource: TeamSettingsResource): TeamModelConfig {
   return {
-    defaultModel: resource.team_settings.DefaultModel,
-    enabledModels: resource.team_settings.EnabledModels,
+    defaultModel: resource.team_settings.ai_model,
+    enabledModels: resource.team_settings.enabled_models,
   }
 }
 

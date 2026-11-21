@@ -818,6 +818,8 @@ func (s *Server) failPartialUpload(w http.ResponseWriter, r *http.Request, orgID
 
 // readKnowledgeFormValue reads one non-file multipart field, bounded so a
 // scalar field cannot be used to stream an unbounded body past the file cap.
+// The value is returned as sent, so root and path_prefix are held to the same
+// rules here as on the list and move routes' JSON bodies.
 func readKnowledgeFormValue(w http.ResponseWriter, part *multipart.Part, field string) (string, bool) {
 	raw, err := io.ReadAll(io.LimitReader(part, kbstore.MaxPathLen+1))
 	if err != nil {
@@ -834,7 +836,7 @@ func readKnowledgeFormValue(w http.ResponseWriter, part *multipart.Part, field s
 		})
 		return "", false
 	}
-	return strings.TrimSpace(string(raw)), true
+	return string(raw), true
 }
 
 // uploadPartFilename reads a part's declared filename from its raw

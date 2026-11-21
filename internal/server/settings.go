@@ -628,10 +628,11 @@ type sshPreflightResponse struct {
 }
 
 var opGitHubPreflightSSH = httpx.NewJSONOp[httpx.NoBody, sshPreflightResponse](httpx.OpSpec{
-	Pattern:     "POST /api/github/preflight-ssh",
+	Pattern:     "POST /api/orgs/{org_id}/github/ssh/preflight",
 	ID:          "preflight_github_ssh",
 	Summary:     "Test this machine's SSH access to GitHub",
 	Description: "Runs ssh against the organization's GitHub host and reports whether the machine's SSH key signed in, adding the host's key to known_hosts if it is not there yet. A probe that fails is reported with ok false rather than as an error. Local mode only.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
 	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintNo, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
 })
 
@@ -662,8 +663,10 @@ func (se *settingsHandler) handleGitHubPreflightSSH(w http.ResponseWriter, r *ht
 	// Probe target tracks the org's GitHub base URL so the Test SSH button on
 	// the Settings page works for GHE deployments. Read under the request's
 	// claims, like the rest of the settings surface.
-	orgID := OrgIDFrom(r.Context())
-	userID := ClaimsFrom(r.Context()).Subject
+	orgID, userID, ok := se.az.RequireOrgMember(w, r)
+	if !ok {
+		return
+	}
 	var orgSet domain.OrgSettings
 	if err := se.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var lerr error

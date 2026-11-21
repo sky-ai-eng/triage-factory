@@ -53,7 +53,7 @@ func newRoleTestServer(t *testing.T, resolver bedrockRoleResolver) *Server {
 func TestBedrockRoleSetup_ReturnsCallerARNAndExternalID(t *testing.T) {
 	s := newRoleTestServer(t, &fakeRoleResolver{arn: "arn:aws:iam::111122223333:role/tf-control"})
 
-	rec := doJSON(t, s, "POST", "/api/bedrock/role-setup", nil)
+	rec := doJSON(t, s, "POST", bedrockRoleSetupRoute(), nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -79,7 +79,7 @@ func TestBedrockRoleSetup_ReturnsCallerARNAndExternalID(t *testing.T) {
 	}
 
 	// External ID is stable across calls (persisted).
-	rec2 := doJSON(t, s, "POST", "/api/bedrock/role-setup", nil)
+	rec2 := doJSON(t, s, "POST", bedrockRoleSetupRoute(), nil)
 	var out2 struct {
 		ExternalID string `json:"external_id"`
 	}
@@ -94,7 +94,7 @@ func TestBedrockRoleSetup_ReturnsCallerARNAndExternalID(t *testing.T) {
 func TestBedrockRoleSetup_NoAmbientIdentity(t *testing.T) {
 	s := newRoleTestServer(t, &fakeRoleResolver{arnErr: llmcred.ErrNoAmbientIdentity})
 
-	rec := doJSON(t, s, "POST", "/api/bedrock/role-setup", nil)
+	rec := doJSON(t, s, "POST", bedrockRoleSetupRoute(), nil)
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status=%d body=%s, want 422", rec.Code, rec.Body.String())
 	}
@@ -252,7 +252,7 @@ func TestTrustPolicyPrincipalARN(t *testing.T) {
 // STS session ARN, when the control service runs under an assumed role.
 func TestBedrockRoleSetup_TrustPolicyUsesRoleARNForAssumedRoleCaller(t *testing.T) {
 	s := newRoleTestServer(t, &fakeRoleResolver{arn: "arn:aws:sts::111122223333:assumed-role/tf-control/i-0abc"})
-	rec := doJSON(t, s, "POST", "/api/bedrock/role-setup", nil)
+	rec := doJSON(t, s, "POST", bedrockRoleSetupRoute(), nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -274,4 +274,9 @@ func TestBedrockRoleSetup_TrustPolicyUsesRoleARNForAssumedRoleCaller(t *testing.
 	if strings.Contains(out.TrustPolicy, "assumed-role") {
 		t.Errorf("trust policy must NOT contain the STS assumed-role session ARN:\n%s", out.TrustPolicy)
 	}
+}
+
+// bedrockRoleSetupRoute is the org's Bedrock role-setup route in local mode.
+func bedrockRoleSetupRoute() string {
+	return "/api/orgs/" + runmode.LocalDefaultOrgID + "/llm/bedrock/role-setup"
 }

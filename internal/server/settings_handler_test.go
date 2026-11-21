@@ -804,9 +804,9 @@ func TestTeamSettingsPatch_EnabledModels_HeldToBothSets(t *testing.T) {
 		"ai_model":       domain.ModelAliasHaiku,
 	})
 	set, _ := ok["team_settings"].(map[string]any)
-	got, _ := set["EnabledModels"].([]any)
+	got, _ := set["enabled_models"].([]any)
 	if len(got) != 1 || got[0] != domain.ModelAliasHaiku {
-		t.Errorf("stored team set = %v, want [%s]", set["EnabledModels"], domain.ModelAliasHaiku)
+		t.Errorf("stored team set = %v, want [%s]", set["enabled_models"], domain.ModelAliasHaiku)
 	}
 }
 
@@ -905,9 +905,9 @@ func TestOrgSettingsPatch_LimitsOutOfRange(t *testing.T) {
 
 // --- unattended-prompt grace window bounds ---------------------------------
 
-// teamGrace reads the team settings GET and returns the stored grace (ms) plus
-// the advertised min/max second bounds that drive the UI slider's range.
-func teamGrace(t *testing.T, s *Server) (graceMS, minS, maxS int) {
+// teamGrace reads the team settings GET and returns the grace plus the
+// advertised min/max bounds that drive the UI slider's range, all in seconds.
+func teamGrace(t *testing.T, s *Server) (graceS, minS, maxS int) {
 	t.Helper()
 	rec := doJSON(t, s, "GET", teamSettingsPath("default"), nil)
 	if rec.Code != http.StatusOK {
@@ -915,7 +915,7 @@ func teamGrace(t *testing.T, s *Server) (graceMS, minS, maxS int) {
 	}
 	var resp struct {
 		TeamSettings struct {
-			PermissionAbsentGraceMS int `json:"PermissionAbsentGraceMS"`
+			PermissionAbsentGraceSeconds int `json:"permission_absent_grace_seconds"`
 		} `json:"team_settings"`
 		Min int `json:"permission_absent_grace_min_seconds"`
 		Max int `json:"permission_absent_grace_max_seconds"`
@@ -923,7 +923,7 @@ func teamGrace(t *testing.T, s *Server) (graceMS, minS, maxS int) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode team settings: %v", err)
 	}
-	return resp.TeamSettings.PermissionAbsentGraceMS, resp.Min, resp.Max
+	return resp.TeamSettings.PermissionAbsentGraceSeconds, resp.Min, resp.Max
 }
 
 // TestTeamSettingsPatch_GraceOutOfBandRejected: a grace outside the band is a
@@ -941,16 +941,16 @@ func TestTeamSettingsPatch_GraceOutOfBandRejected(t *testing.T) {
 			t.Fatalf("grace %ds = %d, want 422; body=%s", secs, rec.Code, rec.Body.String())
 		}
 		httpxtest.AssertFirstError(t, rec, httpx.ReasonOutOfRange, "permission_absent_grace_seconds")
-		if ms, _, _ := teamGrace(t, s); ms != before {
-			t.Errorf("rejected grace %ds still moved the stored value to %dms", secs, ms)
+		if got, _, _ := teamGrace(t, s); got != before {
+			t.Errorf("rejected grace %ds still moved the stored value to %ds", secs, got)
 		}
 	}
 
 	patchTeamSettingsOK(t, s, "default", map[string]any{
 		"permission_absent_grace_seconds": 20,
 	})
-	if ms, _, _ := teamGrace(t, s); ms != 20000 {
-		t.Errorf("after saving 20s, stored grace = %dms, want 20000ms (in-band, verbatim)", ms)
+	if got, _, _ := teamGrace(t, s); got != 20 {
+		t.Errorf("after saving 20s, grace = %ds, want 20s (in-band, verbatim)", got)
 	}
 }
 
@@ -969,8 +969,6 @@ func jiraDataCenterCredentialRoute() string { return jiraCredentialRoute() + "/d
 // --- review posting posture ------------------------------------------------
 
 // teamReviewPosture reads the stored posture back off the team settings GET.
-// The GET serializes domain.TeamSettings wholesale (no JSON tags), so the wire
-// key is the Go field name.
 func teamReviewPosture(t *testing.T, s *Server) string {
 	t.Helper()
 	rec := doJSON(t, s, "GET", teamSettingsPath("default"), nil)
@@ -979,7 +977,7 @@ func teamReviewPosture(t *testing.T, s *Server) string {
 	}
 	var resp struct {
 		TeamSettings struct {
-			ReviewPosture string `json:"ReviewPosture"`
+			ReviewPosture string `json:"review_posture"`
 		} `json:"team_settings"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
@@ -1065,8 +1063,7 @@ func TestTeamSettingsPatch_ClaudeAIConnectors(t *testing.T) {
 
 // --- base-branch push policy -----------------------------------------------
 
-// teamBasePushPolicy reads the stored policy back off the team settings GET
-// (same wholesale-serialized shape as the posture above).
+// teamBasePushPolicy reads the stored policy back off the team settings GET.
 func teamBasePushPolicy(t *testing.T, s *Server) string {
 	t.Helper()
 	rec := doJSON(t, s, "GET", teamSettingsPath("default"), nil)
@@ -1075,7 +1072,7 @@ func teamBasePushPolicy(t *testing.T, s *Server) string {
 	}
 	var resp struct {
 		TeamSettings struct {
-			BaseBranchPushPolicy string `json:"BaseBranchPushPolicy"`
+			BaseBranchPushPolicy string `json:"base_branch_push_policy"`
 		} `json:"team_settings"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {

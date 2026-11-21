@@ -98,10 +98,10 @@ func (h *Handler) handleUsageAccessLog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var v httpx.Validation
-	category := strings.TrimSpace(req.Category)
-	// A closed vocabulary: an unknown category used to pass straight through to
-	// a filter that matched nothing, so a typo returned an
-	// authoritative-looking empty log.
+	category := req.Category
+	// A closed vocabulary, matched exactly: an unknown category, a blank one
+	// included, is refused rather than read as a filter that matches nothing or
+	// as no filter at all.
 	if category != "" && !slices.Contains(accessLogCategories, category) {
 		v.Invalid("category", "must be one of: "+strings.Join(accessLogCategories, ", "))
 	}

@@ -113,7 +113,9 @@ export async function disconnectBedrock(
 // has no ambient AWS identity (an operator-side deployment problem) — the
 // returned `error` is the remediation text, surfaced inline. Mirrors
 // connectBedrock's shape + fetch conventions.
-export async function fetchBedrockRoleSetup(): Promise<
+export async function fetchBedrockRoleSetup(
+  orgId: string,
+): Promise<
   | { ok: true; caller_identity_arn: string; external_id: string; trust_policy: string }
   | { ok: false; error: string }
 > {
@@ -122,7 +124,7 @@ export async function fetchBedrockRoleSetup(): Promise<
       caller_identity_arn?: string
       external_id?: string
       trust_policy?: string
-    }>('/api/bedrock/role-setup', {
+    }>(`/api/orgs/${encodeURIComponent(orgId)}/llm/bedrock/role-setup`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
     })
