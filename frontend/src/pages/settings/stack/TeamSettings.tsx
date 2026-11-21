@@ -452,7 +452,6 @@ export default function TeamSettings({
         review_posture: reviewPosture,
         base_branch_push_policy: basePushPolicy,
       }))
-      if (res.warning) toast.info(res.warning)
       toast.success('Team defaults saved')
       return true
     } finally {

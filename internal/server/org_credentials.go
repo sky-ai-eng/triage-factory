@@ -371,8 +371,18 @@ func (s *Server) handleGitHubPATDelete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "disconnected"})
 }
 
+var opJiraCredentialDelete = httpx.NewJSONOp[httpx.NoBody, credentialDisconnectedResponse](httpx.OpSpec{
+	Pattern:     "DELETE /api/orgs/{org_id}/jira/access/credential",
+	ID:          "delete_jira_credential",
+	Summary:     "Disconnect the organization from Jira",
+	Description: "Deletes the organization's Jira credential for either deployment, clears its Jira site, and stops its Jira polling. It succeeds when no credential is stored, and leaves each person's own Jira credential as it is.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
+
 // handleJiraCredentialDelete unbinds the org's Jira service credential — the
-// mirror of the PUT that handleJiraConnect serves. It clears the stored
+// mirror of the PUTs that handleJiraCloudCredentialPut and
+// handleJiraDataCenterCredentialPut serve. It clears the stored
 // credential AND the base URL column in ONE transaction; that pairing is the
 // whole reason this route exists, since the frontend previously had to fire
 // DELETE /api/integrations/jira and then a second sparse org-settings save to
@@ -441,7 +451,7 @@ func (s *Server) handleJiraCredentialDelete(w http.ResponseWriter, r *http.Reque
 		s.MarkJiraRestarted(ctx, orgID)
 		go s.onJiraChanged(orgID)
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "disconnected"})
+	opJiraCredentialDelete.Write(w, credentialDisconnectedResponse{Status: "disconnected"})
 }
 
 // kickGitHubChanged re-dues GitHub polling under a changed GitHub credential

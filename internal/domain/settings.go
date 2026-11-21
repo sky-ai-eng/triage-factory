@@ -743,7 +743,7 @@ type UserSettings struct {
 	// The client writes it, and the row is keyed by user alone, so a multi-org
 	// person carries one marker across their orgs. Both are accepted because
 	// the value anchors a line of prose read at minute resolution, not a query.
-	OverviewSeenAt *time.Time `json:"overview_seen_at"`
+	OverviewSeenAt *time.Time `json:"overview_seen_at" doc:"When the person last opened the Overview, as an RFC 3339 timestamp, or null if they never have."`
 }
 
 // JiraStatusRef is one workflow status as the rules store it: the id Jira's

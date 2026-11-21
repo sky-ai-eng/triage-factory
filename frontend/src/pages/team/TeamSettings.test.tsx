@@ -190,8 +190,8 @@ const MODELS_READ = {
 // team-enabled — the row the panel exists to switch on.
 const TEAM_SETTINGS = {
   team_settings: {
-    DefaultModel: 'claude-opus-5',
-    EnabledModels: ['claude-opus-5', 'claude-sonnet-5'],
+    ai_model: 'claude-opus-5',
+    enabled_models: ['claude-opus-5', 'claude-sonnet-5'],
   },
 }
 
@@ -229,8 +229,8 @@ beforeEach(() => {
       }
       return Promise.resolve({
         team_settings: {
-          DefaultModel: body.ai_model ?? TEAM_SETTINGS.team_settings.DefaultModel,
-          EnabledModels: body.enabled_models ?? TEAM_SETTINGS.team_settings.EnabledModels,
+          ai_model: body.ai_model ?? TEAM_SETTINGS.team_settings.ai_model,
+          enabled_models: body.enabled_models ?? TEAM_SETTINGS.team_settings.enabled_models,
         },
       })
     }

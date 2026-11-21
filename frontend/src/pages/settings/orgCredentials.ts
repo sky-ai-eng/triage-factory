@@ -1,7 +1,8 @@
 // The org's integration credentials — the GitHub bot PAT and the Jira service
 // credential — as bind/unbind actions against their backend resources
-// (PUT/DELETE /api/orgs/{org}/github/pat and .../jira/access/credential;
-// see internal/server/org_credentials.go, which this mirrors). They are not
+// (PUT/DELETE /api/orgs/{org}/github/pat, PUT .../jira/access/credential/cloud
+// or /data-center, and DELETE .../jira/access/credential; see
+// internal/server/org_credentials.go, which this mirrors). They are not
 // fields inside the bulk org-settings save, so each action is a single request
 // that validates, stores, re-dues the poller, and lands an audit row.
 //

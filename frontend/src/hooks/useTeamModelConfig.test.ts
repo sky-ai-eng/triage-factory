@@ -14,7 +14,7 @@ vi.mock('../lib/apiClient', async (importOriginal) => {
 import { useTeamModelConfig } from './useTeamModelConfig'
 
 function resource(defaultModel: string, enabled: string[] | null) {
-  return { team_settings: { DefaultModel: defaultModel, EnabledModels: enabled } }
+  return { team_settings: { ai_model: defaultModel, enabled_models: enabled } }
 }
 
 function deferred<T>() {

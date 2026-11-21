@@ -635,15 +635,15 @@ describe('Jira source page', () => {
   const SETTINGS = {
     '/api/teams/t1/settings': {
       team_settings: {
-        AIReprioritizeThreshold: 0,
-        AIPreferenceUpdateInterval: 0,
-        DefaultModel: 'sonnet',
-        AutoDelegateEnabled: true,
-        BranchTemplate: 'tfac/<ticket-id>',
-        ReviewPosture: 'identity',
-        BaseBranchPushPolicy: 'never',
-        PermissionAbsentGraceMS: 15000,
-        PermissionAbsentAutodenyEnabled: true,
+        ai_reprioritize_threshold: 0,
+        ai_preference_update_interval: 0,
+        ai_model: 'sonnet',
+        ai_auto_delegate_enabled: true,
+        branch_template: 'tfac/<ticket-id>',
+        review_posture: 'identity',
+        base_branch_push_policy: 'never',
+        permission_absent_grace_seconds: 15,
+        permission_absent_autodeny_enabled: true,
       },
       jira_projects: [
         {

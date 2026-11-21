@@ -468,8 +468,8 @@ func TestJiraConnect_DoesNotWriteUserIdentity(t *testing.T) {
 		t.Fatalf("seed identity: %v", err)
 	}
 
-	rec := doJSON(t, s, "PUT", jiraCredentialRoute(),
-		map[string]any{"deployment": "data_center", "url": jiraStub.URL, "pat": "org_pat"})
+	rec := doJSON(t, s, "PUT", jiraDataCenterCredentialRoute(),
+		map[string]any{"url": jiraStub.URL, "pat": "org_pat"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s, want 200", rec.Code, rec.Body.String())
 	}
@@ -484,25 +484,48 @@ func TestJiraConnect_DoesNotWriteUserIdentity(t *testing.T) {
 }
 
 // TestJiraConnect_Cloud_RequiresBothHalves pins that a half-filled Cloud form
-// (email without token) is a 400 and stores nothing, rather than silently
-// falling through to the Data Center path.
+// (email without token) is a 400 naming the missing half and stores nothing.
 func TestJiraConnect_Cloud_RequiresBothHalves(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
 	s := newTestServer(t)
 	ctx := t.Context()
 
-	rec := doJSON(t, s, "PUT", jiraCredentialRoute(),
+	rec := doJSON(t, s, "PUT", jiraCloudCredentialRoute(),
 		map[string]any{"url": "https://acme.atlassian.net", "email": "bot@acme.com"})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d body=%s, want 400", rec.Code, rec.Body.String())
 	}
+	httpxtest.AssertFirstError(t, rec, httpx.ReasonMissingField, "token")
 	creds, err := integrations.Load(ctx, s.secrets, runmode.LocalDefaultOrgID)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	if creds.JiraEmail != "" || creds.JiraAPIToken != "" || creds.JiraAuthMethod != "" {
 		t.Errorf("partial Cloud form persisted credentials: %+v", creds)
+	}
+}
+
+// TestJiraConnect_DataCenter_RequiresThePAT: a Data Center bind with no pat is
+// refused with the same reason a Cloud bind's missing half is, and stores
+// nothing.
+func TestJiraConnect_DataCenter_RequiresThePAT(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+
+	rec := doJSON(t, s, "PUT", jiraDataCenterCredentialRoute(),
+		map[string]any{"url": "https://jira.acme.internal"})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s, want 400", rec.Code, rec.Body.String())
+	}
+	httpxtest.AssertFirstError(t, rec, httpx.ReasonMissingField, "pat")
+	creds, err := integrations.Load(t.Context(), s.secrets, runmode.LocalDefaultOrgID)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if creds.JiraPAT != "" || creds.JiraAuthMethod != "" {
+		t.Errorf("a Data Center bind with no pat persisted credentials: %+v", creds)
 	}
 }
 
@@ -521,8 +544,8 @@ func TestJiraConnect_Cloud_MismatchHint(t *testing.T) {
 	}))
 	t.Cleanup(jiraStub.Close)
 
-	rec := doJSON(t, s, "PUT", jiraCredentialRoute(),
-		map[string]any{"deployment": "cloud", "url": jiraStub.URL, "email": "bot@acme.com", "token": "tok"})
+	rec := doJSON(t, s, "PUT", jiraCloudCredentialRoute(),
+		map[string]any{"url": jiraStub.URL, "email": "bot@acme.com", "token": "tok"})
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status=%d body=%s, want 422", rec.Code, rec.Body.String())
 	}
@@ -551,8 +574,8 @@ func TestJiraConnect_SchemeSwitch_ClearsStaleCredential(t *testing.T) {
 	t.Cleanup(jiraStub.Close)
 
 	// 1) Connect as Data Center (PAT).
-	rec := doJSON(t, s, "PUT", jiraCredentialRoute(),
-		map[string]any{"deployment": "data_center", "url": jiraStub.URL, "pat": "dc_pat"})
+	rec := doJSON(t, s, "PUT", jiraDataCenterCredentialRoute(),
+		map[string]any{"url": jiraStub.URL, "pat": "dc_pat"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("DC connect status=%d body=%s, want 200", rec.Code, rec.Body.String())
 	}
@@ -562,8 +585,8 @@ func TestJiraConnect_SchemeSwitch_ClearsStaleCredential(t *testing.T) {
 	}
 
 	// 2) Reconnect the same org as Cloud (email + API token).
-	rec = doJSON(t, s, "PUT", jiraCredentialRoute(),
-		map[string]any{"deployment": "cloud", "url": jiraStub.URL, "email": "bot@acme.com", "token": "cloud_tok"})
+	rec = doJSON(t, s, "PUT", jiraCloudCredentialRoute(),
+		map[string]any{"url": jiraStub.URL, "email": "bot@acme.com", "token": "cloud_tok"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("Cloud connect status=%d body=%s, want 200", rec.Code, rec.Body.String())
 	}
@@ -586,8 +609,8 @@ func TestJiraConnect_SchemeSwitch_ClearsStaleCredential(t *testing.T) {
 
 	// 3) Switch back to Data Center — the Cloud pair must now be gone, leaving
 	//    exactly the DC scheme.
-	rec = doJSON(t, s, "PUT", jiraCredentialRoute(),
-		map[string]any{"deployment": "data_center", "url": jiraStub.URL, "pat": "dc_pat_2"})
+	rec = doJSON(t, s, "PUT", jiraDataCenterCredentialRoute(),
+		map[string]any{"url": jiraStub.URL, "pat": "dc_pat_2"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("DC reconnect status=%d body=%s, want 200", rec.Code, rec.Body.String())
 	}
@@ -804,23 +827,24 @@ func TestTeamSettingsPatch_EnabledModels_HeldToBothSets(t *testing.T) {
 		"ai_model":       domain.ModelAliasHaiku,
 	})
 	set, _ := ok["team_settings"].(map[string]any)
-	got, _ := set["EnabledModels"].([]any)
+	got, _ := set["enabled_models"].([]any)
 	if len(got) != 1 || got[0] != domain.ModelAliasHaiku {
-		t.Errorf("stored team set = %v, want [%s]", set["EnabledModels"], domain.ModelAliasHaiku)
+		t.Errorf("stored team set = %v, want [%s]", set["enabled_models"], domain.ModelAliasHaiku)
 	}
 }
 
 // --- daily spend cap and concurrent-run limit ------------------------------
 
-// orgDailyCap reads the org settings GET and returns max_daily_cost_usd.
-func orgDailyCap(t *testing.T, s *Server) float64 {
+// orgDailyCap reads the org settings GET and returns max_daily_cost_usd, nil
+// when it is null.
+func orgDailyCap(t *testing.T, s *Server) *float64 {
 	t.Helper()
 	rec := doJSON(t, s, "GET", orgSettingsPath(), nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET %s: %d: %s", orgSettingsPath(), rec.Code, rec.Body.String())
 	}
 	var resp struct {
-		MaxDailyCostUSD float64 `json:"max_daily_cost_usd"`
+		MaxDailyCostUSD *float64 `json:"max_daily_cost_usd"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode org settings: %v", err)
@@ -828,15 +852,16 @@ func orgDailyCap(t *testing.T, s *Server) float64 {
 	return resp.MaxDailyCostUSD
 }
 
-// orgConcurrentRuns reads the org settings GET and returns max_concurrent_runs.
-func orgConcurrentRuns(t *testing.T, s *Server) int {
+// orgConcurrentRuns reads the org settings GET and returns
+// max_concurrent_runs, nil when it is null.
+func orgConcurrentRuns(t *testing.T, s *Server) *int {
 	t.Helper()
 	rec := doJSON(t, s, "GET", orgSettingsPath(), nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET %s: %d: %s", orgSettingsPath(), rec.Code, rec.Body.String())
 	}
 	var resp struct {
-		MaxConcurrentRuns int `json:"max_concurrent_runs"`
+		MaxConcurrentRuns *int `json:"max_concurrent_runs"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode org settings: %v", err)
@@ -849,18 +874,24 @@ func orgConcurrentRuns(t *testing.T, s *Server) int {
 // stored values alone.
 func TestOrgSettingsPatch_DailyCostCap_OmittedFieldUntouched(t *testing.T) {
 	s := newTestServer(t)
-	if capUSD, runs := orgDailyCap(t, s), orgConcurrentRuns(t, s); capUSD != 0 || runs != 0 {
-		t.Fatalf("fresh org cap = %v, concurrent runs = %v; want 0 and 0 (no limit by default)", capUSD, runs)
+	if capUSD, runs := orgDailyCap(t, s), orgConcurrentRuns(t, s); capUSD != nil || runs != nil {
+		t.Fatalf("fresh org cap = %v, concurrent runs = %v; want null and null (no limit by default)", capUSD, runs)
 	}
 	patchOrgSettingsOK(t, s, map[string]any{"max_daily_cost_usd": 40, "max_concurrent_runs": 5})
 
 	// A save touching only the enable-set omits both → they must survive.
 	patchOrgSettingsOK(t, s, map[string]any{"enabled_models": []string{domain.ModelAliasSonnet}})
-	if got := orgDailyCap(t, s); got != 40 {
+	if got := orgDailyCap(t, s); got == nil || *got != 40 {
 		t.Errorf("omitting max_daily_cost_usd cleared the cap: got %v, want 40 preserved", got)
 	}
-	if got := orgConcurrentRuns(t, s); got != 5 {
+	if got := orgConcurrentRuns(t, s); got == nil || *got != 5 {
 		t.Errorf("omitting max_concurrent_runs cleared the limit: got %v, want 5 preserved", got)
+	}
+
+	// null clears both, and the read answers them in the same spelling.
+	patchOrgSettingsOK(t, s, map[string]any{"max_daily_cost_usd": nil, "max_concurrent_runs": nil})
+	if capUSD, runs := orgDailyCap(t, s), orgConcurrentRuns(t, s); capUSD != nil || runs != nil {
+		t.Errorf("after clearing: cap = %v, concurrent runs = %v; want null and null", capUSD, runs)
 	}
 }
 
@@ -890,24 +921,24 @@ func TestOrgSettingsPatch_LimitsOutOfRange(t *testing.T) {
 			httpxtest.AssertFirstError(t, rec, httpx.ReasonOutOfRange, c.field)
 		})
 	}
-	if got := orgDailyCap(t, s); got != 12 {
+	if got := orgDailyCap(t, s); got == nil || *got != 12 {
 		t.Errorf("a refused save changed the cap: got %v, want 12", got)
 	}
-	if got := orgConcurrentRuns(t, s); got != 4 {
+	if got := orgConcurrentRuns(t, s); got == nil || *got != 4 {
 		t.Errorf("a refused save changed the concurrent-run limit: got %v, want 4", got)
 	}
 
 	patchOrgSettingsOK(t, s, map[string]any{"max_concurrent_runs": domain.MaxConcurrentClaimsCeiling})
-	if got := orgConcurrentRuns(t, s); got != domain.MaxConcurrentClaimsCeiling {
+	if got := orgConcurrentRuns(t, s); got == nil || *got != domain.MaxConcurrentClaimsCeiling {
 		t.Errorf("ceiling value should round-trip, got %v want %v", got, domain.MaxConcurrentClaimsCeiling)
 	}
 }
 
 // --- unattended-prompt grace window bounds ---------------------------------
 
-// teamGrace reads the team settings GET and returns the stored grace (ms) plus
-// the advertised min/max second bounds that drive the UI slider's range.
-func teamGrace(t *testing.T, s *Server) (graceMS, minS, maxS int) {
+// teamGrace reads the team settings GET and returns the grace plus the
+// advertised min/max bounds that drive the UI slider's range, all in seconds.
+func teamGrace(t *testing.T, s *Server) (graceS, minS, maxS int) {
 	t.Helper()
 	rec := doJSON(t, s, "GET", teamSettingsPath("default"), nil)
 	if rec.Code != http.StatusOK {
@@ -915,7 +946,7 @@ func teamGrace(t *testing.T, s *Server) (graceMS, minS, maxS int) {
 	}
 	var resp struct {
 		TeamSettings struct {
-			PermissionAbsentGraceMS int `json:"PermissionAbsentGraceMS"`
+			PermissionAbsentGraceSeconds int `json:"permission_absent_grace_seconds"`
 		} `json:"team_settings"`
 		Min int `json:"permission_absent_grace_min_seconds"`
 		Max int `json:"permission_absent_grace_max_seconds"`
@@ -923,7 +954,7 @@ func teamGrace(t *testing.T, s *Server) (graceMS, minS, maxS int) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode team settings: %v", err)
 	}
-	return resp.TeamSettings.PermissionAbsentGraceMS, resp.Min, resp.Max
+	return resp.TeamSettings.PermissionAbsentGraceSeconds, resp.Min, resp.Max
 }
 
 // TestTeamSettingsPatch_GraceOutOfBandRejected: a grace outside the band is a
@@ -941,30 +972,34 @@ func TestTeamSettingsPatch_GraceOutOfBandRejected(t *testing.T) {
 			t.Fatalf("grace %ds = %d, want 422; body=%s", secs, rec.Code, rec.Body.String())
 		}
 		httpxtest.AssertFirstError(t, rec, httpx.ReasonOutOfRange, "permission_absent_grace_seconds")
-		if ms, _, _ := teamGrace(t, s); ms != before {
-			t.Errorf("rejected grace %ds still moved the stored value to %dms", secs, ms)
+		if got, _, _ := teamGrace(t, s); got != before {
+			t.Errorf("rejected grace %ds still moved the stored value to %ds", secs, got)
 		}
 	}
 
 	patchTeamSettingsOK(t, s, "default", map[string]any{
 		"permission_absent_grace_seconds": 20,
 	})
-	if ms, _, _ := teamGrace(t, s); ms != 20000 {
-		t.Errorf("after saving 20s, stored grace = %dms, want 20000ms (in-band, verbatim)", ms)
+	if got, _, _ := teamGrace(t, s); got != 20 {
+		t.Errorf("after saving 20s, grace = %ds, want 20s (in-band, verbatim)", got)
 	}
 }
 
 // jiraCredentialRoute is the org's Jira service-credential resource in local
-// mode.
+// mode, which the unbind deletes.
 func jiraCredentialRoute() string {
 	return "/api/orgs/" + runmode.LocalDefaultOrgID + "/jira/access/credential"
 }
 
+// jiraCloudCredentialRoute and jiraDataCenterCredentialRoute bind the org's
+// Jira credential for each deployment.
+func jiraCloudCredentialRoute() string { return jiraCredentialRoute() + "/cloud" }
+
+func jiraDataCenterCredentialRoute() string { return jiraCredentialRoute() + "/data-center" }
+
 // --- review posting posture ------------------------------------------------
 
 // teamReviewPosture reads the stored posture back off the team settings GET.
-// The GET serializes domain.TeamSettings wholesale (no JSON tags), so the wire
-// key is the Go field name.
 func teamReviewPosture(t *testing.T, s *Server) string {
 	t.Helper()
 	rec := doJSON(t, s, "GET", teamSettingsPath("default"), nil)
@@ -973,7 +1008,7 @@ func teamReviewPosture(t *testing.T, s *Server) string {
 	}
 	var resp struct {
 		TeamSettings struct {
-			ReviewPosture string `json:"ReviewPosture"`
+			ReviewPosture string `json:"review_posture"`
 		} `json:"team_settings"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
@@ -1059,8 +1094,7 @@ func TestTeamSettingsPatch_ClaudeAIConnectors(t *testing.T) {
 
 // --- base-branch push policy -----------------------------------------------
 
-// teamBasePushPolicy reads the stored policy back off the team settings GET
-// (same wholesale-serialized shape as the posture above).
+// teamBasePushPolicy reads the stored policy back off the team settings GET.
 func teamBasePushPolicy(t *testing.T, s *Server) string {
 	t.Helper()
 	rec := doJSON(t, s, "GET", teamSettingsPath("default"), nil)
@@ -1069,7 +1103,7 @@ func teamBasePushPolicy(t *testing.T, s *Server) string {
 	}
 	var resp struct {
 		TeamSettings struct {
-			BaseBranchPushPolicy string `json:"BaseBranchPushPolicy"`
+			BaseBranchPushPolicy string `json:"base_branch_push_policy"`
 		} `json:"team_settings"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {

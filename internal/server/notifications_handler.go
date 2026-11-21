@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -29,40 +28,40 @@ import (
 // notificationAudienceJSON is who a row is for. Each id is null unless the
 // scope names one, and role is null on a user row.
 type notificationAudienceJSON struct {
-	Scope  domain.NotificationScope `json:"scope"`
-	Role   *domain.NotificationRole `json:"role"`
-	TeamID *string                  `json:"team_id"`
-	UserID *string                  `json:"user_id"`
+	Scope  domain.NotificationScope `json:"scope" doc:"Who the notification is addressed to: org, team, or user."`
+	Role   *domain.NotificationRole `json:"role" doc:"Which people of the organization or team the notification is for, admins or members, or null on a user's notification."`
+	TeamID *string                  `json:"team_id" doc:"The team's id when scope is team, otherwise null."`
+	UserID *string                  `json:"user_id" doc:"The user's id when scope is user, otherwise null."`
 }
 
 // notificationJSON is the wire item: the row's display columns, its actions
 // as this viewer may use them, and this viewer's marks. The key and params are
 // ids for the system's use and never leave the server.
 type notificationJSON struct {
-	ID             string                             `json:"id"`
-	Kind           string                             `json:"kind"`
-	Lifecycle      domain.NotificationLifecycle       `json:"lifecycle"`
-	Priority       domain.NotificationPriority        `json:"priority"`
-	Audience       notificationAudienceJSON           `json:"audience"`
-	Title          string                             `json:"title"`
-	Body           string                             `json:"body"`
-	Dismissible    bool                               `json:"dismissible"`
-	FirstSeenAt    time.Time                          `json:"first_seen_at"`
-	LastSeenAt     time.Time                          `json:"last_seen_at"`
-	SeenCount      int                                `json:"seen_count"`
-	ResolvedAt     *time.Time                         `json:"resolved_at"`
-	ResolvedReason *domain.NotificationResolvedReason `json:"resolved_reason"`
+	ID             string                             `json:"id" doc:"The notification's id."`
+	Kind           string                             `json:"kind" doc:"The kind of notification, such as linear_team_unreadable."`
+	Lifecycle      domain.NotificationLifecycle       `json:"lifecycle" doc:"condition for a notification about a problem, which resolves when the problem is fixed, or notice for one that expires and never resolves."`
+	Priority       domain.NotificationPriority        `json:"priority" doc:"The notification's priority: urgent, high, or low."`
+	Audience       notificationAudienceJSON           `json:"audience" doc:"Who the notification is for."`
+	Title          string                             `json:"title" doc:"The notification's title."`
+	Body           string                             `json:"body" doc:"The notification's text."`
+	Dismissible    bool                               `json:"dismissible" doc:"Whether the notification may be dismissed; one about something the organization requires stays until it resolves."`
+	FirstSeenAt    time.Time                          `json:"first_seen_at" doc:"When the notification was first raised, as an RFC 3339 timestamp."`
+	LastSeenAt     time.Time                          `json:"last_seen_at" doc:"When the notification was last raised, as an RFC 3339 timestamp."`
+	SeenCount      int                                `json:"seen_count" doc:"How many times the notification has been raised, the first time included."`
+	ResolvedAt     *time.Time                         `json:"resolved_at" doc:"When the notification resolved, as an RFC 3339 timestamp, or null while it is open."`
+	ResolvedReason *domain.NotificationResolvedReason `json:"resolved_reason" doc:"Why the notification resolved: cleared when the problem was fixed, source_off when its event source was turned off, or audience_removed when its audience was taken out of the problem's reach; null while it is open."`
 	// Resolution says in a sentence why the row resolved; null while it is
 	// open.
-	Resolution *string             `json:"resolution"`
-	ExpiresAt  *time.Time          `json:"expires_at"`
-	Actions    []notify.ActionView `json:"actions"`
-	Read       bool                `json:"read"`
-	Dismissed  bool                `json:"dismissed"`
+	Resolution *string             `json:"resolution" doc:"A sentence saying why the notification resolved, or null while it is open."`
+	ExpiresAt  *time.Time          `json:"expires_at" doc:"When a notice expires, as an RFC 3339 timestamp, or null on a condition."`
+	Actions    []notify.ActionView `json:"actions" doc:"What the caller can do from the notification."`
+	Read       bool                `json:"read" doc:"Whether the caller has read the notification; a rise in its priority makes it unread again."`
+	Dismissed  bool                `json:"dismissed" doc:"Whether the caller has dismissed the notification; a rise in its priority brings it back."`
 	// Sent is whether the caller is in the row's audience: true on every
 	// inbox row, and false on a team's row an org admin reads without being
 	// sent it.
-	Sent bool `json:"sent"`
+	Sent bool `json:"sent" doc:"Whether the caller is in the notification's audience: true on every notification in the caller's inbox, and false on a team's notification an organization admin reads without being sent it."`
 }
 
 // notificationItems renders views for the caller. Call it outside any
@@ -107,18 +106,19 @@ func notificationItems(r *http.Request, caller *notify.Caller, views []domain.No
 // the row as the caller now sees it, null once the row has left what they
 // may read.
 type notificationActionResponse struct {
-	Notification *notificationJSON `json:"notification"`
-	Outcome      string            `json:"outcome"`
+	Notification *notificationJSON `json:"notification" doc:"The notification as the caller now sees it, or null when the caller can no longer read it."`
+	Outcome      string            `json:"outcome" doc:"A sentence saying what the action did."`
 }
 
-// writeNotificationItem renders one view for the caller as a 200.
-func writeNotificationItem(w http.ResponseWriter, r *http.Request, caller *notify.Caller, v domain.NotificationView) {
+// renderNotificationItem renders one view for the caller, answering a 500
+// itself when that fails.
+func renderNotificationItem(w http.ResponseWriter, r *http.Request, caller *notify.Caller, v domain.NotificationView) (notificationJSON, bool) {
 	items, err := notificationItems(r, caller, []domain.NotificationView{v})
 	if err != nil {
 		internalError(w, "notifications", err)
-		return
+		return notificationJSON{}, false
 	}
-	writeJSON(w, http.StatusOK, items[0])
+	return items[0], true
 }
 
 // notificationCaller resolves the /api/me routes' subject: the org the
@@ -170,14 +170,14 @@ func (s *Server) pingMarksChanged(orgID, userID string) {
 //     role and no team, so role_in or team_id_in leaves it out. The
 //     by_audience facet's values each name the filters that select them.
 type notificationFilterRequest struct {
-	Status     *string  `json:"status"`
-	Dismissed  *bool    `json:"dismissed"`
-	Unread     *bool    `json:"unread"`
-	PriorityIn []string `json:"priority_in"`
-	ScopeIn    []string `json:"scope_in"`
-	RoleIn     []string `json:"role_in"`
-	TeamIDIn   []string `json:"team_id_in"`
-	Search     string   `json:"search"`
+	Status     *string  `json:"status" doc:"open or resolved, to include only the notifications in that state; absent includes both."`
+	Dismissed  *bool    `json:"dismissed" doc:"true to include only the notifications the caller has dismissed, false to include only those they have not; absent includes both."`
+	Unread     *bool    `json:"unread" doc:"true to include only the notifications the caller has not read, false to include only those they have; absent includes both."`
+	PriorityIn []string `json:"priority_in" doc:"Priorities to include, from urgent, high, and low; absent includes every priority, and an empty list is refused."`
+	ScopeIn    []string `json:"scope_in" doc:"Audience scopes to include, from org, team, and user; absent includes every scope, and an empty list is refused."`
+	RoleIn     []string `json:"role_in" doc:"Audience roles to include, from admins and members, which leaves out every user notification; absent includes every role, and an empty list is refused."`
+	TeamIDIn   []string `json:"team_id_in" doc:"Ids of the teams whose notifications to include, which leaves out every org and user notification; absent includes every team, and an empty list is refused."`
+	Search     string   `json:"search" doc:"Text the notification's title or body must contain, matched without regard to case."`
 }
 
 // notificationListRequest is the body of both lists, POST
@@ -190,8 +190,8 @@ type notificationFilterRequest struct {
 //     refused without a key: the default order has no direction to flip.
 type notificationListRequest struct {
 	notificationFilterRequest
-	SortKey *string `json:"sort_key"`
-	SortDir *string `json:"sort_dir"`
+	SortKey *string `json:"sort_key" doc:"Orders the result by priority, title, first_seen_at, last_seen_at, or resolved_at; absent orders it by priority, urgent first, and then by when each notification last rose in priority, latest first. An empty string is refused."`
+	SortDir *string `json:"sort_dir" doc:"The direction of sort_key, asc or desc; absent is asc for priority and title and desc for the times. It is refused without sort_key, and an empty string is refused."`
 
 	httpx.PageRequest
 }
@@ -206,10 +206,10 @@ type notificationListRequest struct {
 type notificationFacetsRequest struct {
 	notificationFilterRequest
 
-	SortKey   json.RawMessage `json:"sort_key"`
-	SortDir   json.RawMessage `json:"sort_dir"`
-	PageSize  json.RawMessage `json:"page_size"`
-	PageToken json.RawMessage `json:"page_token"`
+	SortKey   json.RawMessage `json:"sort_key" spec:"-"`
+	SortDir   json.RawMessage `json:"sort_dir" spec:"-"`
+	PageSize  json.RawMessage `json:"page_size" spec:"-"`
+	PageToken json.RawMessage `json:"page_token" spec:"-"`
 }
 
 // notificationListSortKeys is db.NotificationListSortKeys as the lists'
@@ -351,6 +351,14 @@ type notificationListRead = func(db.NotificationStore, context.Context, string, 
 // notificationFacetsRead is one list's facets read, as a method expression.
 type notificationFacetsRead = func(db.NotificationStore, context.Context, string, string, db.NotificationListFilter) (db.NotificationFacets, error)
 
+var opNotificationList = httpx.NewListOp[notificationListRequest, notificationJSON](httpx.OpSpec{
+	Pattern:     "POST /api/me/notifications/list",
+	ID:          "list_my_notifications",
+	Summary:     "List your notifications",
+	Description: "Lists one page of the notifications the caller is sent in the organization their credential names, each with the caller's read and dismissed marks and the actions the caller may use.",
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
+
 // handleNotificationList is the caller's inbox: the rows they are sent, which
 // for an org admin excludes the teams' rows they may read but are not sent.
 // page_size 0 is the badge's count-only read.
@@ -361,8 +369,8 @@ func (s *Server) handleNotificationList(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	var req notificationListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opNotificationList.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -375,8 +383,17 @@ func (s *Server) handleNotificationList(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	httpx.WriteList(w, page, items, total)
+	opNotificationList.Write(w, page, items, total)
 }
+
+var opOrgNotificationList = httpx.NewListOp[notificationListRequest, notificationJSON](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/notifications/list",
+	ID:          "list_org_notifications",
+	Summary:     "List an organization's notifications",
+	Description: "Lists one page of every notification in the organization, team notifications included, each with the caller's own read and dismissed marks and the actions the caller may use.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleOrgNotificationList is the org admin's "All teams" view: every row in
 // the org they may read, team rows included, with their own marks.
@@ -387,8 +404,8 @@ func (s *Server) handleOrgNotificationList(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
-	var req notificationListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opOrgNotificationList.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -401,7 +418,7 @@ func (s *Server) handleOrgNotificationList(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
-	httpx.WriteList(w, page, items, total)
+	opOrgNotificationList.Write(w, page, items, total)
 }
 
 // parseNotificationListRequest validates a list body's filters and order.
@@ -461,9 +478,29 @@ func (s *Server) readNotificationPage(w http.ResponseWriter, r *http.Request, or
 //
 // A value no row carries is absent, so an empty cut is [].
 type notificationFacetsResponse struct {
-	ByPriority []httpx.FacetJSON `json:"by_priority"`
-	ByAudience []httpx.FacetJSON `json:"by_audience"`
+	ByPriority []httpx.FacetJSON `json:"by_priority" doc:"The priorities the matching notifications have, urgent first, each counted under every filter but priority_in."`
+	ByAudience []httpx.FacetJSON `json:"by_audience" doc:"The audiences the matching notifications are for, each counted under every filter but scope_in, role_in, and team_id_in: user, org:admins, org:members, or team: followed by a team's id."`
 }
+
+// notificationFacetsOp is the type of both facets nodes' operations.
+type notificationFacetsOp = httpx.JSONOp[notificationFacetsRequest, notificationFacetsResponse]
+
+var opNotificationFacets = httpx.NewJSONOp[notificationFacetsRequest, notificationFacetsResponse](httpx.OpSpec{
+	Pattern:     "POST /api/me/notifications/facets",
+	ID:          "get_my_notification_facets",
+	Summary:     "Count your notifications",
+	Description: "Counts the notifications in the caller's inbox that the filters match, by priority and by audience, under the inbox list's filters. Each cut is counted without its own filters.",
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
+
+var opOrgNotificationFacets = httpx.NewJSONOp[notificationFacetsRequest, notificationFacetsResponse](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/notifications/facets",
+	ID:          "get_org_notification_facets",
+	Summary:     "Count an organization's notifications",
+	Description: "Counts the organization's notifications that the filters match, by priority and by audience, under the organization list's filters. Each cut is counted without its own filters.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleNotificationFacets is the inbox's synthetic sibling: how many of the
 // rows its filters match sit at each priority and each audience, which a
@@ -477,7 +514,7 @@ func (s *Server) handleNotificationFacets(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
-	s.writeNotificationFacets(w, r, orgID, userID, db.NotificationStore.FacetsForViewer)
+	s.writeNotificationFacets(w, r, opNotificationFacets, orgID, userID, db.NotificationStore.FacetsForViewer)
 }
 
 // handleOrgNotificationFacets is the All-teams list's synthetic sibling, on
@@ -489,15 +526,15 @@ func (s *Server) handleOrgNotificationFacets(w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return
 	}
-	s.writeNotificationFacets(w, r, orgID, userID, db.NotificationStore.FacetsForOrg)
+	s.writeNotificationFacets(w, r, opOrgNotificationFacets, orgID, userID, db.NotificationStore.FacetsForOrg)
 }
 
 // writeNotificationFacets decodes a facets body and answers the cuts read
 // counts. It takes no paging: the cuts group closed vocabularies, so the
 // answer is bounded by them rather than by a window.
-func (s *Server) writeNotificationFacets(w http.ResponseWriter, r *http.Request, orgID, userID string, read notificationFacetsRead) {
-	var req notificationFacetsRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+func (s *Server) writeNotificationFacets(w http.ResponseWriter, r *http.Request, op *notificationFacetsOp, orgID, userID string, read notificationFacetsRead) {
+	req, ok := op.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -531,7 +568,7 @@ func (s *Server) writeNotificationFacets(w http.ResponseWriter, r *http.Request,
 		internalError(w, "notifications", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, notificationFacetsResponse{
+	op.Write(w, notificationFacetsResponse{
 		ByPriority: httpx.Facets(facets.ByPriority),
 		ByAudience: httpx.Facets(facets.ByAudience),
 	})
@@ -540,6 +577,15 @@ func (s *Server) writeNotificationFacets(w http.ResponseWriter, r *http.Request,
 // --------------------------------------------------------------------
 // one row and its marks
 // --------------------------------------------------------------------
+
+var opNotificationGet = httpx.NewJSONOp[httpx.NoBody, notificationJSON](httpx.OpSpec{
+	Pattern:     "GET /api/me/notifications/{id}",
+	ID:          "get_notification",
+	Summary:     "Get a notification",
+	Description: "Returns a notification the caller may read, with the caller's read and dismissed marks and the actions the caller may use. For an organization admin that includes a team's notification the admin is not sent.",
+	PathParams:  map[string]string{"id": "The notification's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleNotificationGet returns a row the caller may read, with their marks.
 // An org admin may read a team's row here that their inbox does not list.
@@ -567,21 +613,23 @@ func (s *Server) handleNotificationGet(w http.ResponseWriter, r *http.Request) {
 		notFound(w, "notification")
 		return
 	}
-	writeNotificationItem(w, r, notify.NewCaller(s.az, orgID, userID), *view)
+	if item, ok := renderNotificationItem(w, r, notify.NewCaller(s.az, orgID, userID), *view); ok {
+		opNotificationGet.Write(w, item)
+	}
 }
 
 // notificationMarksPatchRequest is the body of PATCH
 // /api/me/notifications/{id}. Absent keeps a mark, true stamps it now, and
 // false or null clears it.
 type notificationMarksPatchRequest struct {
-	Read      json.RawMessage `json:"read"`
-	Dismissed json.RawMessage `json:"dismissed"`
+	Read      httpx.Patch[bool] `json:"read" doc:"true marks the notification read now, and false or null marks it unread."`
+	Dismissed httpx.Patch[bool] `json:"dismissed" doc:"true dismisses the notification now, and false or null brings it back; dismissing a notification that is not dismissible is refused."`
 }
 
 // patchMark reads one mark of a marks PATCH: nil when absent, and false when
-// null, which PatchBool returns for a clear.
-func patchMark(v *httpx.Validation, raw json.RawMessage, field string) *bool {
-	on, st := httpx.PatchBool(v, raw, field)
+// null, which Read returns for a clear.
+func patchMark(v *httpx.Validation, mark httpx.Patch[bool], field string) *bool {
+	on, st := mark.Read(v, field)
 	if st == httpx.PatchAbsent {
 		return nil
 	}
@@ -591,6 +639,15 @@ func patchMark(v *httpx.Validation, raw json.RawMessage, field string) *bool {
 // notDismissibleMessage is the refusal to dismiss a row that is not
 // dismissible, on the marks PATCH and the bulk dismiss alike.
 const notDismissibleMessage = "this notification can't be dismissed: it stays until the condition is fixed"
+
+var opNotificationMarksPatch = httpx.NewJSONOp[notificationMarksPatchRequest, notificationJSON](httpx.OpSpec{
+	Pattern:     "PATCH /api/me/notifications/{id}",
+	ID:          "update_notification",
+	Summary:     "Update your marks on a notification",
+	Description: "Sets or clears the caller's read and dismissed marks on a notification the caller may read, and returns the notification as the caller now sees it. The marks are the caller's own and change nothing for anyone else.",
+	PathParams:  map[string]string{"id": "The notification's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleNotificationMarksPatch writes the caller's own marks on a row they may
 // read and returns the row as they now see it. Dismissing a row that is not
@@ -606,21 +663,23 @@ func (s *Server) handleNotificationMarksPatch(w http.ResponseWriter, r *http.Req
 	if !ok {
 		return
 	}
-	var req notificationMarksPatchRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
-		return
-	}
-	if !httpx.PatchNamed(req.Read, req.Dismissed) {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-			Reason:  httpx.ReasonMissingField,
-			Message: "no marks to update: provide read, dismissed or both",
-		})
+	req, ok := opNotificationMarksPatch.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
 	patch := db.NotificationMarksPatch{
 		Read:      patchMark(&v, req.Read, "read"),
 		Dismissed: patchMark(&v, req.Dismissed, "dismissed"),
+	}
+	// A PATCH that names no mark wrote nothing, so it must not answer as a
+	// write.
+	if patch.Read == nil && patch.Dismissed == nil {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason:  httpx.ReasonMissingField,
+			Message: "no marks to update: provide read, dismissed or both",
+		})
+		return
 	}
 	if v.Flush(w, http.StatusBadRequest) {
 		return
@@ -655,7 +714,9 @@ func (s *Server) handleNotificationMarksPatch(w http.ResponseWriter, r *http.Req
 		return
 	}
 	s.pingMarksChanged(orgID, userID)
-	writeNotificationItem(w, r, notify.NewCaller(s.az, orgID, userID), *view)
+	if item, ok := renderNotificationItem(w, r, notify.NewCaller(s.az, orgID, userID), *view); ok {
+		opNotificationMarksPatch.Write(w, item)
+	}
 }
 
 // maxNotificationIDs bounds a mark-read or dismiss call at the largest page a
@@ -665,21 +726,24 @@ const maxNotificationIDs = httpx.MaxPageSize
 // notificationIDsRequest is the body of POST /api/me/notifications/mark-read
 // and POST /api/me/notifications/dismiss: the rows the client rendered.
 type notificationIDsRequest struct {
-	IDs []string `json:"ids"`
+	IDs []string `json:"ids" doc:"Ids of the notifications, from 1 to 200, each a UUID."`
 }
 
 // notificationIDsResponse names the rows the call wrote. An id the caller
 // cannot read, or that no longer exists, is absent from it.
 type notificationIDsResponse struct {
-	IDs []string `json:"ids"`
+	IDs []string `json:"ids" doc:"The ids of the notifications whose marks the call wrote, sorted; an id the caller cannot read, or that no longer exists, is left out."`
 }
+
+// notificationIDsOp is the type of the bulk marks verbs' operations.
+type notificationIDsOp = httpx.JSONOp[notificationIDsRequest, notificationIDsResponse]
 
 // notificationIDsBody reads a bulk marks body: 1 to maxNotificationIDs ids,
 // each a UUID, returned in their canonical spelling at the index the body
 // gave them. Every malformed id is reported.
-func notificationIDsBody(w http.ResponseWriter, r *http.Request) ([]string, bool) {
-	var req notificationIDsRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+func notificationIDsBody(w http.ResponseWriter, r *http.Request, op *notificationIDsOp) ([]string, bool) {
+	req, ok := op.Decode(w, r)
+	if !ok {
 		return nil, false
 	}
 	var v httpx.Validation
@@ -709,7 +773,7 @@ func notificationIDsBody(w http.ResponseWriter, r *http.Request) ([]string, bool
 
 // writeNotificationMarksWritten answers a bulk marks call with the sorted ids
 // of the marks it wrote, and pings the caller's other tabs when there are any.
-func (s *Server) writeNotificationMarksWritten(w http.ResponseWriter, orgID, userID string, marks []domain.NotificationMarks) {
+func (s *Server) writeNotificationMarksWritten(w http.ResponseWriter, op *notificationIDsOp, orgID, userID string, marks []domain.NotificationMarks) {
 	out := notificationIDsResponse{IDs: make([]string, len(marks))}
 	for i, m := range marks {
 		out.IDs[i] = m.NotificationID
@@ -718,8 +782,16 @@ func (s *Server) writeNotificationMarksWritten(w http.ResponseWriter, orgID, use
 	if len(marks) > 0 {
 		s.pingMarksChanged(orgID, userID)
 	}
-	writeJSON(w, http.StatusOK, out)
+	op.Write(w, out)
 }
+
+var opNotificationMarkRead = httpx.NewJSONOp[notificationIDsRequest, notificationIDsResponse](httpx.OpSpec{
+	Pattern:     "POST /api/me/notifications/mark-read",
+	ID:          "mark_my_notifications_read",
+	Summary:     "Mark notifications read",
+	Description: "Marks the named notifications read for the caller and returns the ids it marked. A notification the caller cannot read is skipped.",
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleNotificationMarkRead marks read the rows the client rendered. It takes
 // ids rather than a filter so that a row which arrived after the page rendered
@@ -731,7 +803,7 @@ func (s *Server) handleNotificationMarkRead(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
-	ids, ok := notificationIDsBody(w, r)
+	ids, ok := notificationIDsBody(w, r, opNotificationMarkRead)
 	if !ok {
 		return
 	}
@@ -744,8 +816,16 @@ func (s *Server) handleNotificationMarkRead(w http.ResponseWriter, r *http.Reque
 		internalError(w, "notifications", err)
 		return
 	}
-	s.writeNotificationMarksWritten(w, orgID, userID, marks)
+	s.writeNotificationMarksWritten(w, opNotificationMarkRead, orgID, userID, marks)
 }
+
+var opNotificationDismiss = httpx.NewJSONOp[notificationIDsRequest, notificationIDsResponse](httpx.OpSpec{
+	Pattern:     "POST /api/me/notifications/dismiss",
+	ID:          "dismiss_my_notifications",
+	Summary:     "Dismiss notifications",
+	Description: "Dismisses the named notifications for the caller and returns the ids it dismissed. A notification the caller cannot read is skipped, and when any named notification is not dismissible the call dismisses none of them.",
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleNotificationDismiss dismisses the rows the client selected. An id the
 // caller cannot read is left out, since it went away between render and call.
@@ -759,7 +839,7 @@ func (s *Server) handleNotificationDismiss(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
-	ids, ok := notificationIDsBody(w, r)
+	ids, ok := notificationIDsBody(w, r, opNotificationDismiss)
 	if !ok {
 		return
 	}
@@ -786,12 +866,24 @@ func (s *Server) handleNotificationDismiss(w http.ResponseWriter, r *http.Reques
 		internalError(w, "notifications", err)
 		return
 	}
-	s.writeNotificationMarksWritten(w, orgID, userID, marks)
+	s.writeNotificationMarksWritten(w, opNotificationDismiss, orgID, userID, marks)
 }
 
 // --------------------------------------------------------------------
 // invoke
 // --------------------------------------------------------------------
+
+var opNotificationAction = httpx.NewJSONOp[httpx.NoBody, notificationActionResponse](httpx.OpSpec{
+	Pattern:     "POST /api/me/notifications/{id}/actions/{action_id}",
+	ID:          "invoke_notification_action",
+	Summary:     "Run a notification's action",
+	Description: "Runs one of the notification's invoke actions as the caller, and returns a sentence saying what it did, with the notification as the caller now sees it. An action can change the organization's configuration or start work that calls outside services.",
+	PathParams: map[string]string{
+		"id":        "The notification's id.",
+		"action_id": "The id of one of the notification's invoke actions.",
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintNo, OpenWorld: httpx.HintYes},
+})
 
 // handleNotificationAction runs a row's invoke action as the caller and
 // answers what it did, with the row as they now see it: resolved when the
@@ -810,14 +902,6 @@ func (s *Server) handleNotificationAction(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
-	body, ok := httpx.BodyBytes(w, r)
-	if !ok {
-		return
-	}
-	if len(bytes.TrimSpace(body)) > 0 && !httpx.DecodeJSONStrictBytes(w, body, &struct{}{}) {
-		return
-	}
-
 	read := func() (*domain.NotificationView, error) {
 		var view *domain.NotificationView
 		err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
@@ -871,7 +955,7 @@ func (s *Server) handleNotificationAction(w http.ResponseWriter, r *http.Request
 		}
 		out.Notification = &items[0]
 	}
-	writeJSON(w, http.StatusOK, out)
+	opNotificationAction.Write(w, out)
 }
 
 func (s *Server) registerNotificationRoutes() {
@@ -883,16 +967,16 @@ func (s *Server) registerNotificationRoutes() {
 	// are verbs because each is a multi-row transition over the ids the client
 	// rendered. facets is the list's counts, a POST because its filters are a
 	// body.
-	s.apiMutating("POST /api/me/notifications/list", s.handleNotificationList)
-	s.apiMutating("POST /api/me/notifications/facets", s.handleNotificationFacets)
-	s.apiMutating("POST /api/me/notifications/mark-read", s.handleNotificationMarkRead)
-	s.apiMutating("POST /api/me/notifications/dismiss", s.handleNotificationDismiss)
-	s.api("GET /api/me/notifications/{id}", s.handleNotificationGet)
-	s.apiMutating("PATCH /api/me/notifications/{id}", s.handleNotificationMarksPatch)
-	s.apiMutating("POST /api/me/notifications/{id}/actions/{action_id}", s.handleNotificationAction)
+	s.op(opNotificationList, s.handleNotificationList)
+	s.op(opNotificationFacets, s.handleNotificationFacets)
+	s.op(opNotificationMarkRead, s.handleNotificationMarkRead)
+	s.op(opNotificationDismiss, s.handleNotificationDismiss)
+	s.op(opNotificationGet, s.handleNotificationGet)
+	s.op(opNotificationMarksPatch, s.handleNotificationMarksPatch)
+	s.op(opNotificationAction, s.handleNotificationAction)
 	// The org admin's "All teams" view: every row in the org, team rows
 	// included, which an org admin may read but is not sent. Authorized
 	// against {org_id}; a member who is not an admin gets 403.
-	s.apiMutating("POST /api/orgs/{org_id}/notifications/list", s.handleOrgNotificationList)
-	s.apiMutating("POST /api/orgs/{org_id}/notifications/facets", s.handleOrgNotificationFacets)
+	s.op(opOrgNotificationList, s.handleOrgNotificationList)
+	s.op(opOrgNotificationFacets, s.handleOrgNotificationFacets)
 }

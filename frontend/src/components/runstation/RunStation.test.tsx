@@ -286,7 +286,7 @@ describe('RunStation chat', () => {
   }
   // The team enables two of the org's three.
   const TEAM_SETTINGS = {
-    team_settings: { DefaultModel: 'sonnet', EnabledModels: ['sonnet', 'haiku'] },
+    team_settings: { ai_model: 'sonnet', enabled_models: ['sonnet', 'haiku'] },
   }
 
   beforeEach(() => {

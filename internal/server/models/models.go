@@ -58,10 +58,10 @@ func New(az *authz.Checker, tx db.TxRunner, prober func() Prober) *Handler {
 // They are base-tier list prices for display and comparison; what a run
 // actually cost is recorded per message in the ledger and never derived here.
 type modelPricesPerMTok struct {
-	Input      float64 `json:"input"`
-	Output     float64 `json:"output"`
-	CacheRead  float64 `json:"cache_read"`
-	CacheWrite float64 `json:"cache_write"`
+	Input      float64 `json:"input" doc:"The list price of input tokens, in USD per million tokens."`
+	Output     float64 `json:"output" doc:"The list price of output tokens, in USD per million tokens."`
+	CacheRead  float64 `json:"cache_read" doc:"The list price of input tokens read from the prompt cache, in USD per million tokens."`
+	CacheWrite float64 `json:"cache_write" doc:"The list price of input tokens written to the prompt cache, in USD per million tokens."`
 }
 
 // modelCatalogRow is one offered model.
@@ -80,29 +80,29 @@ type modelPricesPerMTok struct {
 // publishing a zero, or the provider TF guessed, would be a claim nothing backs.
 // A client renders what is present and says nothing about what is not.
 type modelCatalogRow struct {
-	Key         string `json:"key"`
-	DisplayName string `json:"display_name"`
+	Key         string `json:"key" doc:"The model's id, the value a model setting stores."`
+	DisplayName string `json:"display_name" doc:"The model's name for display."`
 	// Provider is absent where the id does not name one. See the type doc.
-	Provider string `json:"provider,omitempty"`
+	Provider string `json:"provider,omitempty" doc:"The provider that serves the model, anthropic or bedrock, absent in local mode, where the credential the agent runs under decides it."`
 	// ProviderDisplayName is how a person reads Provider, and travels beside it
 	// so a client renders the name TF uses rather than keeping its own map of
 	// the provider vocabulary — a second copy that can only ever fall behind
 	// this one. Absent exactly when Provider is.
-	ProviderDisplayName string `json:"provider_display_name,omitempty"`
+	ProviderDisplayName string `json:"provider_display_name,omitempty" doc:"The provider's name for display, such as Amazon Bedrock, absent exactly when provider is."`
 	// Enabled is the enable-set's answer and says nothing about credentials:
 	// whether the organization, or on the team read the team, may pick this
 	// model. It is true on every row of the team read, which omits rows
 	// outside the team's set.
-	Enabled bool `json:"enabled"`
+	Enabled bool `json:"enabled" doc:"Whether the organization, or on a team's list the team, may choose the model; true on every row of a team's list, which leaves out the models the team may not choose."`
 	// PricesPerMTok is absent where cost is harness-settled. See the type doc.
-	PricesPerMTok *modelPricesPerMTok `json:"prices_per_mtok,omitempty"`
-	ContextWindow int                 `json:"context_window,omitempty"`
+	PricesPerMTok *modelPricesPerMTok `json:"prices_per_mtok,omitempty" doc:"The model's list prices, absent in local mode, where the agent runtime settles what a run costs."`
+	ContextWindow int                 `json:"context_window,omitempty" doc:"The most tokens the model reads in one request, absent in local mode."`
 	// SupportsPromptCaching is a POINTER because false is an answer here and
 	// absent is not one: a model that cannot cache its prompt costs several
 	// times more to run, which a client has to say out loud, and a bare bool
 	// with omitempty would publish that fact and "TF makes no claim" as the
 	// same missing field.
-	SupportsPromptCaching *bool `json:"supports_prompt_caching,omitempty"`
+	SupportsPromptCaching *bool `json:"supports_prompt_caching,omitempty" doc:"Whether the model can cache its prompt, absent in local mode, where Triage Factory makes no claim either way."`
 	// Availability is the whole triple's presence gate: it is absent — with the
 	// two fields below — when this org's credentials are not TF-owned, because
 	// a verdict about the machine an agent happens to run on has no stable
@@ -128,27 +128,36 @@ type modelCatalogRow struct {
 	//   - The enabled-set writes and a prompt's model save do not consult
 	//     it. They store a choice for later, and the doors above decide when
 	//     the work starts.
-	Availability string `json:"availability,omitempty"`
+	Availability string `json:"availability,omitempty" doc:"Whether the organization's credentials can run the model: unconfigured when no credential for its provider is connected, unverified before a test has concluded, verified after a test ran it, or red after the provider refused a test; absent while the organization runs on the credentials of the machine hosting it. Work on an unconfigured model is refused, and every other value is advisory."`
 	// AvailabilityDetail is the provider's own refusal, present only on "red".
 	// It is what turns an unavailable badge into something an admin can act
 	// on: "not entitled in this account" and "this id does not exist" are the
 	// same badge and completely different fixes.
-	AvailabilityDetail string `json:"availability_detail,omitempty"`
+	AvailabilityDetail string `json:"availability_detail,omitempty" doc:"The provider's message refusing the model, present only when availability is red."`
 	// AvailabilityCheckedAt is when the probe behind this state ran. Absent
 	// for "unconfigured" and "unverified", which are the states no probe
 	// produced.
-	AvailabilityCheckedAt *time.Time `json:"availability_checked_at,omitempty"`
+	AvailabilityCheckedAt *time.Time `json:"availability_checked_at,omitempty" doc:"When the test behind availability ran, as an RFC 3339 timestamp, present only when availability is verified or red."`
 	// EffortLevels are the reasoning efforts a message on this model may ask
 	// for, lowest first, as their wire values. Always present: an empty list
 	// is a model that takes no effort, which a composer answers by hiding the
 	// control, and an absent field would say nothing.
-	EffortLevels []string `json:"effort_levels"`
-	DisplayOrder int      `json:"display_order"`
+	EffortLevels []string `json:"effort_levels" doc:"The reasoning efforts a message on the model may ask for, lowest first, from low, medium, high, xhigh, and max; an empty array when the model takes none."`
+	DisplayOrder int      `json:"display_order" doc:"The model's position when the models are listed for display, which says nothing about capability."`
 }
 
 type modelCatalogResponse struct {
-	Items []modelCatalogRow `json:"items"`
+	Items []modelCatalogRow `json:"items" doc:"The models, in display order."`
 }
+
+var opModelsList = httpx.NewJSONOp[httpx.NoBody, modelCatalogResponse](httpx.OpSpec{
+	Pattern:     "GET /api/orgs/{org_id}/models",
+	ID:          "list_org_models",
+	Summary:     "List the models an organization may use",
+	Description: "Lists every model this deployment offers, with whether the organization has enabled it, its prices and limits, and whether the organization's credentials can run it. The list is not paginated: it holds the deployment's fixed set of models.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // The availability vocabulary this read publishes. Four values, published
 // whenever the org's credentials are TF-owned — always in multi mode, and in
@@ -233,7 +242,7 @@ func (h *Handler) handleModelsList(w http.ResponseWriter, r *http.Request) {
 	for _, m := range models {
 		items = append(items, catalogRow(m, enabled.Has(m.Key), avail))
 	}
-	httpx.WriteJSON(w, http.StatusOK, modelCatalogResponse{Items: items})
+	opModelsList.Write(w, modelCatalogResponse{Items: items})
 }
 
 // DeploymentUniverse is the handler surface's one door onto what this
@@ -282,6 +291,15 @@ func catalogRow(m modelcatalog.Model, enabled bool, avail availabilityIndex) mod
 	}
 	return row
 }
+
+var opTeamModelsList = httpx.NewJSONOp[httpx.NoBody, modelCatalogResponse](httpx.OpSpec{
+	Pattern:     "GET /api/teams/{team_id}/models",
+	ID:          "list_team_models",
+	Summary:     "List the models a team may use",
+	Description: "Lists the models the team may choose, which are those the organization enabled narrowed to the team's own set, with their prices and limits and whether the organization's credentials can run them. The list is not paginated.",
+	PathParams:  map[string]string{"team_id": "The team's id, or default for the one team in local mode."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleTeamModelsList returns the models one TEAM may run on: the org's
 // enable-set narrowed to the team's own.
@@ -344,7 +362,7 @@ func (h *Handler) handleTeamModelsList(w http.ResponseWriter, r *http.Request) {
 		}
 		items = append(items, catalogRow(m, true, avail))
 	}
-	httpx.WriteJSON(w, http.StatusOK, modelCatalogResponse{Items: items})
+	opTeamModelsList.Write(w, modelCatalogResponse{Items: items})
 }
 
 // resolveTeam is the shared prefix of the two team-scoped model routes: the
@@ -404,13 +422,13 @@ func (h *Handler) Register(m httpx.Mounts) {
 	// sets are WRITTEN on their scope's settings resource — they are ordinary
 	// columns, not effects a field write cannot express — so there is no write
 	// verb here.
-	m.API("GET /api/orgs/{org_id}/models", h.handleModelsList)
-	m.API("GET /api/teams/{team_id}/models", h.handleTeamModelsList)
+	m.Op(opModelsList, h.handleModelsList)
+	m.Op(opTeamModelsList, h.handleTeamModelsList)
 	// The availability probes: the same verb on the item and on the
 	// collection, because "test this model" and "test this provider's
 	// candidates" are two nameable things with two response shapes. Both are
 	// POSTs for an effect no field write can express — each one calls the
 	// provider and is billed for it.
-	m.APIMutating("POST /api/orgs/{org_id}/models/{model_key}/test", h.handleModelTest)
-	m.APIMutating("POST /api/orgs/{org_id}/models/tests", h.handleModelTestSweep)
+	m.Op(opModelTest, h.handleModelTest)
+	m.Op(opModelTestSweep, h.handleModelTestSweep)
 }

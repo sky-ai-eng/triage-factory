@@ -185,15 +185,15 @@ const (
 // modelTestResult is one model's test outcome — the shape both routes speak,
 // so the per-row button and the post-connect sweep report a model the same way.
 type modelTestResult struct {
-	ModelKey string `json:"model_key"`
-	Outcome  string `json:"outcome"`
+	ModelKey string `json:"model_key" doc:"The model's id."`
+	Outcome  string `json:"outcome" doc:"What the test found: verified when the model answered, red when the provider refused it, inconclusive when nobody answered and nothing was recorded, or skipped when a sweep passed over a model already verified."`
 	// Detail is the provider's own message on red or inconclusive. On
 	// inconclusive it is the only trace of what went wrong, since nothing was
 	// stored.
-	Detail string `json:"detail,omitempty"`
+	Detail string `json:"detail,omitempty" doc:"The provider's message, present when outcome is red or inconclusive."`
 	// CheckedAt is the stored row's stamp — this test's, or on a skip the
 	// earlier one that made it verified. Absent when nothing is stored.
-	CheckedAt *time.Time `json:"checked_at,omitempty"`
+	CheckedAt *time.Time `json:"checked_at,omitempty" doc:"When the stored test result was recorded, as an RFC 3339 timestamp: this test's, or on a skipped model the earlier one that verified it; absent when outcome is inconclusive."`
 }
 
 // modelTestSweepResponse is the sweep's answer: one result per candidate, in
@@ -201,8 +201,8 @@ type modelTestResult struct {
 // dialog's aftermath wants is a filter over these items, and a second
 // representation of the same numbers is one more thing that can disagree.
 type modelTestSweepResponse struct {
-	Provider string            `json:"provider"`
-	Items    []modelTestResult `json:"items"`
+	Provider string            `json:"provider" doc:"The provider whose models were tested."`
+	Items    []modelTestResult `json:"items" doc:"One result for each of the provider's models, in display order."`
 }
 
 // modelTestSweepRequest names which provider's candidates to test. Required:
@@ -210,8 +210,29 @@ type modelTestSweepResponse struct {
 // prompted it, and a body that meant "all of them" when the field was absent
 // would make an empty object spend money on the other provider too.
 type modelTestSweepRequest struct {
-	Provider string `json:"provider"`
+	Provider string `json:"provider" doc:"The provider whose models to test, anthropic or bedrock."`
 }
+
+var opModelTest = httpx.NewJSONOp[httpx.NoBody, modelTestResult](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/models/{model_key}/test",
+	ID:          "test_model",
+	Summary:     "Test whether an organization can run a model",
+	Description: "Sends one billed request to the model's provider with the organization's credentials, records whether the model answered, and returns the result. It runs even on a model already verified, and a refusal then records the model as red.",
+	PathParams: map[string]string{
+		"org_id":    "The organization's id.",
+		"model_key": "The model's id, as the organization's model list names it.",
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintNo, OpenWorld: httpx.HintYes},
+})
+
+var opModelTestSweep = httpx.NewJSONOp[modelTestSweepRequest, modelTestSweepResponse](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/models/tests",
+	ID:          "test_models",
+	Summary:     "Test a provider's models for an organization",
+	Description: "Sends one billed request for each of the provider's models that is not already verified, with the organization's credentials, one after another, records what each test found, and returns a result for every model, including those it skipped.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintNo, OpenWorld: httpx.HintYes},
+})
 
 // handleModelTest tests one model against the org's credentials and records
 // what it learns.
@@ -262,7 +283,7 @@ func (h *Handler) handleModelTest(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, result)
+	opModelTest.Write(w, result)
 }
 
 // handleModelTestSweep tests every candidate of one provider — the eager pass
@@ -303,11 +324,11 @@ func (h *Handler) handleModelTestSweep(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req modelTestSweepRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opModelTestSweep.Decode(w, r)
+	if !ok {
 		return
 	}
-	provider := strings.TrimSpace(req.Provider)
+	provider := req.Provider
 	switch {
 	case provider == "":
 		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
@@ -354,7 +375,7 @@ func (h *Handler) handleModelTestSweep(w http.ResponseWriter, r *http.Request) {
 		}
 		items = append(items, result)
 	}
-	httpx.WriteJSON(w, http.StatusOK, modelTestSweepResponse{Provider: provider, Items: items})
+	opModelTestSweep.Write(w, modelTestSweepResponse{Provider: provider, Items: items})
 }
 
 // runProbe spends one request and persists whatever it concluded, returning
@@ -462,7 +483,7 @@ const noProberConfigured = "this deployment has no model prober configured"
 // exist, and probing an arbitrary caller-supplied string would let anyone spend
 // the org's money on requests to models TF never named.
 func offeredModel(w http.ResponseWriter, rawKey string) (modelcatalog.Model, bool) {
-	model, ok := DeploymentUniverse().Lookup(strings.TrimSpace(rawKey))
+	model, ok := DeploymentUniverse().Lookup(rawKey)
 	if !ok {
 		httpx.NotFound(w, "model")
 		return modelcatalog.Model{}, false

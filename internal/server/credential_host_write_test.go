@@ -99,8 +99,8 @@ func hostWriteCases() []hostWriteCase {
 			},
 			call: func(t *testing.T, s *Server) (*httptest.ResponseRecorder, string) {
 				stub := jiraCloudMyselfStub(t, `{"accountId":"cloud-bot","displayName":"Cloud Bot"}`, nil)
-				rec := doJSON(t, s, http.MethodPut, jiraCredentialRoute(), map[string]any{
-					"deployment": "cloud", "url": stub.URL, "email": "bot@acme.com", "token": "cloud_tok",
+				rec := doJSON(t, s, http.MethodPut, jiraCloudCredentialRoute(), map[string]any{
+					"url": stub.URL, "email": "bot@acme.com", "token": "cloud_tok",
 				})
 				return rec, stub.URL
 			},
@@ -221,8 +221,8 @@ func TestJiraCredentialRotation_SameHostLeavesSettingsVersion(t *testing.T) {
 	stub := jiraMyselfStub(t, `{"accountId":"bot","displayName":"Bot"}`, nil)
 	bind := func(pat string) {
 		t.Helper()
-		if rec := doJSON(t, s, http.MethodPut, jiraCredentialRoute(), map[string]any{
-			"deployment": "data_center", "url": stub.URL, "pat": pat,
+		if rec := doJSON(t, s, http.MethodPut, jiraDataCenterCredentialRoute(), map[string]any{
+			"url": stub.URL, "pat": pat,
 		}); rec.Code != http.StatusOK {
 			t.Fatalf("jira bind: %d: %s", rec.Code, rec.Body.String())
 		}

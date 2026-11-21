@@ -27,8 +27,8 @@ func storedJiraSite(t *testing.T, s *Server) string {
 
 func connectJiraDC(t *testing.T, s *Server, url, pat string) int {
 	t.Helper()
-	return doJSON(t, s, http.MethodPut, jiraCredentialRoute(),
-		map[string]any{"deployment": "data_center", "url": url, "pat": pat}).Code
+	return doJSON(t, s, http.MethodPut, jiraDataCenterCredentialRoute(),
+		map[string]any{"url": url, "pat": pat}).Code
 }
 
 // A bind stores the site in canonical form as the org's Jira site and nowhere
@@ -56,8 +56,8 @@ func TestJiraConnect_RefusesAURLThatIsNotHTTP(t *testing.T) {
 	keyring.MockInit()
 	s := newTestServer(t)
 
-	rec := doJSON(t, s, http.MethodPut, jiraCredentialRoute(),
-		map[string]any{"deployment": "data_center", "url": "jira.example.com", "pat": "pat-1"})
+	rec := doJSON(t, s, http.MethodPut, jiraDataCenterCredentialRoute(),
+		map[string]any{"url": "jira.example.com", "pat": "pat-1"})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
@@ -83,8 +83,8 @@ func TestJiraConnect_AReplacementStaysOnTheConnectedSite(t *testing.T) {
 		t.Fatalf("rotate on the same site = %d, want 200", code)
 	}
 
-	rec := doJSON(t, s, http.MethodPut, jiraCredentialRoute(),
-		map[string]any{"deployment": "data_center", "url": other.URL, "pat": "pat-3"})
+	rec := doJSON(t, s, http.MethodPut, jiraDataCenterCredentialRoute(),
+		map[string]any{"url": other.URL, "pat": "pat-3"})
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("replace on another site = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}

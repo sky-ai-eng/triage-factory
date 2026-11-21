@@ -56,17 +56,17 @@ import (
 // (domain.ArtifactDeliverable), or null. name is the object's name within its
 // repository (domain.Artifact.Name), "" for a kind target already names.
 type objectActivityJSON struct {
-	ObjectID          domain.ObjectRef         `json:"object_id"`
-	ObjectKind        string                   `json:"object_kind"`
-	Provider          string                   `json:"provider"`
-	Target            string                   `json:"target"`
-	Name              string                   `json:"name"`
-	URL               string                   `json:"url"`
-	LastAction        string                   `json:"last_action"`
-	ActionCount       int                      `json:"action_count"`
-	ConversationCount int                      `json:"run_count"`
-	LastAt            time.Time                `json:"last_at"`
-	Deliverable       *ArtifactDeliverableJSON `json:"deliverable"`
+	ObjectID          domain.ObjectRef         `json:"object_id" doc:"The object's id, the value the actions lists' object_id carries."`
+	ObjectKind        string                   `json:"object_kind" doc:"The kind of object: pull_request, issue, repository, branch, label, release, workflow, workflow_run, review, comment, or message."`
+	Provider          string                   `json:"provider" doc:"The system the object is in: github, jira, linear, slack, or network."`
+	Target            string                   `json:"target" doc:"The object's key as its latest action named it, such as owner/repo#123, owner/repo, or a Jira issue key."`
+	Name              string                   `json:"name" doc:"The object's name within its repository for a branch, label, release, workflow, or workflow run, and empty for every other kind, which target names."`
+	URL               string                   `json:"url" doc:"The object's page in its system, empty when none is recorded."`
+	LastAction        string                   `json:"last_action" doc:"The type of the latest action on the object, such as pr_created or branch_pushed."`
+	ActionCount       int                      `json:"action_count" doc:"How many actions changed the object."`
+	ConversationCount int                      `json:"run_count" doc:"How many runs changed the object."`
+	LastAt            time.Time                `json:"last_at" doc:"When the latest action on the object occurred, as an RFC 3339 timestamp."`
+	Deliverable       *ArtifactDeliverableJSON `json:"deliverable" doc:"The most recently created deliverable that is the same object, or null when none is."`
 }
 
 // ArtifactDeliverableJSON names the deliverable an artifact matched: enough
@@ -74,9 +74,9 @@ type objectActivityJSON struct {
 // for the rest. The artifacts feeds here and a conversation's artifacts list
 // both carry it.
 type ArtifactDeliverableJSON struct {
-	ID    string `json:"id"`
-	Kind  string `json:"kind"`
-	State string `json:"state"`
+	ID    string `json:"id" doc:"The deliverable's id."`
+	Kind  string `json:"kind" doc:"The kind of deliverable: pull_request or review."`
+	State string `json:"state" doc:"Where the deliverable stands: pending, draft, open, merged, or closed for a pull request, and pending, submitted, or dismissed for a review."`
 }
 
 // orgObjectActivityJSON is the org feed's item: the teams whose runs changed
@@ -84,14 +84,14 @@ type ArtifactDeliverableJSON struct {
 // acted. The team feed is one team and carries none.
 type orgObjectActivityJSON struct {
 	objectActivityJSON
-	Teams []activityTeamJSON `json:"teams"`
+	Teams []activityTeamJSON `json:"teams" doc:"The teams whose runs changed the object, in order of id, or the one team team_id names."`
 }
 
 // activityTeamJSON names a team on an org feed item. Name is empty for a team
 // whose row is gone.
 type activityTeamJSON struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID   string `json:"id" doc:"The team's id."`
+	Name string `json:"name" doc:"The team's name, empty when the team no longer exists."`
 }
 
 func toObjectActivityJSON(a domain.ObjectActivity, deliverables []domain.Deliverable) objectActivityJSON {
@@ -130,10 +130,10 @@ func toObjectActivityJSON(a domain.ObjectActivity, deliverables []domain.Deliver
 // artifactActivityListRequest is the body of POST
 // /api/teams/{team_id}/usage/artifacts/list.
 type artifactActivityListRequest struct {
-	Provider   string `json:"provider"`
-	ObjectKind string `json:"object_kind"`
-	Since      string `json:"since"`
-	Until      string `json:"until"`
+	Provider   string `json:"provider" doc:"The system whose objects to include: github, jira, linear, slack, or network; empty includes every system."`
+	ObjectKind string `json:"object_kind" doc:"The kind of object to include: pull_request, issue, repository, branch, label, release, workflow, workflow_run, review, comment, or message; empty includes every kind."`
+	Since      string `json:"since" doc:"Counts only actions that occurred at or after this time, an RFC 3339 timestamp or a YYYY-MM-DD date read as UTC midnight; empty leaves the window open at the start."`
+	Until      string `json:"until" doc:"Counts only actions that occurred before this time, an RFC 3339 timestamp or a YYYY-MM-DD date read as UTC midnight, which must be after since when both are given; empty leaves the window open at the end."`
 
 	httpx.PageRequest
 }
@@ -141,11 +141,11 @@ type artifactActivityListRequest struct {
 // orgArtifactActivityListRequest is the body of POST
 // /api/orgs/{org_id}/usage/artifacts/list.
 type orgArtifactActivityListRequest struct {
-	Provider   string `json:"provider"`
-	ObjectKind string `json:"object_kind"`
-	TeamID     string `json:"team_id"`
-	Since      string `json:"since"`
-	Until      string `json:"until"`
+	Provider   string `json:"provider" doc:"The system whose objects to include: github, jira, linear, slack, or network; empty includes every system."`
+	ObjectKind string `json:"object_kind" doc:"The kind of object to include: pull_request, issue, repository, branch, label, release, workflow, workflow_run, review, comment, or message; empty includes every kind."`
+	TeamID     string `json:"team_id" doc:"The id of a team, in canonical lowercase UUID form, to count only the actions of that team's runs; empty counts every team's."`
+	Since      string `json:"since" doc:"Counts only actions that occurred at or after this time, an RFC 3339 timestamp or a YYYY-MM-DD date read as UTC midnight; empty leaves the window open at the start."`
+	Until      string `json:"until" doc:"Counts only actions that occurred before this time, an RFC 3339 timestamp or a YYYY-MM-DD date read as UTC midnight, which must be after since when both are given; empty leaves the window open at the end."`
 
 	httpx.PageRequest
 }
@@ -154,26 +154,26 @@ type orgArtifactActivityListRequest struct {
 // /api/teams/{team_id}/usage/artifacts/facets: the team list's filters, and
 // the paging pair declared only to be refused (refuseFacetPaging).
 type artifactActivityFacetsRequest struct {
-	Provider   string `json:"provider"`
-	ObjectKind string `json:"object_kind"`
-	Since      string `json:"since"`
-	Until      string `json:"until"`
+	Provider   string `json:"provider" doc:"The system whose objects to include: github, jira, linear, slack, or network; empty includes every system."`
+	ObjectKind string `json:"object_kind" doc:"The kind of object to include: pull_request, issue, repository, branch, label, release, workflow, workflow_run, review, comment, or message; empty includes every kind."`
+	Since      string `json:"since" doc:"Counts only actions that occurred at or after this time, an RFC 3339 timestamp or a YYYY-MM-DD date read as UTC midnight; empty leaves the window open at the start."`
+	Until      string `json:"until" doc:"Counts only actions that occurred before this time, an RFC 3339 timestamp or a YYYY-MM-DD date read as UTC midnight, which must be after since when both are given; empty leaves the window open at the end."`
 
-	PageSize  json.RawMessage `json:"page_size"`
-	PageToken json.RawMessage `json:"page_token"`
+	PageSize  json.RawMessage `json:"page_size" spec:"-"`
+	PageToken json.RawMessage `json:"page_token" spec:"-"`
 }
 
 // orgArtifactActivityFacetsRequest is the body of POST
 // /api/orgs/{org_id}/usage/artifacts/facets: the org list's filters.
 type orgArtifactActivityFacetsRequest struct {
-	Provider   string `json:"provider"`
-	ObjectKind string `json:"object_kind"`
-	TeamID     string `json:"team_id"`
-	Since      string `json:"since"`
-	Until      string `json:"until"`
+	Provider   string `json:"provider" doc:"The system whose objects to include: github, jira, linear, slack, or network; empty includes every system."`
+	ObjectKind string `json:"object_kind" doc:"The kind of object to include: pull_request, issue, repository, branch, label, release, workflow, workflow_run, review, comment, or message; empty includes every kind."`
+	TeamID     string `json:"team_id" doc:"The id of a team, in canonical lowercase UUID form, to count only the actions of that team's runs; empty counts every team's."`
+	Since      string `json:"since" doc:"Counts only actions that occurred at or after this time, an RFC 3339 timestamp or a YYYY-MM-DD date read as UTC midnight; empty leaves the window open at the start."`
+	Until      string `json:"until" doc:"Counts only actions that occurred before this time, an RFC 3339 timestamp or a YYYY-MM-DD date read as UTC midnight, which must be after since when both are given; empty leaves the window open at the end."`
 
-	PageSize  json.RawMessage `json:"page_size"`
-	PageToken json.RawMessage `json:"page_token"`
+	PageSize  json.RawMessage `json:"page_size" spec:"-"`
+	PageToken json.RawMessage `json:"page_token" spec:"-"`
 }
 
 // artifactActivityFilters is the artifacts filters as any of the four bodies
@@ -237,6 +237,15 @@ func artifactKeys(items []domain.ObjectActivity) (entityIDs, reviewIDs []string,
 	return entityIDs, reviewIDs, len(entityIDs)+len(reviewIDs) > 0
 }
 
+var opUsageTeamArtifacts = httpx.NewListOp[artifactActivityListRequest, objectActivityJSON](httpx.OpSpec{
+	Pattern:     "POST /api/teams/{team_id}/usage/artifacts/list",
+	ID:          "list_team_usage_artifacts",
+	Summary:     "List the objects a team's runs changed",
+	Description: "Lists the objects the team's runs changed in GitHub, Jira, Linear, and Slack, one item per object with its latest action, how many actions and runs changed it, and the deliverable that is the same object, latest action first. It needs an Enterprise licence.",
+	PathParams:  map[string]string{"team_id": "The team's id, or default for the one team in local mode."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
+
 // handleUsageTeamArtifacts returns the objects one team's runs changed, by the
 // latest action on each first. Gate: FeatureGovernance AND (team admin OR org
 // admin). The ledger read and the deliverables it matches both run under the
@@ -250,8 +259,8 @@ func (h *Handler) handleUsageTeamArtifacts(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
-	var req artifactActivityListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opUsageTeamArtifacts.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -290,8 +299,17 @@ func (h *Handler) handleUsageTeamArtifacts(w http.ResponseWriter, r *http.Reques
 	for i, a := range items {
 		out[i] = toObjectActivityJSON(a, deliverables)
 	}
-	httpx.WriteList(w, page, out, total)
+	opUsageTeamArtifacts.Write(w, page, out, total)
 }
+
+var opUsageOrgArtifacts = httpx.NewListOp[orgArtifactActivityListRequest, orgObjectActivityJSON](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/usage/artifacts/list",
+	ID:          "list_org_usage_artifacts",
+	Summary:     "List the objects an organization's runs changed",
+	Description: "Lists the objects every team's runs in the organization changed, one item per object with its latest action, how many actions and runs changed it, the teams whose runs did, and the deliverable that is the same object, latest action first. It needs an Enterprise licence.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleUsageOrgArtifacts returns the objects every team's runs changed, by
 // the latest action on each first. Gate: FeatureGovernance AND org admin — a
@@ -306,8 +324,8 @@ func (h *Handler) handleUsageOrgArtifacts(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
-	var req orgArtifactActivityListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opUsageOrgArtifacts.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -358,7 +376,7 @@ func (h *Handler) handleUsageOrgArtifacts(w http.ResponseWriter, r *http.Request
 		}
 		out[i] = orgObjectActivityJSON{objectActivityJSON: toObjectActivityJSON(a, deliverables), Teams: teams}
 	}
-	httpx.WriteList(w, page, out, total)
+	opUsageOrgArtifacts.Write(w, page, out, total)
 }
 
 // --- The activity feeds' facets nodes ---
@@ -379,21 +397,21 @@ func (h *Handler) handleUsageOrgArtifacts(w http.ResponseWriter, r *http.Request
 // user whose row is gone.
 type activityFacetJSON struct {
 	httpx.FacetJSON
-	Name string `json:"name"`
+	Name string `json:"name" doc:"The team's or person's name, empty when the team or person no longer exists."`
 }
 
 // artifactActivityFacetsJSON is the artifacts facets node's fixed schema:
 // by_team counts the objects each team's runs changed.
 type artifactActivityFacetsJSON struct {
-	ByTeam []activityFacetJSON `json:"by_team"`
+	ByTeam []activityFacetJSON `json:"by_team" doc:"The teams whose runs changed objects under the request's filters other than team_id, each with how many objects, ordered by name; on a team's facets, that team alone."`
 }
 
 // actionActivityFacetsJSON is the actions facets node's fixed schema: by_actor
 // counts the rows each person performed or authorized, by_team the rows each
 // team holds.
 type actionActivityFacetsJSON struct {
-	ByActor []activityFacetJSON `json:"by_actor"`
-	ByTeam  []activityFacetJSON `json:"by_team"`
+	ByActor []activityFacetJSON `json:"by_actor" doc:"The people who authorized or started actions under the request's filters other than actor, each with how many actions, ordered by name."`
+	ByTeam  []activityFacetJSON `json:"by_team" doc:"The teams whose actions match the request's filters other than team_id, each with how many actions, ordered by name; on a team's facets, that team alone."`
 }
 
 // namedFacets renders a cut with each value's name, ordered by name the way a
@@ -419,6 +437,13 @@ func namedFacets(in []db.Facet, names map[string]string) []activityFacetJSON {
 	return out
 }
 
+// facetsWriter is the one method the shared facets writers call on a route's
+// operation. A team's and an organization's facets route decode different
+// bodies into the same cuts, so their operations differ in Req alone.
+type facetsWriter[Resp any] interface {
+	Write(w http.ResponseWriter, resp Resp)
+}
+
 // facetValues is the values of a cut, for the name resolvers.
 func facetValues(in []db.Facet) []string {
 	out := make([]string, len(in))
@@ -427,6 +452,15 @@ func facetValues(in []db.Facet) []string {
 	}
 	return out
 }
+
+var opUsageTeamArtifactFacets = httpx.NewJSONOp[artifactActivityFacetsRequest, artifactActivityFacetsJSON](httpx.OpSpec{
+	Pattern:     "POST /api/teams/{team_id}/usage/artifacts/facets",
+	ID:          "get_team_usage_artifact_facets",
+	Summary:     "Count the objects a team's runs changed",
+	Description: "Returns how many objects the team's runs changed under the request's filters, as the team's one entry in by_team. It needs an Enterprise licence.",
+	PathParams:  map[string]string{"team_id": "The team's id, or default for the one team in local mode."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleUsageTeamArtifactFacets answers the team artifacts feed's facets.
 // Same gates and pools as the list.
@@ -437,8 +471,8 @@ func (h *Handler) handleUsageTeamArtifactFacets(w http.ResponseWriter, r *http.R
 	if !ok {
 		return
 	}
-	var req artifactActivityFacetsRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opUsageTeamArtifactFacets.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -449,10 +483,19 @@ func (h *Handler) handleUsageTeamArtifactFacets(w http.ResponseWriter, r *http.R
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
-	h.writeArtifactFacets(w, r, orgID, userID, func(tx db.TxStores) (db.ArtifactFacets, error) {
+	h.writeArtifactFacets(w, r, orgID, userID, opUsageTeamArtifactFacets, func(tx db.TxStores) (db.ArtifactFacets, error) {
 		return tx.Artifacts.FacetsByTeam(r.Context(), orgID, teamID, opts)
 	})
 }
+
+var opUsageOrgArtifactFacets = httpx.NewJSONOp[orgArtifactActivityFacetsRequest, artifactActivityFacetsJSON](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/usage/artifacts/facets",
+	ID:          "get_org_usage_artifact_facets",
+	Summary:     "Count the objects an organization's runs changed",
+	Description: "Returns the teams the organization's changed-objects list can be narrowed to, each with how many objects its runs changed under the request's other filters. It needs an Enterprise licence.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleUsageOrgArtifactFacets answers the org artifacts feed's facets. Same
 // gates and pools as the list.
@@ -463,8 +506,8 @@ func (h *Handler) handleUsageOrgArtifactFacets(w http.ResponseWriter, r *http.Re
 	if !ok {
 		return
 	}
-	var req orgArtifactActivityFacetsRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opUsageOrgArtifactFacets.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -475,14 +518,15 @@ func (h *Handler) handleUsageOrgArtifactFacets(w http.ResponseWriter, r *http.Re
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
-	h.writeArtifactFacets(w, r, orgID, userID, func(tx db.TxStores) (db.ArtifactFacets, error) {
+	h.writeArtifactFacets(w, r, orgID, userID, opUsageOrgArtifactFacets, func(tx db.TxStores) (db.ArtifactFacets, error) {
 		return tx.Artifacts.FacetsByOrgSystem(r.Context(), orgID, opts)
 	})
 }
 
 // writeArtifactFacets runs read under the caller's claims, names the teams
-// the way the org list names them (Teams.GetSystem), and writes the cuts.
-func (h *Handler) writeArtifactFacets(w http.ResponseWriter, r *http.Request, orgID, userID string, read func(db.TxStores) (db.ArtifactFacets, error)) {
+// the way the org list names them (Teams.GetSystem), and writes the cuts
+// through op, the route's own operation.
+func (h *Handler) writeArtifactFacets(w http.ResponseWriter, r *http.Request, orgID, userID string, op facetsWriter[artifactActivityFacetsJSON], read func(db.TxStores) (db.ArtifactFacets, error)) {
 	var (
 		facets    db.ArtifactFacets
 		teamNames map[string]string
@@ -498,8 +542,17 @@ func (h *Handler) writeArtifactFacets(w http.ResponseWriter, r *http.Request, or
 		httpx.InternalError(w, "usage", err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, artifactActivityFacetsJSON{ByTeam: namedFacets(facets.ByTeam, teamNames)})
+	op.Write(w, artifactActivityFacetsJSON{ByTeam: namedFacets(facets.ByTeam, teamNames)})
 }
+
+var opUsageTeamActionFacets = httpx.NewJSONOp[actionActivityFacetsRequest, actionActivityFacetsJSON](httpx.OpSpec{
+	Pattern:     "POST /api/teams/{team_id}/usage/actions/facets",
+	ID:          "get_team_usage_action_facets",
+	Summary:     "Count a team's actions in external systems",
+	Description: "Returns the people the team's action list can be narrowed to, and the team itself, each with how many actions match the request's other filters. It needs an Enterprise licence.",
+	PathParams:  map[string]string{"team_id": "The team's id, or default for the one team in local mode."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleUsageTeamActionFacets answers the team actions feed's facets. Same
 // gates and pools as the list.
@@ -510,8 +563,8 @@ func (h *Handler) handleUsageTeamActionFacets(w http.ResponseWriter, r *http.Req
 	if !ok {
 		return
 	}
-	var req actionActivityFacetsRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opUsageTeamActionFacets.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -522,10 +575,19 @@ func (h *Handler) handleUsageTeamActionFacets(w http.ResponseWriter, r *http.Req
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
-	h.writeActionFacets(w, r, orgID, userID, func(tx db.TxStores) (db.ExternalActionFacets, error) {
+	h.writeActionFacets(w, r, orgID, userID, opUsageTeamActionFacets, func(tx db.TxStores) (db.ExternalActionFacets, error) {
 		return tx.ExternalActions.FacetsByTeam(r.Context(), orgID, teamID, opts)
 	})
 }
+
+var opUsageOrgActionFacets = httpx.NewJSONOp[orgActionActivityFacetsRequest, actionActivityFacetsJSON](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/usage/actions/facets",
+	ID:          "get_org_usage_action_facets",
+	Summary:     "Count an organization's actions in external systems",
+	Description: "Returns the people and teams the organization's action list can be narrowed to, each with how many actions match the request's other filters. It needs an Enterprise licence.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleUsageOrgActionFacets answers the org actions feed's facets. Same
 // gates and pools as the list.
@@ -536,8 +598,8 @@ func (h *Handler) handleUsageOrgActionFacets(w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return
 	}
-	var req orgActionActivityFacetsRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opUsageOrgActionFacets.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -548,15 +610,15 @@ func (h *Handler) handleUsageOrgActionFacets(w http.ResponseWriter, r *http.Requ
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
-	h.writeActionFacets(w, r, orgID, userID, func(tx db.TxStores) (db.ExternalActionFacets, error) {
+	h.writeActionFacets(w, r, orgID, userID, opUsageOrgActionFacets, func(tx db.TxStores) (db.ExternalActionFacets, error) {
 		return tx.ExternalActions.FacetsByOrgSystem(r.Context(), orgID, opts)
 	})
 }
 
 // writeActionFacets runs read under the caller's claims, names the teams and
 // people the way the lists name them (Teams.GetSystem, Users.GetProfile), and
-// writes the cuts.
-func (h *Handler) writeActionFacets(w http.ResponseWriter, r *http.Request, orgID, userID string, read func(db.TxStores) (db.ExternalActionFacets, error)) {
+// writes the cuts through op, the route's own operation.
+func (h *Handler) writeActionFacets(w http.ResponseWriter, r *http.Request, orgID, userID string, op facetsWriter[actionActivityFacetsJSON], read func(db.TxStores) (db.ExternalActionFacets, error)) {
 	var (
 		facets     db.ExternalActionFacets
 		teamNames  map[string]string
@@ -576,7 +638,7 @@ func (h *Handler) writeActionFacets(w http.ResponseWriter, r *http.Request, orgI
 		httpx.InternalError(w, "usage", err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, actionActivityFacetsJSON{
+	op.Write(w, actionActivityFacetsJSON{
 		ByActor: namedFacets(facets.ByActor, actorNames),
 		ByTeam:  namedFacets(facets.ByTeam, teamNames),
 	})
@@ -705,31 +767,31 @@ func (h *Handler) requireTeamOrOrgAdmin(w http.ResponseWriter, r *http.Request, 
 // /api/agent/conversations/{conversationID}/actions/list) serves the same shape
 // and sets none of the three.
 type ActionJSON struct {
-	ID             string `json:"id"`
-	Provider       string `json:"provider"`
-	Scope          string `json:"scope"`
-	Action         string `json:"action"`
-	Target         string `json:"target"`
-	ExternalID     string `json:"external_id,omitempty"`
-	URL            string `json:"url,omitempty"`
-	FromState      string `json:"from_state,omitempty"`
-	ToState        string `json:"to_state,omitempty"`
-	ConversationID string `json:"conversation_id,omitempty"`
-	ActorUserID    string `json:"actor_user_id,omitempty"`
-	PerformedBy    string `json:"performed_by"`
+	ID             string `json:"id" doc:"The action's id."`
+	Provider       string `json:"provider" doc:"The system the action was performed in: github, jira, linear, slack, or network."`
+	Scope          string `json:"scope" doc:"The namespace in its system the acted-on object lives in, such as the GitHub host, the Jira site, or the Linear workspace id."`
+	Action         string `json:"action" doc:"The action type, such as pr_created or branch_pushed."`
+	Target         string `json:"target" doc:"The acted-on object's key as the action named it, such as owner/repo#123, owner/repo, or a Jira issue key."`
+	ExternalID     string `json:"external_id,omitempty" doc:"The id its system gave the acted-on object, such as a pull request number or a comment id, absent when none is recorded."`
+	URL            string `json:"url,omitempty" doc:"The acted-on object's page in its system, under its current name, absent when none is recorded."`
+	FromState      string `json:"from_state,omitempty" doc:"The state a transition moved the object from, absent on an action that is not a transition."`
+	ToState        string `json:"to_state,omitempty" doc:"The state a transition moved the object to, absent on an action that is not a transition."`
+	ConversationID string `json:"conversation_id,omitempty" doc:"The id of the conversation that produced the action, absent when it had none or the conversation was deleted."`
+	ActorUserID    string `json:"actor_user_id,omitempty" doc:"The id of the person who authorized or started the action, absent on an action no person started."`
+	PerformedBy    string `json:"performed_by" doc:"Who performed the action: agent, person, or system."`
 	// ObjectKind and ObjectID name the object the action changed; ObjectID
 	// is the value an artifact's object_id carries. A row that names no
 	// object has neither, and one whose kind's identifying columns are empty
 	// has no ObjectID.
-	ObjectKind string           `json:"object_kind,omitempty"`
-	ObjectID   domain.ObjectRef `json:"object_id,omitempty"`
-	Credential string           `json:"credential"`
-	Details    json.RawMessage  `json:"details,omitempty"`
-	OccurredAt time.Time        `json:"occurred_at"`
+	ObjectKind string           `json:"object_kind,omitempty" doc:"The kind of object the action changed, absent when it changed none, as on a refusal or a failure."`
+	ObjectID   domain.ObjectRef `json:"object_id,omitempty" doc:"The id of the object the action changed, the value an artifact's object_id carries, absent when the action changed no object or its object cannot be identified."`
+	Credential string           `json:"credential" doc:"The organization credential the action was performed under, such as github_app, github_pat, jira_org, linear_org, or slack_bot, or none when it used no credential."`
+	Details    json.RawMessage  `json:"details,omitempty" doc:"A JSON object of details specific to the action type, such as a pushed commit's sha, absent when there are none."`
+	OccurredAt time.Time        `json:"occurred_at" doc:"When the action occurred, as an RFC 3339 timestamp."`
 	// org feed only:
-	TeamID    string `json:"team_id,omitempty"`
-	TeamName  string `json:"team_name,omitempty"`
-	ActorName string `json:"actor_name,omitempty"`
+	TeamID    string `json:"team_id,omitempty" doc:"The id of the team the action belongs to, present only on an organization's list and absent there on an action with no team."`
+	TeamName  string `json:"team_name,omitempty" doc:"The name of that team, present only on an organization's list and absent when the action has no team or the team no longer exists."`
+	ActorName string `json:"actor_name,omitempty" doc:"The name of the person in actor_user_id, present only on a team's or an organization's list and absent there when the action has no person or the name cannot be read."`
 }
 
 // ToActionJSON projects a stored action onto the wire shape, emitting detail_json
@@ -775,11 +837,11 @@ func ToActionJSON(a domain.ExternalAction) ActionJSON {
 // actionActivityListRequest is the body of POST
 // /api/teams/{team_id}/usage/actions/list.
 type actionActivityListRequest struct {
-	Provider string `json:"provider"`
-	Action   string `json:"action"`
-	Actor    string `json:"actor"`
-	Since    string `json:"since"`
-	Until    string `json:"until"`
+	Provider string `json:"provider" doc:"The system whose actions to include: github, jira, linear, slack, or network; empty includes every system."`
+	Action   string `json:"action" doc:"The action type to include, such as pr_created or branch_pushed; empty includes every type."`
+	Actor    string `json:"actor" doc:"The id of the person, in canonical lowercase UUID form, whose authorized or started actions to include; empty includes every action, those with no person among them."`
+	Since    string `json:"since" doc:"Includes only actions that occurred at or after this time, an RFC 3339 timestamp or a YYYY-MM-DD date read as UTC midnight; empty leaves the window open at the start."`
+	Until    string `json:"until" doc:"Includes only actions that occurred before this time, an RFC 3339 timestamp or a YYYY-MM-DD date read as UTC midnight, which must be after since when both are given; empty leaves the window open at the end."`
 
 	httpx.PageRequest
 }
@@ -787,12 +849,12 @@ type actionActivityListRequest struct {
 // orgActionActivityListRequest is the body of POST
 // /api/orgs/{org_id}/usage/actions/list.
 type orgActionActivityListRequest struct {
-	Provider string `json:"provider"`
-	Action   string `json:"action"`
-	Actor    string `json:"actor"`
-	TeamID   string `json:"team_id"`
-	Since    string `json:"since"`
-	Until    string `json:"until"`
+	Provider string `json:"provider" doc:"The system whose actions to include: github, jira, linear, slack, or network; empty includes every system."`
+	Action   string `json:"action" doc:"The action type to include, such as pr_created or branch_pushed; empty includes every type."`
+	Actor    string `json:"actor" doc:"The id of the person, in canonical lowercase UUID form, whose authorized or started actions to include; empty includes every action, those with no person among them."`
+	TeamID   string `json:"team_id" doc:"The id of a team, in canonical lowercase UUID form, whose actions to include; empty includes every team's."`
+	Since    string `json:"since" doc:"Includes only actions that occurred at or after this time, an RFC 3339 timestamp or a YYYY-MM-DD date read as UTC midnight; empty leaves the window open at the start."`
+	Until    string `json:"until" doc:"Includes only actions that occurred before this time, an RFC 3339 timestamp or a YYYY-MM-DD date read as UTC midnight, which must be after since when both are given; empty leaves the window open at the end."`
 
 	httpx.PageRequest
 }
@@ -801,28 +863,28 @@ type orgActionActivityListRequest struct {
 // /api/teams/{team_id}/usage/actions/facets: the team list's filters, and the
 // paging pair declared only to be refused (refuseFacetPaging).
 type actionActivityFacetsRequest struct {
-	Provider string `json:"provider"`
-	Action   string `json:"action"`
-	Actor    string `json:"actor"`
-	Since    string `json:"since"`
-	Until    string `json:"until"`
+	Provider string `json:"provider" doc:"The system whose actions to include: github, jira, linear, slack, or network; empty includes every system."`
+	Action   string `json:"action" doc:"The action type to include, such as pr_created or branch_pushed; empty includes every type."`
+	Actor    string `json:"actor" doc:"The id of the person, in canonical lowercase UUID form, whose authorized or started actions to include; empty includes every action, those with no person among them."`
+	Since    string `json:"since" doc:"Includes only actions that occurred at or after this time, an RFC 3339 timestamp or a YYYY-MM-DD date read as UTC midnight; empty leaves the window open at the start."`
+	Until    string `json:"until" doc:"Includes only actions that occurred before this time, an RFC 3339 timestamp or a YYYY-MM-DD date read as UTC midnight, which must be after since when both are given; empty leaves the window open at the end."`
 
-	PageSize  json.RawMessage `json:"page_size"`
-	PageToken json.RawMessage `json:"page_token"`
+	PageSize  json.RawMessage `json:"page_size" spec:"-"`
+	PageToken json.RawMessage `json:"page_token" spec:"-"`
 }
 
 // orgActionActivityFacetsRequest is the body of POST
 // /api/orgs/{org_id}/usage/actions/facets: the org list's filters.
 type orgActionActivityFacetsRequest struct {
-	Provider string `json:"provider"`
-	Action   string `json:"action"`
-	Actor    string `json:"actor"`
-	TeamID   string `json:"team_id"`
-	Since    string `json:"since"`
-	Until    string `json:"until"`
+	Provider string `json:"provider" doc:"The system whose actions to include: github, jira, linear, slack, or network; empty includes every system."`
+	Action   string `json:"action" doc:"The action type to include, such as pr_created or branch_pushed; empty includes every type."`
+	Actor    string `json:"actor" doc:"The id of the person, in canonical lowercase UUID form, whose authorized or started actions to include; empty includes every action, those with no person among them."`
+	TeamID   string `json:"team_id" doc:"The id of a team, in canonical lowercase UUID form, whose actions to include; empty includes every team's."`
+	Since    string `json:"since" doc:"Includes only actions that occurred at or after this time, an RFC 3339 timestamp or a YYYY-MM-DD date read as UTC midnight; empty leaves the window open at the start."`
+	Until    string `json:"until" doc:"Includes only actions that occurred before this time, an RFC 3339 timestamp or a YYYY-MM-DD date read as UTC midnight, which must be after since when both are given; empty leaves the window open at the end."`
 
-	PageSize  json.RawMessage `json:"page_size"`
-	PageToken json.RawMessage `json:"page_token"`
+	PageSize  json.RawMessage `json:"page_size" spec:"-"`
+	PageToken json.RawMessage `json:"page_token" spec:"-"`
 }
 
 // actionActivityFilters is the actions filters as any of the four bodies sent
@@ -847,6 +909,15 @@ func resolveActionActivityFilters(v *httpx.Validation, f actionActivityFilters) 
 	return opts
 }
 
+var opUsageTeamActions = httpx.NewListOp[actionActivityListRequest, ActionJSON](httpx.OpSpec{
+	Pattern:     "POST /api/teams/{team_id}/usage/actions/list",
+	ID:          "list_team_usage_actions",
+	Summary:     "List a team's actions in external systems",
+	Description: "Lists the writes Triage Factory made to GitHub, Jira, Linear, and Slack for the team, and the attempts that were refused or failed, newest first, each with the name of the person who authorized or started it. It needs an Enterprise licence.",
+	PathParams:  map[string]string{"team_id": "The team's id, or default for the one team in local mode."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
+
 // handleUsageTeamActions returns one team's external-action history, newest
 // first. Same gates as the team artifacts feed. The team feed omits
 // team_id/team_name (it's already one team) but DOES resolve the authorizing
@@ -861,8 +932,8 @@ func (h *Handler) handleUsageTeamActions(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	var req actionActivityListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opUsageTeamActions.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -898,8 +969,17 @@ func (h *Handler) handleUsageTeamActions(w http.ResponseWriter, r *http.Request)
 		j.ActorName = actorNames[a.ActorUserID]
 		out[i] = j
 	}
-	httpx.WriteList(w, page, out, total)
+	opUsageTeamActions.Write(w, page, out, total)
 }
+
+var opUsageOrgActions = httpx.NewListOp[orgActionActivityListRequest, ActionJSON](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/usage/actions/list",
+	ID:          "list_org_usage_actions",
+	Summary:     "List an organization's actions in external systems",
+	Description: "Lists the writes Triage Factory made to GitHub, Jira, Linear, and Slack across the organization's teams, and the attempts that were refused or failed, newest first, each with its team and the name of the person who authorized or started it. It needs an Enterprise licence.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleUsageOrgActions returns the org-wide external-action history across
 // every team, newest first. It uses the System aggregate (ListByOrgSystem,
@@ -915,8 +995,8 @@ func (h *Handler) handleUsageOrgActions(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	var req orgActionActivityListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opUsageOrgActions.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -959,7 +1039,7 @@ func (h *Handler) handleUsageOrgActions(w http.ResponseWriter, r *http.Request) 
 		j.ActorName = actorNames[a.ActorUserID]
 		out[i] = j
 	}
-	httpx.WriteList(w, page, out, total)
+	opUsageOrgActions.Write(w, page, out, total)
 }
 
 // resolveActionTeamNames maps each distinct team in the action set to its

@@ -1326,6 +1326,7 @@ export default function OrgSettings({
                 />
               ) : (
                 <BedrockFields
+                  orgId={orgId}
                   form={draft.org}
                   onChange={(p) => patch({ org: { ...draft.org, ...p } })}
                   hasStored={

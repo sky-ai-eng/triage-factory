@@ -13,7 +13,9 @@ import (
 // The org's ceiling on API-token lifetime. These tests pin the setting; the
 // store tests own its enforcement, which is applied when a token is used.
 
-// orgAPITokenMaxAge reads the setting back off the org settings GET.
+// orgAPITokenMaxAge reads the setting back off the org settings GET, 0 when
+// it is null. No maximum is spelled null on the read as on the PATCH, so a 0
+// on the wire fails the test.
 func orgAPITokenMaxAge(t *testing.T, s *Server) int {
 	t.Helper()
 	rec := doJSON(t, s, http.MethodGet, orgSettingsPath(), nil)
@@ -21,12 +23,18 @@ func orgAPITokenMaxAge(t *testing.T, s *Server) int {
 		t.Fatalf("GET %s: %d: %s", orgSettingsPath(), rec.Code, rec.Body.String())
 	}
 	var out struct {
-		APITokenMaxAgeDays int `json:"api_token_max_age_days"`
+		APITokenMaxAgeDays *int `json:"api_token_max_age_days"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatalf("decode org settings: %v", err)
 	}
-	return out.APITokenMaxAgeDays
+	if out.APITokenMaxAgeDays == nil {
+		return 0
+	}
+	if *out.APITokenMaxAgeDays == 0 {
+		t.Errorf("api_token_max_age_days read 0, want null for no maximum")
+	}
+	return *out.APITokenMaxAgeDays
 }
 
 // TestOrgSettingsPatch_APITokenMaxAge_BoundsAccepted: a fresh org is uncapped,

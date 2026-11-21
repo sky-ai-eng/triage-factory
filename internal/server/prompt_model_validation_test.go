@@ -81,7 +81,7 @@ func TestTeamSettingsPatch_ModelMustBeOfferedByTheUniverse(t *testing.T) {
 
 	resp := patchTeamSettingsOK(t, s, "default", map[string]any{"ai_model": domain.ModelAliasHaiku})
 	settings, _ := resp["team_settings"].(map[string]any)
-	if settings == nil || settings["DefaultModel"] != domain.ModelAliasHaiku {
+	if settings == nil || settings["ai_model"] != domain.ModelAliasHaiku {
 		t.Errorf("saved team default = %#v, want %q", resp["team_settings"], domain.ModelAliasHaiku)
 	}
 }

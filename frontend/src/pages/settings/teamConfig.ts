@@ -66,10 +66,10 @@ export type GitHubGroup = GitHubTeamRef
 
 // TeamConfigForm is the editable team-level field set the shared groups
 // drive. A container spreads each group's patch straight into this state.
-// Field names follow the GET response (default_model / auto_delegate_enabled)
-// rather than the POST wire keys (ai_model / ai_auto_delegate_enabled); the
-// savers below do that one mapping, exactly as orgConfig maps github_url →
-// github_base_url.
+// Field names are the form's own (default_model / auto_delegate_enabled)
+// rather than the wire keys the settings read and PATCH share (ai_model /
+// ai_auto_delegate_enabled); teamConfigFromSettings and the savers below do
+// that one mapping, exactly as orgConfig maps github_url → github_base_url.
 export interface TeamConfigForm {
   default_model: string
   auto_delegate_enabled: boolean
@@ -84,12 +84,12 @@ export interface TeamConfigForm {
   // ticket id at run time. Same key on the GET and POST wire.
   branch_template: string
   // How this team's delegated reviews reach GitHub: 'identity' |
-  // 'draft' | 'auto' | 'auto_unless_blocking'. GET returns it as ReviewPosture;
-  // the POST key is review_posture.
+  // 'draft' | 'auto' | 'auto_unless_blocking'. The read and the PATCH both
+  // call it review_posture.
   review_posture: string
   // Whether delegated agents may push to a repo's base/default branch:
-  // 'never' | 'manual_only' | 'always'. GET returns it as
-  // BaseBranchPushPolicy; the POST key is base_branch_push_policy.
+  // 'never' | 'manual_only' | 'always'. The read and the PATCH both call it
+  // base_branch_push_policy.
   base_branch_push_policy: string
   // Carried for round-trip fidelity (they're part of the team_settings the
   // GET returns and the POST accepts) even though no surface exposes an
@@ -120,18 +120,21 @@ export interface TeamConfigForm {
 // frontend can collapse to the flat N=1 layout and gate write-side fields
 // without a second round trip.
 export interface TeamSettingsData {
+  // Under the PATCH's own keys and units.
   team_settings: {
-    AIReprioritizeThreshold: number
-    AIPreferenceUpdateInterval: number
-    DefaultModel: string
-    AutoDelegateEnabled: boolean
-    AutoModeEnabled: boolean
-    ClaudeAIConnectorsEnabled: boolean
-    BranchTemplate: string
-    ReviewPosture: string
-    BaseBranchPushPolicy: string
-    PermissionAbsentGraceMS: number
-    PermissionAbsentAutodenyEnabled: boolean
+    ai_model: string
+    enabled_models: string[] | null
+    ai_auto_delegate_enabled: boolean
+    auto_mode_enabled: boolean
+    claude_ai_connectors_enabled: boolean
+    ai_reprioritize_threshold: number
+    ai_preference_update_interval: number
+    branch_template: string
+    review_posture: string
+    base_branch_push_policy: string
+    permission_absent_autodeny_enabled: boolean
+    permission_absent_grace_seconds: number
+    max_daily_cost_usd: number | null
   }
   jira_projects: JiraProjectConfig[]
   // The tracked Linear teams in display order, as PUT
@@ -497,20 +500,19 @@ export const emptyTeamConfig = (): TeamConfigForm => ({
 // what lets a surface tell a slice that never loaded from an empty one.
 export function teamConfigFromSettings(data: TeamSettingsData): TeamConfigForm {
   return {
-    default_model: data.team_settings.DefaultModel,
-    auto_delegate_enabled: data.team_settings.AutoDelegateEnabled,
-    auto_mode_enabled: data.team_settings.AutoModeEnabled ?? true,
-    claude_ai_connectors_enabled: data.team_settings.ClaudeAIConnectorsEnabled ?? false,
-    branch_template: data.team_settings.BranchTemplate || 'tfac/<ticket-id>',
-    review_posture: data.team_settings.ReviewPosture || 'identity',
-    base_branch_push_policy: data.team_settings.BaseBranchPushPolicy || 'never',
-    ai_reprioritize_threshold: data.team_settings.AIReprioritizeThreshold,
-    ai_preference_update_interval: data.team_settings.AIPreferenceUpdateInterval,
-    permission_absent_autodeny_enabled: data.team_settings.PermissionAbsentAutodenyEnabled,
-    // Stored as ms; the form (and the input) work in whole seconds.
+    default_model: data.team_settings.ai_model,
+    auto_delegate_enabled: data.team_settings.ai_auto_delegate_enabled,
+    auto_mode_enabled: data.team_settings.auto_mode_enabled ?? true,
+    claude_ai_connectors_enabled: data.team_settings.claude_ai_connectors_enabled ?? false,
+    branch_template: data.team_settings.branch_template || 'tfac/<ticket-id>',
+    review_posture: data.team_settings.review_posture || 'identity',
+    base_branch_push_policy: data.team_settings.base_branch_push_policy || 'never',
+    ai_reprioritize_threshold: data.team_settings.ai_reprioritize_threshold,
+    ai_preference_update_interval: data.team_settings.ai_preference_update_interval,
+    permission_absent_autodeny_enabled: data.team_settings.permission_absent_autodeny_enabled,
     permission_absent_grace_seconds: Math.max(
       1,
-      Math.round((data.team_settings.PermissionAbsentGraceMS ?? 15000) / 1000),
+      data.team_settings.permission_absent_grace_seconds ?? 15,
     ),
     jira_projects: data.jira_projects ?? [],
     linear_teams: (data.linear_teams ?? []).map(linearTeamFromWire),
@@ -547,7 +549,7 @@ export async function fetchTeamGitHubGroups(teamId: string): Promise<GitHubGroup
     .catch(() => null)
 }
 
-export type SaveResult = { ok: true; warning?: string } | { ok: false; error: string }
+export type SaveResult = { ok: true } | { ok: false; error: string }
 
 // JiraProjectsSaveResult carries the stored set back, because the PUT resolves
 // status display names server-side — so what came back is not necessarily what
@@ -557,8 +559,7 @@ export type JiraProjectsSaveResult =
   | { ok: false; error: string }
 
 // saveTeamSettings persists the team settings row via
-// PATCH /api/teams/{id}/settings. `warning` carries the backend's model-cap
-// clamp notice on an otherwise-successful save.
+// PATCH /api/teams/{id}/settings.
 //
 // Every field is sent because every field is edited somewhere on this form and
 // the caller passes the whole live form; a surface that edits one field can
@@ -570,7 +571,7 @@ export async function saveTeamSettings(
   isLocal: boolean,
 ): Promise<SaveResult> {
   try {
-    const body = await apiJSON<{ warning?: string } | null>(`${teamPath(teamId)}/settings`, {
+    await apiJSON<unknown>(`${teamPath(teamId)}/settings`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -593,7 +594,7 @@ export async function saveTeamSettings(
         permission_absent_grace_seconds: form.permission_absent_grace_seconds,
       }),
     })
-    return { ok: true, warning: body?.warning }
+    return { ok: true }
   } catch (e) {
     return { ok: false, error: httpErrorMessage(e, 'Could not save the team settings.') }
   }

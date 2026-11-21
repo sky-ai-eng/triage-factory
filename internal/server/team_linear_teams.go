@@ -89,35 +89,35 @@ type teamLinearTeamsResponse struct {
 // rules are keyed on, and the name and type Linear gave for it at the last
 // save.
 type linearStateRefJSON struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	Type string `json:"type"`
+	ID   string `json:"id" doc:"Linear's id for the workflow state."`
+	Name string `json:"name" doc:"The state's name in Linear when the rule was last saved."`
+	Type string `json:"type" doc:"The state's type in Linear when the rule was last saved, such as started or completed."`
 }
 
 // linearPickupRuleJSON is the pickup rule's read shape: members only.
 type linearPickupRuleJSON struct {
-	Members []linearStateRefJSON `json:"members"`
+	Members []linearStateRefJSON `json:"members" doc:"The workflow states an issue may be in for the team to pick it up, empty when the rule is not mapped."`
 }
 
 // linearStateRuleJSON is a write-target rule's read shape. canonical is null
 // on an unmapped rule rather than absent, so a client reads one shape in both
 // states.
 type linearStateRuleJSON struct {
-	Members   []linearStateRefJSON `json:"members"`
-	Canonical *linearStateRefJSON  `json:"canonical"`
+	Members   []linearStateRefJSON `json:"members" doc:"The workflow states that count as this rule's state, empty when the rule is not mapped."`
+	Canonical *linearStateRefJSON  `json:"canonical" doc:"The state Triage Factory moves an issue into for this rule, or null when the rule is not mapped."`
 }
 
 // linearTeamSettings is one tracked Linear team as the API renders it, on this
 // route and on the team-settings read.
 type linearTeamSettings struct {
-	ID         string               `json:"id"`
-	Key        string               `json:"key"`
-	Name       string               `json:"name"`
-	Armed      bool                 `json:"armed"`
-	Pickup     linearPickupRuleJSON `json:"pickup"`
-	InProgress linearStateRuleJSON  `json:"in_progress"`
-	InReview   linearStateRuleJSON  `json:"in_review"`
-	Done       linearStateRuleJSON  `json:"done"`
+	ID         string               `json:"id" doc:"Linear's id for the Linear team."`
+	Key        string               `json:"key" doc:"The Linear team's key, such as ENG."`
+	Name       string               `json:"name" doc:"The Linear team's name."`
+	Armed      bool                 `json:"armed" doc:"Whether the pickup, in_progress, and done rules are all mapped, which is when the Linear team's issues are polled."`
+	Pickup     linearPickupRuleJSON `json:"pickup" doc:"The states an issue may be in for the team to pick it up."`
+	InProgress linearStateRuleJSON  `json:"in_progress" doc:"The states that count as in progress, and the state an issue moves into when work on it starts."`
+	InReview   linearStateRuleJSON  `json:"in_review" doc:"The states that count as in review, and the state an issue moves into when its work goes to review."`
+	Done       linearStateRuleJSON  `json:"done" doc:"The states that count as done, and the state an issue moves into when its work is complete."`
 }
 
 // linearTeamWish is one shape-checked body element.

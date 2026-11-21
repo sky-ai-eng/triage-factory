@@ -75,12 +75,13 @@ export default function GitHubAccessGroup({
   // Test SSH preflight on demand. Purely diagnostic — doesn't save
   // settings — so a user can confirm reachability before saving and
   // watching the bootstrap re-clone.
-  const testSSH = async () => {
+  const testSSH = async (org: string) => {
     setSshTestState({ kind: 'running' })
     try {
-      const data = await apiJSON<{ ok: boolean; stderr?: string }>('/api/github/preflight-ssh', {
-        method: 'POST',
-      })
+      const data = await apiJSON<{ ok: boolean; stderr?: string }>(
+        `/api/orgs/${encodeURIComponent(org)}/github/ssh/preflight`,
+        { method: 'POST' },
+      )
       if (data.ok) {
         setSshTestState({ kind: 'ok' })
       } else {
@@ -168,10 +169,10 @@ export default function GitHubAccessGroup({
                     it's only meaningful once credentials are saved. Hide it
                     until then — pre-save, the GitHub step's submit runs its
                     own server-side preflight against the URL being saved. */}
-              {hasToken && (
+              {hasToken && orgId && (
                 <button
                   type="button"
-                  onClick={testSSH}
+                  onClick={() => void testSSH(orgId)}
                   disabled={sshTestState.kind === 'running'}
                   className="text-reported text-warm hover:underline disabled:opacity-50"
                 >

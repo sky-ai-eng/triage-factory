@@ -33,20 +33,20 @@ import (
 // raw captured payload, passed through for power users / future use (omitted when
 // empty).
 type accessChangeJSON struct {
-	ID          string          `json:"id"`
-	Action      string          `json:"action"`
-	ActionLabel string          `json:"action_label"`
-	ActorName   string          `json:"actor_name"`
-	TargetName  string          `json:"target_name,omitempty"`
-	TeamName    string          `json:"team_name,omitempty"`
-	DetailJSON  json.RawMessage `json:"detail_json,omitempty"`
-	CreatedAt   time.Time       `json:"created_at"`
+	ID          string          `json:"id" doc:"The change's id."`
+	Action      string          `json:"action" doc:"What changed, such as org_role_changed, team_member_added, credential_set, or sso_enforcement_enabled."`
+	ActionLabel string          `json:"action_label" doc:"A sentence describing the change, to show after the actor's name, such as changed Alice from member to admin."`
+	ActorName   string          `json:"actor_name" doc:"The name of the person who made the change, empty when it cannot be read."`
+	TargetName  string          `json:"target_name,omitempty" doc:"The name of the person the change was about, absent when it was about no person or the name cannot be read."`
+	TeamName    string          `json:"team_name,omitempty" doc:"The name of the team the change was about, absent when it was about no team or the team no longer exists."`
+	DetailJSON  json.RawMessage `json:"detail_json,omitempty" doc:"A JSON object of the details recorded with the change, such as the old and new role, absent when none were recorded."`
+	CreatedAt   time.Time       `json:"created_at" doc:"When the change was made, as an RFC 3339 timestamp."`
 }
 
 // accessLogListRequest is the body of POST /api/orgs/{org_id}/usage/access-log/list.
 // Category narrows to one bucket of actions; empty is every action.
 type accessLogListRequest struct {
-	Category string `json:"category"`
+	Category string `json:"category" doc:"The kind of change to include: membership for memberships, roles, and ownership, credential for credentials and API tokens, or policy for SSO and event-source settings. Empty or absent includes every change."`
 
 	httpx.PageRequest
 }
@@ -54,6 +54,15 @@ type accessLogListRequest struct {
 type accessLogFilterKey struct {
 	Category string `json:"category"`
 }
+
+var opUsageAccessLog = httpx.NewListOp[accessLogListRequest, accessChangeJSON](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/usage/access-log/list",
+	ID:          "list_org_access_log",
+	Summary:     "List an organization's access changes",
+	Description: "Lists the changes made to the organization's memberships, roles, ownership, credentials, API tokens, and access policy, newest first, each with who made it and a sentence describing it. It needs an Enterprise licence.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleUsageAccessLog serves the EE access & credential change-log viewer.
 //
@@ -84,15 +93,15 @@ func (h *Handler) handleUsageAccessLog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req accessLogListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opUsageAccessLog.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
-	category := strings.TrimSpace(req.Category)
-	// A closed vocabulary: an unknown category used to pass straight through to
-	// a filter that matched nothing, so a typo returned an
-	// authoritative-looking empty log.
+	category := req.Category
+	// A closed vocabulary, matched exactly: an unknown category, a blank one
+	// included, is refused rather than read as a filter that matches nothing or
+	// as no filter at all.
 	if category != "" && !slices.Contains(accessLogCategories, category) {
 		v.Invalid("category", "must be one of: "+strings.Join(accessLogCategories, ", "))
 	}
@@ -140,7 +149,7 @@ func (h *Handler) handleUsageAccessLog(w http.ResponseWriter, r *http.Request) {
 			CreatedAt:   e.CreatedAt,
 		})
 	}
-	httpx.WriteList(w, page, items, total)
+	opUsageAccessLog.Write(w, page, items, total)
 }
 
 // accessLogCategories is the closed category vocabulary — the buckets

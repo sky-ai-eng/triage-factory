@@ -57,7 +57,8 @@ func writeFieldFaults(w http.ResponseWriter, err error) bool {
 }
 
 // normalizeModelSet validates one enable-set as it arrives on the wire: a
-// non-empty list of distinct, non-blank keys this deployment offers, trimmed.
+// non-empty list of distinct, non-blank keys this deployment offers, each
+// matched exactly.
 //
 // The universe is the accepted set rather than the native registry, and it is a
 // parameter rather than resolved here. A set names models a deployment will be
@@ -82,8 +83,7 @@ func normalizeModelSet(v *httpx.Validation, universe modelcatalog.Universe, raw 
 	seen := make(map[string]bool, len(raw))
 	var unknown, duplicate []string
 	blank := false
-	for _, entry := range raw {
-		key := strings.TrimSpace(entry)
+	for _, key := range raw {
 		switch {
 		case key == "":
 			blank = true

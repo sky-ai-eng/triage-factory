@@ -266,10 +266,10 @@ func (s *Server) handleJiraIdentityStatus(w http.ResponseWriter, r *http.Request
 // The user-supplied Jira credential for the capture-and-STORE access path, one
 // struct per deployment. Which shape applies is the ORG's deployment, not the
 // caller's choice — a user cannot bind a Cloud API token against a Data Center
-// site — so unlike the org-credential bind there is no discriminator in the
-// body. The struct is still picked before the decode rather than after, so the
-// other deployment's fields are rejected by name instead of being accepted and
-// silently ignored, which is what a single both-shapes struct did.
+// site — so unlike the org-credential bind, which has a route per deployment,
+// the caller names no deployment. The struct is still picked before the decode
+// rather than after, so the other deployment's fields are rejected by name
+// instead of being accepted and silently ignored.
 //
 // Unlike the GitHub sibling, the credential is retained (per-user vault scope):
 // the user acts as themselves on board claims, so it must outlive the request.

@@ -133,12 +133,12 @@ export default function PromptDrawer({
     if (!open) return
     let cancelled = false
     const settingsTeam = effectiveTeam || 'default'
-    apiJSON<{ team_settings?: { DefaultModel?: string } }>(
+    apiJSON<{ team_settings?: { ai_model?: string } }>(
       `/api/teams/${encodeURIComponent(settingsTeam)}/settings`,
     )
       .then((data) => {
-        if (!cancelled && data?.team_settings?.DefaultModel)
-          setDefaultModel(data.team_settings.DefaultModel)
+        if (!cancelled && data?.team_settings?.ai_model)
+          setDefaultModel(data.team_settings.ai_model)
       })
       .catch(() => {})
     return () => {

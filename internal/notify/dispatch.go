@@ -171,17 +171,17 @@ func (c *Caller) may(ctx context.Context, p Permission, to Recipient) (bool, err
 
 // ActionView is one of a row's actions as a client reads it.
 type ActionView struct {
-	ID    string `json:"id"`
-	Type  string `json:"type"`
-	Label string `json:"label"`
+	ID    string `json:"id" doc:"The action's id, which an invoke action is run by."`
+	Type  string `json:"type" doc:"link for an action that opens a page of the app, or invoke for one the server runs."`
+	Label string `json:"label" doc:"The text of the action's button."`
 	// RunningLabel is set on an invoke action: what to show in Label's place
 	// while the call is out.
-	RunningLabel string `json:"running_label,omitempty"`
-	Href         string `json:"href,omitempty"`
-	Confirm      string `json:"confirm,omitempty"`
+	RunningLabel string `json:"running_label,omitempty" doc:"On an invoke action, the text to show in place of label while the action runs, absent on a link."`
+	Href         string `json:"href,omitempty" doc:"On a link action, the path of the app page it opens, absent on an invoke action."`
+	Confirm      string `json:"confirm,omitempty" doc:"On an invoke action, the question to ask before running it, absent when the action runs without asking."`
 	// Allowed is set on an invoke action: whether this caller may run it here
 	// and now.
-	Allowed *bool `json:"allowed,omitempty"`
+	Allowed *bool `json:"allowed,omitempty" doc:"On an invoke action, whether the caller may run it now, absent on a link."`
 }
 
 // Actions returns n's actions for the caller. An invoke action is allowed when

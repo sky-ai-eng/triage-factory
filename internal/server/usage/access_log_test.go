@@ -339,7 +339,8 @@ func TestAccessChangeLabel(t *testing.T) {
 
 // TestAccessLogList_StrictBody: an unknown category, an out-of-range page_size
 // and an unknown field are each a 400, never a filter matching nothing or a
-// clamp.
+// clamp. A category is matched exactly, so a padded one is unknown and a blank
+// one is not read as no filter.
 func TestAccessLogList_StrictBody(t *testing.T) {
 	s := newLicensedAccessLogRig(t)
 	for _, tc := range []struct {
@@ -349,6 +350,8 @@ func TestAccessLogList_StrictBody(t *testing.T) {
 		{"page_size negative", map[string]any{"page_size": -5}},
 		{"page_size over cap", map[string]any{"page_size": 9999}},
 		{"unknown category", map[string]any{"category": "membershipp"}},
+		{"padded category", map[string]any{"category": " membership "}},
+		{"blank category", map[string]any{"category": " "}},
 		{"retired limit param", map[string]any{"limit": 10}},
 		{"retired offset param", map[string]any{"offset": 10}},
 	} {
