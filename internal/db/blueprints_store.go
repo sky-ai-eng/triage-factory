@@ -261,13 +261,14 @@ func DedupPreserveOrder(ids []string) []string {
 //
 // # version contract
 //
-// A steps PUT names the blueprint version its list was decided against and
-// is refused once the blueprint is past it, so every write that changes a
+// A steps PUT names the blueprint version its list was decided against, and
+// a split or a reconnect the version its step index was read at, and each is
+// refused once the blueprint is past it, so every write that changes a
 // blueprint's name or its steps raises blueprints.version in the same UPDATE:
 // Rename, ReplaceSteps, MergeInto (the host, and the source it retires),
 // SplitAt (the kept upstream), DeleteStep (the original), and the shipped
 // sync's rewrite of a blueprint. A write that changes the steps without it
-// lets a PUT read before that write land on top of it. Create and the
+// lets a PUT, split, or reconnect read before that write land on top of it. Create and the
 // blueprints SplitAt, DeleteStep, and DuplicatePrompts insert start at 1.
 // IncrementUsage/IncrementUsageSystem and a plain Delete leave it: a run
 // bumping the counter is not a change a steps PUT decided against.

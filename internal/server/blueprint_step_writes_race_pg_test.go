@@ -79,6 +79,18 @@ func (r stepWriteRig) merge(host, source string) <-chan *httptest.ResponseRecord
 	return r.send(http.MethodPost, "/api/blueprints/"+host+"/merge", map[string]any{"source_blueprint_id": source})
 }
 
+// split sends a split of id before step at, naming version.
+func (r stepWriteRig) split(id string, at int, version int64) <-chan *httptest.ResponseRecorder {
+	return r.send(http.MethodPost, "/api/blueprints/"+id+"/split", map[string]any{"at_step_index": at, "version": version})
+}
+
+// reconnect sends a reconnect of id before step at onto target, naming
+// version.
+func (r stepWriteRig) reconnect(id, target string, at int, version int64) <-chan *httptest.ResponseRecorder {
+	return r.send(http.MethodPost, "/api/blueprints/"+id+"/reconnect",
+		map[string]any{"at_step_index": at, "target_blueprint_id": target, "version": version})
+}
+
 // putSteps sends a steps PUT naming version, with brief on every step.
 func (r stepWriteRig) putSteps(id string, version int64, brief string, prompts []string) <-chan *httptest.ResponseRecorder {
 	steps := make([]map[string]any, len(prompts))
@@ -217,16 +229,16 @@ func TestBlueprints_StepWritesRaceAMergeThatRetiresTheirBlueprint_Postgres(t *te
 			absorbs: true,
 		},
 		"reconnect": {
-			send: func(r stepWriteRig, a, b string, _ []string, _ int64) <-chan *httptest.ResponseRecorder {
-				return r.send(http.MethodPost, "/api/blueprints/"+a+"/reconnect", map[string]any{"at_step_index": 1, "target_blueprint_id": b})
+			send: func(r stepWriteRig, a, b string, _ []string, aVersion int64) <-chan *httptest.ResponseRecorder {
+				return r.reconnect(a, b, 1, aVersion)
 			},
 			ok:      http.StatusOK,
 			after:   func(a, b []string) []string { return concat(a[:1], b) },
 			absorbs: true,
 		},
 		"split": {
-			send: func(r stepWriteRig, a, _ string, _ []string, _ int64) <-chan *httptest.ResponseRecorder {
-				return r.send(http.MethodPost, "/api/blueprints/"+a+"/split", map[string]any{"at_step_index": 1})
+			send: func(r stepWriteRig, a, _ string, _ []string, aVersion int64) <-chan *httptest.ResponseRecorder {
+				return r.split(a, 1, aVersion)
 			},
 			ok:    http.StatusOK,
 			after: func(a, _ []string) []string { return a[:1] },
@@ -402,6 +414,43 @@ func TestBlueprints_StepsPutRacesAnotherStepsPut_Postgres(t *testing.T) {
 	}
 }
 
+// TestBlueprints_CutsRaceAStepsPut_Postgres runs a split and a reconnect on
+// A, each sent with the step index and the version read before a steps PUT
+// reorders A, behind that PUT. The index is a position in the steps the
+// caller read, so each is refused for its version, and A keeps the PUT's
+// order: neither cuts next to a step the caller never chose.
+func TestBlueprints_CutsRaceAStepsPut_Postgres(t *testing.T) {
+	cuts := map[string]func(r stepWriteRig, a, target string, version int64) <-chan *httptest.ResponseRecorder{
+		"split": func(r stepWriteRig, a, _ string, version int64) <-chan *httptest.ResponseRecorder {
+			return r.split(a, 1, version)
+		},
+		"reconnect": func(r stepWriteRig, a, target string, version int64) <-chan *httptest.ResponseRecorder {
+			return r.reconnect(a, target, 1, version)
+		},
+	}
+	for name, cut := range cuts {
+		t.Run(name, func(t *testing.T) {
+			r := newStepWriteRig(t)
+			a, target := r.seedChain(t, "a", 3), r.seedChain(t, "t", 1)
+			aSteps, aVersion, targetSteps := r.stepPrompts(t, a), r.version(t, a), r.stepPrompts(t, target)
+			reordered := []string{aSteps[2], aSteps[0], aSteps[1]}
+
+			put, cutRec := r.firstHolds(t, [2]string{"steps PUT on A", name + " on A"},
+				func() <-chan *httptest.ResponseRecorder { return r.putSteps(a, aVersion, "", reordered) },
+				func() <-chan *httptest.ResponseRecorder { return cut(r, a, target, aVersion) })
+			if put.Code != http.StatusOK {
+				t.Fatalf("steps PUT = %d %s, want 200", put.Code, put.Body.String())
+			}
+			wantRefusal(t, name+" sent A's version from before the PUT, behind it", cutRec, httpx.ReasonVersionConflict, "version")
+			r.wantSteps(t, "A", a, true, reordered)
+			r.wantSteps(t, "the target", target, true, targetSteps)
+			if v := r.version(t, a); v != aVersion+1 {
+				t.Errorf("A's version = %d, want %d: the PUT's raise alone", v, aVersion+1)
+			}
+		})
+	}
+}
+
 // TestBlueprints_Postgres_AbsorbingAnotherTeamsBlueprintIs422: a merge or a
 // reconnect naming a blueprint of a team the caller may only read is refused
 // with 422 CROSS_TEAM_REF, and changes neither blueprint. The route holds its
@@ -429,7 +478,7 @@ func TestBlueprints_Postgres_AbsorbingAnotherTeamsBlueprintIs422(t *testing.T) {
 		field string
 	}{
 		"merge":     {map[string]any{"source_blueprint_id": theirs}, "source_blueprint_id"},
-		"reconnect": {map[string]any{"at_step_index": 1, "target_blueprint_id": theirs}, "target_blueprint_id"},
+		"reconnect": {map[string]any{"at_step_index": 1, "target_blueprint_id": theirs, "version": r.version(t, host)}, "target_blueprint_id"},
 	} {
 		rec := httptest.NewRecorder()
 		r.mux.ServeHTTP(rec, r.req(http.MethodPost, "/api/blueprints/"+host+"/"+route, r.member, c.body))

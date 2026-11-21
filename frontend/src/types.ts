@@ -800,6 +800,9 @@ export interface BlueprintStep {
   // live blueprint_steps row, so the run projection omits created_at (the
   // /steps editor reads still carry it).
   created_at?: string
+  // The blueprint's version as of the read that returned the step, which a
+  // split or reconnect names. A blueprint run's frozen steps omit it.
+  blueprint_version?: number
 }
 
 export interface BlueprintRunStepView {
