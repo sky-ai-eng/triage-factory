@@ -226,12 +226,12 @@ func TestTeamGet_Local(t *testing.T) {
 }
 
 // TestTeamCreate_LocalIsNotFound: "add team" is multi-only; in local
-// mode POST /api/teams is 404 (the feature is absent at N=1).
+// mode POST /api/orgs/{org_id}/teams is 404 (the feature is absent at N=1).
 func TestTeamCreate_LocalIsNotFound(t *testing.T) {
 	l := newLocalRig(t)
 
 	rec := httptest.NewRecorder()
-	l.th.handleTeamCreate(rec, localRequest(t, http.MethodPost, "/api/teams", map[string]string{"name": "Platform"}))
+	l.th.handleTeamCreate(rec, localRequest(t, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/teams", map[string]string{"name": "Platform"}))
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404 (multi-only); body=%s", rec.Code, rec.Body.String())
 	}

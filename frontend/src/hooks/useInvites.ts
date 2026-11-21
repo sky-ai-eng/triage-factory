@@ -11,9 +11,8 @@ import type { CreateInviteResponse, PendingInvite } from '../types'
 // empty panel rather than an error, which keeps a role change mid-session from
 // surfacing a scary line.
 //
-// All calls hit the literal /api/invites paths WITHOUT apiClient's `org`
-// option: the routes are session-org-scoped (the backend reads the active org
-// from the session, like /api/teams), so an `org`-prefixed path would 404.
+// Every call is addressed at the org the People tab shows, under
+// /api/orgs/{org_id}/invites.
 export interface UseInvites {
   invites: PendingInvite[]
   /** Outstanding invites across every page, for a count badge. */
@@ -38,9 +37,10 @@ export interface UseInvites {
 // Hoisted so the option object is referentially stable across renders.
 const INVITES_EMPTY_ON = { emptyOnStatus: [403, 404] }
 
-export function useInvites(enabled: boolean): UseInvites {
+export function useInvites(orgId: string, enabled: boolean): UseInvites {
+  const base = `/api/orgs/${encodeURIComponent(orgId)}/invites`
   const page = usePagedList<PendingInvite>(
-    '/api/invites/list',
+    `${base}/list`,
     'Could not load invites.',
     INVITES_EMPTY_ON,
   )
@@ -60,7 +60,7 @@ export function useInvites(enabled: boolean): UseInvites {
 
   const create = useCallback(
     async (email: string, role: string, targetTeamId: string): Promise<CreateInviteResponse> => {
-      const res = await apiJSON<CreateInviteResponse>('/api/invites', {
+      const res = await apiJSON<CreateInviteResponse>(base, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, role, target_team_id: targetTeamId }),
@@ -68,15 +68,15 @@ export function useInvites(enabled: boolean): UseInvites {
       await load()
       return res
     },
-    [load],
+    [base, load],
   )
 
   const revoke = useCallback(
     async (id: string): Promise<void> => {
-      await apiFetch(`/api/invites/${id}/revoke`, { method: 'POST' })
+      await apiFetch(`${base}/${id}/revoke`, { method: 'POST' })
       await load()
     },
-    [load],
+    [base, load],
   )
 
   const resend = useCallback(
@@ -93,8 +93,8 @@ export function useInvites(enabled: boolean): UseInvites {
       // re-invite cleanly. load() captures its own errors (never throws), so it
       // can't mask the original failure that propagates to the caller.
       try {
-        await apiFetch(`/api/invites/${invite.id}/revoke`, { method: 'POST' })
-        return await apiJSON<CreateInviteResponse>('/api/invites', {
+        await apiFetch(`${base}/${invite.id}/revoke`, { method: 'POST' })
+        return await apiJSON<CreateInviteResponse>(base, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -107,7 +107,7 @@ export function useInvites(enabled: boolean): UseInvites {
         await load()
       }
     },
-    [load],
+    [base, load],
   )
 
   return {

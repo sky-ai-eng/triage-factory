@@ -341,7 +341,7 @@ function OrgNotifications({ org }: { org: string }) {
   const [orgTeams, setOrgTeams] = useState<{ org: string; teams: Team[] } | null>(null)
   useEffect(() => {
     if (list !== 'all' || !org || orgTeams?.org === org) return
-    void Promise.allSettled([listOrgTeams(org), fetchArchivedTeams()]).then(
+    void Promise.allSettled([listOrgTeams(org), fetchArchivedTeams(org)]).then(
       ([active, archived]) => {
         const ts = [
           ...(active.status === 'fulfilled'

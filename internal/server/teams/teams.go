@@ -469,17 +469,18 @@ func (th *Handler) requireTeamAdminOrOrgAdmin(w http.ResponseWriter, r *http.Req
 	return true
 }
 
-// teamCreateRequest is the body of POST /api/teams.
+// teamCreateRequest is the body of POST /api/orgs/{org_id}/teams.
 type teamCreateRequest struct {
 	Name string `json:"name" doc:"The team's display name, at most 100 characters, with at least one letter or number."`
-	Slug string `json:"slug" doc:"The team's slug, rewritten into slug form, which must keep at least one letter or number; absent or empty derives it from name."`
+	Slug string `json:"slug" doc:"The team's slug: lowercase ASCII letters and digits in words joined by single hyphens, at most 48 characters, such as platform-eng. Absent or empty derives it from name."`
 }
 
 var opTeamCreate = httpx.NewJSONOp[teamCreateRequest, teamJSON](httpx.OpSpec{
-	Pattern:     "POST /api/teams",
+	Pattern:     "POST /api/orgs/{org_id}/teams",
 	ID:          "create_team",
 	Summary:     "Create a team",
-	Description: "Creates a team in the caller's current organization, gives it the shipped prompts, blueprints, and event handlers, makes the caller its admin, and returns it. Only an organization admin may call it. Multi mode only.",
+	Description: "Creates a team in the organization, gives it the shipped prompts, blueprints, and event handlers, makes the caller its admin, and returns it. Only an organization admin may call it. Multi mode only.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
 	Status:      http.StatusCreated,
 	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintNo, Idempotent: httpx.HintNo, OpenWorld: httpx.HintNo},
 })
@@ -490,7 +491,7 @@ var opTeamCreate = httpx.NewJSONOp[teamCreateRequest, teamJSON](httpx.OpSpec{
 // 404 in local matches the "feature absent" posture. Gated on org-admin;
 // the new team enrolls the creator so it shows up in their team list.
 //
-// POST /api/teams  body: { "name": "<display name>", "slug"?: "<slug>" }
+// POST /api/orgs/{org_id}/teams  body: { "name": "<display name>", "slug"?: "<slug>" }
 func (th *Handler) handleTeamCreate(w http.ResponseWriter, r *http.Request) {
 	if runmode.Current() == runmode.ModeLocal {
 		// Multi-only: local mode has exactly one team by construction. A
@@ -498,23 +499,10 @@ func (th *Handler) handleTeamCreate(w http.ResponseWriter, r *http.Request) {
 		httpx.NotFound(w, "route")
 		return
 	}
-	orgID, ok := httpx.RequireOrg(w, r)
+	// A member who is not an admin gets 403 naming the role; a caller outside
+	// the org gets 404.
+	orgID, userID, ok := th.az.RequireOrgAdmin(w, r)
 	if !ok {
-		return
-	}
-	userID := httpx.ClaimsFrom(r.Context()).Subject
-
-	isAdmin, err := th.az.UserIsOrgAdmin(r.Context(), userID, orgID)
-	if err != nil {
-		httpx.InternalError(w, "teams", err)
-		return
-	}
-	if !isAdmin {
-		// The caller is a member of the org (httpx.RequireOrg resolved it from
-		// their own session), so the org is visible to them and the denial
-		// names the role they lack. A 404 here would report their own
-		// org missing.
-		httpx.Forbidden(w, "org admin role required")
 		return
 	}
 
@@ -525,13 +513,15 @@ func (th *Handler) handleTeamCreate(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimSpace(body.Name)
 	var v httpx.Validation
 	derived := validateTeamName(&v, name)
-	// An explicit slug overrides the derived one; it goes through the same
-	// slugify, so a value that survives it is a value the column can hold.
+	// An explicit slug overrides the derived one. It must already be in the
+	// form Slugify produces, which is what the column holds: a value Slugify
+	// would change is refused rather than rewritten, so the stored slug is
+	// the one the caller sent.
 	slug := derived
-	if raw := strings.TrimSpace(body.Slug); raw != "" {
-		slug = domain.Slugify(raw)
-		if slug == "" {
-			v.Invalid("slug", "slug must contain letters or numbers")
+	if body.Slug != "" {
+		slug = body.Slug
+		if domain.Slugify(slug) != slug {
+			v.Invalid("slug", fmt.Sprintf("slug must be lowercase letters and digits, in words joined by single hyphens, at most %d characters, such as platform-eng", domain.MaxSlugLen))
 		}
 	}
 	if v.Flush(w, http.StatusBadRequest) {
@@ -583,8 +573,8 @@ func (th *Handler) Register(m httpx.Mounts) {
 	// the write-time picker (count-gated to ≥2 teams in the frontend); it
 	// carries the last-acting-team the picker seeds from, maintained
 	// server-side on each write — a recency signal, not a user preference, so
-	// there is no endpoint to set it explicitly. POST /api/teams is the
-	// org-admin "add team" affordance (multi-only; 404 in local).
+	// there is no endpoint to set it explicitly. POST /api/orgs/{org_id}/teams
+	// is the org-admin "add team" affordance (multi-only; 404 in local).
 	m.Op(opTeamsList, th.handleTeamsList)
 	// Every active team in the org, for any of its members, with the caller's
 	// role on the ones they are on: the names an org-wide view needs for the

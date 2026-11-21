@@ -154,7 +154,7 @@ export async function createOrg(api: APIRequestContext, name: string): Promise<s
 }
 
 export async function setActiveOrg(api: APIRequestContext, orgId: string) {
-  await json(await api.post('/api/me/active-org', { data: { org_id: orgId } }), 200)
+  await json(await api.patch('/api/me', { data: { active_org_id: orgId } }), 200)
 }
 
 type ConnectionResponse = {
@@ -198,9 +198,16 @@ export async function claimVerifiedDomain(api: APIRequestContext, orgId: string,
   expect(ids, `verify ${domain} for org ${orgId}`).toHaveLength(1)
 }
 
-export async function invite(api: APIRequestContext, email: string): Promise<string> {
+export async function invite(
+  api: APIRequestContext,
+  orgId: string,
+  email: string,
+): Promise<string> {
   return (
-    await json<{ accept_url: string }>(await api.post('/api/invites', { data: { email } }), 201)
+    await json<{ accept_url: string }>(
+      await api.post(`/api/orgs/${orgId}/invites`, { data: { email } }),
+      201,
+    )
   ).accept_url
 }
 

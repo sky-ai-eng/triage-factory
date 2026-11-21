@@ -146,7 +146,7 @@ export interface TranscriptPage {
 
 // TeamSummary is one row of POST /api/teams/list, POST
 // /api/orgs/{org_id}/teams/list, GET /api/teams/{id}, and POST
-// /api/teams/archived/list — one team shape across all four. The count of the
+// /api/orgs/{org_id}/teams/archived/list — one team shape across all four. The count of the
 // caller's own teams drives whether a team control renders at all (the ≥2
 // gate).
 export interface TeamSummary {
@@ -1103,14 +1103,12 @@ export interface LinearIdentityStatus {
 }
 
 // ──────────────────────────────────────────────────────────────────────
-// Org invites (TFAC-418, consuming the TFAC-416 backend). Multi-mode only.
-// The admin surfaces (create/list/revoke) are session-org-scoped — the
-// backend resolves the org from the session's active org, so the frontend
-// calls the literal /api/invites paths WITHOUT an org prefix (same as
-// /api/teams), never via apiClient's `org` option.
+// Org invites. Multi-mode only. The admin surfaces (create/list/get/revoke)
+// are addressed at the org, under /api/orgs/{org_id}/invites; preview and
+// accept are addressed by the invite's token, under /api/invites.
 // ──────────────────────────────────────────────────────────────────────
 
-/** One pending invite from GET /api/invites — the rows the org People
+/** One pending invite from POST /api/orgs/{org_id}/invites/list — the rows the org People
  *  roster renders as muted "ghost" rows beneath real members. `created_at`
  *  drives the "invited {relative time}" label; `expires_at` is the 7-day TTL. */
 export interface PendingInvite {
@@ -1125,7 +1123,7 @@ export interface PendingInvite {
   expires_at: string
 }
 
-/** POST /api/invites 201 response. `accept_url` is the single-use link shown
+/** POST /api/orgs/{org_id}/invites 201 response. `accept_url` is the single-use link shown
  *  ONCE (the raw token is never returned again — copy/paste IS the delivery
  *  in v1, no SMTP). */
 export interface CreateInviteResponse {

@@ -48,8 +48,8 @@ const (
 	// access/credential change-log viewer. It is the first EE feature with
 	// a real frontend surface — SSO only needed backend route-mounting plus a
 	// 404-and-hide — which is why this feature also motivates the
-	// /api/entitlements probe and the useEntitlements FE hook the governance
-	// surfaces gate on.
+	// entitlements probe (GET /api/orgs/{org_id}/entitlements) and the
+	// useEntitlements FE hook the governance surfaces gate on.
 	FeatureGovernance Feature = "governance"
 
 	// FeatureSlack gates the Slack workspace-connect surface: the
@@ -80,7 +80,7 @@ const (
 // registry and corrupt the probe.
 var allFeatures = []Feature{FeatureSSO, FeatureGovernance, FeatureSlack, FeatureFleet}
 
-// AllFeatures returns every gated feature, for the /api/entitlements probe to
+// AllFeatures returns every gated feature, for the entitlements probe to
 // iterate and report the subset the active provider licenses. It returns a
 // fresh copy each call, so a new gated Feature must be added to allFeatures to
 // show up on the probe (and thus to the frontend's useEntitlements hook).

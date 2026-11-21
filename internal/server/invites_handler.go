@@ -26,12 +26,14 @@ import (
 // the ticket; re-inviting after expiry mints a fresh row + token.
 const inviteTTL = 7 * 24 * time.Hour
 
-// invitesHandler serves /api/invites — the org-admin invite lifecycle
-// (create/list/revoke) plus the two redeem surfaces (preview/accept).
+// invitesHandler serves the org-admin invite lifecycle under
+// /api/orgs/{org_id}/invites (create/list/get/revoke) plus the two redeem
+// surfaces under /api/invites (preview/accept), whose subject is the token
+// rather than an org.
 //
-// The admin-facing handlers follow the teams handlers: requireOrg for the
-// active org, ClaimsFrom for the user, az.UserIsOrgAdmin for the gate (404
-// not 403 on non-admin — non-disclosure), tx.WithTx for app-pool writes.
+// The admin-facing handlers gate on az.RequireOrgAdmin for the org the path
+// names (404 for a caller outside it, 403 for a member who is not an admin)
+// and write through the app pool with tx.WithTx.
 //
 // The redeem handlers run on the admin pool: the actor is an outsider
 // holding a token, with no membership, so the org_invites RLS policies
@@ -60,7 +62,7 @@ type invitesHandler struct {
 	refuseSSOBarred func(w http.ResponseWriter, r *http.Request, orgID string) bool
 }
 
-// createInviteRequest is the POST /api/invites body. target_team_id is
+// createInviteRequest is the POST /api/orgs/{org_id}/invites body. target_team_id is
 // optional — omitted/empty means an org-only invite (member of the org, on
 // zero teams).
 type createInviteRequest struct {
@@ -79,39 +81,21 @@ type createInviteResponse struct {
 }
 
 var opInviteCreate = httpx.NewJSONOp[createInviteRequest, createInviteResponse](httpx.OpSpec{
-	Pattern:     "POST /api/invites",
+	Pattern:     "POST /api/orgs/{org_id}/invites",
 	ID:          "create_invite",
-	Summary:     "Invite someone to the organization",
-	Description: "Creates an invite to the caller's current organization for an email address and returns its accept link, which is shown only in this response. It sends no email; the caller passes the link on. Only an organization admin may call it, and an address with an invite pending or that belongs to a member is refused. Multi mode only.",
+	Summary:     "Invite someone to an organization",
+	Description: "Creates an invite to the organization for an email address and returns its accept link, which is shown only in this response. It sends no email; the caller passes the link on. Only an organization admin may call it, and an address with an invite pending or that belongs to a member is refused. Multi mode only.",
 	Status:      http.StatusCreated,
+	PathParams:  map[string]string{"org_id": "The organization's id."},
 	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintNo, Idempotent: httpx.HintNo, OpenWorld: httpx.HintNo},
 })
 
 // handleInviteCreate mints a pending invite + one-time accept_url.
 //
-// POST /api/invites  body: { email, role, target_team_id? }
+// POST /api/orgs/{org_id}/invites  body: { email, role, target_team_id? }
 func (ih *invitesHandler) handleInviteCreate(w http.ResponseWriter, r *http.Request) {
-	if runmode.Current() == runmode.ModeLocal {
-		// The invite surface is multi-mode only; a route absent in this
-		// deployment mode is a 404.
-		notFound(w, "route")
-		return
-	}
-	orgID, ok := requireOrg(w, r)
+	orgID, userID, ok := ih.requireOrgAdmin(w, r)
 	if !ok {
-		return
-	}
-	userID := ClaimsFrom(r.Context()).Subject
-
-	isAdmin, err := ih.az.UserIsOrgAdmin(r.Context(), userID, orgID)
-	if err != nil {
-		internalError(w, "invites", err)
-		return
-	}
-	if !isAdmin {
-		// The caller is a member of this org (requireOrg resolved it from
-		// their session), so name the missing role rather than hiding it.
-		forbidden(w, "org admin role required")
 		return
 	}
 
@@ -321,23 +305,24 @@ func inviteToJSON(iv domain.OrgInvite) inviteListItem {
 	}
 }
 
-// inviteListRequest is the body of POST /api/invites/list. The resource is the
+// inviteListRequest is the body of POST /api/orgs/{org_id}/invites/list. The resource is the
 // org's redeemable invites, which has no filters of its own.
 type inviteListRequest struct {
 	httpx.PageRequest
 }
 
 var opInviteList = httpx.NewListOp[inviteListRequest, inviteListItem](httpx.OpSpec{
-	Pattern:     "POST /api/invites/list",
+	Pattern:     "POST /api/orgs/{org_id}/invites/list",
 	ID:          "list_invites",
-	Summary:     "List pending invites",
-	Description: "Returns one page of the caller's current organization's invites that can still be accepted: not accepted, revoked, or expired. No row carries an invite's token or accept link. Only an organization admin may call it. Multi mode only.",
+	Summary:     "List an organization's pending invites",
+	Description: "Returns one page of the organization's invites that can still be accepted: not accepted, revoked, or expired. No row carries an invite's token or accept link. Only an organization admin may call it. Multi mode only.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
 	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
 })
 
 // handleInviteList returns the active invites for the active org.
 //
-// POST /api/invites/list
+// POST /api/orgs/{org_id}/invites/list
 func (ih *invitesHandler) handleInviteList(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := ih.requireOrgAdmin(w, r)
 	if !ok {
@@ -375,12 +360,15 @@ func (ih *invitesHandler) handleInviteList(w http.ResponseWriter, r *http.Reques
 }
 
 var opInviteGet = httpx.NewJSONOp[httpx.NoBody, inviteListItem](httpx.OpSpec{
-	Pattern:     "GET /api/invites/{id}",
+	Pattern:     "GET /api/orgs/{org_id}/invites/{id}",
 	ID:          "get_invite",
 	Summary:     "Get a pending invite",
-	Description: "Returns one of the caller's current organization's invites that can still be accepted, without its token or accept link. An accepted, revoked, or expired invite is not found. Only an organization admin may call it. Multi mode only.",
-	PathParams:  map[string]string{"id": "The invite's id."},
-	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+	Description: "Returns one of the organization's invites that can still be accepted, without its token or accept link. An accepted, revoked, or expired invite is not found. Only an organization admin may call it. Multi mode only.",
+	PathParams: map[string]string{
+		"org_id": "The organization's id.",
+		"id":     "The invite's id.",
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
 })
 
 // handleInviteGet is the canonical single read: one active invite, in the
@@ -388,7 +376,7 @@ var opInviteGet = httpx.NewJSONOp[httpx.NoBody, inviteListItem](httpx.OpSpec{
 // 404 — the same predicate the list applies, so a row an admin cannot see in
 // the table cannot be opened out of it either.
 //
-// GET /api/invites/{id}
+// GET /api/orgs/{org_id}/invites/{id}
 func (ih *invitesHandler) handleInviteGet(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := ih.requireOrgAdmin(w, r)
 	if !ok {
@@ -415,10 +403,9 @@ func (ih *invitesHandler) handleInviteGet(w http.ResponseWriter, r *http.Request
 	opInviteGet.Write(w, inviteToJSON(*invite))
 }
 
-// requireOrgAdmin is the shared front gate for the invite reads and the
-// revoke: multi-mode only, an active org, and an org-admin caller. A plain
-// member gets 403 rather than 404 — requireOrg resolved the org from their own
-// session, so the org is plainly visible to them and only the role is missing.
+// requireOrgAdmin is the shared front gate for the invite admin routes:
+// multi-mode only, and an admin of the org the path names. A member who is
+// not an admin gets 403 naming the role, and a caller outside the org 404.
 func (ih *invitesHandler) requireOrgAdmin(w http.ResponseWriter, r *http.Request) (orgID, userID string, ok bool) {
 	if runmode.Current() == runmode.ModeLocal {
 		// The invite surface is multi-mode only; a route absent in this
@@ -426,42 +413,30 @@ func (ih *invitesHandler) requireOrgAdmin(w http.ResponseWriter, r *http.Request
 		notFound(w, "route")
 		return "", "", false
 	}
-	orgID, ok = requireOrg(w, r)
-	if !ok {
-		return "", "", false
-	}
-	userID = ClaimsFrom(r.Context()).Subject
-
-	isAdmin, err := ih.az.UserIsOrgAdmin(r.Context(), userID, orgID)
-	if err != nil {
-		internalError(w, "invites", err)
-		return "", "", false
-	}
-	if !isAdmin {
-		forbidden(w, "org admin role required")
-		return "", "", false
-	}
-	return orgID, userID, true
+	return ih.az.RequireOrgAdmin(w, r)
 }
 
-// inviteRevokeResponse is the body of POST /api/invites/{id}/revoke.
+// inviteRevokeResponse is the body of POST /api/orgs/{org_id}/invites/{id}/revoke.
 type inviteRevokeResponse struct {
 	Status string `json:"status" doc:"Always revoked."`
 }
 
 var opInviteRevoke = httpx.NewJSONOp[httpx.NoBody, inviteRevokeResponse](httpx.OpSpec{
-	Pattern:     "POST /api/invites/{id}/revoke",
+	Pattern:     "POST /api/orgs/{org_id}/invites/{id}/revoke",
 	ID:          "revoke_invite",
 	Summary:     "Revoke an invite",
 	Description: "Revokes an invite so its accept link stops working; revoking it again succeeds. An invite that was already accepted is refused. Only an organization admin may call it. Multi mode only.",
-	PathParams:  map[string]string{"id": "The invite's id."},
-	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+	PathParams: map[string]string{
+		"org_id": "The organization's id.",
+		"id":     "The invite's id.",
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
 })
 
 // handleInviteRevoke revokes a pending invite. Idempotent; revoking an
 // accepted invite → 409.
 //
-// POST /api/invites/{id}/revoke
+// POST /api/orgs/{org_id}/invites/{id}/revoke
 func (ih *invitesHandler) handleInviteRevoke(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := ih.requireOrgAdmin(w, r)
 	if !ok {
@@ -836,8 +811,9 @@ func displayEmail(e string) string {
 
 func (s *Server) registerInviteRoutes() {
 	// Org invites (multi-mode only — each handler 404s in local). The
-	// admin-facing create/list/revoke gate on org-admin and write through the
-	// app pool; preview + accept are the redeem surfaces and run on the admin
+	// admin-facing create/list/get/revoke are addressed at the org, gate on its
+	// admin, and write through the app pool; preview + accept are the redeem
+	// surfaces and run on the admin
 	// pool (the redeem actor holds a token but no membership). publicURL +
 	// setActiveOrg are read lazily because deployCfg/authDeps land after
 	// routes() runs. GET /api/invites/preview is intentionally pre-auth (the
@@ -866,8 +842,7 @@ func (s *Server) registerInviteRoutes() {
 	s.op(opInviteList, ih.handleInviteList)
 	s.op(opInviteCreate, ih.handleInviteCreate)
 	// The single read carries no token and no accept URL — those live only in
-	// the create response. Registered after /preview, which is a literal and
-	// so wins the {id} segment on GET.
+	// the create response.
 	s.op(opInviteGet, ih.handleInviteGet)
 	s.op(opInviteRevoke, ih.handleInviteRevoke)
 	s.op(opInviteAccept, ih.handleInviteAccept)

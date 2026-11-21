@@ -304,17 +304,19 @@ func (th *Handler) handleTeamRestore(w http.ResponseWriter, r *http.Request) {
 	opTeamRestore.Write(w, teamToJSON(restored, ""))
 }
 
-// archivedTeamListRequest is the body of POST /api/teams/archived/list. The
+// archivedTeamListRequest is the body of POST
+// /api/orgs/{org_id}/teams/archived/list. The
 // resource is "the org's archived teams", which has no filters of its own.
 type archivedTeamListRequest struct {
 	httpx.PageRequest
 }
 
 var opTeamArchivedList = httpx.NewListOp[archivedTeamListRequest, teamJSON](httpx.OpSpec{
-	Pattern:     "POST /api/teams/archived/list",
+	Pattern:     "POST /api/orgs/{org_id}/teams/archived/list",
 	ID:          "list_archived_teams",
-	Summary:     "List archived teams",
-	Description: "Returns one page of the archived teams in the caller's current organization. Only an organization admin may call it. Multi mode only.",
+	Summary:     "List an organization's archived teams",
+	Description: "Returns one page of the organization's archived teams. Only an organization admin may call it. Multi mode only.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
 	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
 })
 
@@ -324,7 +326,7 @@ var opTeamArchivedList = httpx.NewListOp[archivedTeamListRequest, teamJSON](http
 //
 // It is its own route rather than a flag on POST /api/teams/list because the
 // two reads are different resources wearing one word: the active list is
-// membership-scoped and answers "my teams", while this one is org-scoped and
+// membership-scoped and answers "my teams", while this one is the org's and
 // admin-gated so a restore surface can reach a team its admin never joined.
 // Folding them together would mean one route whose scope, gate, and result set
 // all change with a boolean.
@@ -332,27 +334,14 @@ var opTeamArchivedList = httpx.NewListOp[archivedTeamListRequest, teamJSON](http
 // Rows carry `role` empty for the same reason: an org admin restoring a team
 // they were never on has no membership to report.
 //
-// POST /api/teams/archived/list
+// POST /api/orgs/{org_id}/teams/archived/list
 func (th *Handler) handleTeamArchivedList(w http.ResponseWriter, r *http.Request) {
 	if runmode.Current() == runmode.ModeLocal {
 		httpx.NotFound(w, "route")
 		return
 	}
-	orgID, ok := httpx.RequireOrg(w, r)
+	orgID, _, ok := th.az.RequireOrgAdmin(w, r)
 	if !ok {
-		return
-	}
-	userID := httpx.ClaimsFrom(r.Context()).Subject
-	isAdmin, err := th.az.UserIsOrgAdmin(r.Context(), userID, orgID)
-	if err != nil {
-		httpx.InternalError(w, "teams", err)
-		return
-	}
-	if !isAdmin {
-		// The caller is an org member by construction (httpx.RequireOrg resolved
-		// their active org), so the org is visible and the denial names the
-		// role rather than hiding the surface.
-		httpx.Forbidden(w, "org admin role required")
 		return
 	}
 

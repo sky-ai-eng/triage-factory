@@ -9,17 +9,19 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
-// createReq builds a POST /api/teams as callerID, seeded with the same claims +
-// active org the rename rig's req does. Both team-name doors are multi-only
+// createReq builds a POST /api/orgs/{org_id}/teams for the rig's org as
+// callerID, seeded with the same claims the rename rig's req does. Both team-name doors are multi-only
 // (404 in local), so the parity assertion lives on the Postgres rig.
 func (r *teamRenameRig) createReq(callerID string, body any) *http.Request {
 	b, _ := json.Marshal(body)
-	req := httptest.NewRequest(http.MethodPost, "/api/teams", bytes.NewReader(b))
+	req := httptest.NewRequest(http.MethodPost, "/api/orgs/"+r.orgID+"/teams", bytes.NewReader(b))
 	req.Header.Set("Content-Type", "application/json")
+	req.SetPathValue("org_id", r.orgID)
 	ctx := httpx.WithClaims(req.Context(), &verify.Claims{Subject: callerID})
 	ctx = httpx.WithOrgID(ctx, r.orgID)
 	return req.WithContext(ctx)
@@ -58,5 +60,42 @@ func TestTeamName_SameRuleAtBothDoors(t *testing.T) {
 				t.Errorf("team renamed to the refused name %q", tc.name)
 			}
 		})
+	}
+}
+
+// TestTeamCreate_SlugMustBeInSlugForm: a slug the caller supplies is stored as
+// sent or refused, never rewritten into a different one.
+func TestTeamCreate_SlugMustBeInSlugForm(t *testing.T) {
+	r := newTeamRenameRig(t)
+
+	for _, slug := range []string{
+		"Platform Eng",
+		"PLATFORM",
+		"platform--eng",
+		"-platform",
+		"platform_eng",
+		strings.Repeat("x", domain.MaxSlugLen+1),
+	} {
+		t.Run(slug, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			r.th.handleTeamCreate(rec, r.createReq(r.admin, map[string]string{"name": "Platform", "slug": slug}))
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("create = %d, want 400; body=%s", rec.Code, rec.Body.String())
+			}
+			httpxtest.AssertFirstError(t, rec, httpx.ReasonInvalidField, "slug")
+		})
+	}
+
+	rec := httptest.NewRecorder()
+	r.th.handleTeamCreate(rec, r.createReq(r.admin, map[string]string{"name": "Platform", "slug": "ops-2"}))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	var got teamJSON
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Slug != "ops-2" {
+		t.Errorf("slug = %q, want ops-2 as sent", got.Slug)
 	}
 }

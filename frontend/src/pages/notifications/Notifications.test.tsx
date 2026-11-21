@@ -216,7 +216,7 @@ const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       total_count: 2,
     })
   }
-  if (url === '/api/teams/archived/list') {
+  if (url === '/api/orgs/org-1/teams/archived/list') {
     return ok({
       items: [{ id: 'gone', name: 'Old', slug: 'old', archived_at: '2026-10-01T00:00:00Z' }],
       next_page_token: '',

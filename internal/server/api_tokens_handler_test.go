@@ -719,6 +719,19 @@ func TestAPITokenRename_Faults(t *testing.T) {
 			t.Fatalf("unknown field = %d, want 400: %s", rec.Code, rec.Body.String())
 		}
 	})
+	t.Run("null name", func(t *testing.T) {
+		// Null is a request to clear the name, which a token cannot be
+		// without; it is refused for what it asks, not read as absent.
+		rec := r.tokensJSON("PATCH", path, map[string]any{"name": nil}, sid, "")
+		assertFault(t, rec, http.StatusUnprocessableEntity, "INVALID_FIELD")
+		if items := errorItems(t, rec); items[0].Field != "name" {
+			t.Errorf("fault field = %q, want name", items[0].Field)
+		}
+	})
+	t.Run("name not a string", func(t *testing.T) {
+		rec := r.tokensJSON("PATCH", path, map[string]any{"name": 7}, sid, "")
+		assertFault(t, rec, http.StatusBadRequest, "INVALID_FIELD")
+	})
 	t.Run("blank name", func(t *testing.T) {
 		rec := r.tokensJSON("PATCH", path, map[string]any{"name": "   "}, sid, "")
 		assertFault(t, rec, http.StatusUnprocessableEntity, "INVALID_FIELD")
@@ -880,8 +893,8 @@ func TestAPITokens_MeUnderBearer(t *testing.T) {
 
 	// Point the SESSION at org A, then call with a token sealed to org B: the
 	// answer must be the token's org, not whatever a session cursor says.
-	if rec := r.tokensJSON("POST", "/api/me/active-org",
-		map[string]any{"org_id": orgA.String()}, sid, ""); rec.Code != http.StatusOK {
+	if rec := r.tokensJSON("PATCH", "/api/me",
+		map[string]any{"active_org_id": orgA.String()}, sid, ""); rec.Code != http.StatusOK {
 		t.Fatalf("set active org = %d: %s", rec.Code, rec.Body.String())
 	}
 	bToken := r.createToken(sid, map[string]any{"name": "b", "org_id": orgB.String()})
@@ -931,7 +944,7 @@ func TestSessionVerbs_RefuseTokenAuth(t *testing.T) {
 		path   string
 		body   any
 	}{
-		{"active-org switch", "POST", "/api/me/active-org", map[string]any{"org_id": orgID.String()}},
+		{"active-org switch", "PATCH", "/api/me", map[string]any{"active_org_id": orgID.String()}},
 		{"logout", "POST", "/api/auth/logout", map[string]any{}},
 		{"logout all", "POST", "/api/auth/logout/all", map[string]any{}},
 		{"invite accept", "POST", "/api/invites/accept", map[string]any{"token": "whatever"}},
@@ -961,8 +974,8 @@ func TestSessionVerbs_RefuseTokenAuth(t *testing.T) {
 
 	// The guard is about the credential, not the route: the same calls under a
 	// cookie still behave as they always did.
-	if rec := r.tokensJSON("POST", "/api/me/active-org",
-		map[string]any{"org_id": orgID.String()}, sid, ""); rec.Code != http.StatusOK {
+	if rec := r.tokensJSON("PATCH", "/api/me",
+		map[string]any{"active_org_id": orgID.String()}, sid, ""); rec.Code != http.StatusOK {
 		t.Errorf("session active-org = %d, want 200: %s", rec.Code, rec.Body.String())
 	}
 	if rec := r.tokensJSON("POST", "/api/auth/logout", map[string]any{}, sid, ""); rec.Code != http.StatusNoContent {
@@ -1010,8 +1023,8 @@ func TestSessionVerbs_NonAPITokenBearerIsNotTokenAuth(t *testing.T) {
 			}
 			// The session really ended — the route did its work rather than
 			// being waved through.
-			if rec := r.tokensJSON("POST", "/api/me/active-org",
-				map[string]any{"org_id": uuid.NewString()}, sid, ""); rec.Code != http.StatusUnauthorized {
+			if rec := r.tokensJSON("PATCH", "/api/me",
+				map[string]any{"active_org_id": uuid.NewString()}, sid, ""); rec.Code != http.StatusUnauthorized {
 				t.Errorf("session after logout = %d, want 401 — logout must have revoked it", rec.Code)
 			}
 		})
@@ -1026,12 +1039,17 @@ func TestSessionVerbs_NonAPITokenBearerOnGuardedRouteIs401(t *testing.T) {
 	userID := r.seedUser()
 	orgID, _ := r.seedOrg(userID, "guarded-401-org")
 
-	for _, path := range []string{"/api/me/active-org", "/api/auth/logout/all", "/api/invites/accept", "/api/orgs"} {
-		rec := r.tokensJSON("POST", path,
+	for _, route := range []struct{ method, path string }{
+		{"PATCH", "/api/me"},
+		{"POST", "/api/auth/logout/all"},
+		{"POST", "/api/invites/accept"},
+		{"POST", "/api/orgs"},
+	} {
+		rec := r.tokensJSON(route.method, route.path,
 			map[string]any{"org_id": orgID.String(), "token": "x"}, "", "definitely-not-ours")
 		if rec.Code != http.StatusUnauthorized {
-			t.Errorf("%s with a non-API-token Bearer = %d, want 401: %s",
-				path, rec.Code, rec.Body.String())
+			t.Errorf("%s %s with a non-API-token Bearer = %d, want 401: %s",
+				route.method, route.path, rec.Code, rec.Body.String())
 		}
 	}
 }

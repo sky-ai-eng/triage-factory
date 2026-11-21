@@ -13,18 +13,6 @@
       }
     },
     "schemas": {
-      "ActiveOrgRequest": {
-        "properties": {
-          "org_id": {
-            "description": "The id of the organization to make the session's current one, which must be one the caller belongs to.",
-            "type": "string"
-          }
-        },
-        "type": "object"
-      },
-      "ActiveOrgResponse": {
-        "type": "object"
-      },
       "ApiTokenCreateRequest": {
         "properties": {
           "allowed_cidrs": {
@@ -245,7 +233,7 @@
       "ApiTokenRenameRequest": {
         "properties": {
           "name": {
-            "description": "The token's new display name, at most 100 bytes. It cannot be cleared, and a body without it, or with null, is refused.",
+            "description": "The token's new display name, at most 100 bytes. A token always has a name, so null is refused.",
             "type": [
               "string",
               "null"
@@ -398,7 +386,7 @@
       "EntitlementsResponse": {
         "properties": {
           "features": {
-            "description": "The Enterprise features licensed for the caller's current organization, such as governance; empty when none is.",
+            "description": "The Enterprise features licensed for the organization, such as governance; empty when none is.",
             "items": {
               "type": "string"
             },
@@ -854,6 +842,18 @@
         ],
         "type": "object"
       },
+      "MeUpdateRequest": {
+        "properties": {
+          "active_org_id": {
+            "description": "The id of the organization the caller's session acts in, which must be one they belong to and whose single sign-on requirement the session meets. A session's organization cannot be cleared, so null is refused.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "MemoryAttemptJSON": {
         "properties": {
           "error_kind": {
@@ -968,8 +968,11 @@
       "OrgMemberRoleRequest": {
         "properties": {
           "role": {
-            "description": "The member's new role in the organization: owner, admin, or member.",
-            "type": "string"
+            "description": "The member's new role in the organization: owner, admin, or member. A member always has a role, so null is refused.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "type": "object"
@@ -1623,7 +1626,7 @@
             "type": "string"
           },
           "slug": {
-            "description": "The team's slug, rewritten into slug form, which must keep at least one letter or number; absent or empty derives it from name.",
+            "description": "The team's slug: lowercase ASCII letters and digits in words joined by single hyphens, at most 48 characters, such as platform-eng. Absent or empty derives it from name.",
             "type": "string"
           }
         },
@@ -1700,8 +1703,11 @@
       "TeamMemberRoleRequest": {
         "properties": {
           "role": {
-            "description": "The member's new role on the team: admin, member, or viewer.",
-            "type": "string"
+            "description": "The member's new role on the team: admin, member, or viewer. A member always has a role, so null is refused.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "type": "object"
@@ -2653,40 +2659,6 @@
         }
       }
     },
-    "/api/entitlements": {
-      "get": {
-        "description": "Returns the Enterprise features licensed for the caller's current organization, as one unpaged list. A build with no licence answers an empty list.",
-        "operationId": "list_entitlements",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/EntitlementsResponse"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "$ref": "#/components/responses/Error"
-          }
-        },
-        "security": [
-          {
-            "session": []
-          },
-          {
-            "token": []
-          }
-        ],
-        "summary": "List the licensed Enterprise features",
-        "x-hints": {
-          "openWorldHint": false,
-          "readOnlyHint": true
-        }
-      }
-    },
     "/api/health": {
       "get": {
         "description": "Reports status ok once the server accepts requests. It needs no credential and checks no database or integration, so it says only that the process is serving.",
@@ -2711,86 +2683,6 @@
         "x-hints": {
           "openWorldHint": false,
           "readOnlyHint": true
-        }
-      }
-    },
-    "/api/integrations/status": {
-      "get": {
-        "description": "Reports which of GitHub, Jira, and Linear the caller's current organization has credentials for, how many repositories its teams track, and whether setup is complete and where it resumes. It reads stored state and calls none of those services.",
-        "operationId": "get_integrations_status",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/IntegrationsStatusResponse"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "$ref": "#/components/responses/Error"
-          }
-        },
-        "security": [
-          {
-            "session": []
-          },
-          {
-            "token": []
-          }
-        ],
-        "summary": "Get the organization's setup status",
-        "x-hints": {
-          "openWorldHint": false,
-          "readOnlyHint": true
-        }
-      }
-    },
-    "/api/invites": {
-      "post": {
-        "description": "Creates an invite to the caller's current organization for an email address and returns its accept link, which is shown only in this response. It sends no email; the caller passes the link on. Only an organization admin may call it, and an address with an invite pending or that belongs to a member is refused. Multi mode only.",
-        "operationId": "create_invite",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CreateInviteRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/CreateInviteResponse"
-                }
-              }
-            },
-            "description": "Created"
-          },
-          "default": {
-            "$ref": "#/components/responses/Error"
-          }
-        },
-        "security": [
-          {
-            "session": []
-          },
-          {
-            "token": []
-          }
-        ],
-        "summary": "Invite someone to the organization",
-        "x-hints": {
-          "destructiveHint": false,
-          "idempotentHint": false,
-          "openWorldHint": false,
-          "readOnlyHint": false
         }
       }
     },
@@ -2840,74 +2732,6 @@
         }
       }
     },
-    "/api/invites/list": {
-      "post": {
-        "description": "Returns one page of the caller's current organization's invites that can still be accepted: not accepted, revoked, or expired. No row carries an invite's token or accept link. Only an organization admin may call it. Multi mode only.",
-        "operationId": "list_invites",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/InviteListRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "properties": {
-                    "items": {
-                      "description": "The rows of this page, as an empty array when it has none.",
-                      "items": {
-                        "$ref": "#/components/schemas/InviteListItem"
-                      },
-                      "type": "array"
-                    },
-                    "next_page_token": {
-                      "description": "The page_token that reads the next page, absent on the last page.",
-                      "type": "string"
-                    },
-                    "total_count": {
-                      "description": "How many rows match the request's filters across every page, or null for a list whose upstream cannot count them.",
-                      "type": [
-                        "integer",
-                        "null"
-                      ]
-                    }
-                  },
-                  "required": [
-                    "items",
-                    "total_count"
-                  ],
-                  "type": "object"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "$ref": "#/components/responses/Error"
-          }
-        },
-        "security": [
-          {
-            "session": []
-          },
-          {
-            "token": []
-          }
-        ],
-        "summary": "List pending invites",
-        "x-hints": {
-          "openWorldHint": false,
-          "readOnlyHint": true
-        }
-      }
-    },
     "/api/invites/preview": {
       "get": {
         "description": "Returns the organization, role, and inviter of the invite a token belongs to, and whether it can still be accepted. It needs no credential, because the token is the invite's secret, and an unknown token answers status not_found. Multi mode only.",
@@ -2946,98 +2770,6 @@
         }
       }
     },
-    "/api/invites/{id}": {
-      "get": {
-        "description": "Returns one of the caller's current organization's invites that can still be accepted, without its token or accept link. An accepted, revoked, or expired invite is not found. Only an organization admin may call it. Multi mode only.",
-        "operationId": "get_invite",
-        "parameters": [
-          {
-            "description": "The invite's id.",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/InviteListItem"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "$ref": "#/components/responses/Error"
-          }
-        },
-        "security": [
-          {
-            "session": []
-          },
-          {
-            "token": []
-          }
-        ],
-        "summary": "Get a pending invite",
-        "x-hints": {
-          "openWorldHint": false,
-          "readOnlyHint": true
-        }
-      }
-    },
-    "/api/invites/{id}/revoke": {
-      "post": {
-        "description": "Revokes an invite so its accept link stops working; revoking it again succeeds. An invite that was already accepted is refused. Only an organization admin may call it. Multi mode only.",
-        "operationId": "revoke_invite",
-        "parameters": [
-          {
-            "description": "The invite's id.",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/InviteRevokeResponse"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "$ref": "#/components/responses/Error"
-          }
-        },
-        "security": [
-          {
-            "session": []
-          },
-          {
-            "token": []
-          }
-        ],
-        "summary": "Revoke an invite",
-        "x-hints": {
-          "destructiveHint": true,
-          "idempotentHint": true,
-          "openWorldHint": false,
-          "readOnlyHint": false
-        }
-      }
-    },
     "/api/me": {
       "get": {
         "description": "Returns the caller's user id, their GitHub, Jira, and Linear identities, the organizations and teams they belong to with their role in each, the organization this request acts in, and whether they may create an organization. In local mode it describes the one local user.",
@@ -3070,17 +2802,15 @@
           "openWorldHint": false,
           "readOnlyHint": true
         }
-      }
-    },
-    "/api/me/active-org": {
-      "post": {
-        "description": "Makes the named organization the current one for the caller's session, so the session's later requests act in it, and answers an empty object. An API token is refused, because its organization is fixed when it is created. Multi mode only.",
-        "operationId": "set_active_org",
+      },
+      "patch": {
+        "description": "Sets active_org_id, the organization the caller's session acts in, so the session's later requests act in it, and returns the caller's identity and memberships as GET /api/me does. An API token is refused, because its organization is fixed when it is created. Multi mode only.",
+        "operationId": "update_me",
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/ActiveOrgRequest"
+                "$ref": "#/components/schemas/MeUpdateRequest"
               }
             }
           },
@@ -3091,7 +2821,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ActiveOrgResponse"
+                  "$ref": "#/components/schemas/MeResponse"
                 }
               }
             },
@@ -3561,6 +3291,51 @@
         }
       }
     },
+    "/api/orgs/{org_id}/entitlements": {
+      "get": {
+        "description": "Returns the Enterprise features licensed for the organization, as one unpaged list. A build with no licence answers an empty list.",
+        "operationId": "list_entitlements",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntitlementsResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List an organization's licensed Enterprise features",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
     "/api/orgs/{org_id}/integrations/rate-limits": {
       "get": {
         "description": "Returns, as one unpaged list, the latest reading of each rate-limit budget the organization's GitHub, Jira, Linear, and Slack credentials are metered against, taken from the responses to Triage Factory's own requests. It reads stored readings and calls none of those services.",
@@ -3603,6 +3378,297 @@
         "x-hints": {
           "openWorldHint": false,
           "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/integrations/status": {
+      "get": {
+        "description": "Reports which of GitHub, Jira, and Linear the organization has credentials for, how many repositories its teams track, and whether setup is complete and where it resumes. In local mode it answers configured false until the local organization is created. It reads stored state and calls none of those services.",
+        "operationId": "get_integrations_status",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IntegrationsStatusResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get an organization's setup status",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/invites": {
+      "post": {
+        "description": "Creates an invite to the organization for an email address and returns its accept link, which is shown only in this response. It sends no email; the caller passes the link on. Only an organization admin may call it, and an address with an invite pending or that belongs to a member is refused. Multi mode only.",
+        "operationId": "create_invite",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateInviteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateInviteResponse"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Invite someone to an organization",
+        "x-hints": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/orgs/{org_id}/invites/list": {
+      "post": {
+        "description": "Returns one page of the organization's invites that can still be accepted: not accepted, revoked, or expired. No row carries an invite's token or accept link. Only an organization admin may call it. Multi mode only.",
+        "operationId": "list_invites",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InviteListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "items": {
+                      "description": "The rows of this page, as an empty array when it has none.",
+                      "items": {
+                        "$ref": "#/components/schemas/InviteListItem"
+                      },
+                      "type": "array"
+                    },
+                    "next_page_token": {
+                      "description": "The page_token that reads the next page, absent on the last page.",
+                      "type": "string"
+                    },
+                    "total_count": {
+                      "description": "How many rows match the request's filters across every page, or null for a list whose upstream cannot count them.",
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "total_count"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List an organization's pending invites",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/invites/{id}": {
+      "get": {
+        "description": "Returns one of the organization's invites that can still be accepted, without its token or accept link. An accepted, revoked, or expired invite is not found. Only an organization admin may call it. Multi mode only.",
+        "operationId": "get_invite",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The invite's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InviteListItem"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get a pending invite",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/invites/{id}/revoke": {
+      "post": {
+        "description": "Revokes an invite so its accept link stops working; revoking it again succeeds. An invite that was already accepted is refused. Only an organization admin may call it. Multi mode only.",
+        "operationId": "revoke_invite",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The invite's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InviteRevokeResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Revoke an invite",
+        "x-hints": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
         }
       }
     },
@@ -4033,6 +4099,142 @@
         }
       }
     },
+    "/api/orgs/{org_id}/teams": {
+      "post": {
+        "description": "Creates a team in the organization, gives it the shipped prompts, blueprints, and event handlers, makes the caller its admin, and returns it. Only an organization admin may call it. Multi mode only.",
+        "operationId": "create_team",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TeamCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeamJSON"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Create a team",
+        "x-hints": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        }
+      }
+    },
+    "/api/orgs/{org_id}/teams/archived/list": {
+      "post": {
+        "description": "Returns one page of the organization's archived teams. Only an organization admin may call it. Multi mode only.",
+        "operationId": "list_archived_teams",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ArchivedTeamListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "items": {
+                      "description": "The rows of this page, as an empty array when it has none.",
+                      "items": {
+                        "$ref": "#/components/schemas/TeamJSON"
+                      },
+                      "type": "array"
+                    },
+                    "next_page_token": {
+                      "description": "The page_token that reads the next page, absent on the last page.",
+                      "type": "string"
+                    },
+                    "total_count": {
+                      "description": "How many rows match the request's filters across every page, or null for a list whose upstream cannot count them.",
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "total_count"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "List an organization's archived teams",
+        "x-hints": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      }
+    },
     "/api/orgs/{org_id}/teams/list": {
       "post": {
         "description": "Returns one page of every active team in the organization, including teams the caller is not on, with the caller's role on the teams they belong to.",
@@ -4344,120 +4546,6 @@
           }
         ],
         "summary": "List tasks",
-        "x-hints": {
-          "openWorldHint": false,
-          "readOnlyHint": true
-        }
-      }
-    },
-    "/api/teams": {
-      "post": {
-        "description": "Creates a team in the caller's current organization, gives it the shipped prompts, blueprints, and event handlers, makes the caller its admin, and returns it. Only an organization admin may call it. Multi mode only.",
-        "operationId": "create_team",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/TeamCreateRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/TeamJSON"
-                }
-              }
-            },
-            "description": "Created"
-          },
-          "default": {
-            "$ref": "#/components/responses/Error"
-          }
-        },
-        "security": [
-          {
-            "session": []
-          },
-          {
-            "token": []
-          }
-        ],
-        "summary": "Create a team",
-        "x-hints": {
-          "destructiveHint": false,
-          "idempotentHint": false,
-          "openWorldHint": false,
-          "readOnlyHint": false
-        }
-      }
-    },
-    "/api/teams/archived/list": {
-      "post": {
-        "description": "Returns one page of the archived teams in the caller's current organization. Only an organization admin may call it. Multi mode only.",
-        "operationId": "list_archived_teams",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ArchivedTeamListRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "properties": {
-                    "items": {
-                      "description": "The rows of this page, as an empty array when it has none.",
-                      "items": {
-                        "$ref": "#/components/schemas/TeamJSON"
-                      },
-                      "type": "array"
-                    },
-                    "next_page_token": {
-                      "description": "The page_token that reads the next page, absent on the last page.",
-                      "type": "string"
-                    },
-                    "total_count": {
-                      "description": "How many rows match the request's filters across every page, or null for a list whose upstream cannot count them.",
-                      "type": [
-                        "integer",
-                        "null"
-                      ]
-                    }
-                  },
-                  "required": [
-                    "items",
-                    "total_count"
-                  ],
-                  "type": "object"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "$ref": "#/components/responses/Error"
-          }
-        },
-        "security": [
-          {
-            "session": []
-          },
-          {
-            "token": []
-          }
-        ],
-        "summary": "List archived teams",
         "x-hints": {
           "openWorldHint": false,
           "readOnlyHint": true

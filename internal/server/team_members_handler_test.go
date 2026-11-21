@@ -12,6 +12,7 @@ import (
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // teamMembersRig is a Postgres-backed team roster handler, with RLS and the
@@ -295,6 +296,31 @@ func TestTeamMemberRoleChange_InvalidRoleIs400(t *testing.T) {
 	r.tmh.handleTeamMemberRoleChange(rec, r.req(http.MethodPatch, r.admin, r.memb, map[string]string{"role": "superuser"}))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 (invalid role); body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestTeamMemberRoleChange_NullOrAbsentRoleIs400: a body that names no role
+// writes nothing, and a null role asks to clear what a membership cannot be
+// without; each is refused on the role field.
+func TestTeamMemberRoleChange_NullOrAbsentRoleIs400(t *testing.T) {
+	r := newTeamMembersRig(t)
+
+	for _, tc := range []struct {
+		what   string
+		body   map[string]any
+		reason string
+	}{
+		{"absent", map[string]any{}, httpx.ReasonMissingField},
+		{"null", map[string]any{"role": nil}, httpx.ReasonInvalidField},
+	} {
+		t.Run(tc.what, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			r.tmh.handleTeamMemberRoleChange(rec, r.req(http.MethodPatch, r.admin, r.memb, tc.body))
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+			}
+			httpxtest.AssertFirstError(t, rec, tc.reason, "role")
+		})
 	}
 }
 

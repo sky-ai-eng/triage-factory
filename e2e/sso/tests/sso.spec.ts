@@ -104,7 +104,7 @@ test('2. identifier-first sign-in provisions an SSO user into the org', async ({
 })
 
 test('3. an SSO sign-in at a verified domain joins the existing account', async ({ browser }) => {
-  const acceptURL = await invite(admin.api, 'bob@globex.test')
+  const acceptURL = await invite(admin.api, globexId, 'bob@globex.test')
   bobGitHub = await signInGitHub(browser, 'bob')
   expect(await acceptInvite(bobGitHub, acceptURL)).toBe(globexId)
   bobId = (await me(bobGitHub.api)).id
@@ -118,7 +118,7 @@ test('3. an SSO sign-in at a verified domain joins the existing account', async 
   expect(ids.methods.map((x) => x.provider).sort()).toEqual(['github', 'saml'])
 
   // State that scenarios 8 to 11 need from before Require SSO is turned on.
-  const contractorInvite = await invite(admin.api, 'contractor@gmail.test')
+  const contractorInvite = await invite(admin.api, globexId, 'contractor@gmail.test')
   contractor = await signInGitHub(browser, 'contractor')
   expect(await acceptInvite(contractor, contractorInvite)).toBe(globexId)
   // Its own page, so later navigation of the contractor's app page leaves the
@@ -199,7 +199,7 @@ test('6. operator status follows a verified address, not an asserted one', async
 })
 
 test('7. an invite cannot be accepted with an address another IdP asserts', async ({ browser }) => {
-  const acceptURL = await invite(admin.api, 'carol@globex.test')
+  const acceptURL = await invite(admin.api, globexId, 'carol@globex.test')
   const fake = await signInThroughProvider(browser, malloryProvider, idpUser('mallory', 'carol'))
   const r = await fake.api.post('/api/invites/accept', { data: { token: tokenOf(acceptURL) } })
   expect(r.status(), await r.text()).toBe(409)
@@ -211,7 +211,7 @@ test('7. an invite cannot be accepted with an address another IdP asserts', asyn
   // expired), so Carol's invite being there means the refused accept did not
   // use it up.
   const list = await json<{ items: { email: string }[] }>(
-    await admin.api.post('/api/invites/list', { data: {} }),
+    await admin.api.post(`/api/orgs/${globexId}/invites/list`, { data: {} }),
     200,
   )
   expect(list.items.map((i) => i.email)).toContain('carol@globex.test')

@@ -3,7 +3,6 @@ import { useAuth } from '../contexts/AuthContext'
 import { useOrgContext } from '../contexts/OrgContext'
 import { reconnectWebSocket } from './useWebSocket'
 import { invalidateTeams } from './useTeams'
-import { invalidateEntitlements } from './useEntitlements'
 import { apiFetch, isSSORequired } from '../lib/apiClient'
 
 /**
@@ -46,7 +45,7 @@ export function useSwitchOrg(): (newOrgId: string) => Promise<void> {
         // local selection would conflict with the URL navigation below; log
         // and let the AuthGate / /api/me reconciliation correct it on the
         // next page render.
-        console.warn('[org-switch] active-org POST failed:', err)
+        console.warn('[org-switch] active-org switch failed:', err)
       }
     }
 
@@ -68,10 +67,10 @@ export async function persistActiveOrg(orgId: string): Promise<void> {
   // Persist the choice on the session row so the server's withSession picks
   // up the new active org for every subsequent request (and so cross-tab
   // /api/me reads agree).
-  await apiFetch('/api/me/active-org', {
-    method: 'POST',
+  await apiFetch('/api/me', {
+    method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ org_id: orgId }),
+    body: JSON.stringify({ active_org_id: orgId }),
   })
   // Drop the cached /api/teams response only AFTER the active org
   // is persisted server-side. /api/teams is session-org-scoped, so
@@ -79,10 +78,6 @@ export async function persistActiveOrg(orgId: string): Promise<void> {
   // OLD org's teams; doing it here guarantees the reload reads the
   // new org's set.
   invalidateTeams()
-  // Entitlements are scoped to the active org too (multi mode), so drop
-  // their cache on the same commit — the new org may license a different
-  // EE feature set. Same post-persist ordering rationale as teams.
-  invalidateEntitlements()
   // Force the WS to re-handshake so the hub's per-(user, org)
   // Broadcast filter routes events for the just-switched
   // tenant rather than the previous one. Without this the

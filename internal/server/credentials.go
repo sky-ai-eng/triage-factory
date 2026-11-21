@@ -92,7 +92,8 @@ func setupModelPicks(ctx context.Context, tx db.TxStores, orgID string) (orgPick
 	return orgPick, strings.TrimSpace(teamSet.DefaultModel) != "", nil
 }
 
-// integrationsStatusResponse is the body of GET /api/integrations/status.
+// integrationsStatusResponse is the body of GET
+// /api/orgs/{org_id}/integrations/status.
 // The trailing fields are omitempty because each is reported only when the
 // org holds the value it names.
 type integrationsStatusResponse struct {
@@ -113,31 +114,33 @@ type integrationsStatusResponse struct {
 }
 
 var opIntegrationsStatus = httpx.NewJSONOp[httpx.NoBody, integrationsStatusResponse](httpx.OpSpec{
-	Pattern:     "GET /api/integrations/status",
+	Pattern:     "GET /api/orgs/{org_id}/integrations/status",
 	ID:          "get_integrations_status",
-	Summary:     "Get the organization's setup status",
-	Description: "Reports which of GitHub, Jira, and Linear the caller's current organization has credentials for, how many repositories its teams track, and whether setup is complete and where it resumes. It reads stored state and calls none of those services.",
+	Summary:     "Get an organization's setup status",
+	Description: "Reports which of GitHub, Jira, and Linear the organization has credentials for, how many repositories its teams track, and whether setup is complete and where it resumes. In local mode it answers configured false until the local organization is created. It reads stored state and calls none of those services.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
 	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
 })
 
 func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+	// Local mode's sentinel org passes the member gate before its row exists,
+	// which is what lets this answer configured=false on a first run.
+	orgID, userID, ok := s.az.RequireOrgMember(w, r)
 	if !ok {
 		return
 	}
-	userID := ClaimsFrom(r.Context()).Subject
 
 	// First-run detection keys on tenant existence, not GitHub creds.
-	// "configured" now means "a provisioned tenant exists" — the local
-	// shim hands every request the LocalDefault* org id regardless of
-	// whether that org row actually exists, so probe the row directly.
+	// "configured" now means "a provisioned tenant exists" — the member
+	// gate admits local mode's LocalDefault* org id whether or not that org
+	// row exists, so probe the row directly.
 	// No tenant ⇒ the user hasn't run "Start your factory" yet and
 	// the AuthGate routes them to the first-run screen; GitHub-creds-
 	// present is now a later config step, surfaced via the github/jira
 	// fields below rather than gating first-run. GetOrgSystem reads org
-	// metadata without claims (a cheap existence probe); in multi mode an
-	// active org always exists, so configured is always true there and
-	// the field is unused (multi gates via AuthContext).
+	// metadata without claims (a cheap existence probe); in multi mode the
+	// member gate already proved the org exists, so configured is always
+	// true there and the field is unused (multi gates via AuthContext).
 	// A probe fault is a 500, never configured=false: the gate keeps its
 	// last known status on a non-2xx, whereas a 200 that says "no tenant"
 	// would bounce a founder back to the first-run screen over a hiccup.

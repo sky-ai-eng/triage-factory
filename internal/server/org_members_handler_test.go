@@ -286,6 +286,31 @@ func TestOrgMemberRoleChange_InvalidRoleIs400(t *testing.T) {
 	}
 }
 
+// TestOrgMemberRoleChange_NullOrAbsentRoleIs400: a body that names no role
+// writes nothing, and a null role asks to clear what a membership cannot be
+// without; each is refused on the role field, and the member keeps their role.
+func TestOrgMemberRoleChange_NullOrAbsentRoleIs400(t *testing.T) {
+	r := newOrgMembersRig(t)
+
+	for _, tc := range []struct {
+		what   string
+		body   map[string]any
+		reason string
+	}{
+		{"absent", map[string]any{}, httpx.ReasonMissingField},
+		{"null", map[string]any{"role": nil}, httpx.ReasonInvalidField},
+	} {
+		t.Run(tc.what, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			r.omh.handleOrgMemberRoleChange(rec, r.req(http.MethodPatch, r.admin, r.memb, tc.body))
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+			}
+			httpxtest.AssertFirstError(t, rec, tc.reason, "role")
+		})
+	}
+}
+
 // TestOrgMemberRoleChange_LastOwnerIs409: demoting the org's sole owner trips
 // the guard_org_owners trigger; the handler surfaces a friendly 409, not a
 // 500, and the owner keeps their role.

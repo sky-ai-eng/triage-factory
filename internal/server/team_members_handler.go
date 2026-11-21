@@ -312,7 +312,7 @@ func (h *teamMembersHandler) handleTeamMemberAdd(w http.ResponseWriter, r *http.
 
 // teamMemberRoleRequest is the body of PATCH /api/teams/{team_id}/members/{user_id}.
 type teamMemberRoleRequest struct {
-	Role string `json:"role" doc:"The member's new role on the team: admin, member, or viewer."`
+	Role httpx.Patch[string] `json:"role" doc:"The member's new role on the team: admin, member, or viewer. A member always has a role, so null is refused."`
 }
 
 var opTeamMemberRoleChange = httpx.NewNoContentOp[teamMemberRoleRequest](httpx.OpSpec{
@@ -358,11 +358,8 @@ func (h *teamMembersHandler) handleTeamMemberRoleChange(w http.ResponseWriter, r
 	if !ok {
 		return
 	}
-	role := strings.TrimSpace(body.Role)
-	if !teamRoles[role] {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-			Reason: httpx.ReasonInvalidField, Message: "role must be one of admin, member, viewer", Field: "role",
-		})
+	role, ok := readMemberRole(w, body.Role, teamRoles, "admin, member, viewer")
+	if !ok {
 		return
 	}
 

@@ -1,23 +1,28 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { renderHook, waitFor } from '@testing-library/react'
-import {
-  useEntitlements,
-  invalidateEntitlements,
-  resetEntitlementsForTest,
-  FeatureGovernance,
-} from './useEntitlements'
+import { useEntitlements, resetEntitlementsForTest, FeatureGovernance } from './useEntitlements'
 import { jsonBody } from '../test/apiResponse'
 
-// useEntitlements holds a module-level cache (one fetch per page), so each test
-// clears it (resetEntitlementsForTest) and stubs fetch to return the
-// deployment's licensed feature list.
+// useEntitlements reads the org useApiOrgId names; the mock lets a test pick
+// that org and switch it.
+const org = vi.hoisted(() => ({ id: 'org-a' as string | null }))
+vi.mock('./useApiOrgId', () => ({ useApiOrgId: () => org.id }))
 
-// stubEntitlements routes GET /api/entitlements to a canned { features } body;
-// any other path resolves not-ok so an accidental call is visible.
-function stubEntitlements(features: string[]) {
+const pathOf = (orgId: string) => `/api/orgs/${orgId}/entitlements`
+
+// useEntitlements holds a module-level cache (one fetch per org), so each test
+// clears it (resetEntitlementsForTest) and stubs fetch to return each org's
+// licensed feature list.
+
+// stubEntitlements routes each org's entitlements GET to a canned { features }
+// body; any other path resolves not-ok so an accidental call is visible.
+function stubEntitlements(byOrg: Record<string, string[]>) {
   const fetchMock = vi.fn((input: unknown) => {
-    if (String(input).split('?')[0] === '/api/entitlements') {
-      return Promise.resolve({ ok: true, ...jsonBody({ features }) })
+    const path = String(input).split('?')[0]
+    for (const [orgId, features] of Object.entries(byOrg)) {
+      if (path === pathOf(orgId)) {
+        return Promise.resolve({ ok: true, ...jsonBody({ features }) })
+      }
     }
     return Promise.resolve({ ok: false, status: 404, ...jsonBody({}) })
   })
@@ -27,11 +32,12 @@ function stubEntitlements(features: string[]) {
 
 beforeEach(() => {
   resetEntitlementsForTest()
+  org.id = 'org-a'
 })
 
 describe('useEntitlements', () => {
   it('reflects the fetched list once the probe resolves', async () => {
-    stubEntitlements(['governance'])
+    stubEntitlements({ 'org-a': ['governance'] })
     const { result } = renderHook(() => useEntitlements())
 
     // Before the fetch resolves: not loaded, nothing licensed.
@@ -47,7 +53,7 @@ describe('useEntitlements', () => {
   })
 
   it('has() is false for all in a community / unlicensed build ([])', async () => {
-    stubEntitlements([])
+    stubEntitlements({ 'org-a': [] })
     const { result } = renderHook(() => useEntitlements())
 
     await waitFor(() => expect(result.current.loaded).toBe(true))
@@ -55,8 +61,8 @@ describe('useEntitlements', () => {
     expect(result.current.has('sso')).toBe(false)
   })
 
-  it('fetches /api/entitlements once across multiple consumers', async () => {
-    const fetchMock = stubEntitlements(['governance'])
+  it('fetches an org once across multiple consumers', async () => {
+    const fetchMock = stubEntitlements({ 'org-a': ['governance'] })
     const a = renderHook(() => useEntitlements())
     const b = renderHook(() => useEntitlements())
 
@@ -67,62 +73,56 @@ describe('useEntitlements', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
-  it('refetches the new org feature set on invalidate (org switch)', async () => {
-    // Org A licenses governance; after switching to org B (which does not), an
-    // invalidate must drop the stale set and reflect B's empty entitlements.
-    let features = ['governance']
-    const fetchMock = vi.fn((input: unknown) => {
-      if (String(input).split('?')[0] === '/api/entitlements') {
-        return Promise.resolve({ ok: true, ...jsonBody({ features }) })
-      }
-      return Promise.resolve({ ok: false, status: 404, ...jsonBody({}) })
-    })
-    vi.stubGlobal('fetch', fetchMock)
-
-    const { result } = renderHook(() => useEntitlements())
+  it("reads the new org's feature set after an org switch", async () => {
+    // Org A licenses governance and org B does not; switching to B must show
+    // B's empty set, read from B's own route.
+    const fetchMock = stubEntitlements({ 'org-a': ['governance'], 'org-b': [] })
+    const { result, rerender } = renderHook(() => useEntitlements())
     await waitFor(() => expect(result.current.has('governance')).toBe(true))
 
-    features = [] // org B
-    invalidateEntitlements()
-    await waitFor(() => expect(result.current.has('governance')).toBe(false))
-    expect(result.current.loaded).toBe(true)
-    expect(fetchMock).toHaveBeenCalledTimes(2)
+    org.id = 'org-b'
+    rerender()
+    await waitFor(() => expect(result.current.loaded).toBe(true))
+    expect(result.current.has('governance')).toBe(false)
+    expect(fetchMock).toHaveBeenCalledWith(pathOf('org-b'), expect.anything())
   })
 
-  it('drops a previous org slow response that lands after an org switch', async () => {
-    // The generation guard's reason for existing: org A's probe is slow; we hold
-    // its resolver so it lands AFTER we switch to org B. Without the guard, A's
-    // stale governance set would clobber B's empty one.
+  it("keeps a previous org's slow answer out of the new org's set", async () => {
+    // Org A's probe is slow; we hold its resolver so it lands AFTER the switch
+    // to org B. Its governance set must not show for B.
     let landA!: () => void
-    const aResponse = { ok: true, ...jsonBody({ features: ['governance'] }) }
-    let call = 0
-    const fetchMock = vi.fn(() => {
-      call += 1
-      if (call === 1) {
+    const fetchMock = vi.fn((input: unknown) => {
+      if (String(input) === pathOf('org-a')) {
         return new Promise((resolve) => {
-          landA = () => resolve(aResponse)
+          landA = () => resolve({ ok: true, ...jsonBody({ features: ['governance'] }) })
         })
       }
-      // Org B resolves immediately with no entitlements.
       return Promise.resolve({ ok: true, ...jsonBody({ features: [] }) })
     })
     vi.stubGlobal('fetch', fetchMock)
 
-    const { result } = renderHook(() => useEntitlements())
+    const { result, rerender } = renderHook(() => useEntitlements())
     expect(result.current.loaded).toBe(false) // org A's fetch is still in flight
 
-    // Switch orgs: invalidate supersedes A (bumps the generation) and dispatches
-    // org B's fetch, which resolves to an empty set.
-    invalidateEntitlements()
+    org.id = 'org-b'
+    rerender()
     await waitFor(() => expect(result.current.loaded).toBe(true))
     expect(result.current.has(FeatureGovernance)).toBe(false) // org B
 
-    // Now A's slow response finally lands. The generation guard must drop it, so
-    // org B's empty set stays put — no governance bleed-through from the old org.
     landA()
-    await new Promise((r) => setTimeout(r, 0)) // flush the superseded chain
+    await new Promise((r) => setTimeout(r, 0)) // flush org A's chain
     expect(result.current.has(FeatureGovernance)).toBe(false)
     expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('holds its fetch while the org is unresolved', async () => {
+    org.id = null
+    const fetchMock = stubEntitlements({})
+    const { result } = renderHook(() => useEntitlements())
+
+    await new Promise((r) => setTimeout(r, 0))
+    expect(result.current.loaded).toBe(false)
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('fails closed when the probe errors (loaded, nothing licensed)', async () => {

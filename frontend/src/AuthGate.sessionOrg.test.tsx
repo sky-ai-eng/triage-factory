@@ -24,7 +24,7 @@ vi.mock('./hooks/useWebSocket', async (importOriginal) => ({
 const SSO_REQUIRED_BODY = { errors: [{ reason: 'SSO_REQUIRED', message: 'requires SSO' }] }
 
 // The server's side: the session's org ('' for none), which orgs require SSO,
-// and how the next POST /api/me/active-org answers.
+// and how the next PATCH /api/me answers.
 let sessionOrg: string
 let barredIds: Set<string>
 let moveAnswer: 'ok' | 'sso' | number
@@ -52,7 +52,10 @@ function me(): MeResponse {
 }
 
 function moveCalls() {
-  return fetchMock.mock.calls.filter(([url]) => String(url) === '/api/me/active-org')
+  return fetchMock.mock.calls.filter(
+    ([url, init]) =>
+      String(url) === '/api/me' && (init as RequestInit | undefined)?.method === 'PATCH',
+  )
 }
 
 beforeEach(() => {
@@ -61,11 +64,11 @@ beforeEach(() => {
   moveAnswer = 'ok'
   fetchMock = vi.fn((url: unknown, init?: RequestInit) => {
     const path = String(url)
-    if (path === '/api/me') {
+    if (path === '/api/me' && init?.method !== 'PATCH') {
       return Promise.resolve({ ok: true, status: 200, ...jsonBody(me()) })
     }
-    if (path === '/api/me/active-org') {
-      const target = (JSON.parse(String(init?.body)) as { org_id: string }).org_id
+    if (path === '/api/me') {
+      const target = (JSON.parse(String(init?.body)) as { active_org_id: string }).active_org_id
       if (moveAnswer === 'sso') {
         barredIds.add(target)
         return Promise.resolve({ ok: false, status: 403, ...jsonBody(SSO_REQUIRED_BODY) })
@@ -74,7 +77,7 @@ beforeEach(() => {
         return Promise.resolve({ ok: false, status: moveAnswer, ...jsonBody({ errors: [] }) })
       }
       sessionOrg = target
-      return Promise.resolve({ ok: true, status: 200, ...jsonBody({}) })
+      return Promise.resolve({ ok: true, status: 200, ...jsonBody(me()) })
     }
     return Promise.resolve({ ok: true, status: 200, ...jsonBody({}) })
   })
@@ -124,7 +127,10 @@ describe('MultiAuthGate with the session in an SSO-required org', () => {
     expect(await screen.findByText('the page')).toBeInTheDocument()
     expect(moveCalls()).toHaveLength(1)
     expect(moveCalls()[0][1]).toEqual(
-      expect.objectContaining({ method: 'POST', body: JSON.stringify({ org_id: 'org-a' }) }),
+      expect.objectContaining({
+        method: 'PATCH',
+        body: JSON.stringify({ active_org_id: 'org-a' }),
+      }),
     )
     expect(sessionOrgAtMount).toBe('org-a')
     expect(reconnectWebSocket).toHaveBeenCalledTimes(1)

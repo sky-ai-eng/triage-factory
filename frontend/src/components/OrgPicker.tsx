@@ -12,7 +12,7 @@ import { useSwitchOrg } from '../hooks/useSwitchOrg'
  *
  * An org that requires an SSO this session did not come through is listed
  * with that org's sign-in instead: switching to it would only be refused, so
- * the row is a link to its start URL and never calls /api/me/active-org.
+ * the row is a link to its start URL and never moves the session to it.
  */
 export default function OrgPicker() {
   const auth = useAuth()

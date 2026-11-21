@@ -15,7 +15,7 @@ import { isSSORequired } from './lib/apiClient'
  * AuthGate routes between the local-mode first-run/provision flow and the
  * multi-mode cookie-session flow.
  *
- *   Local mode → LocalAuthGate (/api/integrations/status; !configured →
+ *   Local mode → LocalAuthGate (the local org's integrations status; !configured →
  *                the "Start your factory" provision screen)
  *   Multi mode → MultiAuthGate (uses AuthContext)
  *
@@ -51,7 +51,7 @@ function Loading() {
 }
 
 function LocalAuthGate({ children }: { children: React.ReactNode }) {
-  const { configured, loading } = useAuthStatus()
+  const { configured, loading } = useAuthStatus(LOCAL_DEFAULT_ORG_ID)
   if (loading) return <Loading />
   // No provisioned tenant yet → the first-run "Start your factory"
   // screen, which fires POST /api/orgs and then routes into the /setup
@@ -65,8 +65,8 @@ function LocalAuthGate({ children }: { children: React.ReactNode }) {
  * the session has no org it can act in and the org on screen is usable.
  * /api/me reports no active_org_id when the session's org requires an SSO this
  * session did not come through, when that membership is gone, or when none was
- * set. Routes with no org in their path — the teams list, entitlements, the
- * websocket — act in the session's org, not the URL's, so otherwise every such
+ * set. Routes with no org in their path — the teams list and the websocket —
+ * act in the session's org, not the URL's, so otherwise every such
  * read on the page fails while /api/me reports the org on screen usable; for a
  * barred session org the failure is 403 SSO_REQUIRED, and no re-read of
  * /api/me changes it. A session with a usable org is left where it is,
@@ -405,11 +405,12 @@ export function RequireSetupComplete({
 }) {
   const auth = useOptionalAuth()
   const activeOrgId = useActiveOrgId()
+  const orgId = isLocal ? LOCAL_DEFAULT_ORG_ID : activeOrgId
   // Poll while blocked so the gate self-heals: a non-admin on the holding
   // screen is admitted automatically once an admin finishes setup (the hook
   // stops polling the moment a response reports setup_complete). 15s is brisk
   // enough to feel automatic without hammering the endpoint.
-  const { setup_complete, loading } = useAuthStatus(activeOrgId ?? undefined, 15000)
+  const { setup_complete, loading } = useAuthStatus(orgId, 15000)
 
   if (loading) return <Loading />
   if (setup_complete) return <>{children}</>

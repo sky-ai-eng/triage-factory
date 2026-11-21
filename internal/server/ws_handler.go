@@ -41,7 +41,7 @@ var opWS = httpx.NewWebSocketOp(httpx.OpSpec{
 //     org) pair by the hub filter.
 //   - userID set, orgID empty: authenticated multi-mode session whose
 //     active_org_id is NULL (user has zero memberships, or hasn't
-//     called POST /api/me/active-org yet). Rejected here with 409 +
+//     set active_org_id with PATCH /api/me yet). Rejected here with 409 +
 //     no_active_org. A credential withSession found barred from its
 //     org (the org requires SSO it was not signed in through) lands
 //     here too, and gets the 403 SSO_REQUIRED every other route gives
@@ -121,6 +121,6 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 func (s *Server) writeNoActiveOrg(w http.ResponseWriter) {
 	httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
 		Reason:  httpx.ReasonNoActiveOrg,
-		Message: "websocket handshake requires an active org; call POST /api/me/active-org to choose one",
+		Message: "websocket handshake requires an active org; set active_org_id with PATCH /api/me to choose one",
 	})
 }

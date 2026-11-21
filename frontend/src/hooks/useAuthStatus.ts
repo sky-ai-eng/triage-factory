@@ -29,9 +29,10 @@ interface AuthStatus {
   loading: boolean
 }
 
-// orgKey lets a multi-mode caller refetch when the active org changes (the
-// endpoint resolves the session's active org, so a switch must re-poll).
-// Local mode (N=1, no switching) omits it.
+// orgId is the org whose status to read: local mode's sentinel org, or the
+// active org in multi mode, where a switch re-reads. While it is null (multi
+// mode still resolving the org) the hook holds its fetch and stays loading
+// rather than reading some other org's status.
 //
 // pollMs, when set, re-polls on that interval so a gate blocking on an
 // incomplete org self-heals: a non-admin parked on the "setup isn't
@@ -41,7 +42,7 @@ interface AuthStatus {
 // hidden — but a tab becoming visible again triggers an immediate refetch so
 // returning to a backgrounded tab is snappy rather than waiting out the
 // interval.
-export function useAuthStatus(orgKey?: string, pollMs?: number): AuthStatus {
+export function useAuthStatus(orgId: string | null, pollMs?: number): AuthStatus {
   const [status, setStatus] = useState<AuthStatus>({
     configured: false,
     github: false,
@@ -50,6 +51,7 @@ export function useAuthStatus(orgKey?: string, pollMs?: number): AuthStatus {
   })
 
   useEffect(() => {
+    if (!orgId) return
     let cancelled = false
     let timer: ReturnType<typeof setInterval> | undefined
 
@@ -65,7 +67,9 @@ export function useAuthStatus(orgKey?: string, pollMs?: number): AuthStatus {
     // the next tick try again. This is a gate poll, not a user action; there is
     // no message to show and nothing to retry by hand.
     const load = () => {
-      apiJSON<Omit<AuthStatus, 'loading'>>('/api/integrations/status')
+      apiJSON<Omit<AuthStatus, 'loading'>>(
+        `/api/orgs/${encodeURIComponent(orgId)}/integrations/status`,
+      )
         .then((data) => {
           if (cancelled) return
           setStatus({ ...data, loading: false })
@@ -97,7 +101,7 @@ export function useAuthStatus(orgKey?: string, pollMs?: number): AuthStatus {
       stopPolling()
       document.removeEventListener('visibilitychange', onVisible)
     }
-  }, [orgKey, pollMs])
+  }, [orgId, pollMs])
 
   return status
 }

@@ -510,7 +510,7 @@ func (s *Server) handleAPITokenList(w http.ResponseWriter, r *http.Request) {
 // credential: a different org, expiry or allowlist is a different token, and
 // rotation (mint, move, revoke) is how one gets it.
 type apiTokenRenameRequest struct {
-	Name *string `json:"name" doc:"The token's new display name, at most 100 bytes. It cannot be cleared, and a body without it, or with null, is refused."`
+	Name httpx.Patch[string] `json:"name" doc:"The token's new display name, at most 100 bytes. A token always has a name, so null is refused."`
 }
 
 var opAPITokenRename = httpx.NewJSONOp[apiTokenRenameRequest, apiTokenJSON](httpx.OpSpec{
@@ -550,15 +550,24 @@ func (s *Server) handleAPITokenRename(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if req.Name == nil {
+	// A type fault is a malformed body, 400 like any other; what the value
+	// means is checked after it, at 422.
+	var types httpx.Validation
+	raw, state := req.Name.Read(&types, "name")
+	if state == httpx.PatchAbsent {
 		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
 			Reason: httpx.ReasonMissingField, Message: "no fields to update: provide name", Field: "name",
 		})
 		return
 	}
+	if types.Flush(w, http.StatusBadRequest) {
+		return
+	}
 	var v httpx.Validation
-	name := strings.TrimSpace(*req.Name)
+	name := strings.TrimSpace(raw)
 	switch {
+	case state == httpx.PatchClear:
+		v.Invalid("name", "name cannot be cleared: a token always has a name")
 	case name == "":
 		v.Invalid("name", "name is required")
 	case len(name) > apitokens.MaxNameLen:

@@ -29,7 +29,7 @@ function assignableRoles(callerRole: string | null): string[] {
 }
 
 // InviteModal is the org People roster's "+ Invite" affordance: email + role
-// (capped to the caller's role) + an optional team, POSTed to /api/invites.
+// (capped to the caller's role) + an optional team, POSTed to the org's invites.
 // On success it reveals the one-time accept link with a Copy button — no email
 // is sent in v1, so copy/paste IS the delivery.
 export default function InviteModal({ create, onClose }: Props) {

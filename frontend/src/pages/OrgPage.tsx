@@ -183,8 +183,10 @@ function resolveTab(raw: string | null, isAdmin: boolean): OrgTab {
 // for them and they see a plain read-only roster.
 function OrgPeople({ orgId, canManage }: { orgId: string; canManage: boolean }) {
   const base = useOrgRosterAdapter(orgId)
-  const { invites, total, loading, hasMore, loadMore, error, create, revoke, resend } =
-    useInvites(canManage)
+  const { invites, total, loading, hasMore, loadMore, error, create, revoke, resend } = useInvites(
+    orgId,
+    canManage,
+  )
   // Default shown (per the ticket). Hidden only collapses the ghost rows; the
   // invites still exist and the "+ Invite" button stays put.
   const [showInvited, setShowInvited] = useState(true)

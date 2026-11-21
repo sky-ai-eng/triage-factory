@@ -253,7 +253,9 @@ export default function TeamSettings({
       fetchTeamSettings(endpointTeamId),
       fetchTeamRepos(endpointTeamId),
       fetchTeamGitHubGroups(endpointTeamId),
-      apiJSON<{ jira?: boolean; jira_url?: string }>('/api/integrations/status').catch(() => null),
+      apiJSON<{ jira?: boolean; jira_url?: string }>(
+        `/api/orgs/${encodeURIComponent(orgId)}/integrations/status`,
+      ).catch(() => null),
     ])
       .then(([settings, teamRepos, teamGroups, integ]) => {
         if (cancelled) return
@@ -312,7 +314,7 @@ export default function TeamSettings({
     return () => {
       cancelled = true
     }
-  }, [endpointTeamId])
+  }, [endpointTeamId, orgId])
 
   useEffect(() => {
     const cancel = load()

@@ -233,7 +233,7 @@ func (h *orgMembersHandler) handleOrgMembersList(w http.ResponseWriter, r *http.
 
 // orgMemberRoleRequest is the body of PATCH /api/orgs/{org_id}/members/{user_id}.
 type orgMemberRoleRequest struct {
-	Role string `json:"role" doc:"The member's new role in the organization: owner, admin, or member."`
+	Role httpx.Patch[string] `json:"role" doc:"The member's new role in the organization: owner, admin, or member. A member always has a role, so null is refused."`
 }
 
 var opOrgMemberRoleChange = httpx.NewNoContentOp[orgMemberRoleRequest](httpx.OpSpec{
@@ -274,11 +274,8 @@ func (h *orgMembersHandler) handleOrgMemberRoleChange(w http.ResponseWriter, r *
 	if !ok {
 		return
 	}
-	role := strings.TrimSpace(body.Role)
-	if !orgRoles[role] {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-			Reason: httpx.ReasonInvalidField, Message: "role must be one of owner, admin, member", Field: "role",
-		})
+	role, ok := readMemberRole(w, body.Role, orgRoles, "owner, admin, member")
+	if !ok {
 		return
 	}
 
@@ -554,6 +551,33 @@ func (h *orgMembersHandler) handleOrgOwnershipTransfer(w http.ResponseWriter, r 
 	default:
 		internalError(w, "org-transfer", err)
 	}
+}
+
+// readMemberRole reads the role field of a membership PATCH, the org's and the
+// team's alike: absent names no field to write, null asks to clear a value a
+// membership cannot be without, and a value must be one of roles. On a fault
+// the error is already written and ok is false.
+func readMemberRole(w http.ResponseWriter, field httpx.Patch[string], roles map[string]bool, vocabulary string) (role string, ok bool) {
+	var v httpx.Validation
+	raw, state := field.Read(&v, "role")
+	switch state {
+	case httpx.PatchAbsent:
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonMissingField, Message: "no fields to update: provide role", Field: "role",
+		})
+		return "", false
+	case httpx.PatchClear:
+		v.Invalid("role", "role cannot be cleared: a member always has a role")
+	case httpx.PatchSet:
+		role = strings.TrimSpace(raw)
+		if !roles[role] {
+			v.Invalid("role", "role must be one of "+vocabulary)
+		}
+	}
+	if v.Flush(w, http.StatusBadRequest) {
+		return "", false
+	}
+	return role, true
 }
 
 // orgMemberPathID extracts and validates the {user_id} path value. A

@@ -67,10 +67,11 @@ func TestIntegrationsStatus_SetupCompleteGate(t *testing.T) {
 	}
 }
 
-// getIntegrationsStatus GETs /api/integrations/status and decodes the body.
+// getIntegrationsStatus GETs the local org's integrations status and decodes
+// the body.
 func getIntegrationsStatus(t *testing.T, s *Server) map[string]any {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodGet, "/api/integrations/status", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/orgs/"+runmode.LocalDefaultOrgID+"/integrations/status", nil)
 	rec := httptest.NewRecorder()
 	s.mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {

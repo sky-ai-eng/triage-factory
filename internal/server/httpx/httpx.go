@@ -812,7 +812,7 @@ func RequireOrg(w http.ResponseWriter, r *http.Request) (string, bool) {
 	}
 	WriteErrors(w, http.StatusConflict, ErrorItem{
 		Reason:  ReasonNoActiveOrg,
-		Message: "no active org selected; call POST /api/me/active-org to choose one",
+		Message: "no active org selected; set active_org_id with PATCH /api/me to choose one",
 	})
 	return "", false
 }

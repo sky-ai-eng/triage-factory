@@ -1,96 +1,55 @@
-import { useSyncExternalStore } from 'react'
+import { useEffect, useState } from 'react'
 import { apiJSON } from '../lib/apiClient'
+import { useApiOrgId } from './useApiOrgId'
 
-// Shared store for GET /api/entitlements — the gated EE features licensed in
-// this deployment (for the viewer's active org in multi mode). Mirrors the
-// module-store + useSyncExternalStore + org-switch-invalidation shape of
-// useTeams: one module-level cache means every EE surface shares one
-// round-trip, and the fetch fires lazily on the first subscriber.
+// Shared store for GET /api/orgs/{org_id}/entitlements — the gated EE features
+// licensed for an org. One module-level cache per org means every EE surface
+// showing that org shares one round-trip, and the fetch fires lazily on the
+// first subscriber for it.
 //
 // This is a deliberately thin mirror of the probe. The entitlement check is
 // mode-agnostic server-side — a feature's EE-ness never depends on local vs
-// multi — so the hook carries no local/multi logic. In any unlicensed build
-// (a local install included) the set is empty and has(x) is false for all; that
-// is correct, not a withheld feature, because the EE surfaces are cross-team /
-// org-wide lenses whose within-boundary core counterparts don't gate on
-// entitlements at all. EE surfaces gate on `loaded && has('<feature>')`.
+// multi — so the hook carries no local/multi logic beyond which org it reads
+// (useApiOrgId). In any unlicensed build (a local install included) the set is
+// empty and has(x) is false for all; that is correct, not a withheld feature,
+// because the EE surfaces are cross-team / org-wide lenses whose
+// within-boundary core counterparts don't gate on entitlements at all. EE
+// surfaces gate on `loaded && has('<feature>')`.
 //
-// The multi-mode answer is scoped to the ACTIVE ORG, so switching orgs drops
-// this cache (org A may license governance, org B may not) — exactly like
-// useTeams. OrgPicker calls invalidateEntitlements() on switch. Today a
-// deployment license answers the same for every org so the refetch is a no-op
-// in effect; the seam is in place for when per-org (Stripe) entitlements land.
+// The answer is the org's, and the cache is keyed by it, so an org switch
+// reads the new org's set and a slow answer for the previous org lands in that
+// org's entry rather than over the new one.
 
-type State = {
-  features: Set<string>
-  loaded: boolean
-}
-
-let state: State = { features: new Set(), loaded: false }
+const cache = new Map<string, Set<string>>()
+const inFlight = new Map<string, Promise<void>>()
 const listeners = new Set<() => void>()
-let inFlight: Promise<void> | null = null
-// Bumped whenever the cache is replaced wholesale (org-switch invalidate). A
-// fetch captures the generation at dispatch and discards its result if a newer
-// invalidation has since bumped it — so a slow request for the previous org
-// can't repopulate the cache after the active org changed (which would surface
-// the wrong org's feature set). Same guard as useTeams.
-let generation = 0
 
-function setState(next: State) {
-  state = next
+function notify() {
   for (const l of listeners) l()
 }
 
-function load(): Promise<void> {
-  if (inFlight) return inFlight
-  const gen = generation
-  inFlight = apiJSON<{ features?: string[] }>('/api/entitlements')
+function load(orgId: string): Promise<void> {
+  const pending = inFlight.get(orgId)
+  if (pending) return pending
+  const read = apiJSON<{ features?: string[] }>(
+    `/api/orgs/${encodeURIComponent(orgId)}/entitlements`,
+  )
     .then((data) => {
-      if (gen !== generation) return // superseded — a newer invalidation won
-      setState({ features: new Set(data.features ?? []), loaded: true })
+      cache.set(orgId, new Set(data.features ?? []))
     })
     .catch(() => {
-      if (gen !== generation) return
-      // Fail closed: keep the feature set empty but flip `loaded` true, so EE
+      // Fail closed: keep the feature set empty but resolve the org, so EE
       // surfaces resolve (hidden) rather than flickering or hanging unresolved.
       // The probe is a core route that always answers in a healthy deployment;
       // a transient failure must not strand the gate.
-      setState({ features: new Set(), loaded: true })
+      cache.set(orgId, new Set())
     })
     .finally(() => {
-      // Only clear if it's still ours — an invalidate may have nulled it and a
-      // newer load() installed its own promise.
-      if (gen === generation) inFlight = null
+      inFlight.delete(orgId)
+      notify()
     })
-  return inFlight
-}
-
-function subscribe(cb: () => void): () => void {
-  listeners.add(cb)
-  // Lazy first load: the first subscriber kicks the single fetch.
-  if (!state.loaded && !inFlight) void load()
-  return () => {
-    listeners.delete(cb)
-  }
-}
-
-function getSnapshot(): State {
-  return state
-}
-
-/** Drop the cached entitlements and reload for any mounted subscriber. Call on
- *  active-org switch — entitlements are scoped to the active org in multi mode,
- *  so the previous org's set must not linger. OrgPicker does this alongside
- *  invalidateTeams(). Bumps the generation first so a still-pending prior-org
- *  request can't repopulate the cache after the reset. */
-export function invalidateEntitlements(): void {
-  generation++
-  inFlight = null
-  state = { features: new Set(), loaded: false }
-  // Reload for any mounted subscriber — load() re-notifies via setState. With
-  // no subscribers the reset above already flips loaded=false, so the next
-  // subscribe() kicks a fresh load.
-  if (listeners.size > 0) void load()
+  inFlight.set(orgId, read)
+  return read
 }
 
 // Feature ids gated by entitlements — mirrors the wire values of
@@ -103,7 +62,7 @@ export const FeatureSSO = 'sso' as const
 export const FeatureSlack = 'slack' as const
 // FeatureFleet gates the sandbox-fleet administration console. Deployment-
 // scoped server-side (resolves via entitlements.Active()); on self-host the
-// /api/entitlements probe reports it identically for every org, so the FE gate
+// entitlements probe reports it identically for every org, so the FE gate
 // `has(FeatureFleet)` is correct here. The nav item additionally requires the
 // operator flag from /api/me — the two compose exactly as the backend gate does.
 export const FeatureFleet = 'fleet' as const
@@ -115,29 +74,44 @@ export interface Entitlements {
    *  empty (the within-boundary core surfaces don't gate on this). Pass a
    *  Fe* constant (e.g. FeatureGovernance), not a bare string. */
   has: (feature: string) => boolean
-  /** True once GET /api/entitlements has resolved (success or fail-closed).
+  /** True once the org's entitlements read has resolved (success or fail-closed).
    *  Gate EE surfaces on `loaded && has('x')` so they don't flash before the
    *  probe answers. */
   loaded: boolean
 }
 
 // useEntitlements exposes the available-feature check to EE frontend surfaces.
-// The returned `has` reads the shared cache, so N consumers across the app
-// trigger exactly one /api/entitlements fetch (until an org switch invalidates).
+// The returned `has` reads the shared cache, so N consumers of one org trigger
+// exactly one entitlements fetch.
 export function useEntitlements(): Entitlements {
-  const snap = useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
+  const orgId = useApiOrgId()
+  const [, forceRender] = useState(0)
+
+  useEffect(() => {
+    const cb = () => forceRender((n) => n + 1)
+    listeners.add(cb)
+    // Another consumer may have filled the entry between this render and the
+    // effect, with no notify left to deliver; re-render to read it.
+    if (orgId) {
+      if (cache.has(orgId)) cb()
+      else void load(orgId)
+    }
+    return () => {
+      listeners.delete(cb)
+    }
+  }, [orgId])
+
+  const features = orgId ? cache.get(orgId) : undefined
   return {
-    has: (feature: string) => snap.features.has(feature),
-    loaded: snap.loaded,
+    has: (feature: string) => features?.has(feature) ?? false,
+    loaded: features !== undefined,
   }
 }
 
 // resetEntitlementsForTest clears the module-level cache so each test starts
-// from the pre-fetch state. Test-only — production invalidates per active-org
-// switch via invalidateEntitlements, never wholesale.
+// from the pre-fetch state. Test-only.
 export function resetEntitlementsForTest(): void {
-  generation++
-  state = { features: new Set(), loaded: false }
-  inFlight = null
+  cache.clear()
+  inFlight.clear()
   listeners.clear()
 }

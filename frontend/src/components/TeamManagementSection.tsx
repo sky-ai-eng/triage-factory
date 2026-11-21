@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Archive, Plus, RotateCcw, Users } from 'lucide-react'
 import { useTeams } from '../hooks/useTeams'
+import { useApiOrgId } from '../hooks/useApiOrgId'
 import {
   fetchArchivedTeams,
   fetchArchivePreview,
@@ -27,6 +28,7 @@ import ArchiveTeamModal from './ArchiveTeamModal'
 // there is no per-org editable source for this section to point at.
 export default function TeamManagementSection() {
   const { teams, createTeam, refresh: refreshTeams } = useTeams()
+  const orgId = useApiOrgId()
   const [name, setName] = useState('')
   const [creating, setCreating] = useState(false)
 
@@ -66,13 +68,14 @@ export default function TeamManagementSection() {
   )
 
   const loadArchived = useCallback(async () => {
+    if (!orgId) return
     setArchivedError(null)
     try {
-      setArchived(await fetchArchivedTeams())
+      setArchived(await fetchArchivedTeams(orgId))
     } catch (err) {
       setArchivedError(err instanceof Error ? err.message : 'Failed to load archived teams')
     }
-  }, [])
+  }, [orgId])
 
   useEffect(() => {
     if (showArchived && archived === null) void loadArchived()

@@ -53,7 +53,7 @@ type Session struct {
 	// requests under. NULL when the user has no memberships yet
 	// (first-time login pre-invite) — handlers that require an org
 	// then return 409 and the SPA prompts the user to pick or join one.
-	// Switched server-side via POST /api/me/active-org.
+	// Switched server-side via PATCH /api/me.
 	ActiveOrgID uuid.NullUUID
 	// AuthUserID is the GoTrue login identity (auth.users id) the session was
 	// signed in as — one of the N identities UserID's principal may hold.
@@ -70,7 +70,7 @@ type Session struct {
 // activeOrgID may be invalid (Valid=false) for a user with zero
 // memberships at login time; the row stores NULL and handlers that
 // require an org-scoped identity will 409 until the user calls
-// POST /api/me/active-org.
+// PATCH /api/me.
 //
 // authUserID is the login identity the JWT names, and ssoProviderID the SSO
 // provider the sign-in came through ("" for GitHub, stored NULL).

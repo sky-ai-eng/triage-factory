@@ -747,36 +747,33 @@ func (s *Server) handleLogoutAll(w http.ResponseWriter, r *http.Request) {
 	opLogoutAll.Write(w)
 }
 
-// activeOrgRequest is the body of POST /api/me/active-org.
-type activeOrgRequest struct {
-	OrgID string `json:"org_id" doc:"The id of the organization to make the session's current one, which must be one the caller belongs to."`
+// meUpdateRequest is the body of PATCH /api/me.
+type meUpdateRequest struct {
+	ActiveOrgID httpx.Patch[string] `json:"active_org_id" doc:"The id of the organization the caller's session acts in, which must be one they belong to and whose single sign-on requirement the session meets. A session's organization cannot be cleared, so null is refused."`
 }
 
-// activeOrgResponse is the empty object POST /api/me/active-org answers.
-type activeOrgResponse struct{}
-
-var opActiveOrg = httpx.NewJSONOp[activeOrgRequest, activeOrgResponse](httpx.OpSpec{
-	Pattern:     "POST /api/me/active-org",
-	ID:          "set_active_org",
+var opMeUpdate = httpx.NewJSONOp[meUpdateRequest, meResponse](httpx.OpSpec{
+	Pattern:     "PATCH /api/me",
+	ID:          "update_me",
 	Summary:     "Switch the session's current organization",
-	Description: "Makes the named organization the current one for the caller's session, so the session's later requests act in it, and answers an empty object. An API token is refused, because its organization is fixed when it is created. Multi mode only.",
+	Description: "Sets active_org_id, the organization the caller's session acts in, so the session's later requests act in it, and returns the caller's identity and memberships as GET /api/me does. An API token is refused, because its organization is fixed when it is created. Multi mode only.",
 	BodyLimit:   1 << 10,
 	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
 })
 
-// handleActiveOrgUpdate swaps the active org for the caller's session.
-// Wrapped at mount time in withCSRFOriginCheck + withSession.
+// handleMeUpdate writes the caller's session's active org, the one field of
+// the me resource a caller sets. Wrapped at mount time in
+// withCSRFOriginCheck + withSession.
 //
-// POST /api/me/active-org  body: { "org_id": "<uuid>" }
+// PATCH /api/me  body: { "active_org_id": "<uuid>" }
 //
-// The active-org primitive. We deliberately store the choice
-// on the session row (single source of truth across tabs) rather than
-// in the URL path. The next request's withSession reads the new value
-// into ctxKeyOrgID; tab B sees the switch on its next round trip.
+// The choice is stored on the session row (single source of truth across
+// tabs) rather than in the URL path. The next request's withSession reads the
+// new value into ctxKeyOrgID; tab B sees the switch on its next round trip.
 //
 // 404-on-non-member mirrors the org-membership gate's posture — don't disclose
 // whether the org exists to a user who isn't in it.
-func (s *Server) handleActiveOrgUpdate(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleMeUpdate(w http.ResponseWriter, r *http.Request) {
 	if s.authDeps == nil {
 		// The whole multi-mode auth surface is absent in local mode: a route that
 		// doesn't exist in this deployment mode answers 404.
@@ -798,22 +795,34 @@ func (s *Server) handleActiveOrgUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	sess := SessionFrom(r.Context())
 	if sess == nil {
-		authLog.Error("active-org update: no session in context, route missing withsession")
+		authLog.Error("me update: no session in context, route missing withsession")
 		writeUnauth(w)
 		return
 	}
 
-	// Strict, capped decoding like every other body: the raw decoder here
-	// accepted trailing junk and unknown fields.
-	body, decoded := opActiveOrg.Decode(w, r)
+	body, decoded := opMeUpdate.Decode(w, r)
 	if !decoded {
 		return
 	}
-	orgUUID, err := uuid.Parse(body.OrgID)
-	if err != nil {
+	var v httpx.Validation
+	raw, state := body.ActiveOrgID.Read(&v, "active_org_id")
+	var orgUUID uuid.UUID
+	switch state {
+	case httpx.PatchAbsent:
 		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-			Reason: httpx.ReasonInvalidField, Message: "org_id must be a valid org id", Field: "org_id",
+			Reason: httpx.ReasonMissingField, Message: "no fields to update: provide active_org_id", Field: "active_org_id",
 		})
+		return
+	case httpx.PatchClear:
+		v.Invalid("active_org_id", "active_org_id cannot be cleared: name the organization to switch to")
+	case httpx.PatchSet:
+		parsed, err := uuid.Parse(raw)
+		if err != nil {
+			v.Invalid("active_org_id", "active_org_id must be a valid org id")
+		}
+		orgUUID = parsed
+	}
+	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
 
@@ -846,7 +855,14 @@ func (s *Server) handleActiveOrgUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	opActiveOrg.Write(w, activeOrgResponse{})
+	// The resource as the next GET reads it: this request's context still
+	// carries the org the session had when it arrived.
+	resp, err := s.buildMe(httpx.WithOrgID(r.Context(), orgUUID.String()), claims)
+	if err != nil {
+		internalError(w, "auth", err)
+		return
+	}
+	opMeUpdate.Write(w, resp)
 }
 
 // meOrgRow is one org in GET /api/me's orgs list.
@@ -944,6 +960,18 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		writeUnauth(w)
 		return
 	}
+	resp, err := s.buildMe(r.Context(), claims)
+	if err != nil {
+		internalError(w, "auth", err)
+		return
+	}
+	opMe.Write(w, resp)
+}
+
+// buildMe assembles the me resource for claims, with the active org ctx
+// carries. GET /api/me answers it, and PATCH /api/me answers it after its
+// write, with the org it just set.
+func (s *Server) buildMe(ctx context.Context, claims *verify.Claims) (meResponse, error) {
 
 	// Local-mode shim path: withSession injects a synthetic claim
 	// carrying LocalDefaultUserID when authDeps is nil. The multi-mode
@@ -995,17 +1023,17 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 			// bare-rig test.
 			var ghHost, jiraHost, linearWorkspace string
 			if s.orgs != nil {
-				if orgSet, err := s.orgs.GetSettings(r.Context(), runmode.LocalDefaultOrgID); err == nil {
+				if orgSet, err := s.orgs.GetSettings(ctx, runmode.LocalDefaultOrgID); err == nil {
 					ghHost = orgSet.GitHubBaseURL
 					jiraHost = orgSet.JiraBaseURL
 					linearWorkspace = orgSet.LinearWorkspaceID
 				}
 			}
-			if identity, _ := s.users.GetGitHubIdentity(r.Context(), runmode.LocalDefaultUserID, ghHost); identity != nil {
+			if identity, _ := s.users.GetGitHubIdentity(ctx, runmode.LocalDefaultUserID, ghHost); identity != nil {
 				resp.GitHubUsername, resp.GitHubUserID = identity.Login, identity.GitHubUserID
 			}
-			resp.JiraAccountID, resp.JiraDisplayName, _ = s.users.GetJiraIdentity(r.Context(), runmode.LocalDefaultUserID, jiraHost)
-			resp.LinearUserID, resp.LinearDisplayName, _ = s.users.GetLinearIdentity(r.Context(), runmode.LocalDefaultUserID, linearWorkspace)
+			resp.JiraAccountID, resp.JiraDisplayName, _ = s.users.GetJiraIdentity(ctx, runmode.LocalDefaultUserID, jiraHost)
+			resp.LinearUserID, resp.LinearDisplayName, _ = s.users.GetLinearIdentity(ctx, runmode.LocalDefaultUserID, linearWorkspace)
 		}
 		// The sole local team, which local mode reports the single user as
 		// admin of — the same role the teams list gives the per-team gates, so
@@ -1013,18 +1041,16 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		// nobody has provisioned yet and leaves the list empty, which is an
 		// answer rather than a fault; localDefaultTeam carries the reasoning
 		// for that and for the states it refuses instead.
-		localTeam, err := s.localDefaultTeam(r.Context())
+		localTeam, err := s.localDefaultTeam(ctx)
 		if err != nil {
-			internalError(w, "auth", err)
-			return
+			return meResponse{}, err
 		}
 		if localTeam != nil {
 			resp.Teams = append(resp.Teams, meTeamRow{
 				ID: localTeam.ID, Name: localTeam.Name, OrgID: localTeam.OrgID, Role: localTeam.Role,
 			})
 		}
-		opMe.Write(w, resp)
-		return
+		return resp, nil
 	}
 
 	var resp meResponse
@@ -1032,7 +1058,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	resp.Teams = []meTeamRow{}
 	resp.Email = claims.Email
 	resp.OrgCreationEnabled = runmode.OrgCreationEnabled()
-	resp.CanCreateOrg = orgCreationBlocked(r.Context()) == ""
+	resp.CanCreateOrg = orgCreationBlocked(ctx) == ""
 	// Deployment-operator flag: whether a grant is bound to the principal, or
 	// one of its login identities holds a pending grant's address verified —
 	// the same read the fleet gate makes, so the flag and the console agree.
@@ -1041,7 +1067,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	// (operators has no RLS policy); best-effort — a lookup error leaves it
 	// false (fail closed, the console 404s), never fails the identity read.
 	if s.allStores.Operators != nil {
-		if ok, err := s.allStores.Operators.IsOperatorUserSystem(r.Context(), claims.Subject); err != nil {
+		if ok, err := s.allStores.Operators.IsOperatorUserSystem(ctx, claims.Subject); err != nil {
 			serverLog.Warn("operator lookup failed on /api/me", "error", err)
 		} else {
 			resp.IsOperator = ok
@@ -1052,7 +1078,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	// same place, so this answers for both credentials. Reaching into the
 	// session here would tell a Bearer caller they have no active org — on the
 	// one endpoint every client reads to find out.
-	resp.ActiveOrgID = OrgIDFrom(r.Context())
+	resp.ActiveOrgID = OrgIDFrom(ctx)
 
 	// Wrap both reads in a single transaction with request.jwt.claims
 	// populated, so the queries source the identity from
@@ -1067,7 +1093,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	// to the active org's GitHub host. A stale/empty active org
 	// is harmless: org_event_sources RLS filters it out and the lookup falls
 	// back to the most-recently-verified identity row.
-	err := tfdb.WithReadTx(r.Context(), s.db,
+	err := tfdb.WithReadTx(ctx, s.db,
 		tfdb.Claims{Sub: claims.Subject, OrgID: resp.ActiveOrgID},
 		func(tx *sql.Tx) error {
 			// Identity is host-scoped for GitHub and Jira: prefer the row
@@ -1084,7 +1110,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 			// membership EXISTS does.
 			//
 			// An absent row scans to "" for every provider.
-			if err := tx.QueryRowContext(r.Context(), `
+			if err := tx.QueryRowContext(ctx, `
 				SELECT u.id::text,
 				       COALESCE(u.display_name, ''),
 				       COALESCE(u.avatar_url, ''),
@@ -1137,7 +1163,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 			// transaction is one connection, and a still-open result set on it
 			// is a busy connection rather than a second cursor.
 			readOrgs := func() error {
-				rows, err := tx.QueryContext(r.Context(), `
+				rows, err := tx.QueryContext(ctx, `
 					SELECT o.id::text, o.name, om.role
 					  FROM org_memberships om
 					  JOIN orgs o ON o.id = om.org_id
@@ -1167,7 +1193,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 			// team from every selector. Ordered (org_id, name) with an id
 			// tiebreak so the shape is stable across reads.
 			readTeams := func() error {
-				rows, err := tx.QueryContext(r.Context(), `
+				rows, err := tx.QueryContext(ctx, `
 					SELECT t.id::text, t.name, t.org_id::text, m.role::text
 					  FROM memberships m
 					  JOIN teams t ON t.id = m.team_id
@@ -1196,8 +1222,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		},
 	)
 	if err != nil {
-		internalError(w, "auth", fmt.Errorf("/api/me for %s: %w", claims.Subject, err))
-		return
+		return meResponse{}, fmt.Errorf("/api/me for %s: %w", claims.Subject, err)
 	}
 
 	// Which of the caller's orgs this credential may not act in, so the client
@@ -1205,10 +1230,9 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	// The same per-request read every enforcement point makes; a failure fails
 	// the read rather than reporting an org as usable.
 	for i := range resp.Orgs {
-		gate, err := s.requestSSOGate(r.Context(), resp.Orgs[i].ID)
+		gate, err := s.requestSSOGate(ctx, resp.Orgs[i].ID)
 		if err != nil {
-			internalError(w, "auth", fmt.Errorf("/api/me sso gate for org %s: %w", resp.Orgs[i].ID, err))
-			return
+			return meResponse{}, fmt.Errorf("/api/me sso gate for org %s: %w", resp.Orgs[i].ID, err)
 		}
 		resp.Orgs[i].SSORequired = gate.Barred
 		resp.Orgs[i].SSOStartURL = gate.StartURL
@@ -1233,7 +1257,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	opMe.Write(w, resp)
+	return resp, nil
 }
 
 // localDefaultTeam resolves the one team a local install has, for /api/me's
@@ -2116,6 +2140,7 @@ func (s *Server) registerAuthRoutes() {
 	// "Login methods" view. Personal read keyed on the session principal, no
 	// org scoping. Both modes (local returns a single synthetic row).
 	s.op(opMeIdentities, s.handleMeIdentities)
-	// Switch the session's active org.
-	s.op(opActiveOrg, s.handleActiveOrgUpdate)
+	// Switch the session's active org, the one field of /api/me a caller
+	// writes.
+	s.op(opMeUpdate, s.handleMeUpdate)
 }

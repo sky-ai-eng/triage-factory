@@ -9,30 +9,27 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// testEntitlementsOrgID is the org seeded into authedReq's context so
-// handleEntitlements' For(orgID) lookup resolves an org — RegisterProvider's
-// Static provider grants the same features to every org, so the specific
-// value is arbitrary but must be present for the resolve to succeed.
-const testEntitlementsOrgID = "11111111-1111-1111-1111-111111111111"
-
-// authedReq builds a GET /api/entitlements request carrying a verified-session
-// claim and an active org in context, the way withSession would seed it before
-// the handler runs. The handler reads no Server fields, so a bare &Server{}
-// drives it without the auth/pg stack — the entitlements provider is
-// process-global, not request-scoped.
-func authedReq() *http.Request {
-	req := httptest.NewRequest(http.MethodGet, "/api/entitlements", nil)
-	ctx := httpx.WithClaims(req.Context(), &verify.Claims{Subject: "test-user"})
-	ctx = httpx.WithOrgID(ctx, testEntitlementsOrgID)
-	return req.WithContext(ctx)
+// entitlementsReq builds a GET of orgID's entitlements carrying a
+// verified-session claim, the way withSession would seed it before the
+// handler runs. Local mode's member gate admits its sentinel org with no
+// database, so a Server holding only an authz Checker drives it; the
+// entitlements provider is process-global, not request-scoped.
+func entitlementsReq(orgID string, withClaims bool) *http.Request {
+	req := httptest.NewRequest(http.MethodGet, "/api/orgs/"+orgID+"/entitlements", nil)
+	req.SetPathValue("org_id", orgID)
+	if withClaims {
+		req = req.WithContext(httpx.WithClaims(req.Context(), &verify.Claims{Subject: "test-user"}))
+	}
+	return req
 }
 
-func recordEntitlements() *httptest.ResponseRecorder {
+func recordEntitlements(orgID string, withClaims bool) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
-	(&Server{}).handleEntitlements(rec, authedReq())
+	(&Server{az: authz.New(nil, nil)}).handleEntitlements(rec, entitlementsReq(orgID, withClaims))
 	return rec
 }
 
@@ -50,52 +47,52 @@ func decodeFeatures(t *testing.T, rec *httptest.ResponseRecorder) []string {
 	return resp.Features
 }
 
-// TestEntitlements_GatingIsModeAgnostic: the probe reports the checker's state
-// and nothing about runmode, so an unlicensed local build reports [] exactly as
-// unlicensed multi does; local mode gets no entitlement pass.
-func TestEntitlements_GatingIsModeAgnostic(t *testing.T) {
-	for _, mode := range []runmode.Mode{runmode.ModeLocal, runmode.ModeMulti} {
-		t.Run(string(mode)+"/unlicensed_is_empty", func(t *testing.T) {
-			runmode.SetForTest(t, mode)
-			entitlements.Reset()
-			t.Cleanup(entitlements.Reset)
+// TestEntitlements_LocalReportsTheProvider: the probe reports the checker's
+// state and nothing about runmode, so an unlicensed local build reports []
+// and local mode gets no entitlement pass. The multi arm of the same rule is
+// TestEntitlements_MultiReadsTheNamedOrg.
+func TestEntitlements_LocalReportsTheProvider(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
 
-			rec := recordEntitlements()
-			if got := decodeFeatures(t, rec); len(got) != 0 {
-				t.Fatalf("features = %v, want [] for an unlicensed build in %s mode", got, mode)
-			}
-			// Wire form must be [] (a non-nil JSON array), never null.
-			if body := rec.Body.String(); !jsonHasEmptyFeaturesArray(body) {
-				t.Fatalf("body = %s, want a features:[] array (not null)", body)
-			}
-		})
+	t.Run("unlicensed_is_empty", func(t *testing.T) {
+		entitlements.Reset()
+		t.Cleanup(entitlements.Reset)
 
-		t.Run(string(mode)+"/governance_granted", func(t *testing.T) {
-			runmode.SetForTest(t, mode)
-			entitlements.RegisterProvider(entitlements.Static(entitlements.FeatureGovernance))
-			t.Cleanup(entitlements.Reset)
+		rec := recordEntitlements(runmode.LocalDefaultOrgID, true)
+		if got := decodeFeatures(t, rec); len(got) != 0 {
+			t.Fatalf("features = %v, want [] for an unlicensed local build", got)
+		}
+		// Wire form must be [] (a non-nil JSON array), never null.
+		if body := rec.Body.String(); !jsonHasEmptyFeaturesArray(body) {
+			t.Fatalf("body = %s, want a features:[] array (not null)", body)
+		}
+	})
 
-			got := decodeFeatures(t, recordEntitlements())
-			if len(got) != 1 || got[0] != string(entitlements.FeatureGovernance) {
-				t.Fatalf("features = %v, want [%q] in %s mode", got, entitlements.FeatureGovernance, mode)
-			}
-		})
-	}
+	t.Run("governance_granted", func(t *testing.T) {
+		entitlements.RegisterProvider(entitlements.Static(entitlements.FeatureGovernance))
+		t.Cleanup(entitlements.Reset)
+
+		got := decodeFeatures(t, recordEntitlements(runmode.LocalDefaultOrgID, true))
+		if len(got) != 1 || got[0] != string(entitlements.FeatureGovernance) {
+			t.Fatalf("features = %v, want [%q]", got, entitlements.FeatureGovernance)
+		}
+	})
 }
 
-// The route is authenticated-session-only: no claims in context → 401, never a
-// 200 that would leak the deployment's feature state to an anonymous caller.
-func TestEntitlements_RequiresSession(t *testing.T) {
+// The route needs a credential: no claims in context → 401, never a 200 that
+// would leak the deployment's feature state to an anonymous caller. An org the
+// caller cannot reach is 404, as on every org-addressed route.
+func TestEntitlements_RequiresSessionAndMembership(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
 	entitlements.Reset() // start from a known baseline, independent of test order
 	entitlements.RegisterProvider(entitlements.Static(entitlements.FeatureGovernance))
 	t.Cleanup(entitlements.Reset)
 
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/entitlements", nil) // no WithClaims
-	(&Server{}).handleEntitlements(rec, req)
-
-	if rec.Code != http.StatusUnauthorized {
+	if rec := recordEntitlements(runmode.LocalDefaultOrgID, false); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401 for an unauthenticated request", rec.Code)
+	}
+	if rec := recordEntitlements("22222222-2222-2222-2222-222222222222", true); rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 for an org outside local mode's one", rec.Code)
 	}
 }
 

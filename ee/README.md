@@ -49,7 +49,7 @@ dormancy contract — is in
 - `ee/sso/store` — the SQLite + Postgres `sso_*` store implementations and
   domain types.
 - Frontend SSO surface is gated at render time on the `sso` entitlement served
-  by `/api/entitlements` (the `useEntitlements` hook — a single SPA bundle
+  by `/api/orgs/{org_id}/entitlements` (the `useEntitlements` hook — a single SPA bundle
   can't be split per-license, so the UI is present but inert without the
   feature).
 
