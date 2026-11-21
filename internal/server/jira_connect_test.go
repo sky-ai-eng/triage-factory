@@ -206,9 +206,11 @@ func TestJiraIdentityAPIToken_MissingHalf_Returns400(t *testing.T) {
 }
 
 // TestJiraIdentity_OtherDeploymentsRoute_Returns409: each paste route takes
-// the credential of one deployment, so a well-formed body sent to the route
-// for the deployment the org is not on is a 409 CONFLICT naming the route it
-// belongs on, and no credential is stored.
+// the credential of one deployment, so a call to the route for the deployment
+// the org is not on is a 409 CONFLICT naming the route it belongs on, and no
+// credential is stored. That holds whichever body the call carries: the
+// route's own, or the other deployment's, which is what a caller sends when it
+// picked the wrong route.
 func TestJiraIdentity_OtherDeploymentsRoute_Returns409(t *testing.T) {
 	for _, tc := range []struct {
 		name, method, host, route, wantRoute string
@@ -216,8 +218,12 @@ func TestJiraIdentity_OtherDeploymentsRoute_Returns409(t *testing.T) {
 	}{
 		{"pat on a Cloud org", "cloud_api_token", "https://acme.atlassian.net", jiraIdentityPATRoute, "/jira/identity/api-token",
 			map[string]any{"pat": "tok"}},
+		{"email and token to the pat route on a Cloud org", "cloud_api_token", "https://acme.atlassian.net", jiraIdentityPATRoute, "/jira/identity/api-token",
+			map[string]any{"email": "me@acme.com", "token": "cloud-tok"}},
 		{"api token on a Data Center org", "dc_pat", "https://jira.corp.example.com", jiraIdentityAPITokenRoute, "/jira/identity/pat",
 			map[string]any{"email": "me@acme.com", "token": "cloud-tok"}},
+		{"pat to the api-token route on a Data Center org", "dc_pat", "https://jira.corp.example.com", jiraIdentityAPITokenRoute, "/jira/identity/pat",
+			map[string]any{"pat": "tok"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			runmode.SetForTest(t, runmode.ModeLocal)
@@ -385,9 +391,11 @@ func TestJiraIdentityStatus_NoJiraConfigured_EmptyHost(t *testing.T) {
 // host TF cannot reach is not (502). None of them stores a credential.
 func TestJiraIdentityPAT_RefusalsStoreNothing(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		host func(t *testing.T) string
-		want int
+		name       string
+		host       func(t *testing.T) string
+		want       int
+		wantReason string
+		wantField  string
 	}{
 		{"bad token", func(t *testing.T) string {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -395,14 +403,14 @@ func TestJiraIdentityPAT_RefusalsStoreNothing(t *testing.T) {
 			}))
 			t.Cleanup(srv.Close)
 			return srv.URL
-		}, http.StatusUnprocessableEntity},
-		{"no account", func(t *testing.T) string { return jiraMyselfStub(t, `{}`, nil).URL }, http.StatusUnprocessableEntity},
+		}, http.StatusUnprocessableEntity, httpx.ReasonUpstreamRejected, "pat"},
+		{"no account", func(t *testing.T) string { return jiraMyselfStub(t, `{}`, nil).URL }, http.StatusUnprocessableEntity, httpx.ReasonUpstreamRejected, "pat"},
 		{"host unreachable", func(t *testing.T) string {
 			// A closed stub's port refuses every dial.
 			dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 			dead.Close()
 			return dead.URL
-		}, http.StatusBadGateway},
+		}, http.StatusBadGateway, httpx.ReasonUpstreamUnavailable, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			runmode.SetForTest(t, runmode.ModeLocal)
@@ -416,10 +424,36 @@ func TestJiraIdentityPAT_RefusalsStoreNothing(t *testing.T) {
 			if rec.Code != tc.want {
 				t.Fatalf("status=%d body=%s, want %d", rec.Code, rec.Body.String(), tc.want)
 			}
+			httpxtest.AssertFirstError(t, rec, tc.wantReason, tc.wantField)
 			if stored, _ := s.secrets.GetUserSystem(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "jira_token/"+host); stored != "" {
 				t.Errorf("credential stored on a refused bind: %q", stored)
 			}
 		})
+	}
+}
+
+// TestJiraIdentityAPIToken_Rejected_NamesNoField: Jira refuses an email and
+// API token pair without saying which half is wrong, so the 422 names neither
+// field, and nothing is stored.
+func TestJiraIdentityAPIToken_Rejected_NamesNoField(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"message":"Unauthorized"}`, http.StatusUnauthorized)
+	}))
+	t.Cleanup(srv.Close)
+	seedLocalOrgJiraHost(t, s, srv.URL)
+	seedLocalOrgJiraAuthMethod(t, s, "cloud_api_token")
+
+	rec := doJSON(t, s, "POST", jiraIdentityAPITokenRoute,
+		map[string]any{"email": "me@acme.com", "token": "cloud-tok"})
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status=%d body=%s, want 422", rec.Code, rec.Body.String())
+	}
+	httpxtest.AssertFirstError(t, rec, httpx.ReasonUpstreamRejected, "")
+	if stored, _ := s.secrets.GetUserSystem(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "jira_token/"+srv.URL); stored != "" {
+		t.Errorf("credential stored on a refused bind: %q", stored)
 	}
 }
 

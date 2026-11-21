@@ -9,7 +9,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
-	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
@@ -235,8 +234,20 @@ func (s *Server) handleJiraAppImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// In local mode the secret lands in the keychain outside the transaction,
+	// so a failed import puts back the secret that was there before rather
+	// than leaving the org's app without one.
+	restore, unlock, err := s.guardLocalJiraAppWrite(r.Context(), orgID)
+	if err != nil {
+		internalError(w, "jira-app", err)
+		return
+	}
+	defer unlock()
+
+	var stored domain.OrgJiraApp
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		if _, err := tx.JiraApps.UpsertForOrg(r.Context(), domain.OrgJiraApp{
+		var err error
+		if stored, err = tx.JiraApps.UpsertForOrg(r.Context(), domain.OrgJiraApp{
 			OrgID:              orgID,
 			ClientID:           clientID,
 			ClientSecretRef:    jiraOAuthClientSecretKey,
@@ -257,30 +268,15 @@ func (s *Server) handleJiraAppImport(w http.ResponseWriter, r *http.Request) {
 			DetailJSON:  accessDetailCredentialNamed(domain.CredentialKindJiraOAuthApp, "", clientID),
 		})
 	}); err != nil {
-		// Local-mode SecretStore writes hit the OS keychain outside the SQLite
-		// tx; clean up a secret that landed before a later failure so a failed
-		// import leaves no orphan credential. Mirrors the GitHub App import.
-		if runmode.Current() == runmode.ModeLocal {
-			_, _ = s.secrets.Delete(r.Context(), orgID, jiraOAuthClientSecretKey)
+		if restore != nil {
+			restore()
 		}
 		internalError(w, "jira-app", err)
 		return
 	}
 
 	jiraAppLog.Info("stored atlassian oauth app", "client_id", clientID, "org", orgID, "user", userID)
-
-	// Re-read so the response reflects the freshly-persisted row, in the same
-	// shape the status GET serves. connect_available is now necessarily true.
-	var app *domain.OrgJiraApp
-	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		var lerr error
-		app, lerr = tx.JiraApps.GetForOrg(r.Context(), orgID)
-		return lerr
-	}); err != nil {
-		internalError(w, "jira-app", err)
-		return
-	}
-	opJiraAppImport.Write(w, s.jiraAppStatusPayload(r, orgID, userID, app))
+	opJiraAppImport.Write(w, s.jiraAppStatusPayload(r, orgID, userID, &stored))
 }
 
 var opJiraAppDelete = httpx.NewJSONOp[httpx.NoBody, jiraAppStatusResponse](httpx.OpSpec{
@@ -303,6 +299,10 @@ func (s *Server) handleJiraAppDelete(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// Held so a local-mode import's restore cannot put back a secret this
+	// delete removes.
+	s.jiraAppMu.Lock()
+	defer s.jiraAppMu.Unlock()
 
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		// Read first: the delete is idempotent, so without knowing whether an

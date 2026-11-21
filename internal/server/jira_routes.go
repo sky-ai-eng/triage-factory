@@ -17,8 +17,10 @@ func (s *Server) registerJiraRoutes() {
 	// above; see jira_issue_fields_handler.go.
 	s.op(opJiraPrioritiesList, s.handleJiraPrioritiesList)
 	s.op(opJiraPriorityGet, s.handleJiraPriorityGet)
+	s.op(opJiraPriorityGetByName, s.handleJiraPriorityGetByName)
 	s.op(opJiraIssueTypesList, s.handleJiraIssueTypesList)
 	s.op(opJiraIssueTypeGet, s.handleJiraIssueTypeGet)
+	s.op(opJiraIssueTypeGetByName, s.handleJiraIssueTypeGetByName)
 
 	// Per-user Jira access — the Jira sibling of the GitHub identity flow
 	// (jira_connect.go). status reports connected from a STORED credential

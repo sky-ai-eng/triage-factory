@@ -56,6 +56,13 @@ func (s *Server) guardLocalLinearAppWrite(ctx context.Context, orgID string) (re
 	return s.guardLocalSecretWrite(ctx, nil, orgID, linearOAuthClientSecretKey)
 }
 
+// guardLocalJiraAppWrite is guardLocalSecretWrite over the Atlassian OAuth
+// app's client secret, for the app card's store. Its delete takes jiraAppMu
+// too.
+func (s *Server) guardLocalJiraAppWrite(ctx context.Context, orgID string) (restore, unlock func(), err error) {
+	return s.guardLocalSecretWrite(ctx, &s.jiraAppMu, orgID, jiraOAuthClientSecretKey)
+}
+
 // guardJiraWrite takes the org's Jira credential lock (lockJiraCredential)
 // and then guardLocalSecretWrite over the Jira credential's keys, for the Jira
 // bind and unbind. The lock is held in both modes, since it also orders those

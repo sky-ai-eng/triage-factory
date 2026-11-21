@@ -634,7 +634,7 @@ func TestGetByName(t *testing.T) {
 			func(err error) bool { return errors.Is(err, ErrNotFound) }},
 		{"team twice", `{"data":{"teams":{"nodes":[` + team + `,` + team + `]}}}`, "key", `"TFAC"`,
 			func(c *Client) (any, error) { return c.GetTeamByKey(context.Background(), "TFAC") },
-			func(err error) bool { return err != nil && !errors.Is(err, ErrNotFound) }},
+			func(err error) bool { return errors.Is(err, ErrAmbiguous) }},
 		{"user found", `{"data":{"users":{"nodes":[` + user + `]}}}`, "displayName", `"ada"`,
 			func(c *Client) (any, error) { return c.GetUserByDisplayName(context.Background(), "ada") }, nil},
 		{"user none", `{"data":{"users":{"nodes":[]}}}`, "displayName", `"ada"`,
@@ -642,7 +642,7 @@ func TestGetByName(t *testing.T) {
 			func(err error) bool { return errors.Is(err, ErrNotFound) }},
 		{"user twice", `{"data":{"users":{"nodes":[` + user + `,` + user + `]}}}`, "displayName", `"ada"`,
 			func(c *Client) (any, error) { return c.GetUserByDisplayName(context.Background(), "ada") },
-			func(err error) bool { return err != nil && !errors.Is(err, ErrNotFound) }},
+			func(err error) bool { return errors.Is(err, ErrAmbiguous) }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -97,7 +97,10 @@ query Team($id: String!) {
 
 // teamByKeyQuery reads the team the credential can see whose key is exactly
 // the one given. Linear keeps team keys unique within a workspace; two are
-// asked for so the client can tell if it ever does not.
+// asked for so the client can tell if it ever does not. Archived teams are
+// left out, as teamsQuery leaves them out: the key is the name a caller finds
+// in the list, and whether Linear frees an archived team's key for reuse is
+// not something this read relies on.
 const teamByKeyQuery = `
 query TeamByKey($key: String!) {
   teams(filter: { key: { eq: $key } }, first: 2) {

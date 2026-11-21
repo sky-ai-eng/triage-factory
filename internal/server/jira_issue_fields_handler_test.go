@@ -201,3 +201,53 @@ func TestJiraIssueTypes(t *testing.T) {
 		assertOneFault(t, doJSON(t, s, http.MethodGet, jiraProjectPath("SKY")+path, nil), http.StatusNotFound, "NOT_FOUND", "")
 	}
 }
+
+// TestJiraPriorityGetByName: a priority is read by its name, matched with
+// case, so another spelling of it and a name no priority holds are a 404; a
+// blank name is a 404 without asking Jira, and a name Jira answers for two
+// priorities is a 409 rather than a pick.
+func TestJiraPriorityGetByName(t *testing.T) {
+	s, fake := newServerWithJiraCatalog(t, "SKY")
+	byName := func(name string) string { return jiraPrioritiesPath() + "/by-name/" + name }
+
+	rec := doJSON(t, s, http.MethodGet, byName("High"), nil)
+	var one jiraPriorityJSON
+	_ = json.Unmarshal(rec.Body.Bytes(), &one)
+	if rec.Code != http.StatusOK || one != (jiraPriorityJSON{ID: "2", Name: "High"}) {
+		t.Errorf("GET priority by name = %d %+v, want 200 High; body=%s", rec.Code, one, rec.Body.String())
+	}
+	for _, name := range []string{"high", "Urgent"} {
+		assertOneFault(t, doJSON(t, s, http.MethodGet, byName(name), nil), http.StatusNotFound, "NOT_FOUND", "")
+	}
+	before := fake.Calls()
+	assertOneFault(t, doJSON(t, s, http.MethodGet, byName("%20"), nil), http.StatusNotFound, "NOT_FOUND", "")
+	if fake.Calls() != before {
+		t.Error("a blank name reached Jira")
+	}
+
+	fake.SetPriorities(fakeJiraStatus{ID: "1", Name: "High"}, fakeJiraStatus{ID: "2", Name: "High"})
+	assertOneFault(t, doJSON(t, s, http.MethodGet, byName("High"), nil), http.StatusConflict, "CONFLICT", "")
+}
+
+// TestJiraIssueTypeGetByName: an issue type is read by its name among its
+// project's, so another project's issue type is a 404 at this project's
+// address, and a name the project holds twice is a 409.
+func TestJiraIssueTypeGetByName(t *testing.T) {
+	s, fake := newServerWithJiraCatalog(t, "SKY", "OPS")
+	fake.SetIssueTypes("SKY", fakeJiraStatus{ID: "10001", Name: "Task"}, fakeJiraStatus{ID: "10004", Name: "Bug"})
+	fake.SetIssueTypes("OPS", fakeJiraStatus{ID: "10100", Name: "Incident"}, fakeJiraStatus{ID: "10101", Name: "Incident"})
+	byName := func(project, name string) string { return jiraProjectPath(project) + "/issue-types/by-name/" + name }
+
+	rec := doJSON(t, s, http.MethodGet, byName("SKY", "Bug"), nil)
+	var one jiraIssueTypeJSON
+	_ = json.Unmarshal(rec.Body.Bytes(), &one)
+	if rec.Code != http.StatusOK || one != (jiraIssueTypeJSON{ID: "10004", Name: "Bug"}) {
+		t.Errorf("GET issue type by name = %d %+v, want 200 Bug; body=%s", rec.Code, one, rec.Body.String())
+	}
+	for _, name := range []string{"bug", "Incident"} {
+		assertOneFault(t, doJSON(t, s, http.MethodGet, byName("SKY", name), nil), http.StatusNotFound, "NOT_FOUND", "")
+	}
+	assertOneFault(t, doJSON(t, s, http.MethodGet, byName("OPS", "Incident"), nil), http.StatusConflict, "CONFLICT", "")
+	fake.Hide("GONE")
+	assertOneFault(t, doJSON(t, s, http.MethodGet, byName("GONE", "Bug"), nil), http.StatusNotFound, "NOT_FOUND", "")
+}

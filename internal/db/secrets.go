@@ -203,7 +203,7 @@ type SecretStore interface {
 	// No production caller today: it is the secrets half of the per-user
 	// disconnect that UsersStore.ClearJiraIdentity is the identity half of,
 	// and no live HTTP handler surfaces that disconnect yet — the
-	// /jira/identity routes are status + PAT-bind only, so a user-facing
+	// /jira/identity routes are status and credential binds only, so a user-facing
 	// disconnect is still future capture-flow UI work. Such a handler would
 	// clear the identity row AND delete the PAT it captured; this exists now
 	// so that handler is a pure addition, not a store change.

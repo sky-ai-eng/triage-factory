@@ -204,7 +204,7 @@ type Server struct {
 	// as. auth.ValidateLinear in production; tests point it at a fake GraphQL
 	// endpoint.
 	validateLinear func(ctx context.Context, cfg linear.Config) (*auth.LinearUser, *auth.LinearOrganization, error)
-	// anthropicCredentialMu and bedrockCredentialMu
+	// anthropicCredentialMu, bedrockCredentialMu and jiraAppMu
 	// serialize each credential's local-mode bind and unbind across snapshot,
 	// transaction and restore (guardLocalSecretWrite). The keychain sits
 	// outside the SQLite transaction, so two overlapping writes could
@@ -216,6 +216,7 @@ type Server struct {
 	// linearCredentialLock.
 	anthropicCredentialMu sync.Mutex
 	bedrockCredentialMu   sync.Mutex
+	jiraAppMu             sync.Mutex
 	// linearCredentialLock is the per-org lock every writer of an org's
 	// Linear credential holds, this server's handlers and every token cache
 	// alike (lockLinearCredential).

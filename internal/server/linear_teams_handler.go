@@ -202,7 +202,7 @@ var opLinearTeamGetByName = httpx.NewJSONOp[httpx.NoBody, linearTeamJSON](httpx.
 	Pattern:     "GET /api/orgs/{org_id}/linear/teams/by-name/{key}",
 	ID:          "get_linear_team_by_name",
 	Summary:     "Get a Linear team by its key",
-	Description: "Reads the Linear team the organization's Linear credential can see whose key is exactly the one given, matched with case, live from Linear.",
+	Description: "Reads the Linear team the organization's Linear credential can see whose key is exactly the one given, matched with case, live from Linear. An archived team is not found by its key, as it is not listed; it is read by its id. A key Linear answers for more than one team is a 409.",
 	PathParams: map[string]string{
 		"org_id": "The organization's id.",
 		"key":    "The team's key as Linear writes it, such as ENG.",
@@ -227,6 +227,10 @@ func (s *Server) handleLinearTeamGetByName(w http.ResponseWriter, r *http.Reques
 	team, err := client.GetTeamByKey(r.Context(), key)
 	if errors.Is(err, linear.ErrNotFound) {
 		httpx.NotFound(w, "linear team")
+		return
+	}
+	if errors.Is(err, linear.ErrAmbiguous) {
+		writeLinearAmbiguous(w, "More than one Linear team has the key "+key+"; read the team by its id.")
 		return
 	}
 	if err != nil {
@@ -449,6 +453,13 @@ func writeLinearUpstream(w http.ResponseWriter, orgID, what string, err error) {
 		Reason:  httpx.ReasonUpstreamUnavailable,
 		Message: "could not read " + what + " from Linear" + httpx.LocalDetail(err),
 	})
+}
+
+// writeLinearAmbiguous answers a by-name read whose name Linear matched to
+// more than one row: a 409, since Linear's answer is what conflicts with the
+// name being unique, and retrying cannot change it.
+func writeLinearAmbiguous(w http.ResponseWriter, message string) {
+	httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: message})
 }
 
 // isLinearID reports whether s is a Linear entity id as Linear writes one: a

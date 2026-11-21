@@ -81,8 +81,9 @@ func CanonicalHost(orgBase string) (string, bool) {
 
 // UserTokenKey is the per-user secret key a user's Jira access token is
 // custodied under — host-scoped so a user can hold credentials on more than one
-// Jira host (forward-compat; v1 is single-host). Composed here so the bind-flow
-// writer (server.handleJiraIdentityPAT) and this resolver stay in lockstep.
+// Jira host (forward-compat; v1 is single-host). Composed here so the writers
+// (server.bindJiraIdentity, behind both paste routes, and the Connect callback)
+// and this resolver stay in lockstep.
 func UserTokenKey(host string) string {
 	return "jira_token/" + host
 }

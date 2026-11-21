@@ -276,8 +276,10 @@ func (s *Server) handleJiraIdentityStatus(w http.ResponseWriter, r *http.Request
 // route and one struct per deployment. Which shape applies is the ORG's
 // deployment, not the caller's choice — a user cannot bind a Cloud API token
 // against a Data Center site — so each route checks the org's deployment and
-// refuses the other one's, naming the route that takes it. A body holding the
-// other deployment's fields is refused by strict decoding, by name.
+// refuses the other one's, naming the route that takes it. The check runs
+// before the body is decoded: a body written for the other route would
+// otherwise fail strict decoding on its unknown fields, and the caller would
+// never learn which route takes them.
 //
 // Unlike the GitHub sibling, the credential is retained (per-user vault scope):
 // the user acts as themselves on board claims, so it must outlive the request.
@@ -329,6 +331,10 @@ func (s *Server) handleJiraIdentityAPIToken(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
+	host, ok := s.jiraIdentityHost(w, r, orgID, userID, jira.DeploymentCloud)
+	if !ok {
+		return
+	}
 	req, ok := opJiraIdentityAPIToken.Decode(w, r)
 	if !ok {
 		return
@@ -345,10 +351,6 @@ func (s *Server) handleJiraIdentityAPIToken(w http.ResponseWriter, r *http.Reque
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
-	host, ok := s.jiraIdentityHost(w, r, orgID, userID, jira.DeploymentCloud)
-	if !ok {
-		return
-	}
 	envelope, err := jira.MarshalUserCredential(jira.UserCredential{
 		Method: jira.AuthMethodCloudAPIToken,
 		Email:  email,
@@ -363,7 +365,6 @@ func (s *Server) handleJiraIdentityAPIToken(w http.ResponseWriter, r *http.Reque
 		cfg:      jira.CloudAPIToken(host, email, token),
 		envelope: envelope,
 		source:   string(jira.AuthMethodCloudAPIToken),
-		field:    "token",
 	})
 	if !ok {
 		return
@@ -383,6 +384,10 @@ func (s *Server) handleJiraIdentityPAT(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	host, ok := s.jiraIdentityHost(w, r, orgID, userID, jira.DeploymentDataCenter)
+	if !ok {
+		return
+	}
 	req, ok := opJiraIdentityPAT.Decode(w, r)
 	if !ok {
 		return
@@ -390,10 +395,6 @@ func (s *Server) handleJiraIdentityPAT(w http.ResponseWriter, r *http.Request) {
 	pat := strings.TrimSpace(req.PAT)
 	if pat == "" {
 		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "A Jira personal access token is required.", Field: "pat"})
-		return
-	}
-	host, ok := s.jiraIdentityHost(w, r, orgID, userID, jira.DeploymentDataCenter)
-	if !ok {
 		return
 	}
 	envelope, err := jira.MarshalUserCredential(jira.UserCredential{
@@ -454,16 +455,18 @@ func (s *Server) jiraIdentityHost(w http.ResponseWriter, r *http.Request, orgID,
 	case want:
 		return host, true
 	case jira.DeploymentCloud:
-		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "Your organization uses Jira Cloud, which takes your Atlassian account email and an API token: send them to POST /api/orgs/" + orgID + "/jira/identity/api-token."})
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "Your organization uses Jira Cloud, which connects with your Atlassian account email and an API token rather than a personal access token (POST /api/orgs/" + orgID + "/jira/identity/api-token)."})
 	default:
-		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "Your organization uses Jira Data Center, which takes a personal access token: send it to POST /api/orgs/" + orgID + "/jira/identity/pat."})
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "Your organization uses Jira Data Center, which connects with a personal access token rather than an email and API token (POST /api/orgs/" + orgID + "/jira/identity/pat)."})
 	}
 	return "", false
 }
 
 // jiraIdentityBind is one capture: the org's host, the validation Config and
 // the stored envelope built from the credential, the identity source marker,
-// and the route's credential field, which Jira's rejection of it names.
+// and the body field Jira's rejection names. field is empty for an email and
+// API token, because Jira refuses that pair without saying which half is
+// wrong.
 type jiraIdentityBind struct {
 	host     string
 	cfg      jira.Config
@@ -803,9 +806,9 @@ func (s *Server) handleJiraConnectCallback(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Store the rotating refresh token AND derive the identity in one tx —
-	// all-or-nothing, mirroring the paste handler. The credential is keyed under
+	// all-or-nothing, mirroring the paste routes. The credential is keyed under
 	// the same host the assignee-routing reverse lookup uses (see the note in
-	// handleJiraIdentityPAT).
+	// bindJiraIdentity).
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		if err := tx.Secrets.PutUser(r.Context(), orgID, userID, jiraTokenKey(host), envelope, "Jira user access token"); err != nil {
 			return fmt.Errorf("store jira oauth credential: %w", err)
@@ -813,8 +816,8 @@ func (s *Server) handleJiraConnectCallback(w http.ResponseWriter, r *http.Reques
 		if err := tx.Users.UpsertJiraIdentity(r.Context(), userID, host, jiraUser.StableID(), jiraUser.DisplayName, "connect_oauth"); err != nil {
 			return fmt.Errorf("persist jira identity: %w", err)
 		}
-		// TFAC-471: audit the per-user Jira credential bind/rotate in the same
-		// tx, mirroring the paste path (handleJiraIdentityPAT). actor = the user
+		// Audit the per-user Jira credential bind/rotate in the same tx,
+		// mirroring the paste routes (bindJiraIdentity). actor = the user
 		// binding their own access; host carries the org's Jira host.
 		if err := tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
 			ActorUserID: userID,

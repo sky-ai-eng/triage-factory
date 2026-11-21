@@ -89,7 +89,7 @@ var opLinearCredentialPut = httpx.NewJSONOp[linearCredentialRequest, linearAcces
 	Pattern:     "PUT /api/orgs/{org_id}/linear/access/credential",
 	ID:          "replace_linear_access_credential",
 	Summary:     "Set the organization's Linear API key",
-	Description: "Checks a personal Linear API key against Linear, stores it as the organization's Linear credential in place of any API key it had, connects the organization to the key's workspace, and returns the connection status. A key cannot replace an installed Linear app, which is disconnected first.",
+	Description: "Checks a personal Linear API key against Linear, stores it as the organization's Linear credential in place of any API key it had, connects the organization to the key's workspace, and returns the connection status. A key cannot replace an installed Linear app: the app is disconnected first, or the key is refused with a 409.",
 	PathParams:  map[string]string{"org_id": "The organization's id."},
 	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
 })

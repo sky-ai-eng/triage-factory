@@ -158,7 +158,7 @@ func (r *linearInstallRig) registerApp(t *testing.T, clientID string) linearAppS
 	t.Helper()
 	rec := doJSON(t, r.s, http.MethodPut, linearAppPath(), map[string]any{"client_id": clientID, "client_secret": "lin-secret"})
 	if rec.Code != http.StatusOK {
-		t.Fatalf("POST linear app: %d: %s", rec.Code, rec.Body.String())
+		t.Fatalf("PUT linear app: %d: %s", rec.Code, rec.Body.String())
 	}
 	var got linearAppStatusResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {

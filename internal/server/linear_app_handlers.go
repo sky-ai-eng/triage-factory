@@ -172,19 +172,29 @@ func (s *Server) resolveLinearAppSource(ctx context.Context, orgID string) linea
 	return source
 }
 
-// linearAppStatus reads the org's app row and name and assembles the status
-// body.
+// linearAppStatus reads the org's app row and assembles the status body.
 func (s *Server) linearAppStatus(ctx context.Context, orgID, userID string) (linearAppStatusResponse, error) {
+	var app *domain.OrgLinearApp
+	if err := s.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		var err error
+		app, err = tx.LinearApps.GetForOrg(ctx, orgID)
+		return err
+	}); err != nil {
+		return linearAppStatusResponse{}, err
+	}
+	return s.linearAppStatusFor(ctx, orgID, userID, app)
+}
+
+// linearAppStatusFor assembles the status body around app, the org's row (nil
+// when it has none), reading the org's name and the registrant's. A write
+// passes the row it persisted.
+func (s *Server) linearAppStatusFor(ctx context.Context, orgID, userID string, app *domain.OrgLinearApp) (linearAppStatusResponse, error) {
 	var (
-		app          *domain.OrgLinearApp
 		org          *domain.Org
 		registeredBy string
 	)
 	if err := s.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		var err error
-		if app, err = tx.LinearApps.GetForOrg(ctx, orgID); err != nil {
-			return err
-		}
 		if org, err = tx.Orgs.GetOrg(ctx, orgID); err != nil {
 			return err
 		}
@@ -306,8 +316,10 @@ func (s *Server) handleLinearAppImport(w http.ResponseWriter, r *http.Request) {
 	}
 	defer unlock()
 
+	var stored domain.OrgLinearApp
 	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		if _, err := tx.LinearApps.UpsertForOrg(ctx, domain.OrgLinearApp{
+		var err error
+		if stored, err = tx.LinearApps.UpsertForOrg(ctx, domain.OrgLinearApp{
 			OrgID:              orgID,
 			ClientID:           clientID,
 			ClientSecretRef:    linearOAuthClientSecretKey,
@@ -335,7 +347,7 @@ func (s *Server) handleLinearAppImport(w http.ResponseWriter, r *http.Request) {
 	}
 	linearAppLog.Info("stored linear oauth app", "client_id", clientID, "org", orgID, "user", userID)
 
-	resp, err := s.linearAppStatus(ctx, orgID, userID)
+	resp, err := s.linearAppStatusFor(ctx, orgID, userID, &stored)
 	if err != nil {
 		internalError(w, "linear-app", err)
 		return
@@ -415,7 +427,7 @@ func (s *Server) handleLinearAppDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	linearAppLog.Info("removed linear oauth app", "org", orgID, "user", userID)
 
-	resp, err := s.linearAppStatus(ctx, orgID, userID)
+	resp, err := s.linearAppStatusFor(ctx, orgID, userID, nil)
 	if err != nil {
 		internalError(w, "linear-app", err)
 		return

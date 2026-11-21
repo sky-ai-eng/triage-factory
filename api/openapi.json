@@ -2406,6 +2406,60 @@
         }
       }
     },
+    "/api/orgs/{org_id}/jira/priorities/by-name/{name}": {
+      "get": {
+        "description": "Reads the priority of the organization's Jira instance whose name is exactly the one given, matched with case, live from Jira. Jira keeps priority names unique; a name it answers for more than one priority is a 409.",
+        "operationId": "get_jira_priority_by_name",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The priority's name, such as High.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JiraPriorityJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get a Jira priority by its name",
+        "x-hints": {
+          "openWorldHint": true,
+          "readOnlyHint": true
+        }
+      }
+    },
     "/api/orgs/{org_id}/jira/priorities/list": {
       "post": {
         "description": "Reads one page of the priorities of the organization's Jira instance, live from Jira, in Jira's order from highest to lowest. total_count is always null, and page_size 0 is refused.",
@@ -2720,6 +2774,69 @@
           }
         ],
         "summary": "Get a Jira project",
+        "x-hints": {
+          "openWorldHint": true,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/jira/projects/{jira_id}/issue-types/by-name/{name}": {
+      "get": {
+        "description": "Reads the issue type of a Jira project whose name is exactly the one given, matched with case, live from Jira. Jira keeps issue type names unique within a project; a name it answers for more than one of the project's issue types is a 409.",
+        "operationId": "get_jira_project_issue_type_by_name",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Jira's id for the project, a decimal number; a project key is not accepted.",
+            "in": "path",
+            "name": "jira_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The issue type's name, such as Bug.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JiraIssueTypeJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get a Jira project's issue type by its name",
         "x-hints": {
           "openWorldHint": true,
           "readOnlyHint": true
@@ -3120,7 +3237,7 @@
         }
       },
       "put": {
-        "description": "Checks a personal Linear API key against Linear, stores it as the organization's Linear credential in place of any API key it had, connects the organization to the key's workspace, and returns the connection status. A key cannot replace an installed Linear app, which is disconnected first.",
+        "description": "Checks a personal Linear API key against Linear, stores it as the organization's Linear credential in place of any API key it had, connects the organization to the key's workspace, and returns the connection status. A key cannot replace an installed Linear app: the app is disconnected first, or the key is refused with a 409.",
         "operationId": "replace_linear_access_credential",
         "parameters": [
           {
@@ -3514,7 +3631,7 @@
     },
     "/api/orgs/{org_id}/linear/teams/by-name/{key}": {
       "get": {
-        "description": "Reads the Linear team the organization's Linear credential can see whose key is exactly the one given, matched with case, live from Linear.",
+        "description": "Reads the Linear team the organization's Linear credential can see whose key is exactly the one given, matched with case, live from Linear. An archived team is not found by its key, as it is not listed; it is read by its id. A key Linear answers for more than one team is a 409.",
         "operationId": "get_linear_team_by_name",
         "parameters": [
           {
@@ -4003,7 +4120,7 @@
     },
     "/api/orgs/{org_id}/linear/users/by-name/{display_name}": {
       "get": {
-        "description": "Reads the user of the organization's Linear workspace, deactivated or not, whose display name is exactly the one given, matched with case, live from Linear. Linear keeps display names unique within a workspace.",
+        "description": "Reads the user of the organization's Linear workspace, deactivated or not, whose display name is exactly the one given, matched with case, live from Linear. Linear keeps display names unique within a workspace; a display name it answers for more than one user is a 409.",
         "operationId": "get_linear_user_by_name",
         "parameters": [
           {

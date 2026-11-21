@@ -157,7 +157,7 @@ var opLinearUserGetByName = httpx.NewJSONOp[httpx.NoBody, linearUserJSON](httpx.
 	Pattern:     "GET /api/orgs/{org_id}/linear/users/by-name/{display_name}",
 	ID:          "get_linear_user_by_name",
 	Summary:     "Get a Linear user by display name",
-	Description: "Reads the user of the organization's Linear workspace, deactivated or not, whose display name is exactly the one given, matched with case, live from Linear. Linear keeps display names unique within a workspace.",
+	Description: "Reads the user of the organization's Linear workspace, deactivated or not, whose display name is exactly the one given, matched with case, live from Linear. Linear keeps display names unique within a workspace; a display name it answers for more than one user is a 409.",
 	PathParams: map[string]string{
 		"org_id":       "The organization's id.",
 		"display_name": "The user's display name.",
@@ -182,6 +182,10 @@ func (s *Server) handleLinearUserGetByName(w http.ResponseWriter, r *http.Reques
 	user, err := client.GetUserByDisplayName(r.Context(), displayName)
 	if errors.Is(err, linear.ErrNotFound) {
 		httpx.NotFound(w, "linear user")
+		return
+	}
+	if errors.Is(err, linear.ErrAmbiguous) {
+		writeLinearAmbiguous(w, "More than one Linear user has the display name "+displayName+"; read the user by their id.")
 		return
 	}
 	if err != nil {

@@ -327,6 +327,12 @@ func TestLinearTeamGetByName(t *testing.T) {
 	if fake.Calls() != before {
 		t.Error("a blank key reached Linear")
 	}
+
+	// Two teams Linear answers for one key are a 409, not a pick.
+	dup := linearFixtureEng
+	dup.ID = linearTeamOps
+	s, _ = newServerWithLinearCatalog(t, linearFixtureEng, dup)
+	assertOneFault(t, doJSON(t, s, http.MethodGet, byName(linearFixtureEng.Key), nil), http.StatusConflict, "CONFLICT", "")
 }
 
 // TestLinearStatesList_TokenIsBoundToTheTeam: a team's whole workflow pages in

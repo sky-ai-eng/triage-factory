@@ -202,8 +202,8 @@ func (c *Client) GetTeamByKey(ctx context.Context, key string) (Team, error) {
 }
 
 // onlyMatch is the one row a lookup by a name Linear keeps unique returned: no
-// row is ErrNotFound, and more than one is an error rather than a pick, since
-// either row could be the one the caller means.
+// row is ErrNotFound, and more than one is ErrAmbiguous rather than a pick,
+// since either row could be the one the caller means.
 func onlyMatch[T any](rows []T, what, by, value string) (T, error) {
 	var zero T
 	switch len(rows) {
@@ -212,7 +212,7 @@ func onlyMatch[T any](rows []T, what, by, value string) (T, error) {
 	case 1:
 		return rows[0], nil
 	default:
-		return zero, fmt.Errorf("linear: more than one %s has %s %q", what, by, value)
+		return zero, fmt.Errorf("%w: %s with %s %q", ErrAmbiguous, what, by, value)
 	}
 }
 

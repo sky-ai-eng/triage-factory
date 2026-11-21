@@ -183,4 +183,11 @@ func TestLinearUserGetByName(t *testing.T) {
 	if fake.Calls() != before {
 		t.Error("a blank display name reached Linear")
 	}
+
+	// Two users Linear answers for one display name are a 409, not a pick.
+	fake.SetUsers(
+		linear.User{ID: linearUserAda, Name: "Ada Lovelace", DisplayName: "ada", Active: true},
+		linear.User{ID: linearUserAdam, Name: "Adam Smith", DisplayName: "ada", Active: true},
+	)
+	assertOneFault(t, doJSON(t, s, http.MethodGet, byName("ada"), nil), http.StatusConflict, "CONFLICT", "")
 }

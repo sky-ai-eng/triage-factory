@@ -21,6 +21,11 @@ var (
 	// when the limit resets.
 	ErrRateLimited = errors.New("linear: rate limited")
 
+	// ErrAmbiguous is a lookup by a name Linear keeps unique that matched
+	// more than one row. Neither row is picked, and asking again cannot
+	// change the answer; the caller reads the one it means by id.
+	ErrAmbiguous = errors.New("linear: more than one match")
+
 	// ErrNotFound is an id or identifier Linear resolves to nothing, which it
 	// also answers for an entity the credential may not see.
 	ErrNotFound = errors.New("linear: not found")
