@@ -748,6 +748,9 @@ func (h *Handler) handleBlueprintStepsPut(w http.ResponseWriter, r *http.Request
 			// prompt is already a step in a *different* blueprint, refuse with a
 			// clean 422 instead of letting the unique index 500. (Owner == this
 			// blueprint is fine — re-saving its own step list.)
+			// TODO(TFAC-1540): only this PUT's blueprint is held, so two PUTs on
+			// different blueprints that add one prompt both pass, and the
+			// second answers 500 from the unique index.
 			ownerID, owned, e := tx.Blueprints.StepPromptOwner(r.Context(), orgID, sid)
 			if e != nil {
 				return e
@@ -1044,6 +1047,9 @@ func (h *Handler) handleBlueprintSplit(w http.ResponseWriter, r *http.Request) {
 		if e != nil {
 			return e
 		}
+		// TODO(TFAC-1539): the index is checked against the steps held now,
+		// not the ones the caller read, so a split sent after another write
+		// moved them cuts next to a step the caller never chose.
 		// 0 < k < N: a split that keeps one side empty is a no-op.
 		if atIndex <= 0 || atIndex >= len(steps) {
 			fault.raise(http.StatusUnprocessableEntity, httpx.ReasonOutOfRange,
@@ -1193,6 +1199,9 @@ func (h *Handler) handleBlueprintReconnect(w http.ResponseWriter, r *http.Reques
 		if e != nil {
 			return e
 		}
+		// TODO(TFAC-1539): the index is checked against the steps held now,
+		// not the ones the caller read, so a reconnect sent after another
+		// write moved them cuts next to a step the caller never chose.
 		// 0 < k < N: both the surviving upstream and the orphaned downstream must
 		// be non-empty (a sequence edge always sits at such a boundary).
 		if atIndex <= 0 || atIndex >= len(steps) {
