@@ -1,5 +1,59 @@
 # Changelog
 
+## [1.20.0](https://github.com/sky-ai-eng/triage-factory/compare/v1.19.0...v1.20.0) (2026-11-21)
+
+
+### Features
+
+* **api:** declare routes as operations and generate api/openapi.json (TFAC-1526) ([#1680](https://github.com/sky-ai-eng/triage-factory/issues/1680)) ([7081638](https://github.com/sky-ai-eng/triage-factory/commit/7081638ae34ecb2d75b9a64b168c4f9d308c4761))
+* **blueprints:** let a blueprint be run by more than one trigger (TFAC-1498) ([#1650](https://github.com/sky-ai-eng/triage-factory/issues/1650)) ([e1ad477](https://github.com/sky-ai-eng/triage-factory/commit/e1ad477c6060c7c888de86681fda9ca9322cf224))
+* **board:** keep the lanes on screen while the board loads (TFAC-1523, TFAC-1524) ([#1673](https://github.com/sky-ai-eng/triage-factory/issues/1673)) ([ce9b045](https://github.com/sky-ai-eng/triage-factory/commit/ce9b045d5716c17c3621c6dad598a8b585211131))
+* **factory:** replace the snapshot with generic entity, event, task, and conversation reads (TFAC-1454) ([#1669](https://github.com/sky-ai-eng/triage-factory/issues/1669)) ([4f45a10](https://github.com/sky-ai-eng/triage-factory/commit/4f45a10c00f9837ad669b97918466d5cf8f39462))
+* **handlers:** one event handler with a mode replaces rules, triggers, and notify rules (TFAC-1499) ([#1662](https://github.com/sky-ai-eng/triage-factory/issues/1662)) ([e172572](https://github.com/sky-ai-eng/triage-factory/commit/e172572c6e51ed52fc495d3246fd5360e8e3a964))
+* **notify:** make every notify rule tell its team (TFAC-1497) ([#1651](https://github.com/sky-ai-eng/triage-factory/issues/1651)) ([ed883cf](https://github.com/sky-ai-eng/triage-factory/commit/ed883cf49ad39ea0602bec9849714f7bff4aa0ac))
+* **slack:** add Slack metrics, alerts and a dashboard row (TFAC-1492) ([#1646](https://github.com/sky-ai-eng/triage-factory/issues/1646)) ([8af33b4](https://github.com/sky-ai-eng/triage-factory/commit/8af33b4f5c337b6cf6b44ad485d5febbc180ac4d))
+* **slack:** address the Slack org and team routes by path (TFAC-1482) ([#1638](https://github.com/sky-ai-eng/triage-factory/issues/1638)) ([59bf614](https://github.com/sky-ai-eng/triage-factory/commit/59bf6149e2493216a7f2cab97f287edb105f851a))
+* **slack:** alert when the deployment Slack app's deliveries are refused as malformed (TFAC-1509) ([#1677](https://github.com/sky-ai-eng/triage-factory/issues/1677)) ([4e03b16](https://github.com/sky-ai-eng/triage-factory/commit/4e03b167b86609322c50942f4be47b6803ec22fa))
+* **slack:** connect through the deployment's app from Settings, with the switch preview (TFAC-1484) ([#1644](https://github.com/sky-ai-eng/triage-factory/issues/1644)) ([92df7aa](https://github.com/sky-ai-eng/triage-factory/commit/92df7aa4c6a145fa9349f1a4d69d4dedad66dc3b))
+* **slack:** count the deployment Slack app's stale deliveries and alert on them (TFAC-1491) ([#1649](https://github.com/sky-ai-eng/triage-factory/issues/1649)) ([3f7f6f7](https://github.com/sky-ai-eng/triage-factory/commit/3f7f6f716bde8ea7a0b2add8b614b7668863ea82))
+* **slack:** document the deployment Slack app and ship its manifests (TFAC-1485) ([#1645](https://github.com/sky-ai-eng/triage-factory/issues/1645)) ([fc02a38](https://github.com/sky-ai-eng/triage-factory/commit/fc02a38eaa6f68a99333878cb26924da1d773193))
+* **slack:** install the deployment's Slack app into a workspace with OAuth (TFAC-1480) ([#1636](https://github.com/sky-ai-eng/triage-factory/issues/1636)) ([4e1fcd9](https://github.com/sky-ai-eng/triage-factory/commit/4e1fcd958701ad64c9e1e718b1966c254e8b0db3))
+* **slack:** read the deployment's Slack app from the environment (TFAC-1447) ([#1633](https://github.com/sky-ai-eng/triage-factory/issues/1633)) ([b2714b6](https://github.com/sky-ai-eng/triage-factory/commit/b2714b695b48312bd638f57921988b1aa0d12114))
+* **slack:** receive events for the deployment's Slack app (TFAC-1481) ([#1637](https://github.com/sky-ai-eng/triage-factory/issues/1637)) ([6b266a8](https://github.com/sky-ai-eng/triage-factory/commit/6b266a8bb15171a3cf57af2ad7aec52bd8b96069))
+* **slack:** store Slack connections, many per workspace with one active (TFAC-1446) ([#1635](https://github.com/sky-ai-eng/triage-factory/issues/1635)) ([490141a](https://github.com/sky-ai-eng/triage-factory/commit/490141a61d4351fb4ca7428135535ab15166d80c))
+* **slack:** switch a workspace between connected apps, with a preview (TFAC-1483) ([#1641](https://github.com/sky-ai-eng/triage-factory/issues/1641)) ([bc22d5e](https://github.com/sky-ai-eng/triage-factory/commit/bc22d5e4c1d911dfd71ede0edef837d03e24900d))
+
+
+### Bug Fixes
+
+* **agentloop:** save a native conversation's newest system blocks in the compaction's own transaction (TFAC-1512) ([#1664](https://github.com/sky-ai-eng/triage-factory/issues/1664)) ([5baf25f](https://github.com/sky-ai-eng/triage-factory/commit/5baf25f820b8a0510d9eb50ab27be094e4b22b80))
+* **agentloop:** stop replaying thinking produced under other tools (TFAC-1459) ([#1648](https://github.com/sky-ai-eng/triage-factory/issues/1648)) ([6ff02a1](https://github.com/sky-ai-eng/triage-factory/commit/6ff02a13bfa0d4469d9080e3659d932507f3afce))
+* **agentproc:** keep the operator's gh login out of a local run whose gh channel did not start (TFAC-1504) ([#1658](https://github.com/sky-ai-eng/triage-factory/issues/1658)) ([2267fa6](https://github.com/sky-ai-eng/triage-factory/commit/2267fa6f581118f257f7d77fbee94373719a810e))
+* **agentproc:** run local agents on the Claude key stored in Settings, not the host's login (TFAC-1503) ([#1657](https://github.com/sky-ai-eng/triage-factory/issues/1657)) ([63e41a1](https://github.com/sky-ai-eng/triage-factory/commit/63e41a148bd7a93201e5d67aac6a9bd2c1ae7f5b))
+* **auth:** answer a secret too large for the OS keychain with a 413 naming the file backend (TFAC-1508) ([#1656](https://github.com/sky-ai-eng/triage-factory/issues/1656)) ([9c56d42](https://github.com/sky-ai-eng/triage-factory/commit/9c56d426f9b7d718c6039b9376ae564acb1d058f))
+* **blueprints:** check a merge's handlers after it retires the absorbed blueprint (TFAC-1511) ([#1667](https://github.com/sky-ai-eng/triage-factory/issues/1667)) ([87d6b5a](https://github.com/sky-ai-eng/triage-factory/commit/87d6b5a362bc56602059e462a7e9c69d86fd53f7))
+* **blueprints:** hold the blueprints a steps write changes before its step rows (TFAC-1518) ([#1679](https://github.com/sky-ai-eng/triage-factory/issues/1679)) ([c6e69ff](https://github.com/sky-ai-eng/triage-factory/commit/c6e69ffc3e5a78f9ad2db4e4aa1c796196f15b2e))
+* **blueprints:** refuse a steps PUT decided against steps the blueprint no longer has (TFAC-1537) ([#1681](https://github.com/sky-ai-eng/triage-factory/issues/1681)) ([ab6c166](https://github.com/sky-ai-eng/triage-factory/commit/ab6c166e43c165b7702a290c001735cce8dc905d))
+* **board:** say a lane could not load when its read fails (TFAC-1525) ([#1676](https://github.com/sky-ai-eng/triage-factory/issues/1676)) ([6a5bb37](https://github.com/sky-ai-eng/triage-factory/commit/6a5bb37f7f7fe3eb787a32e8e4ab922e5549fde9))
+* **breaker:** start a trigger's breaker over when its predicate changes (TFAC-1513) ([#1668](https://github.com/sky-ai-eng/triage-factory/issues/1668)) ([79bf5df](https://github.com/sky-ai-eng/triage-factory/commit/79bf5dfe5ccdd38324eabee68812ef1f652d8f2e))
+* **db:** count a poll completed at the restart's own instant as ready (TFAC-1506) ([#1652](https://github.com/sky-ai-eng/triage-factory/issues/1652)) ([5a7651d](https://github.com/sky-ai-eng/triage-factory/commit/5a7651d79190999ae7fde6eb01c5284c41dfccf0))
+* **db:** renumber the escalated_seen_count migration past event_handler_modes (TFAC-1516) ([#1666](https://github.com/sky-ai-eng/triage-factory/issues/1666)) ([9355083](https://github.com/sky-ai-eng/triage-factory/commit/9355083c96c36e0c760aecd147e15ce4a9b4280d))
+* **db:** settle the orderings that relied on distinct timestamps (TFAC-1516) ([#1663](https://github.com/sky-ai-eng/triage-factory/issues/1663)) ([f856719](https://github.com/sky-ai-eng/triage-factory/commit/f8567199e8fec6d3411c86134847776c01f2d98b))
+* **delegate:** keep a conversation's system blocks and send a re-claim's changes as a system message (TFAC-1440) ([#1653](https://github.com/sky-ai-eng/triage-factory/issues/1653)) ([5dccb48](https://github.com/sky-ai-eng/triage-factory/commit/5dccb48a52465f2996a7ac3904b6843f8bdb9ffe))
+* **handlers:** hold a blueprint across the handler write that attaches it (TFAC-1517) ([#1665](https://github.com/sky-ai-eng/triage-factory/issues/1665)) ([cd82435](https://github.com/sky-ai-eng/triage-factory/commit/cd82435eb6c2825e6918c1207bd9ca345775ccdc))
+* **notifications:** draw no table between two answers on the notifications page (TFAC-1538) ([#1682](https://github.com/sky-ai-eng/triage-factory/issues/1682)) ([fdac25f](https://github.com/sky-ai-eng/triage-factory/commit/fdac25f7efbe9bfd3b94e1b46e9703809280715c))
+* **promptseed:** aim the merge-conflict prompt at a PR that is right against the new base (TFAC-1520) ([#1670](https://github.com/sky-ai-eng/triage-factory/issues/1670)) ([9fc3527](https://github.com/sky-ai-eng/triage-factory/commit/9fc3527aaed4d017e525ff70a6de559f184ba75d))
+* **promptseed:** define a good CI fix, and tell a run to abort the blueprint where it should stop (TFAC-1521) ([#1671](https://github.com/sky-ai-eng/triage-factory/issues/1671)) ([d86d3cd](https://github.com/sky-ai-eng/triage-factory/commit/d86d3cdaf07fb238dc2049fd8eded128eaf74de4))
+* remove the scheduler races behind the flaky frontend tests ([#1647](https://github.com/sky-ai-eng/triage-factory/issues/1647)) ([cd97a9f](https://github.com/sky-ai-eng/triage-factory/commit/cd97a9f2363b15484ede7801f6419df1689a41eb))
+* **routing:** re-check a queued firing against its trigger and team before it fires (TFAC-1519) ([#1678](https://github.com/sky-ai-eng/triage-factory/issues/1678)) ([0c761a2](https://github.com/sky-ai-eng/triage-factory/commit/0c761a2b04efad0e4001082b182375c1b4aeba77))
+* **routing:** reroute a task's newer event when two events share a created_at (TFAC-1505) ([#1659](https://github.com/sky-ai-eng/triage-factory/issues/1659)) ([bb80da9](https://github.com/sky-ai-eng/triage-factory/commit/bb80da9b6fb485fa8b1da3fa492d93a2ce95d196))
+* **slack:** alert per control pod on a wrong Slack signing secret (TFAC-1510) ([#1675](https://github.com/sky-ai-eng/triage-factory/issues/1675)) ([ea1a02b](https://github.com/sky-ai-eng/triage-factory/commit/ea1a02b06c22ad9fbe4d3635bb693f29b0ab5f60))
+* **slack:** keep an unlicensed org's Socket Mode connection open (TFAC-1486) ([#1643](https://github.com/sky-ai-eng/triage-factory/issues/1643)) ([dadd166](https://github.com/sky-ai-eng/triage-factory/commit/dadd166c7582e188f40e8b54cd48efa03df57361))
+* **slack:** refuse a malformed bot or app-level token on the import route (TFAC-1488) ([#1642](https://github.com/sky-ai-eng/triage-factory/issues/1642)) ([0071be5](https://github.com/sky-ai-eng/triage-factory/commit/0071be5125d434ec596ae7757f5144d978044b5a))
+* **slack:** refuse the expiring bot token of an app with token rotation on (TFAC-1487) ([#1640](https://github.com/sky-ai-eng/triage-factory/issues/1640)) ([8cbc13d](https://github.com/sky-ai-eng/triage-factory/commit/8cbc13d698175dc8c5ed0ffb3999e3f8f915b617))
+* **ui:** let utility classes win over the element defaults in index.css (TFAC-1490) ([#1654](https://github.com/sky-ai-eng/triage-factory/issues/1654)) ([2c78335](https://github.com/sky-ai-eng/triage-factory/commit/2c783355031d0a98b39505f98eafa8ca6ffdce4e))
+* **worktree:** encode Claude project dirs with Claude Code's rule on every platform (TFAC-1507) ([#1655](https://github.com/sky-ai-eng/triage-factory/issues/1655)) ([5f82972](https://github.com/sky-ai-eng/triage-factory/commit/5f829724bc122858c73e008f3735eaeba9413355))
+
 ## [1.19.0](https://github.com/sky-ai-eng/triage-factory/compare/v1.18.2...v1.19.0) (2026-11-16)
 
 
