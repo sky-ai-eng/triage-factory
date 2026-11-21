@@ -312,7 +312,9 @@ function OrgPeople({ orgId, canManage }: { orgId: string; canManage: boolean }) 
         </button>
       )}
 
-      {modalOpen && <InviteModal create={create} onClose={() => setModalOpen(false)} />}
+      {modalOpen && (
+        <InviteModal orgId={orgId} create={create} onClose={() => setModalOpen(false)} />
+      )}
     </div>
   )
 }

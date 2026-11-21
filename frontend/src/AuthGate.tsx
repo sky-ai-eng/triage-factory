@@ -247,7 +247,7 @@ export function RequireGitHubIdentity({
  * the configured/connected branches, so a transient failure is never rendered
  * through (which would silently skip the Jira check or admit an unbound user).
  * This is why the configured-signal is read off this same fetch rather than the
- * `jira` flag from /api/integrations/status — useAuthStatus has no error state,
+ * `jira` flag from /api/orgs/{org_id}/integrations/status — useAuthStatus has no error state,
  * so a failed read there is indistinguishable from "GitHub-only" and the gate
  * would fall open. The bind failure shapes (bad token, host-unreachable) surface
  * on the Connect page itself.

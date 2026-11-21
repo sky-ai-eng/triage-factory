@@ -38,23 +38,23 @@ const (
 
 // PatchString reads a `string | null` PATCH field.
 func PatchString(v *Validation, raw json.RawMessage, field string) (string, PatchState) {
-	return patchValue[string](v, raw, field)
+	return patchValue[string](v, raw, field, true)
 }
 
 // PatchBool reads a `bool | null` PATCH field.
 func PatchBool(v *Validation, raw json.RawMessage, field string) (bool, PatchState) {
-	return patchValue[bool](v, raw, field)
+	return patchValue[bool](v, raw, field, true)
 }
 
 // PatchInt reads an `integer | null` PATCH field. A fractional number is a
 // type fault, not a silent truncation.
 func PatchInt(v *Validation, raw json.RawMessage, field string) (int, PatchState) {
-	return patchValue[int](v, raw, field)
+	return patchValue[int](v, raw, field, true)
 }
 
 // PatchFloat reads a `number | null` PATCH field.
 func PatchFloat(v *Validation, raw json.RawMessage, field string) (float64, PatchState) {
-	return patchValue[float64](v, raw, field)
+	return patchValue[float64](v, raw, field, true)
 }
 
 // PatchStrings reads a `[]string | null` PATCH field. The list IS the value —
@@ -62,7 +62,7 @@ func PatchFloat(v *Validation, raw json.RawMessage, field string) (float64, Patc
 // what the body named, empty array included; whether an empty one is legal is
 // the field's own question, not this reader's.
 func PatchStrings(v *Validation, raw json.RawMessage, field string) ([]string, PatchState) {
-	return patchValue[[]string](v, raw, field)
+	return patchValue[[]string](v, raw, field, true)
 }
 
 // Patch is a PATCH body field of type T. It keeps the field's raw bytes the
@@ -81,13 +81,27 @@ func (p *Patch[T]) UnmarshalJSON(b []byte) error {
 // other readers do. A struct T refuses a key it does not declare, as the body
 // decode does.
 func (p Patch[T]) Read(v *Validation, field string) (T, PatchState) {
-	return patchValue[T](v, p.raw, field)
+	return patchValue[T](v, p.raw, field, true)
+}
+
+// ReadSet reads a field a PATCH may set but never clear, so the state it
+// returns is PatchAbsent or PatchSet. A null is a fault on the field, "<field>
+// cannot be cleared: <why>", recorded on v with the type faults, and a type
+// fault's message does not offer null.
+func (p Patch[T]) ReadSet(v *Validation, field, why string) (T, PatchState) {
+	if string(p.raw) == "null" {
+		var zero T
+		v.Invalid(field, field+" cannot be cleared: "+why)
+		return zero, patchInvalid
+	}
+	return patchValue[T](v, p.raw, field, false)
 }
 
 // patchValue is the shared body of the readers above: absent stays absent, the
 // literal null clears, and anything else must decode as T or it's a 400 naming
 // the field, in the words the strict body decode uses for the same fault.
-func patchValue[T any](v *Validation, raw json.RawMessage, field string) (T, PatchState) {
+// nullable says whether that message offers null as well.
+func patchValue[T any](v *Validation, raw json.RawMessage, field string, nullable bool) (T, PatchState) {
 	var zero T
 	if raw == nil {
 		return zero, PatchAbsent
@@ -123,7 +137,11 @@ func patchValue[T any](v *Validation, raw json.RawMessage, field string) (T, Pat
 			}
 		}
 		want, _ := jsonType(reflect.TypeFor[T](), typeErr)
-		v.Invalid(field, fmt.Sprintf("%s must be %s, or null", field, want))
+		message := fmt.Sprintf("%s must be %s", field, want)
+		if nullable {
+			message += ", or null"
+		}
+		v.Invalid(field, message)
 		return zero, patchInvalid
 	}
 	return out, PatchSet

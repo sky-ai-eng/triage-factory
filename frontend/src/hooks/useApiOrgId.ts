@@ -23,3 +23,18 @@ export function useApiOrgId(): string | null {
   const ctxOrgId = useActiveOrgId()
   return auth === null ? LOCAL_DEFAULT_ORG_ID : ctxOrgId
 }
+
+/**
+ * useSessionOrgId returns the org the session acts in, or null while multi mode
+ * has not read /api/me or the session has no org.
+ *
+ * Routes with no org in their path (the teams list and a team's own routes)
+ * act in the session's org, and AuthGate leaves a usable session org where it
+ * is when the URL names another org. A surface whose rows come from those
+ * routes addresses this org on its org-path calls too, so all of its reads and
+ * writes act in one org.
+ */
+export function useSessionOrgId(): string | null {
+  const auth = useOptionalAuth()
+  return auth === null ? LOCAL_DEFAULT_ORG_ID : auth.serverActiveOrgId
+}

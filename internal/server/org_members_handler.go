@@ -559,15 +559,13 @@ func (h *orgMembersHandler) handleOrgOwnershipTransfer(w http.ResponseWriter, r 
 // the error is already written and ok is false.
 func readMemberRole(w http.ResponseWriter, field httpx.Patch[string], roles map[string]bool, vocabulary string) (role string, ok bool) {
 	var v httpx.Validation
-	raw, state := field.Read(&v, "role")
+	raw, state := field.ReadSet(&v, "role", "a member always has a role")
 	switch state {
 	case httpx.PatchAbsent:
 		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
 			Reason: httpx.ReasonMissingField, Message: "no fields to update: provide role", Field: "role",
 		})
 		return "", false
-	case httpx.PatchClear:
-		v.Invalid("role", "role cannot be cleared: a member always has a role")
 	case httpx.PatchSet:
 		role = strings.TrimSpace(raw)
 		if !roles[role] {

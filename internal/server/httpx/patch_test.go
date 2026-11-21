@@ -39,3 +39,37 @@ func TestPatchValue_TypeFaultMessages(t *testing.T) {
 		})
 	}
 }
+
+// TestPatchReadSet pins that a field a PATCH may set but never clear refuses
+// null with the reason it is given, and words a type fault without offering
+// null.
+func TestPatchReadSet(t *testing.T) {
+	cases := []struct {
+		name      string
+		raw       json.RawMessage
+		wantState PatchState
+		wantValue string
+		wantFault string
+	}{
+		{"absent", nil, PatchAbsent, "", ""},
+		{"set", json.RawMessage(`"x"`), PatchSet, "x", ""},
+		{"null", json.RawMessage(`null`), patchInvalid, "", "f cannot be cleared: f always has a value"},
+		{"wrong type", json.RawMessage(`7`), patchInvalid, "", "f must be a string"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var v Validation
+			got, state := Patch[string]{raw: tc.raw}.ReadSet(&v, "f", "f always has a value")
+			if state != tc.wantState || got != tc.wantValue {
+				t.Errorf("ReadSet = (%q, %v), want (%q, %v)", got, state, tc.wantValue, tc.wantState)
+			}
+			var want []ErrorItem
+			if tc.wantFault != "" {
+				want = []ErrorItem{{Reason: ReasonInvalidField, Message: tc.wantFault, Field: "f"}}
+			}
+			if items := v.Items(); !slices.Equal(items, want) {
+				t.Errorf("faults = %+v, want %+v", items, want)
+			}
+		})
+	}
+}

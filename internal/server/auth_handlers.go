@@ -805,7 +805,7 @@ func (s *Server) handleMeUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var v httpx.Validation
-	raw, state := body.ActiveOrgID.Read(&v, "active_org_id")
+	raw, state := body.ActiveOrgID.ReadSet(&v, "active_org_id", "name the organization to switch to")
 	var orgUUID uuid.UUID
 	switch state {
 	case httpx.PatchAbsent:
@@ -813,8 +813,6 @@ func (s *Server) handleMeUpdate(w http.ResponseWriter, r *http.Request) {
 			Reason: httpx.ReasonMissingField, Message: "no fields to update: provide active_org_id", Field: "active_org_id",
 		})
 		return
-	case httpx.PatchClear:
-		v.Invalid("active_org_id", "active_org_id cannot be cleared: name the organization to switch to")
 	case httpx.PatchSet:
 		parsed, err := uuid.Parse(raw)
 		if err != nil {
@@ -843,6 +841,15 @@ func (s *Server) handleMeUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The resource as the next GET reads it, built from the org the session is
+	// moving to (this request's context carries the org it arrived with), and
+	// built before the write so a failed read answers 500 for a switch that
+	// did not happen.
+	resp, err := s.buildMe(httpx.WithOrgID(r.Context(), orgUUID.String()), claims)
+	if err != nil {
+		internalError(w, "auth", err)
+		return
+	}
 	if err := s.authDeps.sessions.UpdateActiveOrgSystem(r.Context(), sess.ID, orgUUID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			// Session vanished between withSession's lookup and now
@@ -852,14 +859,6 @@ func (s *Server) handleMeUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		internalError(w, "auth", fmt.Errorf("update active org for session %s: %w", sessions.LogID(sess.ID), err))
-		return
-	}
-
-	// The resource as the next GET reads it: this request's context still
-	// carries the org the session had when it arrived.
-	resp, err := s.buildMe(httpx.WithOrgID(r.Context(), orgUUID.String()), claims)
-	if err != nil {
-		internalError(w, "auth", err)
 		return
 	}
 	opMeUpdate.Write(w, resp)

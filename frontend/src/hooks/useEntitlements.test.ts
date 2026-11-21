@@ -125,6 +125,30 @@ describe('useEntitlements', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
+  it('reads a failed org again when the viewer returns to it', async () => {
+    let failA = true
+    const fetchMock = vi.fn((input: unknown) => {
+      if (String(input) === pathOf('org-a') && failA) {
+        return Promise.resolve({ ok: false, status: 503, ...jsonBody({}) })
+      }
+      const features = String(input) === pathOf('org-a') ? ['governance'] : []
+      return Promise.resolve({ ok: true, ...jsonBody({ features }) })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { result, rerender } = renderHook(() => useEntitlements())
+    await waitFor(() => expect(result.current.loaded).toBe(true))
+    expect(result.current.has(FeatureGovernance)).toBe(false) // failed closed
+
+    failA = false
+    org.id = 'org-b'
+    rerender()
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(pathOf('org-b'), expect.anything()))
+    org.id = 'org-a'
+    rerender()
+    await waitFor(() => expect(result.current.has(FeatureGovernance)).toBe(true))
+  })
+
   it('fails closed when the probe errors (loaded, nothing licensed)', async () => {
     vi.stubGlobal(
       'fetch',

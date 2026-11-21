@@ -550,10 +550,11 @@ func (s *Server) handleAPITokenRename(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	// A type fault is a malformed body, 400 like any other; what the value
-	// means is checked after it, at 422.
+	// A type fault, or a null on a field that cannot be cleared, is a
+	// malformed body, 400 like any other; what the value means is checked
+	// after it, at 422.
 	var types httpx.Validation
-	raw, state := req.Name.Read(&types, "name")
+	raw, state := req.Name.ReadSet(&types, "name", "a token always has a name")
 	if state == httpx.PatchAbsent {
 		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
 			Reason: httpx.ReasonMissingField, Message: "no fields to update: provide name", Field: "name",
@@ -566,8 +567,6 @@ func (s *Server) handleAPITokenRename(w http.ResponseWriter, r *http.Request) {
 	var v httpx.Validation
 	name := strings.TrimSpace(raw)
 	switch {
-	case state == httpx.PatchClear:
-		v.Invalid("name", "name cannot be cleared: a token always has a name")
 	case name == "":
 		v.Invalid("name", "name is required")
 	case len(name) > apitokens.MaxNameLen:

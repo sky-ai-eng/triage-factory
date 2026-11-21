@@ -723,7 +723,7 @@ func TestAPITokenRename_Faults(t *testing.T) {
 		// Null is a request to clear the name, which a token cannot be
 		// without; it is refused for what it asks, not read as absent.
 		rec := r.tokensJSON("PATCH", path, map[string]any{"name": nil}, sid, "")
-		assertFault(t, rec, http.StatusUnprocessableEntity, "INVALID_FIELD")
+		assertFault(t, rec, http.StatusBadRequest, "INVALID_FIELD")
 		if items := errorItems(t, rec); items[0].Field != "name" {
 			t.Errorf("fault field = %q, want name", items[0].Field)
 		}

@@ -29,10 +29,16 @@ interface AuthStatus {
   loading: boolean
 }
 
+type StatusBody = Omit<AuthStatus, 'loading'>
+
+const NOT_READ: StatusBody = { configured: false, github: false, jira: false }
+
 // orgId is the org whose status to read: local mode's sentinel org, or the
-// active org in multi mode, where a switch re-reads. While it is null (multi
-// mode still resolving the org) the hook holds its fetch and stays loading
-// rather than reading some other org's status.
+// active org in multi mode, where a switch re-reads. The hook answers only
+// from a read of the org it was given: while orgId is null (multi mode still
+// resolving the org), and from a switch until the new org's first read
+// settles, it reports loading, so a gate never decides on another org's
+// status.
 //
 // pollMs, when set, re-polls on that interval so a gate blocking on an
 // incomplete org self-heals: a non-admin parked on the "setup isn't
@@ -43,12 +49,9 @@ interface AuthStatus {
 // returning to a backgrounded tab is snappy rather than waiting out the
 // interval.
 export function useAuthStatus(orgId: string | null, pollMs?: number): AuthStatus {
-  const [status, setStatus] = useState<AuthStatus>({
-    configured: false,
-    github: false,
-    jira: false,
-    loading: true,
-  })
+  // The last settled read, with the org it was for. body is null when that
+  // org's reads have all failed.
+  const [read, setRead] = useState<{ orgId: string; body: StatusBody | null } | null>(null)
 
   useEffect(() => {
     if (!orgId) return
@@ -63,22 +66,21 @@ export function useAuthStatus(orgId: string | null, pollMs?: number): AuthStatus
     }
 
     // Every failure — a non-2xx, a network drop, a body that isn't JSON —
-    // lands in the same arm: stop the spinner, keep the last known status, let
-    // the next tick try again. This is a gate poll, not a user action; there is
-    // no message to show and nothing to retry by hand.
+    // lands in the same arm: stop the spinner, keep this org's last known
+    // status, let the next tick try again. This is a gate poll, not a user
+    // action; there is no message to show and nothing to retry by hand.
     const load = () => {
-      apiJSON<Omit<AuthStatus, 'loading'>>(
-        `/api/orgs/${encodeURIComponent(orgId)}/integrations/status`,
-      )
+      apiJSON<StatusBody>(`/api/orgs/${encodeURIComponent(orgId)}/integrations/status`)
         .then((data) => {
           if (cancelled) return
-          setStatus({ ...data, loading: false })
+          setRead({ orgId, body: data })
           // Once the org is fully configured the gate admits the user, so
           // there's nothing left to poll for — drop the interval.
           if (data.setup_complete) stopPolling()
         })
         .catch(() => {
-          if (!cancelled) setStatus((s) => ({ ...s, loading: false }))
+          if (cancelled) return
+          setRead((prev) => (prev?.orgId === orgId ? prev : { orgId, body: null }))
         })
     }
 
@@ -103,5 +105,6 @@ export function useAuthStatus(orgId: string | null, pollMs?: number): AuthStatus
     }
   }, [orgId, pollMs])
 
-  return status
+  if (!orgId || read?.orgId !== orgId) return { ...NOT_READ, loading: true }
+  return { ...(read.body ?? NOT_READ), loading: false }
 }

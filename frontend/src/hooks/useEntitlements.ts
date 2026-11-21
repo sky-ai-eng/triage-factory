@@ -18,9 +18,13 @@ import { useApiOrgId } from './useApiOrgId'
 //
 // The answer is the org's, and the cache is keyed by it, so an org switch
 // reads the new org's set and a slow answer for the previous org lands in that
-// org's entry rather than over the new one.
+// org's entry rather than over the new one. A failed read is cached too, as an
+// empty set marked failed, and the org is read again the next time a consumer
+// mounts for it or the viewer returns to it.
 
-const cache = new Map<string, Set<string>>()
+type Entry = { features: Set<string>; failed: boolean }
+
+const cache = new Map<string, Entry>()
 const inFlight = new Map<string, Promise<void>>()
 const listeners = new Set<() => void>()
 
@@ -35,14 +39,14 @@ function load(orgId: string): Promise<void> {
     `/api/orgs/${encodeURIComponent(orgId)}/entitlements`,
   )
     .then((data) => {
-      cache.set(orgId, new Set(data.features ?? []))
+      cache.set(orgId, { features: new Set(data.features ?? []), failed: false })
     })
     .catch(() => {
       // Fail closed: keep the feature set empty but resolve the org, so EE
       // surfaces resolve (hidden) rather than flickering or hanging unresolved.
       // The probe is a core route that always answers in a healthy deployment;
       // a transient failure must not strand the gate.
-      cache.set(orgId, new Set())
+      cache.set(orgId, { features: new Set(), failed: true })
     })
     .finally(() => {
       inFlight.delete(orgId)
@@ -93,15 +97,16 @@ export function useEntitlements(): Entitlements {
     // Another consumer may have filled the entry between this render and the
     // effect, with no notify left to deliver; re-render to read it.
     if (orgId) {
-      if (cache.has(orgId)) cb()
-      else void load(orgId)
+      const entry = cache.get(orgId)
+      if (entry) cb()
+      if (!entry || entry.failed) void load(orgId)
     }
     return () => {
       listeners.delete(cb)
     }
   }, [orgId])
 
-  const features = orgId ? cache.get(orgId) : undefined
+  const features = orgId ? cache.get(orgId)?.features : undefined
   return {
     has: (feature: string) => features?.has(feature) ?? false,
     loaded: features !== undefined,

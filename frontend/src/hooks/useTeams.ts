@@ -1,7 +1,7 @@
 import { useSyncExternalStore, useCallback, useEffect, useRef, useState } from 'react'
 import type { TeamSummary } from '../types'
 import { apiJSON, apiList, httpErrorMessage } from '../lib/apiClient'
-import { useApiOrgId } from './useApiOrgId'
+import { useSessionOrgId } from './useApiOrgId'
 
 // Shared store for POST /api/teams/list — the data source for the multi-team
 // selectors (the per-page read filter and the write-time picker) plus the
@@ -142,7 +142,7 @@ export interface UseTeams {
 
 export function useTeams(): UseTeams {
   const snap = useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
-  const orgId = useApiOrgId()
+  const orgId = useSessionOrgId()
 
   const refresh = useCallback(() => {
     // Supersede any in-flight fetch so a stale response can't land after
@@ -152,8 +152,8 @@ export function useTeams(): UseTeams {
     return load()
   }, [])
 
-  // The team is created in the org on screen, which the route names in its
-  // path.
+  // The team is created in the session's org: the org the list this store
+  // holds, and reloads below, comes from.
   const createTeam = useCallback(
     async (name: string): Promise<TeamSummary> => {
       if (!orgId) throw new Error('No organization context.')

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Archive, Plus, RotateCcw, Users } from 'lucide-react'
 import { useTeams } from '../hooks/useTeams'
-import { useApiOrgId } from '../hooks/useApiOrgId'
+import { useSessionOrgId } from '../hooks/useApiOrgId'
 import {
   fetchArchivedTeams,
   fetchArchivePreview,
@@ -26,9 +26,18 @@ import ArchiveTeamModal from './ArchiveTeamModal'
 // A new team's prompts + handlers seed directly from TF's shipped defaults
 // (ai.ShippedPrompts() / ai.ShippedBlueprints() / db.ShippedEventHandlers) —
 // there is no per-org editable source for this section to point at.
+//
+// Every call here acts in the session's org: the teams list and a team's
+// archive and restore routes take their org from the session, so create and
+// the archived list address that org too. Keyed on it, so a change of org
+// drops the previous org's archived list and any open confirm.
 export default function TeamManagementSection() {
+  const orgId = useSessionOrgId()
+  return <TeamManagementBody key={orgId ?? ''} orgId={orgId} />
+}
+
+function TeamManagementBody({ orgId }: { orgId: string | null }) {
   const { teams, createTeam, refresh: refreshTeams } = useTeams()
-  const orgId = useApiOrgId()
   const [name, setName] = useState('')
   const [creating, setCreating] = useState(false)
 

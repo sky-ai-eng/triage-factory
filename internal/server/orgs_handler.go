@@ -200,7 +200,7 @@ func (s *Server) handleOrgCreate(w http.ResponseWriter, r *http.Request) {
 	claims := ClaimsFrom(r.Context())
 	if claims == nil || claims.Subject == runmode.LocalDefaultUserID {
 		// Sentinel-claim caller is the local-mode shim; nothing to do
-		// here. 401 mirrors handleActiveOrgUpdate's gate.
+		// here. 401 mirrors handleMeUpdate's gate.
 		writeUnauth(w)
 		return
 	}
