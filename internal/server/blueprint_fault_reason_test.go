@@ -93,22 +93,7 @@ func TestBlueprintStepsPut_FaultReasons(t *testing.T) {
 				map[string]string{"steps": httpx.ReasonInvalidField}},
 		} {
 			rec := doJSON(t, s, http.MethodPut, "/api/blueprints/"+bp+"/steps", c.body)
-			if rec.Code != http.StatusBadRequest {
-				t.Errorf("%s: status = %d, want 400; body=%s", c.name, rec.Code, rec.Body.String())
-				continue
-			}
-			got := map[string]string{}
-			for _, item := range decodeErrorItems(t, rec) {
-				got[item.Field] = item.Reason
-			}
-			if len(got) != len(c.reasons) {
-				t.Errorf("%s: errors = %v, want %v", c.name, got, c.reasons)
-			}
-			for field, reason := range c.reasons {
-				if got[field] != reason {
-					t.Errorf("%s: %s error = %q, want %q", c.name, field, got[field], reason)
-				}
-			}
+			wantShapeFaults(t, c.name, rec, c.reasons)
 		}
 	})
 
@@ -176,4 +161,35 @@ func TestBlueprintStepsPut_FaultReasons(t *testing.T) {
 			}
 		}
 	})
+}
+
+// wantShapeFaults fails unless rec is a 400 whose errors are reasons, one per
+// field: every failing field reported, and no other.
+func wantShapeFaults(t *testing.T, what string, rec *httptest.ResponseRecorder, reasons map[string]string) {
+	t.Helper()
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("%s: status = %d, want 400; body=%s", what, rec.Code, rec.Body.String())
+		return
+	}
+	got := map[string]string{}
+	for _, item := range decodeErrorItems(t, rec) {
+		got[item.Field] = item.Reason
+	}
+	if len(got) != len(reasons) {
+		t.Errorf("%s: errors = %v, want %v", what, got, reasons)
+	}
+	for field, reason := range reasons {
+		if got[field] != reason {
+			t.Errorf("%s: %s error = %q, want %q", what, field, got[field], reason)
+		}
+	}
+}
+
+// stepsNaming is a steps PUT's list naming prompts in order.
+func stepsNaming(prompts []string) []map[string]any {
+	out := make([]map[string]any, len(prompts))
+	for i, p := range prompts {
+		out[i] = map[string]any{"step_prompt_id": p}
+	}
+	return out
 }

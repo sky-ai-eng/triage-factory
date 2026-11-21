@@ -258,6 +258,9 @@ type absorbRig struct {
 	mux                    *http.ServeMux
 	afterList, beforeWrite *pausePoint
 	host, absorbed         string
+	// hostVersion is host's version as seeded. The handler writes these tests
+	// race leave it, so a reconnect sends it.
+	hostVersion int64
 }
 
 func newAbsorbRig(t *testing.T, wrap func(db.TxRunner) db.TxRunner) absorbRig {
@@ -274,9 +277,10 @@ func newAbsorbRig(t *testing.T, wrap func(db.TxRunner) db.TxRunner) absorbRig {
 	mux := http.NewServeMux()
 	mount := func(pattern string, h http.HandlerFunc) { mux.HandleFunc(pattern, h) }
 	blueprints.New(r.s.tx, r.s.az).Register(httpx.Mounts{API: mount, APIMutating: mount, Op: func(op httpx.Operation, h http.HandlerFunc) { mount(op.Spec().Pattern, h) }})
+	host := r.seedChain(t, "host", 2)
 	return absorbRig{
 		viewerRig: r, mux: mux, afterList: afterList, beforeWrite: beforeWrite,
-		host: r.seedChain(t, "host", 2), absorbed: r.seedChain(t, "absorbed", 1),
+		host: host, absorbed: r.seedChain(t, "absorbed", 1), hostVersion: r.version(t, host),
 	}
 }
 
@@ -285,7 +289,7 @@ func newAbsorbRig(t *testing.T, wrap func(db.TxRunner) db.TxRunner) absorbRig {
 func (r absorbRig) absorb(route string) <-chan *httptest.ResponseRecorder {
 	body := map[string]any{"source_blueprint_id": r.absorbed}
 	if route == "reconnect" {
-		body = map[string]any{"at_step_index": 1, "target_blueprint_id": r.absorbed}
+		body = map[string]any{"at_step_index": 1, "target_blueprint_id": r.absorbed, "version": r.hostVersion}
 	}
 	return serveAsync(r.mux.ServeHTTP, r.req(http.MethodPost, "/api/blueprints/"+r.host+"/"+route, r.admin, body))
 }

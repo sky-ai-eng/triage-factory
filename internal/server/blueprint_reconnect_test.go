@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"slices"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
@@ -29,6 +30,7 @@ func TestBlueprintReconnect_RepointsUpstreamAndOrphansDownstream(t *testing.T) {
 	rec := doJSON(t, s, http.MethodPost, "/api/blueprints/"+b+"/reconnect", map[string]any{
 		"at_step_index":       1,
 		"target_blueprint_id": target,
+		"version":             blueprintVersion(t, s, b),
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("reconnect: expected 200, got %d: %s", rec.Code, rec.Body.String())
@@ -71,6 +73,7 @@ func TestBlueprintReconnect_SelfRejected(t *testing.T) {
 	rec := doJSON(t, s, http.MethodPost, "/api/blueprints/"+b+"/reconnect", map[string]any{
 		"at_step_index":       1,
 		"target_blueprint_id": b,
+		"version":             blueprintVersion(t, s, b),
 	})
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("reconnect into self: expected 422, got %d: %s", rec.Code, rec.Body.String())
@@ -87,6 +90,7 @@ func TestBlueprintReconnect_TriggeredTargetRejected(t *testing.T) {
 	rec := doJSON(t, s, http.MethodPost, "/api/blueprints/"+b+"/reconnect", map[string]any{
 		"at_step_index":       1,
 		"target_blueprint_id": target,
+		"version":             blueprintVersion(t, s, b),
 	})
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("reconnect to triggered target: expected 422, got %d: %s", rec.Code, rec.Body.String())
@@ -110,6 +114,7 @@ func TestBlueprintReconnect_IndexOutOfRangeRejected(t *testing.T) {
 		rec := doJSON(t, s, http.MethodPost, "/api/blueprints/"+b+"/reconnect", map[string]any{
 			"at_step_index":       k,
 			"target_blueprint_id": target,
+			"version":             blueprintVersion(t, s, b),
 		})
 		if rec.Code != http.StatusUnprocessableEntity {
 			t.Fatalf("reconnect at index %d: expected 422, got %d: %s", k, rec.Code, rec.Body.String())
@@ -117,14 +122,60 @@ func TestBlueprintReconnect_IndexOutOfRangeRejected(t *testing.T) {
 	}
 }
 
-func TestBlueprintReconnect_MissingIndexRejected(t *testing.T) {
+func TestBlueprintReconnect_Shape(t *testing.T) {
 	s := newTestServer(t)
 	b, _ := createChainBlueprint(t, s, "Chain", 3)
 	target, _ := createWrappedBlueprint(t, s, "Target")
-	rec := doJSON(t, s, http.MethodPost, "/api/blueprints/"+b+"/reconnect", map[string]any{
-		"target_blueprint_id": target,
-	})
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("reconnect without at_step_index: expected 400, got %d: %s", rec.Code, rec.Body.String())
+	v := blueprintVersion(t, s, b)
+	for _, c := range []struct {
+		name    string
+		body    map[string]any
+		reasons map[string]string
+	}{
+		{"no index", map[string]any{"target_blueprint_id": target, "version": v},
+			map[string]string{"at_step_index": httpx.ReasonMissingField}},
+		{"no version", map[string]any{"at_step_index": 1, "target_blueprint_id": target},
+			map[string]string{"version": httpx.ReasonMissingField}},
+		{"zero version", map[string]any{"at_step_index": 1, "target_blueprint_id": target, "version": 0},
+			map[string]string{"version": httpx.ReasonInvalidField}},
+		// Every missing field is reported, not the first.
+		{"nothing", map[string]any{},
+			map[string]string{"at_step_index": httpx.ReasonMissingField, "target_blueprint_id": httpx.ReasonMissingField, "version": httpx.ReasonMissingField}},
+	} {
+		rec := doJSON(t, s, http.MethodPost, "/api/blueprints/"+b+"/reconnect", c.body)
+		wantShapeFaults(t, c.name, rec, c.reasons)
 	}
+	if got := listBlueprintSteps(t, s, b); len(got) != 3 {
+		t.Fatalf("host steps after the refused reconnects = %d, want 3 (untouched)", len(got))
+	}
+	assertLiveWithSteps(t, s, target, 1)
+}
+
+// TestBlueprintReconnect_StaleVersionRefused sends a reconnect with the
+// host's version read before a steps PUT reordered it. Its index was a
+// position in the steps the caller read, so it is refused: the host keeps the
+// PUT's order, and the target is not absorbed.
+func TestBlueprintReconnect_StaleVersionRefused(t *testing.T) {
+	s := newTestServer(t)
+	b, p := createChainBlueprint(t, s, "Moved", 3)
+	target, _ := createWrappedBlueprint(t, s, "Target")
+	read := blueprintVersion(t, s, b)
+	reordered := []string{p[2], p[0], p[1]}
+	if put := putBlueprintSteps(t, s, b, stepsNaming(reordered)); put.Code != http.StatusOK {
+		t.Fatalf("steps PUT: %d: %s", put.Code, put.Body.String())
+	}
+
+	rec := doJSON(t, s, http.MethodPost, "/api/blueprints/"+b+"/reconnect", map[string]any{
+		"at_step_index":       1,
+		"target_blueprint_id": target,
+		"version":             read,
+	})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("reconnect naming the version before the PUT = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	httpxtest.AssertFirstError(t, rec, httpx.ReasonVersionConflict, "version")
+	if got := stepPromptIDs(t, s, b); !slices.Equal(got, reordered) {
+		t.Errorf("host steps after the refused reconnect = %v, want the PUT's %v", got, reordered)
+	}
+	assertLiveWithSteps(t, s, target, 1)
 }

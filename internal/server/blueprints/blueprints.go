@@ -647,17 +647,7 @@ func (h *Handler) handleBlueprintStepsPut(w http.ResponseWriter, r *http.Request
 		briefs = append(briefs, step.Brief)
 	}
 	var shape httpx.Validation
-	switch {
-	case req.Version == nil:
-		shape.Add(httpx.ErrorItem{
-			Reason:  httpx.ReasonMissingField,
-			Message: "version is required: send the blueprint_version your read of the steps returned, or the blueprint's version if it has no steps",
-			Field:   "version",
-		})
-	case *req.Version < 1:
-		// Versions start at 1 and only rise, so anything below names no read.
-		shape.Invalid("version", "version must be the blueprint_version your read of the steps returned, or the blueprint's version if it has no steps: a positive integer")
-	}
+	checkStepsVersion(&shape, req.Version)
 	if slices.Contains(stepIDs, "") {
 		shape.Add(httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "step_prompt_id is required for every step", Field: "steps"})
 	}
@@ -703,9 +693,7 @@ func (h *Handler) handleBlueprintStepsPut(w http.ResponseWriter, r *http.Request
 		}
 		// First, because every check after it would judge a list decided
 		// against steps the blueprint no longer has.
-		if held.Version != *req.Version {
-			fault.raise(http.StatusConflict, httpx.ReasonVersionConflict,
-				"this blueprint changed since you read its steps; read them again and decide again", "version")
+		if fault.staleSteps(held, *req.Version) {
 			return nil
 		}
 		// A step the list leaves out would lose its row, and its prompt would
@@ -809,6 +797,38 @@ func (f *blueprintFault) raise(status int, reason, message, field string) {
 	}
 	f.status = status
 	f.item = httpx.ErrorItem{Reason: reason, Message: message, Field: field}
+}
+
+// staleSteps raises the refusal a step write gets when its blueprint has moved
+// past the version the caller read its steps at, and reports whether it did.
+// The caller holds the blueprint (GetForUpdate or GetAllForUpdate), and every
+// write that raises the version holds it too, so the version cannot move
+// between this check and the write.
+func (f *blueprintFault) staleSteps(held *domain.Blueprint, version int64) bool {
+	if held.Version == version {
+		return false
+	}
+	f.raise(http.StatusConflict, httpx.ReasonVersionConflict,
+		"this blueprint changed since you read its steps; read them again and decide again", "version")
+	return true
+}
+
+// checkStepsVersion records the faults of the version a step write names: the
+// blueprint_version the caller's read of the steps returned. The steps PUT,
+// split, and reconnect each decide against the steps they read, so they share
+// the rule.
+func checkStepsVersion(shape *httpx.Validation, version *int64) {
+	switch {
+	case version == nil:
+		shape.Add(httpx.ErrorItem{
+			Reason:  httpx.ReasonMissingField,
+			Message: "version is required: send the blueprint_version your read of the steps returned, or the blueprint's version if it has no steps",
+			Field:   "version",
+		})
+	case *version < 1:
+		// Versions start at 1 and only rise, so anything below names no read.
+		shape.Invalid("version", "version must be the blueprint_version your read of the steps returned, or the blueprint's version if it has no steps: a positive integer")
+	}
 }
 
 // write emits the refusal if one was raised, reporting whether it did so the
@@ -988,6 +1008,10 @@ type splitBlueprintRequest struct {
 	// {id}, steps [k,N) move to a new trigger-less blueprint. Pointer so a
 	// missing field 400s ("required") instead of silently defaulting to 0.
 	AtStepIndex *int `json:"at_step_index"`
+	// Version is the blueprint_version the caller's read of the steps
+	// returned. The index is a position in those steps, so it names the step
+	// the caller chose only while the blueprint is still at that version.
+	Version *int64 `json:"version"`
 }
 
 // blueprintSplitResponse returns both halves of a split: the upstream blueprint
@@ -999,7 +1023,9 @@ type blueprintSplitResponse struct {
 
 // handleBlueprintSplit partitions a blueprint at an index into the upstream
 // (trigger-retained) half and a new trigger-less downstream blueprint,
-// atomically.
+// atomically. A blueprint any write has moved past the version the body
+// names is refused (409 VERSION_CONFLICT), because the index was read from
+// steps it no longer has and would cut next to a step the caller never chose.
 func (h *Handler) handleBlueprintSplit(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
@@ -1015,10 +1041,14 @@ func (h *Handler) handleBlueprintSplit(w http.ResponseWriter, r *http.Request) {
 	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
+	var shape httpx.Validation
 	// *int so a missing field is distinguishable from an explicit 0 (which is a
 	// real index whose 422 message is about non-empty halves, not absence).
 	if req.AtStepIndex == nil {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "at_step_index is required", Field: "at_step_index"})
+		shape.Missing("at_step_index")
+	}
+	checkStepsVersion(&shape, req.Version)
+	if shape.Flush(w, http.StatusBadRequest) {
 		return
 	}
 	atIndex := *req.AtStepIndex
@@ -1037,19 +1067,21 @@ func (h *Handler) handleBlueprintSplit(w http.ResponseWriter, r *http.Request) {
 	)
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		// Held until commit, before the steps are read, so the index is
-		// checked against the steps the split moves
+		// Held until commit, before the version is checked and the steps are
+		// read, so the index is checked against the steps the split moves
 		// (BlueprintStore.GetAllForUpdate).
 		if bp, e = tx.Blueprints.GetForUpdate(r.Context(), orgID, id); e != nil || bp == nil {
 			return e
+		}
+		// First, because the index is a position in the steps the caller
+		// read, and the bounds check below would judge it against others.
+		if fault.staleSteps(bp, *req.Version) {
+			return nil
 		}
 		steps, e := tx.Blueprints.ListSteps(r.Context(), orgID, id)
 		if e != nil {
 			return e
 		}
-		// TODO(TFAC-1539): the index is checked against the steps held now,
-		// not the ones the caller read, so a split sent after another write
-		// moved them cuts next to a step the caller never chose.
 		// 0 < k < N: a split that keeps one side empty is a no-op.
 		if atIndex <= 0 || atIndex >= len(steps) {
 			fault.raise(http.StatusUnprocessableEntity, httpx.ReasonOutOfRange,
@@ -1110,6 +1142,10 @@ type reconnectBlueprintRequest struct {
 	// TargetBlueprintID (C) is the trigger-less blueprint whose entry the
 	// upstream half now connects to; its steps are absorbed onto {id}'s tail.
 	TargetBlueprintID string `json:"target_blueprint_id"`
+	// Version is the blueprint_version the caller's read of {id}'s steps
+	// returned, as for a split. The target takes none: it is named by id and
+	// absorbed whole, as a merge's source is, so no position in it was read.
+	Version *int64 `json:"version"`
 }
 
 // blueprintReconnectResponse returns the updated host (the upstream half with
@@ -1126,7 +1162,9 @@ type blueprintReconnectResponse struct {
 // off as a new orphaned trigger-less blueprint) and merges target_blueprint_id
 // onto the surviving upstream half, atomically: SplitAt + MergeInto run in one
 // tx (inTx reuses the WithTx tx), so a mid-sequence failure can't leave a
-// half-split blueprint behind. The host keeps its id + trigger.
+// half-split blueprint behind. The host keeps its id + trigger. A host past
+// the version the body names is refused (409 VERSION_CONFLICT), as a split
+// is.
 func (h *Handler) handleBlueprintReconnect(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
@@ -1142,12 +1180,15 @@ func (h *Handler) handleBlueprintReconnect(w http.ResponseWriter, r *http.Reques
 	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
+	var shape httpx.Validation
 	if req.AtStepIndex == nil {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "at_step_index is required", Field: "at_step_index"})
-		return
+		shape.Missing("at_step_index")
 	}
 	if req.TargetBlueprintID == "" {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "target_blueprint_id is required", Field: "target_blueprint_id"})
+		shape.Missing("target_blueprint_id")
+	}
+	checkStepsVersion(&shape, req.Version)
+	if shape.Flush(w, http.StatusBadRequest) {
 		return
 	}
 
@@ -1195,13 +1236,15 @@ func (h *Handler) handleBlueprintReconnect(w http.ResponseWriter, r *http.Reques
 		if host, target = held[id], held[req.TargetBlueprintID]; host == nil || target == nil {
 			return nil // resolved to 404 below
 		}
+		// First, as for a split: the index is a position in the steps the
+		// caller read.
+		if fault.staleSteps(host, *req.Version) {
+			return nil
+		}
 		steps, e := tx.Blueprints.ListSteps(r.Context(), orgID, id)
 		if e != nil {
 			return e
 		}
-		// TODO(TFAC-1539): the index is checked against the steps held now,
-		// not the ones the caller read, so a reconnect sent after another
-		// write moved them cuts next to a step the caller never chose.
 		// 0 < k < N: both the surviving upstream and the orphaned downstream must
 		// be non-empty (a sequence edge always sits at such a boundary).
 		if atIndex <= 0 || atIndex >= len(steps) {

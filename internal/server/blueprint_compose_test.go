@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"slices"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
@@ -142,14 +143,54 @@ func TestBlueprintMerge_ExceedsStepCapRejected(t *testing.T) {
 	}
 }
 
-func TestBlueprintSplit_RequiresIndex(t *testing.T) {
+func TestBlueprintSplit_Shape(t *testing.T) {
 	s := newTestServer(t)
 	bp, _ := createChainBlueprint(t, s, "NeedsIndex", 2)
-	// A missing at_step_index is a clean 400 "required", distinct from the 422
-	// the ends return — a present 0 is a real index, not absence.
-	rec := doJSON(t, s, http.MethodPost, "/api/blueprints/"+bp+"/split", map[string]any{})
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("split without at_step_index: expected 400, got %d: %s", rec.Code, rec.Body.String())
+	v := blueprintVersion(t, s, bp)
+	for _, c := range []struct {
+		name    string
+		body    map[string]any
+		reasons map[string]string
+	}{
+		// A missing at_step_index is a clean 400 "required", distinct from the
+		// 422 the ends return — a present 0 is a real index, not absence.
+		{"no index", map[string]any{"version": v},
+			map[string]string{"at_step_index": httpx.ReasonMissingField}},
+		{"no version", map[string]any{"at_step_index": 1},
+			map[string]string{"version": httpx.ReasonMissingField}},
+		{"zero version", map[string]any{"at_step_index": 1, "version": 0},
+			map[string]string{"version": httpx.ReasonInvalidField}},
+		// Both are reported, not the first.
+		{"neither", map[string]any{},
+			map[string]string{"at_step_index": httpx.ReasonMissingField, "version": httpx.ReasonMissingField}},
+	} {
+		rec := doJSON(t, s, http.MethodPost, "/api/blueprints/"+bp+"/split", c.body)
+		wantShapeFaults(t, c.name, rec, c.reasons)
+	}
+	if got := listBlueprintSteps(t, s, bp); len(got) != 2 {
+		t.Fatalf("steps after the refused splits = %d, want 2 (untouched)", len(got))
+	}
+}
+
+// TestBlueprintSplit_StaleVersionRefused sends a split with the version read
+// before a steps PUT reordered the blueprint. Its index was a position in the
+// steps the caller read, so it is refused, and the PUT's order stays.
+func TestBlueprintSplit_StaleVersionRefused(t *testing.T) {
+	s := newTestServer(t)
+	bp, p := createChainBlueprint(t, s, "Moved", 3)
+	read := blueprintVersion(t, s, bp)
+	reordered := []string{p[2], p[0], p[1]}
+	if put := putBlueprintSteps(t, s, bp, stepsNaming(reordered)); put.Code != http.StatusOK {
+		t.Fatalf("steps PUT: %d: %s", put.Code, put.Body.String())
+	}
+
+	rec := doJSON(t, s, http.MethodPost, "/api/blueprints/"+bp+"/split", map[string]any{"at_step_index": 1, "version": read})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("split naming the version before the PUT = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	httpxtest.AssertFirstError(t, rec, httpx.ReasonVersionConflict, "version")
+	if got := stepPromptIDs(t, s, bp); !slices.Equal(got, reordered) {
+		t.Errorf("steps after the refused split = %v, want the PUT's %v", got, reordered)
 	}
 }
 
@@ -178,8 +219,10 @@ func TestBlueprintSplit_PartitionsIntoTwo(t *testing.T) {
 	s := newTestServer(t)
 	bp, p := createChainBlueprint(t, s, "Chain", 3)
 
+	read := blueprintVersion(t, s, bp)
 	rec := doJSON(t, s, http.MethodPost, "/api/blueprints/"+bp+"/split", map[string]any{
 		"at_step_index": 1,
+		"version":       read,
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("split: expected 200, got %d: %s", rec.Code, rec.Body.String())
@@ -212,13 +255,19 @@ func TestBlueprintSplit_PartitionsIntoTwo(t *testing.T) {
 	if resp.Downstream.Blueprint["name"] != "Chain-1" {
 		t.Errorf("downstream name=%v, want Chain-1 (defaults to its step-0 prompt)", resp.Downstream.Blueprint["name"])
 	}
+	// The upstream answers the version the split raised it to, on itself and
+	// on its steps, so the caller can send its next cut from this answer.
+	if v := blueprintVersion(t, s, bp); v <= read || resp.Upstream.Blueprint["version"] != float64(v) || resp.Upstream.Steps[0]["blueprint_version"] != float64(v) {
+		t.Errorf("upstream answered version %v and step version %v; the blueprint is at %d, from %d",
+			resp.Upstream.Blueprint["version"], resp.Upstream.Steps[0]["blueprint_version"], v, read)
+	}
 }
 
 func TestBlueprintSplit_AtEndsRejected(t *testing.T) {
 	s := newTestServer(t)
 	bp, _ := createChainBlueprint(t, s, "Pair", 2)
 	for _, k := range []int{0, 2} {
-		rec := doJSON(t, s, http.MethodPost, "/api/blueprints/"+bp+"/split", map[string]any{"at_step_index": k})
+		rec := doJSON(t, s, http.MethodPost, "/api/blueprints/"+bp+"/split", map[string]any{"at_step_index": k, "version": blueprintVersion(t, s, bp)})
 		if rec.Code != http.StatusUnprocessableEntity {
 			t.Fatalf("split at %d: expected 422, got %d: %s", k, rec.Code, rec.Body.String())
 		}

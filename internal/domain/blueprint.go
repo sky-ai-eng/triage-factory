@@ -87,8 +87,8 @@ type Blueprint struct {
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 	// Version starts at 1 and rises with every write that changes the
-	// blueprint's name or its steps. A steps write names the version it read,
-	// and lands only on a blueprint still at it.
+	// blueprint's name or its steps. A steps PUT, split, or reconnect names
+	// the version it read, and lands only on a blueprint still at it.
 	Version int64 `json:"version"`
 }
 
@@ -115,12 +115,12 @@ type BlueprintStep struct {
 	Brief        string    `json:"brief"`
 	CreatedAt    time.Time `json:"created_at"`
 	// BlueprintVersion is the step's blueprint's Version, as of the read
-	// that returned the step, so a steps PUT can name the version of the
-	// steps it was decided against whatever order the caller read the
-	// blueprint and its steps in. The step list reads it in the same
-	// statement as the step, and the step writes' answers copy it from the
-	// blueprint they return. A blueprint run's steps leave it zero, and it is
-	// omitted.
+	// that returned the step, so a steps PUT, split, or reconnect can name
+	// the version of the steps it was decided against whatever order the
+	// caller read the blueprint and its steps in. The step list reads it in
+	// the same statement as the step, and the step writes' answers copy it
+	// from the blueprint they return. A blueprint run's steps leave it zero,
+	// and it is omitted.
 	BlueprintVersion int64 `json:"blueprint_version,omitempty"`
 }
 

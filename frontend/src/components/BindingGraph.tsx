@@ -17,7 +17,7 @@ import {
 import '@xyflow/react/dist/style.css'
 import { Copy, FileText, Layers, MoreVertical, Trash2 } from 'lucide-react'
 import type { Blueprint, BlueprintStep, EventHandler, Prompt } from '../types'
-import { toast } from './Toast/toastStore'
+import { backToOrigin, toast } from './Toast/toastStore'
 import { apiFetch, apiJSON, apiListAll } from '../lib/apiClient'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { useEventSources } from '../hooks/useEventSources'
@@ -32,6 +32,28 @@ import {
 } from './bindingGraphConnection'
 import { type BindingScope, blueprintsBase, promptsBase, handlersBase } from '../lib/scope'
 import { createEventHandler, detachPatch, updateEventHandler } from '../lib/eventHandlers'
+import {
+  isStaleSteps,
+  reconnectBlueprint,
+  splitBlueprint,
+  stepsVersion,
+} from '../lib/blueprintWrites'
+
+// What a sequence edge stands for: the boundary before step atStepIndex of
+// blueprintId, in the steps read at blueprintVersion. A split or a reconnect
+// of the edge sends all three, so a canvas that missed a change to the
+// blueprint is refused instead of cutting next to another step.
+type SequenceEdgeData = {
+  kind: 'sequence'
+  blueprintId: string
+  atStepIndex: number
+  blueprintVersion: number
+}
+
+// The canvas's words for a cut the server refused because the blueprint
+// changed since the canvas read it. The canvas reads it again either way.
+const BLUEPRINT_CHANGED =
+  'This blueprint changed since the canvas loaded it, so nothing was moved. The canvas now shows it as it is.'
 
 interface EventType {
   id: string
@@ -446,6 +468,8 @@ function BindingGraphInner({
   // prompt→prompt sequence edges).
   const [blueprintFirstPrompt, setBlueprintFirstPrompt] = useState<Record<string, string>>({})
   const [blueprintSteps, setBlueprintSteps] = useState<Record<string, string[]>>({})
+  // The version each blueprint's steps were read at, which a cut names.
+  const [blueprintVersions, setBlueprintVersions] = useState<Record<string, number>>({})
   const [nodes, setNodes] = useState<Node[]>([])
   const [loading, setLoading] = useState(true)
   const [activeEventIds, setActiveEventIds] = useState<Set<string>>(new Set())
@@ -453,7 +477,7 @@ function BindingGraphInner({
   // (→ the trigger config panel) + remove; for a sequence edge, split-here.
   const [edgeMenu, setEdgeMenu] = useState<
     | { x: number; y: number; kind: 'trigger'; trigger: EventHandler }
-    | { x: number; y: number; kind: 'sequence'; blueprintId: string; atStepIndex: number }
+    | ({ x: number; y: number } & SequenceEdgeData)
     | null
   >(null)
   // Blueprint details popup (the box's edit button).
@@ -618,6 +642,7 @@ function BindingGraphInner({
       // prompt ids.
       const firstPrompt: Record<string, string> = {}
       const stepsByBlueprint: Record<string, string[]> = {}
+      const versions: Record<string, number> = {}
       const nodeList: Prompt[] = []
       const seen = new Set<string>()
       for (const b of blueprintList) {
@@ -625,6 +650,7 @@ function BindingGraphInner({
         stepsByBlueprint[b.id] = ordered.map((s) => s.step_prompt_id)
         if (ordered.length > 0) {
           firstPrompt[b.id] = ordered[0].step_prompt_id
+          versions[b.id] = stepsVersion(ordered)
         }
         for (const step of ordered) {
           if (seen.has(step.step_prompt_id)) continue
@@ -637,6 +663,7 @@ function BindingGraphInner({
       setBlueprints(blueprintList)
       setBlueprintFirstPrompt(firstPrompt)
       setBlueprintSteps(stepsByBlueprint)
+      setBlueprintVersions(versions)
 
       const saved = layoutRef.current
       const boundIds = new Set(tRes.map((t) => t.event_type))
@@ -1037,7 +1064,12 @@ function BindingGraphInner({
           // a committed step link rather than an unfired binding.
           type: 'default',
           // Disconnecting this edge splits the blueprint before step i+1.
-          data: { kind: 'sequence', blueprintId: bpId, atStepIndex: i + 1 },
+          data: {
+            kind: 'sequence',
+            blueprintId: bpId,
+            atStepIndex: i + 1,
+            blueprintVersion: blueprintVersions[bpId],
+          } satisfies SequenceEdgeData,
           deletable: false,
           reconnectable,
           style: { stroke: 'var(--color-ink-3)', strokeWidth: 1.5 },
@@ -1046,7 +1078,7 @@ function BindingGraphInner({
       }
     }
     return [...sequenceEdges, ...triggerEdges]
-  }, [triggers, activeEventIds, blueprintFirstPrompt, blueprintSteps, prompts])
+  }, [triggers, activeEventIds, blueprintFirstPrompt, blueprintSteps, blueprintVersions, prompts])
 
   // Handle node changes (dragging) — apply, persist positions, recompute boxes.
   //
@@ -1365,19 +1397,25 @@ function BindingGraphInner({
     [fetchAll, removeTriggerGuard],
   )
 
-  // Split the blueprint before the given step index.
+  // Split the blueprint at a sequence edge. A refusal for a blueprint that
+  // changed since the canvas read it reloads the canvas, so the person decides
+  // again against the steps it holds now.
   const doSplit = useCallback(
-    async (blueprintId: string, atStepIndex: number) => {
+    async (edge: SequenceEdgeData) => {
       await splitGuard.run(async () => {
         try {
-          await apiFetch(`${blueprintsBase()}/${encodeURIComponent(blueprintId)}/split`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ at_step_index: atStepIndex }),
-          })
+          await splitBlueprint(
+            { id: edge.blueprintId, version: edge.blueprintVersion },
+            edge.atStepIndex,
+          )
           await fetchAll()
         } catch (err) {
-          toast.failed(err, 'Could not split the blueprint.')
+          if (isStaleSteps(err)) {
+            toast.error(BLUEPRINT_CHANGED, 'Not split', { action: backToOrigin(err) })
+            await fetchAll()
+          } else {
+            toast.failed(err, 'Could not split the blueprint.')
+          }
         }
       })
     },
@@ -1405,19 +1443,20 @@ function BindingGraphInner({
   // Re-point a sequence edge onto a different blueprint's entry: atomic
   // split-here + merge-there, peeling the old downstream into a new orphan.
   const doReconnectSequence = useCallback(
-    async (blueprintId: string, atStepIndex: number, targetBlueprintId: string) => {
+    async (edge: SequenceEdgeData, targetBlueprintId: string) => {
       try {
-        await apiFetch(`${blueprintsBase()}/${encodeURIComponent(blueprintId)}/reconnect`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            at_step_index: atStepIndex,
-            target_blueprint_id: targetBlueprintId,
-          }),
-        })
+        await reconnectBlueprint(
+          { id: edge.blueprintId, version: edge.blueprintVersion },
+          edge.atStepIndex,
+          targetBlueprintId,
+        )
         toast.info('Steps after the reconnect point are now a separate blueprint.')
       } catch (err) {
-        toast.failed(err, 'Could not reconnect the step.')
+        if (isStaleSteps(err)) {
+          toast.error(BLUEPRINT_CHANGED, 'Not reconnected', { action: backToOrigin(err) })
+        } else {
+          toast.failed(err, 'Could not reconnect the step.')
+        }
       } finally {
         fetchAll()
       }
@@ -1474,7 +1513,7 @@ function BindingGraphInner({
         return
       }
       if (kind === 'sequence') {
-        const data = oldEdge.data as { blueprintId: string; atStepIndex: number }
+        const data = oldEdge.data as SequenceEdgeData
         if (targetBp === data.blueprintId) {
           toast.error('A blueprint can’t wire into itself')
           return
@@ -1483,7 +1522,7 @@ function BindingGraphInner({
           toast.error(DETACH_BEFORE_MERGE)
           return
         }
-        doReconnectSequence(data.blueprintId, data.atStepIndex, targetBp)
+        doReconnectSequence(data, targetBp)
       }
     },
     [scopeReady, doRetargetTrigger, doReconnectSequence],
@@ -1500,8 +1539,7 @@ function BindingGraphInner({
       if (kind === 'trigger') {
         doDetachTrigger(edge.id)
       } else if (kind === 'sequence') {
-        const data = edge.data as { blueprintId: string; atStepIndex: number }
-        doSplit(data.blueprintId, data.atStepIndex)
+        doSplit(edge.data as SequenceEdgeData)
       }
       edgeReconnectSuccessful.current = true
     },
@@ -1515,13 +1553,10 @@ function BindingGraphInner({
     const kind = (edge.data as { kind?: string } | undefined)?.kind
     if (kind === 'sequence') {
       if (event.shiftKey) {
-        const data = edge.data as { blueprintId: string; atStepIndex: number }
         setEdgeMenu({
           x: mouseEvent.clientX,
           y: mouseEvent.clientY,
-          kind: 'sequence',
-          blueprintId: data.blueprintId,
-          atStepIndex: data.atStepIndex,
+          ...(edge.data as SequenceEdgeData),
         })
       }
       return
@@ -1751,7 +1786,7 @@ function BindingGraphInner({
                 </div>
                 <button
                   onClick={async () => {
-                    await doSplit(edgeMenu.blueprintId, edgeMenu.atStepIndex)
+                    await doSplit(edgeMenu)
                     setEdgeMenu(null)
                   }}
                   disabled={splitGuard.pending}
