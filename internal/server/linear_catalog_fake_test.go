@@ -62,9 +62,10 @@ var linearFixtureStates = []linear.WorkflowState{
 
 // linearCatalogFake stands in for Linear's GraphQL endpoint, answering the
 // documents the catalog routes and the write gate send — Teams (filtered and
-// cursor-paged), TeamsByID, Team, TeamStates (cursor-paged), WorkflowState,
-// Labels (cursor-paged), Users (filtered and cursor-paged, active users only)
-// and User — from one in-memory workspace, so a paging, filtering or
+// cursor-paged), TeamsByID, Team, TeamByKey, TeamStates (cursor-paged),
+// WorkflowState, Labels (cursor-paged), Users (filtered and cursor-paged,
+// active users only), User and UserByDisplayName — from one in-memory
+// workspace, so a paging, filtering or
 // resolution bug shows up as wrong rows rather than as a stub running out of
 // scripted replies. A team with no states of its own set has
 // linearFixtureStates, and one with no labels of its own set has
@@ -182,6 +183,14 @@ func (f *linearCatalogFake) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = io.WriteString(w, `{"errors":[{"message":"Entity not found: Team","extensions":{"code":"INVALID_INPUT"}}]}`)
+	case "TeamByKey":
+		matched := []linear.Team{}
+		for _, t := range teams {
+			if t.Key == stringVar(body.Variables, "key") {
+				matched = append(matched, t)
+			}
+		}
+		writeGraphQLData(w, map[string]any{"teams": map[string]any{"nodes": matched}})
 	case "TeamStates":
 		states, known := workflows[stringVar(body.Variables, "id")]
 		if !known {
@@ -238,6 +247,15 @@ func (f *linearCatalogFake) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = io.WriteString(w, `{"errors":[{"message":"Entity not found: User","extensions":{"code":"INVALID_INPUT"}}]}`)
+	case "UserByDisplayName":
+		// Deactivated users included, as the document asks.
+		matched := []linear.User{}
+		for _, u := range users {
+			if u.DisplayName == stringVar(body.Variables, "displayName") {
+				matched = append(matched, u)
+			}
+		}
+		writeGraphQLData(w, map[string]any{"users": map[string]any{"nodes": matched}})
 	default:
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = io.WriteString(w, `{"errors":[{"message":"unexpected document `+op+`"}]}`)

@@ -7,6 +7,7 @@ func (s *Server) registerLinearRoutes() {
 	// active org. Member-gated; see the handler file.
 	s.op(opLinearTeamsList, s.handleLinearTeamsList)
 	s.op(opLinearTeamGet, s.handleLinearTeamGet)
+	s.op(opLinearTeamGetByName, s.handleLinearTeamGetByName)
 	s.op(opLinearStatesList, s.handleLinearStatesList)
 	s.op(opLinearStateGet, s.handleLinearStateGet)
 	// The labels an issue in a Linear team can carry, which Linear event
@@ -17,6 +18,7 @@ func (s *Server) registerLinearRoutes() {
 	// see linear_users_handler.go.
 	s.op(opLinearUsersList, s.handleLinearUsersList)
 	s.op(opLinearUserGet, s.handleLinearUserGet)
+	s.op(opLinearUserGetByName, s.handleLinearUserGetByName)
 
 	// The org's Linear credential, the same pair again (linear_access.go),
 	// plus the status read its settings card and the setup wizard render.

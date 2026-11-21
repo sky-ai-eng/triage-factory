@@ -337,8 +337,8 @@ func TestLinearIdentity_APIKeyRefusals(t *testing.T) {
 			t.Errorf("status = %+v, want not connected, no workspace, Connect available", st)
 		}
 		rec := doJSON(t, r.s, http.MethodPost, linearIdentityPath()+"/api-key", map[string]any{"api_key": linearUserKey})
-		if rec.Code != http.StatusConflict || errorItems(t, rec)[0].Reason != "NOT_CONFIGURED" {
-			t.Fatalf("status = %d %s, want 409 NOT_CONFIGURED", rec.Code, rec.Body.String())
+		if item := errorItems(t, rec)[0]; rec.Code != http.StatusConflict || item.Reason != "NOT_CONFIGURED" || item.Field != "" {
+			t.Fatalf("status = %d %s, want 409 NOT_CONFIGURED naming no field", rec.Code, rec.Body.String())
 		}
 		if r.fake.Calls() != 0 {
 			t.Error("validated a key the org has no workspace to bind it in")
@@ -941,7 +941,7 @@ func TestLinearIdentity_MultiMode(t *testing.T) {
 	if rec := rig.tokensJSON(http.MethodPut, orgPath+"/linear/access/credential", map[string]any{"api_key": linearOrgKey}, sidA, ""); rec.Code != http.StatusOK {
 		t.Fatalf("org bind: %d: %s", rec.Code, rec.Body.String())
 	}
-	if rec := rig.tokensJSON(http.MethodPost, orgPath+"/linear/app", map[string]any{"client_id": "lin-client-1", "client_secret": "s"}, sidA, ""); rec.Code != http.StatusOK {
+	if rec := rig.tokensJSON(http.MethodPut, orgPath+"/linear/app", map[string]any{"client_id": "lin-client-1", "client_secret": "s"}, sidA, ""); rec.Code != http.StatusOK {
 		t.Fatalf("register app: %d: %s", rec.Code, rec.Body.String())
 	}
 	status := func(sid string) linearIdentityStatusResponse {
@@ -1113,7 +1113,7 @@ func TestLinearIdentity_RemovalRacingABind(t *testing.T) {
 	if rec := rig.tokensJSON(http.MethodPut, orgPath+"/linear/access/credential", map[string]any{"api_key": linearOrgKey}, sidA, ""); rec.Code != http.StatusOK {
 		t.Fatalf("org bind: %d: %s", rec.Code, rec.Body.String())
 	}
-	if rec := rig.tokensJSON(http.MethodPost, orgPath+"/linear/app", map[string]any{"client_id": "lin-client-1", "client_secret": "s"}, sidA, ""); rec.Code != http.StatusOK {
+	if rec := rig.tokensJSON(http.MethodPut, orgPath+"/linear/app", map[string]any{"client_id": "lin-client-1", "client_secret": "s"}, sidA, ""); rec.Code != http.StatusOK {
 		t.Fatalf("register app: %d: %s", rec.Code, rec.Body.String())
 	}
 	addMember := func() (uuid.UUID, string) {

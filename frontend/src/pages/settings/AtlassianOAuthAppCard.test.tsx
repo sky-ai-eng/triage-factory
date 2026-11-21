@@ -75,7 +75,7 @@ describe('AtlassianOAuthAppCard', () => {
       expect(fetchMock).toHaveBeenLastCalledWith(
         '/api/orgs/org-1/jira/app',
         expect.objectContaining({
-          method: 'POST',
+          method: 'PUT',
           body: JSON.stringify({ client_id: 'other-client', client_secret: 'new-secret' }),
         }),
       ),
@@ -92,7 +92,7 @@ describe('AtlassianOAuthAppCard', () => {
       expect(fetchMock).toHaveBeenLastCalledWith(
         '/api/orgs/org-1/jira/app',
         expect.objectContaining({
-          method: 'POST',
+          method: 'PUT',
           body: JSON.stringify({ client_id: 'atl-client', client_secret: 'new-secret' }),
         }),
       ),

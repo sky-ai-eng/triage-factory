@@ -177,6 +177,39 @@ func TestJiraProjectGet(t *testing.T) {
 	}
 }
 
+// TestJiraProjectGetByName: a project is read by its current key, exactly as
+// Jira writes it. A key Jira has no project for, and one the project was
+// renamed from, are a 404; so is a value that cannot be a key, without asking
+// Jira, since the key goes into Jira's URL.
+func TestJiraProjectGetByName(t *testing.T) {
+	s, fake := newServerWithJiraCatalog(t, "SKY", "OPS")
+	byName := func(segment string) string {
+		return jiraOrgPath(runmode.LocalDefaultOrgID) + "/projects/by-name/" + segment
+	}
+
+	rec := doJSON(t, s, http.MethodGet, byName("OPS"), nil)
+	var got jiraProjectJSON
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil || rec.Code != http.StatusOK {
+		t.Fatalf("GET by key = %d; body=%s", rec.Code, rec.Body.String())
+	}
+	if want := (jiraProjectJSON{JiraID: fakeJiraProjectID("OPS"), Key: "OPS", Name: "OPS Project"}); got != want {
+		t.Errorf("project = %+v, want %+v", got, want)
+	}
+
+	fake.Rename("OLDOPS", "OPS")
+	for _, key := range []string{"GONE", "OLDOPS"} {
+		assertOneFault(t, doJSON(t, s, http.MethodGet, byName(key), nil), http.StatusNotFound, "NOT_FOUND", "")
+	}
+
+	before := fake.Calls()
+	for _, segment := range []string{"ops", "1OPS", "OP-S", "OPS%2Fstatuses"} {
+		assertOneFault(t, doJSON(t, s, http.MethodGet, byName(segment), nil), http.StatusNotFound, "NOT_FOUND", "")
+	}
+	if fake.Calls() != before {
+		t.Errorf("a value that is not a project key reached Jira %d times", fake.Calls()-before)
+	}
+}
+
 // TestJiraStatusesList_TokenIsBoundToTheProject: a project's whole workflow
 // pages by name, each status under the id the team write takes, and a token is
 // an offset into that project's workflow that cannot page another's.

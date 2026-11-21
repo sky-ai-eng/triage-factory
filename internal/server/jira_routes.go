@@ -9,6 +9,7 @@ func (s *Server) registerJiraRoutes() {
 	// handler file for why the two differ.
 	s.op(opJiraProjectsList, s.handleJiraProjectsList)
 	s.op(opJiraProjectGet, s.handleJiraProjectGet)
+	s.op(opJiraProjectGetByName, s.handleJiraProjectGetByName)
 	s.op(opJiraStatusesList, s.handleJiraStatusesList)
 	s.op(opJiraStatusGet, s.handleJiraStatusGet)
 	// The instance's priorities and each project's issue types, which Jira

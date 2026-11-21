@@ -14,10 +14,12 @@ import (
 //
 //   POST /api/orgs/{org_id}/linear/users/list
 //   GET  /api/orgs/{org_id}/linear/users/{linear_user_id}
+//   GET  /api/orgs/{org_id}/linear/users/by-name/{display_name}
 //
 // Proxied live under the org's Linear service credential and gated on live
 // membership of the org, like the team catalog (linear_teams_handler.go). The
-// list is how a caller turns a name into the id a filter stores; the point
+// list is how a caller turns a name into the id a filter stores, and the read
+// by display name how it turns the one name Linear keeps unique; the point
 // read is how it names a stored id no team member holds.
 //
 // A user's email is matched by the list's search but never returned: the people
@@ -149,4 +151,42 @@ func (s *Server) handleLinearUserGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	opLinearUserGet.Write(w, toLinearUserJSON(user))
+}
+
+var opLinearUserGetByName = httpx.NewJSONOp[httpx.NoBody, linearUserJSON](httpx.OpSpec{
+	Pattern:     "GET /api/orgs/{org_id}/linear/users/by-name/{display_name}",
+	ID:          "get_linear_user_by_name",
+	Summary:     "Get a Linear user by display name",
+	Description: "Reads the user of the organization's Linear workspace, deactivated or not, whose display name is exactly the one given, matched with case, live from Linear. Linear keeps display names unique within a workspace.",
+	PathParams: map[string]string{
+		"org_id":       "The organization's id.",
+		"display_name": "The user's display name.",
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
+
+// GET /api/orgs/{org_id}/linear/users/by-name/{display_name}
+func (s *Server) handleLinearUserGetByName(w http.ResponseWriter, r *http.Request) {
+	orgID, _, ok := s.az.RequireOrgMember(w, r)
+	if !ok {
+		return
+	}
+	displayName, ok := linearPathName(w, r, "display_name", "linear user")
+	if !ok {
+		return
+	}
+	client, ok := s.linearSystemClient(w, r, orgID, "linear/user", "Linear is not connected for this organization")
+	if !ok {
+		return
+	}
+	user, err := client.GetUserByDisplayName(r.Context(), displayName)
+	if errors.Is(err, linear.ErrNotFound) {
+		httpx.NotFound(w, "linear user")
+		return
+	}
+	if err != nil {
+		writeLinearUpstream(w, orgID, "the Linear user "+displayName, err)
+		return
+	}
+	opLinearUserGetByName.Write(w, toLinearUserJSON(user))
 }

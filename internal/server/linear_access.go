@@ -232,7 +232,7 @@ func (s *Server) handleLinearCredentialPut(w http.ResponseWriter, r *http.Reques
 			restore()
 		}
 		if errors.Is(err, errLinearAppInstalled) {
-			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this organization's Linear access is an installed app — disconnect the installed app first", Field: "api_key"})
+			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this organization's Linear access is an installed app — disconnect the installed app first"})
 			return
 		}
 		internalError(w, "linear-access", fmt.Errorf("persist linear credential: %w", err))

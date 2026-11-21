@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -200,13 +199,13 @@ func (s *Server) jiraAppStatusPayload(r *http.Request, orgID, userID string, app
 // jiraAppImportRequest is the import endpoint body — a bring-your-own
 // Atlassian OAuth app's client credentials.
 type jiraAppImportRequest struct {
-	ClientID     string `json:"client_id" doc:"The Atlassian OAuth app's client id."`
-	ClientSecret string `json:"client_secret" doc:"The Atlassian OAuth app's client secret."`
+	ClientID     string `json:"client_id" doc:"The Atlassian OAuth app's client id, at most 256 characters."`
+	ClientSecret string `json:"client_secret" doc:"The Atlassian OAuth app's client secret, at most 256 characters."`
 }
 
 var opJiraAppImport = httpx.NewJSONOp[jiraAppImportRequest, jiraAppStatusResponse](httpx.OpSpec{
-	Pattern:     "POST /api/orgs/{org_id}/jira/app",
-	ID:          "create_jira_app",
+	Pattern:     "PUT /api/orgs/{org_id}/jira/app",
+	ID:          "replace_jira_app",
 	Summary:     "Store the organization's Atlassian OAuth app",
 	Description: "Stores an Atlassian OAuth app's client id and secret as the organization's own app, replacing any it had, and returns the app status. The credentials are stored without being checked against Atlassian.",
 	PathParams:  map[string]string{"org_id": "The organization's id."},
@@ -220,7 +219,7 @@ var opJiraAppImport = httpx.NewJSONOp[jiraAppImportRequest, jiraAppStatusRespons
 // exposes no way to verify an OAuth app's client credentials without running the
 // authorize/token flow itself (a separate ticket), so this only stores them.
 //
-// POST /api/orgs/{org_id}/jira/app
+// PUT /api/orgs/{org_id}/jira/app
 func (s *Server) handleJiraAppImport(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := s.az.RequireOrgAdmin(w, r)
 	if !ok {
@@ -230,14 +229,9 @@ func (s *Server) handleJiraAppImport(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	clientID := strings.TrimSpace(req.ClientID)
-	clientSecret := strings.TrimSpace(req.ClientSecret)
-	if clientID == "" {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "An Atlassian OAuth app client ID is required.", Field: "client_id"})
-		return
-	}
-	if clientSecret == "" {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "An Atlassian OAuth app client secret is required.", Field: "client_secret"})
+	var v httpx.Validation
+	clientID, clientSecret := oauthAppCredentials(&v, "An Atlassian OAuth app", req.ClientID, req.ClientSecret)
+	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
 

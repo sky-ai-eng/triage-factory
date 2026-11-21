@@ -452,14 +452,14 @@ func TestJiraIdentityPAT_NoJiraHost_ReturnsNotConfigured(t *testing.T) {
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status=%d body=%s, want 409", rec.Code, rec.Body.String())
 	}
-	httpxtest.AssertFirstError(t, rec, httpx.ReasonNotConfigured, "pat")
+	httpxtest.AssertFirstError(t, rec, httpx.ReasonNotConfigured, "")
 
 	rec = doJSON(t, s, "POST", jiraIdentityAPITokenRoute,
 		map[string]any{"email": "me@acme.com", "token": "cloud-tok"})
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("api-token status=%d body=%s, want 409", rec.Code, rec.Body.String())
 	}
-	httpxtest.AssertFirstError(t, rec, httpx.ReasonNotConfigured, "token")
+	httpxtest.AssertFirstError(t, rec, httpx.ReasonNotConfigured, "")
 }
 
 // TestJiraConnectStart_DataCenterOrg_BouncesToPaste: a Data Center org has no

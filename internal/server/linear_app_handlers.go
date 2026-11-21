@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -22,7 +21,7 @@ import (
 // ceremony (linear_install.go) then runs against it.
 //
 //   GET    /api/orgs/{org_id}/linear/app
-//   POST   /api/orgs/{org_id}/linear/app
+//   PUT    /api/orgs/{org_id}/linear/app
 //   DELETE /api/orgs/{org_id}/linear/app
 //
 // The row is the per-org override in linear.OAuthAppResolver's precedence; the
@@ -40,10 +39,6 @@ const (
 	linearConnectCallbackPath = "/api/linear/connect/callback"
 )
 
-// linearAppCredentialMaxLen caps the client ID and the client secret. Linear's
-// are 32 characters; the cap only refuses a value no OAuth app would issue.
-const linearAppCredentialMaxLen = 256
-
 // linearAppCreateURL is Linear's app-creation page, which pre-fills its form
 // from these query parameters. It does not hand the credentials back, so the
 // admin copies them from the created app's page.
@@ -60,7 +55,7 @@ type linearAppInfo struct {
 	RegisteredByDisplayName string `json:"registered_by_display_name" doc:"The display name of the person who last stored the app, empty when it cannot be read."`
 }
 
-// linearAppStatusResponse is the GET body, and what a successful POST or
+// linearAppStatusResponse is the GET body, and what a successful PUT or
 // DELETE answers with. Like jiraAppStatusResponse it is driven by the
 // resolved source rather than the raw row: a row whose secret is gone is not
 // reported as the org's app.
@@ -76,7 +71,7 @@ type linearAppStatusResponse struct {
 	RedirectURIs           []string       `json:"redirect_uris" doc:"The redirect URIs to register on the Linear OAuth app: the install callback, then the connect callback."`
 }
 
-// linearAppImportRequest is the POST body.
+// linearAppImportRequest is the PUT body.
 type linearAppImportRequest struct {
 	ClientID     string `json:"client_id" doc:"The Linear OAuth app's client id, at most 256 characters."`
 	ClientSecret string `json:"client_secret" doc:"The Linear OAuth app's client secret, at most 256 characters."`
@@ -92,8 +87,8 @@ var opLinearAppStatus = httpx.NewJSONOp[httpx.NoBody, linearAppStatusResponse](h
 })
 
 var opLinearAppImport = httpx.NewJSONOp[linearAppImportRequest, linearAppStatusResponse](httpx.OpSpec{
-	Pattern:     "POST /api/orgs/{org_id}/linear/app",
-	ID:          "create_linear_app",
+	Pattern:     "PUT /api/orgs/{org_id}/linear/app",
+	ID:          "replace_linear_app",
 	Summary:     "Store the organization's Linear OAuth app",
 	Description: "Stores a Linear OAuth app's client id and secret as the organization's own app, replacing any it had, and returns the app status. The credentials are stored without being checked against Linear, and an app with another client id is refused while Triage Factory is installed in Linear with the current one.",
 	PathParams:  map[string]string{"org_id": "The organization's id."},
@@ -264,7 +259,7 @@ func (s *Server) liveLinearInstall(ctx context.Context, orgID string) (*domain.O
 // minted by another app is live is refused 409, for the reason the delete
 // gives. Rotating the secret of the same app is a replace like any other.
 //
-// POST /api/orgs/{org_id}/linear/app
+// PUT /api/orgs/{org_id}/linear/app
 func (s *Server) handleLinearAppImport(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := s.az.RequireOrgAdmin(w, r)
 	if !ok {
@@ -275,23 +270,9 @@ func (s *Server) handleLinearAppImport(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	clientID := strings.TrimSpace(req.ClientID)
-	clientSecret := strings.TrimSpace(req.ClientSecret)
-	var faults []httpx.ErrorItem
-	if clientID == "" {
-		faults = append(faults, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "A Linear OAuth app client ID is required.", Field: "client_id"})
-	}
-	if clientSecret == "" {
-		faults = append(faults, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "A Linear OAuth app client secret is required.", Field: "client_secret"})
-	}
-	if utf8.RuneCountInString(clientID) > linearAppCredentialMaxLen {
-		faults = append(faults, httpx.ErrorItem{Reason: httpx.ReasonOutOfRange, Message: fmt.Sprintf("client_id must be at most %d characters", linearAppCredentialMaxLen), Field: "client_id"})
-	}
-	if utf8.RuneCountInString(clientSecret) > linearAppCredentialMaxLen {
-		faults = append(faults, httpx.ErrorItem{Reason: httpx.ReasonOutOfRange, Message: fmt.Sprintf("client_secret must be at most %d characters", linearAppCredentialMaxLen), Field: "client_secret"})
-	}
-	if len(faults) > 0 {
-		httpx.WriteErrors(w, http.StatusBadRequest, faults...)
+	var v httpx.Validation
+	clientID, clientSecret := oauthAppCredentials(&v, "A Linear OAuth app", req.ClientID, req.ClientSecret)
+	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
 

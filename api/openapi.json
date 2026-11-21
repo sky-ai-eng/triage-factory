@@ -135,11 +135,11 @@
       "JiraAppImportRequest": {
         "properties": {
           "client_id": {
-            "description": "The Atlassian OAuth app's client id.",
+            "description": "The Atlassian OAuth app's client id, at most 256 characters.",
             "type": "string"
           },
           "client_secret": {
-            "description": "The Atlassian OAuth app's client secret.",
+            "description": "The Atlassian OAuth app's client secret, at most 256 characters.",
             "type": "string"
           }
         },
@@ -2191,9 +2191,9 @@
           "readOnlyHint": true
         }
       },
-      "post": {
+      "put": {
         "description": "Stores an Atlassian OAuth app's client id and secret as the organization's own app, replacing any it had, and returns the app status. The credentials are stored without being checked against Atlassian.",
-        "operationId": "create_jira_app",
+        "operationId": "replace_jira_app",
         "parameters": [
           {
             "description": "The organization's id.",
@@ -2533,6 +2533,60 @@
           }
         ],
         "summary": "Get a Jira priority",
+        "x-hints": {
+          "openWorldHint": true,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/jira/projects/by-name/{key}": {
+      "get": {
+        "description": "Reads the Jira project whose current key is exactly the one given, live from Jira, under the organization's Jira credential. A key the project had before it was renamed is not found.",
+        "operationId": "get_jira_project_by_name",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The project's key as Jira writes it, such as PROJ: an uppercase letter, then uppercase letters, digits, or underscores.",
+            "in": "path",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JiraProjectJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get a Jira project by its key",
         "x-hints": {
           "openWorldHint": true,
           "readOnlyHint": true
@@ -3255,9 +3309,9 @@
           "readOnlyHint": true
         }
       },
-      "post": {
+      "put": {
         "description": "Stores a Linear OAuth app's client id and secret as the organization's own app, replacing any it had, and returns the app status. The credentials are stored without being checked against Linear, and an app with another client id is refused while Triage Factory is installed in Linear with the current one.",
-        "operationId": "create_linear_app",
+        "operationId": "replace_linear_app",
         "parameters": [
           {
             "description": "The organization's id.",
@@ -3455,6 +3509,60 @@
           "idempotentHint": true,
           "openWorldHint": true,
           "readOnlyHint": false
+        }
+      }
+    },
+    "/api/orgs/{org_id}/linear/teams/by-name/{key}": {
+      "get": {
+        "description": "Reads the Linear team the organization's Linear credential can see whose key is exactly the one given, matched with case, live from Linear.",
+        "operationId": "get_linear_team_by_name",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The team's key as Linear writes it, such as ENG.",
+            "in": "path",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinearTeamJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get a Linear team by its key",
+        "x-hints": {
+          "openWorldHint": true,
+          "readOnlyHint": true
         }
       }
     },
@@ -3887,6 +3995,60 @@
           }
         ],
         "summary": "Get a Linear team's workflow state",
+        "x-hints": {
+          "openWorldHint": true,
+          "readOnlyHint": true
+        }
+      }
+    },
+    "/api/orgs/{org_id}/linear/users/by-name/{display_name}": {
+      "get": {
+        "description": "Reads the user of the organization's Linear workspace, deactivated or not, whose display name is exactly the one given, matched with case, live from Linear. Linear keeps display names unique within a workspace.",
+        "operationId": "get_linear_user_by_name",
+        "parameters": [
+          {
+            "description": "The organization's id.",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The user's display name.",
+            "in": "path",
+            "name": "display_name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinearUserJSON"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": []
+          }
+        ],
+        "summary": "Get a Linear user by display name",
         "x-hints": {
           "openWorldHint": true,
           "readOnlyHint": true

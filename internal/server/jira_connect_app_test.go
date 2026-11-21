@@ -61,7 +61,7 @@ func fakeAtlassian(t *testing.T, s *Server) {
 // saveJiraApp stores the org's own Atlassian app, as an admin does.
 func saveJiraApp(t *testing.T, s *Server, clientID string) {
 	t.Helper()
-	rec := doJSON(t, s, http.MethodPost, jiraAppPath(), map[string]string{"client_id": clientID, "client_secret": clientID + "-secret"})
+	rec := doJSON(t, s, http.MethodPut, jiraAppPath(), map[string]string{"client_id": clientID, "client_secret": clientID + "-secret"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("save jira app: %d: %s", rec.Code, rec.Body.String())
 	}

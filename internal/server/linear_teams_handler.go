@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"slices"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -19,6 +20,7 @@ import (
 //
 //   POST /api/orgs/{org_id}/linear/teams/list
 //   GET  /api/orgs/{org_id}/linear/teams/{linear_team_id}
+//   GET  /api/orgs/{org_id}/linear/teams/by-name/{key}
 //   POST /api/orgs/{org_id}/linear/teams/{linear_team_id}/states/list
 //   GET  /api/orgs/{org_id}/linear/teams/{linear_team_id}/states/{state_id}
 //
@@ -196,6 +198,44 @@ func (s *Server) handleLinearTeamGet(w http.ResponseWriter, r *http.Request) {
 	opLinearTeamGet.Write(w, toLinearTeamJSON(team))
 }
 
+var opLinearTeamGetByName = httpx.NewJSONOp[httpx.NoBody, linearTeamJSON](httpx.OpSpec{
+	Pattern:     "GET /api/orgs/{org_id}/linear/teams/by-name/{key}",
+	ID:          "get_linear_team_by_name",
+	Summary:     "Get a Linear team by its key",
+	Description: "Reads the Linear team the organization's Linear credential can see whose key is exactly the one given, matched with case, live from Linear.",
+	PathParams: map[string]string{
+		"org_id": "The organization's id.",
+		"key":    "The team's key as Linear writes it, such as ENG.",
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
+
+// GET /api/orgs/{org_id}/linear/teams/by-name/{key}
+func (s *Server) handleLinearTeamGetByName(w http.ResponseWriter, r *http.Request) {
+	orgID, _, ok := s.az.RequireOrgMember(w, r)
+	if !ok {
+		return
+	}
+	key, ok := linearPathName(w, r, "key", "linear team")
+	if !ok {
+		return
+	}
+	client, ok := s.linearSystemClient(w, r, orgID, "linear/team", "Linear is not connected for this organization")
+	if !ok {
+		return
+	}
+	team, err := client.GetTeamByKey(r.Context(), key)
+	if errors.Is(err, linear.ErrNotFound) {
+		httpx.NotFound(w, "linear team")
+		return
+	}
+	if err != nil {
+		writeLinearUpstream(w, orgID, "Linear team "+key, err)
+		return
+	}
+	opLinearTeamGetByName.Write(w, toLinearTeamJSON(team))
+}
+
 // linearStateListRequest is the states list's body: a search over the state
 // name plus the paging pair.
 type linearStateListRequest struct {
@@ -356,6 +396,18 @@ func linearPathID(w http.ResponseWriter, r *http.Request, name, thing string) (s
 		return "", false
 	}
 	return id, true
+}
+
+// linearPathName reads a Linear name from the path for a lookup by it. A
+// blank one names nothing, so it is a 404 like a malformed id; any other value
+// goes to Linear as given, which matches it exactly.
+func linearPathName(w http.ResponseWriter, r *http.Request, name, thing string) (string, bool) {
+	v := r.PathValue(name)
+	if strings.TrimSpace(v) == "" {
+		httpx.NotFound(w, thing)
+		return "", false
+	}
+	return v, true
 }
 
 // linearSystemClient resolves the org's Linear service credential into a

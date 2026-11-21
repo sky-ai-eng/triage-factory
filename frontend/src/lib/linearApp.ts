@@ -61,7 +61,7 @@ export type LinearAppImportOutcome =
 // outcome rather than throwing so the form can route a field-level rejection.
 // A replacement by a different app while an install is live is refused 409.
 //
-// POST /api/orgs/{org_id}/linear/app
+// PUT /api/orgs/{org_id}/linear/app
 export async function importLinearApp(
   orgId: string,
   input: LinearAppImportInput,
@@ -71,7 +71,7 @@ export async function importLinearApp(
     const result = await apiJSON<LinearAppStatus>(
       `/api/orgs/${encodeURIComponent(orgId)}/linear/app`,
       {
-        method: 'POST',
+        method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(input),
       },

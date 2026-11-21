@@ -52,7 +52,7 @@ func TestJiraApp_LocalMode_DeleteClearsConnectAvailable(t *testing.T) {
 	keyring.MockInit()
 	s := newTestServer(t)
 
-	rec := doJSON(t, s, "POST", jiraAppPath(), map[string]string{
+	rec := doJSON(t, s, http.MethodPut, jiraAppPath(), map[string]string{
 		"client_id":     "atl-client-xyz",
 		"client_secret": "shhh-secret",
 	})
@@ -103,7 +103,7 @@ func TestJiraApp_DeadOverrideRowNotShownAsConfigured(t *testing.T) {
 	keyring.MockInit()
 	s := newTestServer(t)
 
-	if rec := doJSON(t, s, "POST", jiraAppPath(), map[string]string{
+	if rec := doJSON(t, s, http.MethodPut, jiraAppPath(), map[string]string{
 		"client_id":     "atl-client-xyz",
 		"client_secret": "shhh-secret",
 	}); rec.Code != http.StatusOK {
@@ -136,15 +136,25 @@ func TestJiraApp_DeadOverrideRowNotShownAsConfigured(t *testing.T) {
 }
 
 // TestJiraApp_ImportRejectsMissingFields: client_id and client_secret are both
-// required, and a blank one is a 400 MISSING_FIELD naming the field.
+// required, and a blank one is a 400 MISSING_FIELD naming the field; with
+// both blank, both are named.
 func TestJiraApp_ImportRejectsMissingFields(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
 	s := newTestServer(t)
 
-	rec := doJSON(t, s, "POST", jiraAppPath(), map[string]string{"client_secret": "x"})
+	rec := doJSON(t, s, http.MethodPut, jiraAppPath(), map[string]string{"client_secret": "x"})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d body=%s, want 400", rec.Code, rec.Body.String())
 	}
 	httpxtest.AssertFirstError(t, rec, httpx.ReasonMissingField, "client_id")
+
+	rec = doJSON(t, s, http.MethodPut, jiraAppPath(), map[string]string{"client_id": " ", "client_secret": ""})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("both blank: status=%d body=%s, want 400", rec.Code, rec.Body.String())
+	}
+	items := decodeErrorItems(t, rec)
+	if len(items) != 2 || items[0].Field != "client_id" || items[1].Field != "client_secret" {
+		t.Errorf("both blank: errors = %+v, want client_id and client_secret named", items)
+	}
 }

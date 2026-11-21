@@ -74,7 +74,7 @@ describe('LinearAccessStep — no app to install yet', () => {
       'fetch',
       vi.fn((input: unknown, init?: { method?: string }) => {
         if (String(input) === appPath) {
-          const saved = init?.method === 'POST'
+          const saved = init?.method === 'PUT'
           return Promise.resolve({ ok: true, ...jsonBody(status(saved)) })
         }
         return Promise.resolve({ ok: false, status: 404, ...jsonBody({}) })

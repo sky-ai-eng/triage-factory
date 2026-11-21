@@ -55,7 +55,9 @@ var (
 // types; /project/{idOrKey}/statuses, which serves one project's workflow
 // statuses grouped by issue type; and /priority, the instance's priorities.
 // Every project's id is fakeJiraProjectID of its key, and the two reads
-// addressed at one project answer the same whichever names it.
+// addressed at one project answer the same whichever names it. A key set with
+// Rename answers /project/{idOrKey} with the project under its current key, as
+// Jira answers a key a project was renamed from.
 //
 // It is the right fixture for every reader under test — the catalog routes and
 // both halves of the PUT's write gate — because each page or lookup they
@@ -73,6 +75,7 @@ type jiraCatalogFake struct {
 	failing    bool
 	failFor    map[string]bool
 	hidden     map[string]bool
+	renamed    map[string]string
 	calls      int
 	onCall     func()
 }
@@ -84,6 +87,7 @@ func newJiraCatalogFake(t *testing.T, keys ...string) *jiraCatalogFake {
 	f := &jiraCatalogFake{
 		keys: keys, statuses: map[string][]fakeJiraStatus{}, issueTypes: map[string][]fakeJiraStatus{},
 		priorities: jiraFixturePriorities, failFor: map[string]bool{}, hidden: map[string]bool{},
+		renamed: map[string]string{},
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
@@ -92,6 +96,9 @@ func newJiraCatalogFake(t *testing.T, keys ...string) *jiraCatalogFake {
 		project, isStatuses := projectFromStatusesPath(r.URL.Path)
 		single, isProject := projectFromProjectPath(r.URL.Path)
 		project, single = fakeJiraProjectKey(project), fakeJiraProjectKey(single)
+		if current, ok := f.renamed[single]; ok && isProject {
+			single = current
+		}
 		statuses, custom := f.statuses[project]
 		issueTypes, customTypes := f.issueTypes[single]
 		priorities := f.priorities
@@ -200,6 +207,13 @@ func projectFromProjectPath(path string) (string, bool) {
 		return parts[4], true
 	}
 	return "", false
+}
+
+// Rename makes from a key the project now called to was renamed from.
+func (f *jiraCatalogFake) Rename(from, to string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.renamed[from] = to
 }
 
 // Calls is how many times Jira was reached — the assertion behind "a write that

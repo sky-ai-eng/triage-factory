@@ -345,7 +345,7 @@ func (s *Server) handleJiraIdentityAPIToken(w http.ResponseWriter, r *http.Reque
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
-	host, ok := s.jiraIdentityHost(w, r, orgID, userID, jira.DeploymentCloud, "token")
+	host, ok := s.jiraIdentityHost(w, r, orgID, userID, jira.DeploymentCloud)
 	if !ok {
 		return
 	}
@@ -392,7 +392,7 @@ func (s *Server) handleJiraIdentityPAT(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "A Jira personal access token is required.", Field: "pat"})
 		return
 	}
-	host, ok := s.jiraIdentityHost(w, r, orgID, userID, jira.DeploymentDataCenter, "pat")
+	host, ok := s.jiraIdentityHost(w, r, orgID, userID, jira.DeploymentDataCenter)
 	if !ok {
 		return
 	}
@@ -425,9 +425,9 @@ func (s *Server) handleJiraIdentityPAT(w http.ResponseWriter, r *http.Request) {
 // validates matches the one the resolver will rebuild: the deployment comes
 // from the org's stored auth-method marker, falling back to host shape for a
 // pre-Cloud org — a claims-scoped org-secret read, the same door
-// integrations.Load uses on the request path. field is the route's credential
-// field, which a refusal names.
-func (s *Server) jiraIdentityHost(w http.ResponseWriter, r *http.Request, orgID, userID string, want jira.Deployment, field string) (string, bool) {
+// integrations.Load uses on the request path. Neither refusal names a field:
+// the org's settings are at fault, not the body.
+func (s *Server) jiraIdentityHost(w http.ResponseWriter, r *http.Request, orgID, userID string, want jira.Deployment) (string, bool) {
 	var (
 		orgSet     domain.OrgSettings
 		authMethod string
@@ -446,7 +446,7 @@ func (s *Server) jiraIdentityHost(w http.ResponseWriter, r *http.Request, orgID,
 	}
 	host, okHost := resolveJiraHost(orgSet.JiraBaseURL)
 	if !okHost {
-		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonNotConfigured, Message: "Your organization's Jira URL isn't set up yet. Ask your admin to connect Jira in organization settings first.", Field: field})
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonNotConfigured, Message: "Your organization's Jira URL isn't set up yet. Ask your admin to connect Jira in organization settings first."})
 		return "", false
 	}
 	deployment := jira.DeploymentForMarker(jira.AuthMethod(authMethod), host)
@@ -463,7 +463,7 @@ func (s *Server) jiraIdentityHost(w http.ResponseWriter, r *http.Request, orgID,
 
 // jiraIdentityBind is one capture: the org's host, the validation Config and
 // the stored envelope built from the credential, the identity source marker,
-// and the route's credential field, which a refusal names.
+// and the route's credential field, which Jira's rejection of it names.
 type jiraIdentityBind struct {
 	host     string
 	cfg      jira.Config
@@ -488,7 +488,7 @@ func (s *Server) bindJiraIdentity(w http.ResponseWriter, r *http.Request, orgID,
 		// Keep the two failure shapes distinct, like the GitHub flow: a host we
 		// couldn't reach (infra) vs. a credential the host rejected (your action).
 		if errors.Is(err, auth.ErrJiraHostUnreachable) {
-			httpx.WriteErrors(w, http.StatusBadGateway, httpx.ErrorItem{Reason: httpx.ReasonUpstreamUnavailable, Message: fmt.Sprintf("Couldn't reach %s. This is a connectivity issue between Triage Factory and your Jira server, not the credential — try again.", host), Field: b.field})
+			httpx.WriteErrors(w, http.StatusBadGateway, httpx.ErrorItem{Reason: httpx.ReasonUpstreamUnavailable, Message: fmt.Sprintf("Couldn't reach %s. This is a connectivity issue between Triage Factory and your Jira server, not the credential — try again.", host)})
 			return jiraIdentityCaptureResponse{}, false
 		}
 		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "That credential didn't validate against " + host + ". Double-check it and try again.", Field: b.field})

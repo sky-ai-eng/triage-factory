@@ -19,6 +19,7 @@ import (
 //
 //   POST /api/orgs/{org_id}/jira/projects/list
 //   GET  /api/orgs/{org_id}/jira/projects/{jira_id}
+//   GET  /api/orgs/{org_id}/jira/projects/by-name/{key}
 //   POST /api/orgs/{org_id}/jira/projects/{jira_id}/statuses/list
 //   GET  /api/orgs/{org_id}/jira/projects/{jira_id}/statuses/{status_id}
 //
@@ -171,6 +172,54 @@ func (s *Server) handleJiraProjectGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	opJiraProjectGet.Write(w, jiraProjectJSON{JiraID: project.ID, Key: project.Key, Name: project.Name})
+}
+
+var opJiraProjectGetByName = httpx.NewJSONOp[httpx.NoBody, jiraProjectJSON](httpx.OpSpec{
+	Pattern:     "GET /api/orgs/{org_id}/jira/projects/by-name/{key}",
+	ID:          "get_jira_project_by_name",
+	Summary:     "Get a Jira project by its key",
+	Description: "Reads the Jira project whose current key is exactly the one given, live from Jira, under the organization's Jira credential. A key the project had before it was renamed is not found.",
+	PathParams: map[string]string{
+		"org_id": "The organization's id.",
+		"key":    "The project's key as Jira writes it, such as PROJ: an uppercase letter, then uppercase letters, digits, or underscores.",
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
+
+// jiraProjectKeyRe is a Jira project key as both deployments write one: an
+// uppercase letter, then uppercase letters, digits and underscores. The key
+// is put into Jira's URL as it stands, so nothing else may reach it, and a
+// lower-case spelling is not found rather than folded.
+var jiraProjectKeyRe = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,254}$`)
+
+// GET /api/orgs/{org_id}/jira/projects/by-name/{key}
+func (s *Server) handleJiraProjectGetByName(w http.ResponseWriter, r *http.Request) {
+	orgID, _, ok := s.az.RequireOrgMember(w, r)
+	if !ok {
+		return
+	}
+	key := r.PathValue("key")
+	if !jiraProjectKeyRe.MatchString(key) {
+		httpx.NotFound(w, "jira project")
+		return
+	}
+	client, ok := s.jiraSystemClient(w, r, orgID, "jira/project", "Jira is not connected for this organization")
+	if !ok {
+		return
+	}
+	project, err := client.GetProject(r.Context(), key)
+	// Jira answers a key the project was renamed from with the project under
+	// its current key. The route answers to the current key alone, so a key
+	// names one project at a time.
+	if jira.IsNotFound(err) || (err == nil && project.Key != key) {
+		httpx.NotFound(w, "jira project")
+		return
+	}
+	if err != nil {
+		writeJiraUpstream(w, orgID, "Jira project "+key, err)
+		return
+	}
+	opJiraProjectGetByName.Write(w, jiraProjectJSON{JiraID: project.ID, Key: project.Key, Name: project.Name})
 }
 
 // jiraStatusListRequest is the statuses list's body: a search over the status
