@@ -170,6 +170,8 @@ type MessageWindow struct {
 	SinceID  int
 	BeforeID int
 	Limit    int
+	// CountOnly reads the total alone, for the list's page_size: 0.
+	CountOnly bool
 }
 
 // PRCoherenceTargetQuery describes the three independent ways a conversation
@@ -700,7 +702,8 @@ type ConversationStore interface {
 	InsertMessage(ctx context.Context, orgID string, msg *domain.Message) (int64, error)
 
 	// MessagesWindow is the conversation's display read, bounded by a
-	// window. Rows are ordered by the same effective assembly key
+	// window, with how many rows its filter admits: every visible row after
+	// w.SinceID, whatever the cursor and the limit cut. Rows are ordered by the same effective assembly key
 	// ListForAssembly uses (COALESCE(seq, id)) rather than by insertion id.
 	// A transcript that ordered on id alone would show a row placed by seq —
 	// a compaction summary written between two existing rows — somewhere
@@ -716,33 +719,30 @@ type ConversationStore interface {
 	// that order, so no two of them can disagree about which rows a client
 	// is entitled to see or where each one belongs.
 	//
-	// The transcript is a sync/tail read, not a browse — a client follows it
-	// forward from a watermark — so it keeps its own window type instead of
-	// the ListOpts offset the list contract uses. An offset into a growing
-	// append-only stream renumbers itself under the reader.
+	// The transcript is a growing append-only stream, so it keeps its own
+	// window type, a keyset on id, instead of the ListOpts offset the list
+	// contract uses: an offset into it renumbers itself under the reader.
 	//
-	//   - w.SinceID > 0: rows strictly after that id, oldest-first. The
-	//     tail-follow direction; a full page means more have already landed.
-	//     The watermark is how a client holding a partial transcript repairs
-	//     it — a websocket frame is a hint, never the only path to a row.
-	//     Callers normalize anything that isn't a real id to 0 rather than
-	//     relying on a negative one selecting everything. The watermark is an
-	//     id while the ordering is COALESCE(seq, id), and those are
-	//     deliberately different keys: "which rows has this client not seen
-	//     yet" is a question about insertion, "where does each row belong" is
-	//     a question about placement. Once anything writes seq, a returned
-	//     row may sort before a row the client already holds — merging it is
-	//     the caller's problem, not this read's.
-	//   - w.BeforeID > 0: the NEWEST rows strictly before that id, still
-	//     returned oldest-first. This is how history pages backward: a client
-	//     that opened on the tail walks toward the beginning.
-	//   - neither: the newest w.Limit rows, oldest-first — the page a client
-	//     opens on.
-	//   - w.Limit 0: no bound, for internal callers that assemble a whole
-	//     transcript. A route always passes one.
-	//
-	// SinceID and BeforeID are alternatives; setting both is a caller bug and
-	// the impls apply SinceID.
+	//   - w.SinceID > 0: only rows strictly after that id. It is a filter, not
+	//     a direction: the tail-follow narrows to what the client has not seen
+	//     and walks that like any other window. The watermark is how a client
+	//     holding a partial transcript repairs it — a websocket frame is a
+	//     hint, never the only path to a row. Callers normalize anything that
+	//     isn't a real id to 0 rather than relying on a negative one selecting
+	//     everything. The watermark is an id while the ordering is
+	//     COALESCE(seq, id), and those are deliberately different keys: "which
+	//     rows has this client not seen yet" is a question about insertion,
+	//     "where does each row belong" is a question about placement. Once
+	//     anything writes seq, a returned row may sort before a row the client
+	//     already holds — merging it is the caller's problem, not this read's.
+	//   - w.BeforeID > 0: only rows strictly before that id, the cursor a
+	//     backward walk resumes from. It combines with SinceID.
+	//   - w.Limit > 0: the NEWEST w.Limit rows the two admit, still returned
+	//     oldest-first. A client opens on the newest page and walks toward the
+	//     beginning, or toward its watermark.
+	//   - w.Limit 0: every row they admit, for internal callers that assemble
+	//     a whole transcript. A route always passes one.
+	//   - w.CountOnly: no rows, and the total.
 	//
 	// **Every direction here cuts at the OLD end, and that is what keeps a
 	// tool call paired with its result.** A tool-result row is always newer
@@ -755,7 +755,7 @@ type ConversationStore interface {
 	// middle slice. Nothing here can express one, and a future read that
 	// could — "jump to timestamp", say — would need its own answer for
 	// pairing before it shipped.
-	MessagesWindow(ctx context.Context, orgID, conversationID string, w MessageWindow) ([]domain.Message, error)
+	MessagesWindow(ctx context.Context, orgID, conversationID string, w MessageWindow) ([]domain.Message, int, error)
 
 	// MessagesForConversations is the batched display read: every message for
 	// any of the given conversation IDs as one flat slice, with the same

@@ -187,6 +187,11 @@ func parsePackageFiles(t *testing.T, dir string) map[string]*ast.File {
 
 // listRouteHandlers returns pattern → handler-function name for every
 // `POST /…/list` registered in routes().
+//
+// TODO(TFAC-1541): a route declared as an operation mounts through op, not
+// api or apiMutating, so this scan misses it, and its handler writes through
+// the op rather than httpx.WriteList; every converted list route is unchecked
+// until both halves read operations.
 func listRouteHandlers(t *testing.T, files map[string]*ast.File) map[string]string {
 	t.Helper()
 	out := map[string]string{}

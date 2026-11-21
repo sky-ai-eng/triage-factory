@@ -139,8 +139,8 @@ var opDashboardPRList = httpx.NewListOp[prListRequest, domain.PRSummaryRow](http
 	Pattern:     "POST /api/dashboard/prs/list",
 	ID:          "list_dashboard_prs",
 	Summary:     "List the caller's pull requests",
-	Description: "Returns one page of the pull requests the caller's GitHub identity authored and those opened by runs the caller started, from what TF last polled, narrowed by the body's filters. In multi mode, when the caller has a GitHub identity bound, the read also starts a one-time background import of that identity's recent pull requests from GitHub, which adds them to TF.",
-	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintNo, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+	Description: "Returns one page of the pull requests the caller's GitHub identity authored and those opened by runs the caller started, from what TF last polled, narrowed by the body's filters.",
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
 })
 
 // handleDashboardPRs returns one page of the caller's PRs from entity
@@ -181,7 +181,6 @@ func (dh *dashboardHandler) handleDashboardPRs(w http.ResponseWriter, r *http.Re
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	var (
-		host  string
 		me    domain.GitHubAccount
 		prs   []domain.PRSummaryRow
 		total int
@@ -199,7 +198,6 @@ func (dh *dashboardHandler) handleDashboardPRs(w http.ResponseWriter, r *http.Re
 		// Propagate a real lookup failure as a 5xx: only a missing row (->
 		// nil, nil) is an answer. See handleDashboardStats.
 		if ghWeb, okHost := resolveGitHubHost(orgSet.GitHubBaseURL); okHost {
-			host = ghWeb
 			identity, ierr := tx.Users.GetGitHubIdentity(r.Context(), userID, ghWeb)
 			if ierr != nil {
 				return ierr
@@ -216,9 +214,6 @@ func (dh *dashboardHandler) handleDashboardPRs(w http.ResponseWriter, r *http.Re
 		internalError(w, "dashboard", err)
 		return
 	}
-	// The backfill is about a GitHub identity's history, so it still needs a
-	// bound one; the list above does not.
-	dh.kickBackfill(orgID, userID, me.Login, host)
 	opDashboardPRList.Write(w, page, prs, total)
 }
 

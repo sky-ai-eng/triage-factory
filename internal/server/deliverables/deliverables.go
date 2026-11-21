@@ -524,8 +524,8 @@ func (ah *Handler) prDeliverableDetails(w http.ResponseWriter, r *http.Request, 
 
 // deliverablePRUpdateRequest is the body of PATCH /api/deliverables/{id}/pr.
 type deliverablePRUpdateRequest struct {
-	Title *string `json:"title" doc:"The pull request's new title, trimmed of surrounding whitespace, which may not be empty; absent or null keeps the current title."`
-	Body  *string `json:"body" doc:"The pull request's new body; absent or null keeps the current body."`
+	Title httpx.Patch[string] `json:"title" doc:"The pull request's new title, trimmed of surrounding whitespace, which may not be empty; absent keeps the current title, and null is refused."`
+	Body  httpx.Patch[string] `json:"body" doc:"The pull request's new body; absent keeps the current body, and null clears it."`
 }
 
 // deliverableOKResponse is the body of the deliverable writes that answer
@@ -538,7 +538,7 @@ var opDeliverablePRUpdate = httpx.NewJSONOp[deliverablePRUpdateRequest, delivera
 	Pattern:     "PATCH /api/deliverables/{id}/pr",
 	ID:          "update_deliverable_pr",
 	Summary:     "Edit a pull request deliverable",
-	Description: "Writes a new title, body, or both to a pull request deliverable's pull request on GitHub, and records them on the deliverable once GitHub accepts them. A field the body leaves out keeps the value GitHub holds now, and a body naming neither field is refused.",
+	Description: "Writes a new title, body, or both to a pull request deliverable's pull request on GitHub, and records them on the deliverable once GitHub accepts them. A field the request leaves out keeps the value GitHub holds now, and a request naming neither field is refused.",
 	PathParams:  map[string]string{"id": "The id of the pull request deliverable."},
 	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
 })
@@ -579,11 +579,20 @@ func (ah *Handler) handleDeliverablePRUpdate(w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return
 	}
-	if req.Title == nil && req.Body == nil {
+	var v httpx.Validation
+	newTitle, titleState := req.Title.Read(&v, "title")
+	newBody, bodyState := req.Body.Read(&v, "body")
+	if titleState == httpx.PatchAbsent && bodyState == httpx.PatchAbsent {
 		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
 			Reason:  httpx.ReasonMissingField,
-			Message: "no fields to update: provide title, body, or both",
+			Message: "no fields to update: provide title, body, or both (null clears the body)",
 		})
+		return
+	}
+	if titleState == httpx.PatchClear {
+		v.Invalid("title", "title can't be cleared: a pull request always has one")
+	}
+	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
 	if art, ok = ah.actionableOr409(w, r, orgID, userID, art); !ok {
@@ -604,7 +613,7 @@ func (ah *Handler) handleDeliverablePRUpdate(w http.ResponseWriter, r *http.Requ
 	// sent both, skip the round-trip.
 	details, derr := domain.ParsePRDeliverableDetails(art.DetailsJSON)
 	var title, body string
-	if req.Title == nil || req.Body == nil {
+	if titleState == httpx.PatchAbsent || bodyState == httpx.PatchAbsent {
 		live, err := gh.GetPRBasic(r.Context(), owner, repo, number)
 		if err != nil {
 			// We can't reconstruct the omitted field without the current PR state,
@@ -616,11 +625,14 @@ func (ah *Handler) handleDeliverablePRUpdate(w http.ResponseWriter, r *http.Requ
 		title = live.Title
 		body = live.Body
 	}
-	if req.Title != nil {
-		title = *req.Title
+	if titleState == httpx.PatchSet {
+		title = newTitle
 	}
-	if req.Body != nil {
-		body = *req.Body
+	switch bodyState {
+	case httpx.PatchSet:
+		body = newBody
+	case httpx.PatchClear:
+		body = ""
 	}
 	// Trim before the empty check: GitHub rejects whitespace-only titles at the
 	// API anyway, and silently letting "   " through means the user only finds
@@ -1065,27 +1077,27 @@ func (ah *Handler) handleDeliverableApprove(w http.ResponseWriter, r *http.Reque
 // deliverableDismissResponse is the body of POST
 // /api/deliverables/{id}/dismiss.
 type deliverableDismissResponse struct {
-	Number  int    `json:"number" doc:"The pull request's number, or 0 when the deliverable names no pull request."`
-	HTMLURL string `json:"html_url" doc:"The pull request's page on GitHub."`
-	State   string `json:"state" doc:"The deliverable's state after the dismissal: closed."`
+	Number  int    `json:"number,omitempty" doc:"The pull request's number, set for a pull request deliverable that names one."`
+	HTMLURL string `json:"html_url,omitempty" doc:"The pull request's page on GitHub, set for a pull request deliverable that has one."`
+	State   string `json:"state" doc:"The deliverable's state after the dismissal: closed for a pull request, dismissed for a review."`
 }
 
 var opDeliverableDismiss = httpx.NewJSONOp[httpx.NoBody, deliverableDismissResponse](httpx.OpSpec{
 	Pattern:     "POST /api/deliverables/{id}/dismiss",
 	ID:          "dismiss_deliverable",
-	Summary:     "Dismiss a draft pull request deliverable",
-	Description: "Marks a draft pull request deliverable closed and closes its pull request on GitHub, keeping the branch. The run that prepared it is told, and its task closes when this was the last deliverable awaiting a person on a run that completed. A pending review is dismissed through PATCH /api/deliverables/{id}/review instead.",
-	PathParams:  map[string]string{"id": "The id of the pull request deliverable."},
+	Summary:     "Dismiss a deliverable",
+	Description: "Abandons a deliverable that waits on a person: a draft pull request is marked closed and closed on GitHub, keeping its branch, and a pending review is marked dismissed without reaching GitHub. The run that prepared it is told, and its task closes when this was the last deliverable awaiting a person on a run that completed.",
+	PathParams:  map[string]string{"id": "The id of the pull request or review deliverable."},
 	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
 })
 
-// handleDeliverableDismiss resolves ONE draft pull request as a decoupled sidecar
-// operation, the per-item counterpart to approve: it abandons the GitHub object
-// and flips the deliverable's state, never touching the conversation's lifecycle.
-// The draft PR is closed on GitHub (best-effort) and flipped to closed;
-// branches are never touched. An already-terminal deliverable (a non-draft PR) is
-// a 409 — there is nothing left to resolve. After the flip it runs the shared
-// terminal-on-last task-closure check.
+// handleDeliverableDismiss resolves ONE deliverable as a decoupled sidecar
+// operation, the per-item counterpart to approve: it abandons the object and
+// flips the deliverable's state, never touching the conversation's lifecycle.
+// A draft PR is closed on GitHub (best-effort) and flipped to closed; branches
+// are never touched. A pending review is flipped to dismissed (reviewDismiss).
+// An already-terminal deliverable is a 409 — there is nothing left to resolve.
+// After the flip it runs the shared terminal-on-last task-closure check.
 //
 // POST /api/deliverables/{id}/dismiss
 func (ah *Handler) handleDeliverableDismiss(w http.ResponseWriter, r *http.Request) {
@@ -1103,11 +1115,18 @@ func (ah *Handler) handleDeliverableDismiss(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
-	// Pull requests only. A review's abandonment reaches nothing outside this
-	// process — it is a local state flip — so it is a field write on the review
-	// sub-resource (PATCH …/review {state:"dismissed"}), not a verb. This verb
-	// exists because closing a PR is a real write to GitHub.
-	if !requireDeliverableKind(w, art, domain.DeliverableKindPullRequest, "a pull request") {
+	// A review's dismissal reaches nothing outside this process, but it is
+	// still this verb rather than a field on the review: it ends the review,
+	// tells the run, and can close the task, as a pull request's does.
+	if art.Kind == domain.DeliverableKindReview {
+		if art.State != domain.DeliverableStateReviewPending {
+			writeReviewNotPending(w, art.State)
+			return
+		}
+		ah.reviewDismiss(w, r, orgID, userID, art)
+		return
+	}
+	if !requireDeliverableKind(w, art, domain.DeliverableKindPullRequest, "a pull request or a review") {
 		return
 	}
 
@@ -1630,8 +1649,8 @@ func (ah *Handler) Register(m httpx.Mounts) {
 	m.Op(opDeliverableReviewUpdate, ah.handleDeliverableReviewUpdate)
 	m.Op(opDeliverableDiff, ah.handleDeliverableDiff)
 	m.Op(opDeliverableApprove, ah.handleDeliverableApprove)
-	// Pull requests only: closing one is a real GitHub write. A review is
-	// abandoned through PATCH …/review {state:"dismissed"}.
+	// Either kind: a draft pull request is closed on GitHub, a pending review
+	// is dismissed locally.
 	m.Op(opDeliverableDismiss, ah.handleDeliverableDismiss)
 	// Dismiss's irreversible sibling: the head branch is deleted from the
 	// upstream as well. Its own verb because the branch delete is the one PR

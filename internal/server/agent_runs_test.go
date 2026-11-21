@@ -395,10 +395,12 @@ func TestHandleConversations_RejectsUnknownField(t *testing.T) {
 	httpxtest.AssertFirstError(t, rec, httpx.ReasonUnknownField, "include")
 }
 
-// TestHandleMessages_SinceID pins the transcript read's optional watermark:
-// absent or 0 is the whole transcript, a padded value is still a watermark, and
-// an unparseable or negative one is a 400 rather than a silent widening.
-func TestHandleMessages_SinceID(t *testing.T) {
+// TestHandleMessages_AfterIDAndPaging pins the transcript list: after_id
+// narrows to the rows after a watermark, absent or 0 is the whole transcript,
+// a negative one is a 400 rather than a silent widening, pages run from the
+// newest rows toward the oldest with each page oldest-first, and total_count
+// counts what the filter admits.
+func TestHandleMessages_AfterIDAndPaging(t *testing.T) {
 	s := newTestServer(t)
 	conversationID := seedSteerConversation(t, s.db, "since", "running")
 
@@ -414,48 +416,74 @@ func TestHandleMessages_SinceID(t *testing.T) {
 		ids[content] = int(id)
 	}
 
-	contents := func(query string) []string {
+	path := "/api/agent/conversations/" + conversationID + "/messages/list"
+	type page struct {
+		contents []string
+		next     string
+		total    int
+	}
+	list := func(body map[string]any) page {
 		t.Helper()
-		rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+conversationID+"/messages"+query, nil)
+		rec := doJSON(t, s, http.MethodPost, path, body)
 		if rec.Code != http.StatusOK {
-			t.Fatalf("GET messages%s = %d; body=%s", query, rec.Code, rec.Body.String())
+			t.Fatalf("POST messages/list %v = %d; body=%s", body, rec.Code, rec.Body.String())
 		}
-		var page struct {
-			Items []map[string]any `json:"items"`
+		var resp struct {
+			Items         []map[string]any `json:"items"`
+			NextPageToken string           `json:"next_page_token"`
+			TotalCount    int              `json:"total_count"`
 		}
-		if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil {
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 			t.Fatalf("decode: %v; body=%s", err, rec.Body.String())
 		}
-		out := make([]string, 0, len(page.Items))
-		for _, m := range page.Items {
-			out = append(out, fmt.Sprint(m["content"]))
+		out := page{contents: []string{}, next: resp.NextPageToken, total: resp.TotalCount}
+		for _, m := range resp.Items {
+			out.contents = append(out.contents, fmt.Sprint(m["content"]))
 		}
 		return out
 	}
-	eq := func(desc string, got, want []string) {
+	eq := func(desc string, got page, want []string, wantTotal int) {
 		t.Helper()
-		if strings.Join(got, ",") != strings.Join(want, ",") {
-			t.Errorf("%s = %v, want %v", desc, got, want)
+		if strings.Join(got.contents, ",") != strings.Join(want, ",") || got.total != wantTotal {
+			t.Errorf("%s = %v (total %d), want %v (total %d)", desc, got.contents, got.total, want, wantTotal)
 		}
 	}
 
 	whole := []string{"first", "second", "third"}
-	eq("no since_id", contents(""), whole)
-	eq("since_id=0", contents("?since_id=0"), whole)
-	eq("since_id=first", contents(fmt.Sprintf("?since_id=%d", ids["first"])), []string{"second", "third"})
-	eq("since_id=third", contents(fmt.Sprintf("?since_id=%d", ids["third"])), nil)
+	eq("no after_id", list(map[string]any{}), whole, 3)
+	eq("after_id 0", list(map[string]any{"after_id": 0}), whole, 3)
+	eq("after first", list(map[string]any{"after_id": ids["first"]}), []string{"second", "third"}, 2)
+	eq("after third", list(map[string]any{"after_id": ids["third"]}), nil, 0)
 
-	// Whitespace is trimmed before parsing, so a padded watermark is still a
-	// watermark — treating it as unparseable would quietly turn a repair read
-	// into a full transcript read on every tick.
-	eq("padded since_id", contents(fmt.Sprintf("?since_id=%%20%d%%20", ids["first"])), []string{"second", "third"})
+	newest := list(map[string]any{"page_size": 2})
+	eq("newest page", newest, []string{"second", "third"}, 3)
+	older := list(map[string]any{"page_size": 2, "page_token": newest.next})
+	eq("the page before it", older, []string{"first"}, 3)
+	if older.next != "" {
+		t.Errorf("the oldest page carries next_page_token %q, want none", older.next)
+	}
 
-	// A watermark that isn't one fails the read rather than silently widening
-	// it back to the whole transcript.
-	for _, bad := range []string{"?since_id=nonsense", "?since_id=-5"} {
-		rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+conversationID+"/messages"+bad, nil)
+	// A walk above a watermark stops at the watermark.
+	tail := list(map[string]any{"after_id": ids["first"], "page_size": 1})
+	eq("after first, newest page", tail, []string{"third"}, 2)
+	rest := list(map[string]any{"after_id": ids["first"], "page_size": 1, "page_token": tail.next})
+	eq("after first, the page before it", rest, []string{"second"}, 2)
+	if rest.next != "" {
+		t.Errorf("the page down to the watermark carries next_page_token %q, want none", rest.next)
+	}
+
+	// A watermark that isn't one fails the read rather than widening it back
+	// to the whole transcript, and a token serves only the filter it was
+	// issued for.
+	for desc, bad := range map[string]map[string]any{
+		"a negative after_id":        {"after_id": -5},
+		"a string after_id":          {"after_id": "nonsense"},
+		"a token from another query": {"page_size": 1, "page_token": tail.next},
+		"page_size above 200":        {"page_size": 201},
+	} {
+		rec := doJSON(t, s, http.MethodPost, path, bad)
 		if rec.Code != http.StatusBadRequest {
-			t.Errorf("GET messages%s = %d, want 400; body=%s", bad, rec.Code, rec.Body.String())
+			t.Errorf("%s: POST messages/list = %d, want 400; body=%s", desc, rec.Code, rec.Body.String())
 		}
 	}
 }

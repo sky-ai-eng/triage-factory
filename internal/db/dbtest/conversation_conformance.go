@@ -2465,7 +2465,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if _, err := store.InsertMessage(ctx, orgID, &plain); err != nil {
 			t.Fatalf("InsertMessage: %v", err)
 		}
-		got, err := store.MessagesWindow(ctx, orgID, conversationID, db.MessageWindow{})
+		got, _, err := store.MessagesWindow(ctx, orgID, conversationID, db.MessageWindow{})
 		if err != nil {
 			t.Fatalf("MessagesWindow: %v", err)
 		}
@@ -5268,11 +5268,14 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// The windowed read is the same display read, so an unbounded one has
 		// to answer exactly what the batched read does — a client repairing a
 		// transcript must not be shown a row the full read hides.
-		unbounded, err := store.MessagesWindow(ctx, orgID, conversationID, db.MessageWindow{})
+		unbounded, total, err := store.MessagesWindow(ctx, orgID, conversationID, db.MessageWindow{})
 		if err != nil {
 			t.Fatalf("MessagesWindow: %v", err)
 		}
 		assertContents("MessagesWindow(unbounded)", unbounded)
+		if total != len(wantVisible) {
+			t.Errorf("MessagesWindow total = %d, want %d: the count applies the display filter too", total, len(wantVisible))
+		}
 
 		// Assembly excludes every inactive row — withdrawn AND compacted.
 		asm, err := store.ListForAssemblySystem(ctx, orgID, conversationID)
@@ -5336,7 +5339,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			}
 		}
 
-		unbounded, err := store.MessagesWindow(ctx, orgID, conversationID, db.MessageWindow{})
+		unbounded, _, err := store.MessagesWindow(ctx, orgID, conversationID, db.MessageWindow{})
 		if err != nil {
 			t.Fatalf("MessagesWindow: %v", err)
 		}
@@ -5384,7 +5387,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 
 		contents := func(desc string, sinceID int) []string {
 			t.Helper()
-			msgs, err := store.MessagesWindow(ctx, orgID, conversationID, db.MessageWindow{SinceID: sinceID})
+			msgs, _, err := store.MessagesWindow(ctx, orgID, conversationID, db.MessageWindow{SinceID: sinceID})
 			if err != nil {
 				t.Fatalf("MessagesWindow(since %s): %v", desc, err)
 			}
@@ -5429,6 +5432,49 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		visible := insert(conversationID, "fourth")
 		eq("third, after a withdrawn row", contents("third", third), []string{"fourth"})
 		eq("fourth", contents("fourth", visible), nil)
+	})
+
+	t.Run("MessagesWindow_BoundedWindowsTakeTheNewestRowsAndCountTheFilter", func(t *testing.T) {
+		// Backs the transcript list: every bounded window is the newest rows
+		// the watermark filter and the cursor admit, oldest-first, and the
+		// total counts the filter alone, so a walk from either end knows how
+		// much there is.
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		conversationID := seedConversationForTest(t, orgID, seed, "running")
+
+		ids := map[string]int{}
+		for _, content := range []string{"m1", "m2", "m3", "m4", "m5"} {
+			id, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: conversationID, Role: "assistant", Content: content})
+			if err != nil {
+				t.Fatalf("InsertMessage %q: %v", content, err)
+			}
+			ids[content] = int(id)
+		}
+		read := func(desc string, w db.MessageWindow, want []string, wantTotal int) {
+			t.Helper()
+			msgs, total, err := store.MessagesWindow(ctx, orgID, conversationID, w)
+			if err != nil {
+				t.Fatalf("MessagesWindow(%s): %v", desc, err)
+			}
+			got := []string{}
+			for _, m := range msgs {
+				got = append(got, m.Content)
+			}
+			if !slices.Equal(got, want) {
+				t.Errorf("MessagesWindow(%s) = %v, want %v", desc, got, want)
+			}
+			if total != wantTotal {
+				t.Errorf("MessagesWindow(%s) total = %d, want %d", desc, total, wantTotal)
+			}
+		}
+
+		read("newest page", db.MessageWindow{Limit: 2}, []string{"m4", "m5"}, 5)
+		read("the page before it", db.MessageWindow{Limit: 2, BeforeID: ids["m4"]}, []string{"m2", "m3"}, 5)
+		read("after a watermark", db.MessageWindow{Limit: 2, SinceID: ids["m1"]}, []string{"m4", "m5"}, 4)
+		read("after a watermark, the page before it", db.MessageWindow{Limit: 2, SinceID: ids["m1"], BeforeID: ids["m4"]}, []string{"m2", "m3"}, 4)
+		read("after a watermark, down to it", db.MessageWindow{Limit: 2, SinceID: ids["m1"], BeforeID: ids["m2"]}, []string{}, 4)
+		read("count only", db.MessageWindow{CountOnly: true, SinceID: ids["m3"]}, []string{}, 2)
 	})
 
 	t.Run("MarkDelivered_FlipsOnlyGivenIDsScopedToConversation", func(t *testing.T) {

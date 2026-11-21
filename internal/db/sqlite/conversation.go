@@ -2650,9 +2650,9 @@ func scanMessageRow(row *sql.Row) (*domain.Message, error) {
 	return &m, nil
 }
 
-func (s *conversationStore) MessagesWindow(ctx context.Context, orgID, conversationID string, w db.MessageWindow) ([]domain.Message, error) {
+func (s *conversationStore) MessagesWindow(ctx context.Context, orgID, conversationID string, w db.MessageWindow) ([]domain.Message, int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	// Withdrawn-pending rows (undelivered + inactive — a staged injection
 	// that was withdrawn before any flush) never happened, so the display
@@ -2664,27 +2664,30 @@ func (s *conversationStore) MessagesWindow(ctx context.Context, orgID, conversat
 	// watermark stays on id: it answers "which rows has this client not seen
 	// yet", which is an insertion question, not a placement one.
 	//
-	// A backward page selects the NEWEST rows below a ceiling, which means
-	// ordering DESC to pick them and reversing afterwards so the caller
-	// always receives oldest-first.
+	// A bounded page selects the NEWEST rows the filter and cursor admit,
+	// which means ordering DESC to pick them and reversing afterwards so the
+	// caller always receives oldest-first. The total counts the filter
+	// alone: the cursor and the limit cut the walk, not the set.
 	where := `conversation_id = ? AND NOT (delivered = 0 AND window_state = 'inactive')`
 	args := []any{conversationID}
-	order := `ORDER BY COALESCE(seq, id) ASC`
-	reverse := false
-	switch {
-	case w.SinceID > 0:
+	if w.SinceID > 0 {
 		where += ` AND id > ?`
 		args = append(args, w.SinceID)
-	case w.BeforeID > 0:
+	}
+	var total int
+	if err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE `+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	if w.CountOnly {
+		return []domain.Message{}, total, nil
+	}
+	if w.BeforeID > 0 {
 		where += ` AND id < ?`
 		args = append(args, w.BeforeID)
+	}
+	order := `ORDER BY COALESCE(seq, id) ASC`
+	if w.Limit > 0 {
 		order = `ORDER BY COALESCE(seq, id) DESC`
-		reverse = true
-	default:
-		if w.Limit > 0 {
-			order = `ORDER BY COALESCE(seq, id) DESC`
-			reverse = true
-		}
 	}
 	query := `SELECT ` + sqliteMessageColumns + ` FROM messages WHERE ` + where + ` ` + order
 	if w.Limit > 0 {
@@ -2693,17 +2696,17 @@ func (s *conversationStore) MessagesWindow(ctx context.Context, orgID, conversat
 	}
 	rows, err := s.q.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 	out, err := scanMessageRows(rows)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	if reverse {
+	if w.Limit > 0 {
 		slices.Reverse(out)
 	}
-	return out, nil
+	return out, total, nil
 }
 
 func (s *conversationStore) MessagesForConversations(ctx context.Context, orgID string, conversationIDs []string) ([]domain.Message, error) {

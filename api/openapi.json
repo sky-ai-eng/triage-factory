@@ -1154,21 +1154,19 @@
       "DeliverableDismissResponse": {
         "properties": {
           "html_url": {
-            "description": "The pull request's page on GitHub.",
+            "description": "The pull request's page on GitHub, set for a pull request deliverable that has one.",
             "type": "string"
           },
           "number": {
-            "description": "The pull request's number, or 0 when the deliverable names no pull request.",
+            "description": "The pull request's number, set for a pull request deliverable that names one.",
             "type": "integer"
           },
           "state": {
-            "description": "The deliverable's state after the dismissal: closed.",
+            "description": "The deliverable's state after the dismissal: closed for a pull request, dismissed for a review.",
             "type": "string"
           }
         },
         "required": [
-          "number",
-          "html_url",
           "state"
         ],
         "type": "object"
@@ -1188,14 +1186,14 @@
       "DeliverablePRUpdateRequest": {
         "properties": {
           "body": {
-            "description": "The pull request's new body; absent or null keeps the current body.",
+            "description": "The pull request's new body; absent keeps the current body, and null clears it.",
             "type": [
               "string",
               "null"
             ]
           },
           "title": {
-            "description": "The pull request's new title, trimmed of surrounding whitespace, which may not be empty; absent or null keeps the current title.",
+            "description": "The pull request's new title, trimmed of surrounding whitespace, which may not be empty; absent keeps the current title, and null is refused.",
             "type": [
               "string",
               "null"
@@ -2003,21 +2001,14 @@
       "PatchReviewRequest": {
         "properties": {
           "body": {
-            "description": "The review's new summary body, trimmed of surrounding whitespace, which may not be empty; absent or null keeps the current body.",
+            "description": "The review's new summary body, trimmed of surrounding whitespace, which may not be empty; absent keeps the current body, and null is refused.",
             "type": [
               "string",
               "null"
             ]
           },
           "event": {
-            "description": "The event the review is to be submitted with: APPROVE, COMMENT, or REQUEST_CHANGES; absent or null keeps the current event.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "state": {
-            "description": "Set to dismissed, the only value accepted, to abandon the pending review; it may not be sent with body or event, and absent or null leaves the review pending.",
+            "description": "The event the review is to be submitted with: APPROVE, COMMENT, or REQUEST_CHANGES; absent keeps the current event, and null is refused.",
             "type": [
               "string",
               "null"
@@ -3027,26 +3018,24 @@
         ],
         "type": "object"
       },
-      "TranscriptResponse": {
+      "TranscriptListRequest": {
         "properties": {
-          "items": {
-            "description": "The page's messages, oldest first.",
-            "items": {
-              "$ref": "#/components/schemas/MessageDTO"
-            },
+          "after_id": {
+            "description": "The id of the newest message the caller already holds, to list only the messages after it; absent or 0 lists every message.",
+            "type": "integer"
+          },
+          "page_size": {
+            "description": "How many rows to return, 50 when absent; 0 returns no rows and only total_count, and a value above the list's maximum, 200 unless the route says otherwise, is refused.",
             "type": [
-              "array",
+              "integer",
               "null"
             ]
           },
-          "next_page_token": {
-            "description": "The token that reads the messages before this page, as page_token, absent when the page reaches the start of the transcript or since_id was given.",
+          "page_token": {
+            "description": "The next_page_token of the previous page, which reads the page after it; it is refused for a request with different filters.",
             "type": "string"
           }
         },
-        "required": [
-          "items"
-        ],
         "type": "object"
       },
       "UsageCategoryBucket": {
@@ -4075,7 +4064,7 @@
   "paths": {
     "/api/agent/conversations/list": {
       "post": {
-        "description": "Returns one page of the conversations the caller can see, narrowed by the body's filters and grouped by task id in runs, with each task's newest first. page_size allows up to 500, and total_count counts conversations, not tasks. With include_messages, messages carries the transcript of each task's newest conversation on the page.",
+        "description": "Returns one page of the conversations the caller can see, narrowed by the body's filters and grouped by task id in runs, with each task's newest first. total_count counts conversations, not tasks. With include_messages, messages carries the transcript of each task's newest conversation on the page.",
         "operationId": "list_conversations",
         "requestBody": {
           "content": {
@@ -4503,9 +4492,9 @@
         }
       }
     },
-    "/api/agent/conversations/{conversationID}/messages": {
-      "get": {
-        "description": "Returns up to 500 messages of the conversation's transcript, oldest first: the newest ones, the ones after since_id, or the ones before page_token. The response carries no total_count.",
+    "/api/agent/conversations/{conversationID}/messages/list": {
+      "post": {
+        "description": "Returns one page of the conversation's transcript, narrowed to the messages after after_id when it is given. The first page holds the newest messages and each next page older ones, and every page lists its messages oldest first; total_count counts every message the filter admits.",
         "operationId": "list_conversation_messages",
         "parameters": [
           {
@@ -4516,32 +4505,48 @@
             "schema": {
               "type": "string"
             }
-          },
-          {
-            "description": "The id of the newest message the caller already holds, to read only the messages after it; absent or 0 reads the newest messages.",
-            "in": "query",
-            "name": "since_id",
-            "required": false,
-            "schema": {
-              "type": "integer"
-            }
-          },
-          {
-            "description": "The next_page_token of an earlier response, a message id, to read the messages before it; it cannot be combined with since_id.",
-            "in": "query",
-            "name": "page_token",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TranscriptListRequest"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/TranscriptResponse"
+                  "properties": {
+                    "items": {
+                      "description": "The rows of this page, as an empty array when it has none.",
+                      "items": {
+                        "$ref": "#/components/schemas/MessageDTO"
+                      },
+                      "type": "array"
+                    },
+                    "next_page_token": {
+                      "description": "The page_token that reads the next page, absent on the last page.",
+                      "type": "string"
+                    },
+                    "total_count": {
+                      "description": "How many rows match the request's filters across every page, or null for a list whose upstream cannot count them.",
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "total_count"
+                  ],
+                  "type": "object"
                 }
               }
             },
@@ -4796,7 +4801,7 @@
     },
     "/api/dashboard/prs/list": {
       "post": {
-        "description": "Returns one page of the pull requests the caller's GitHub identity authored and those opened by runs the caller started, from what TF last polled, narrowed by the body's filters. In multi mode, when the caller has a GitHub identity bound, the read also starts a one-time background import of that identity's recent pull requests from GitHub, which adds them to TF.",
+        "description": "Returns one page of the pull requests the caller's GitHub identity authored and those opened by runs the caller started, from what TF last polled, narrowed by the body's filters.",
         "operationId": "list_dashboard_prs",
         "requestBody": {
           "content": {
@@ -4857,10 +4862,8 @@
         ],
         "summary": "List the caller's pull requests",
         "x-hints": {
-          "destructiveHint": false,
-          "idempotentHint": true,
-          "openWorldHint": true,
-          "readOnlyHint": false
+          "openWorldHint": false,
+          "readOnlyHint": true
         }
       }
     },
@@ -5282,11 +5285,11 @@
     },
     "/api/deliverables/{id}/dismiss": {
       "post": {
-        "description": "Marks a draft pull request deliverable closed and closes its pull request on GitHub, keeping the branch. The run that prepared it is told, and its task closes when this was the last deliverable awaiting a person on a run that completed. A pending review is dismissed through PATCH /api/deliverables/{id}/review instead.",
+        "description": "Abandons a deliverable that waits on a person: a draft pull request is marked closed and closed on GitHub, keeping its branch, and a pending review is marked dismissed without reaching GitHub. The run that prepared it is told, and its task closes when this was the last deliverable awaiting a person on a run that completed.",
         "operationId": "dismiss_deliverable",
         "parameters": [
           {
-            "description": "The id of the pull request deliverable.",
+            "description": "The id of the pull request or review deliverable.",
             "in": "path",
             "name": "id",
             "required": true,
@@ -5318,7 +5321,7 @@
             "token": []
           }
         ],
-        "summary": "Dismiss a draft pull request deliverable",
+        "summary": "Dismiss a deliverable",
         "x-hints": {
           "destructiveHint": true,
           "idempotentHint": true,
@@ -5329,7 +5332,7 @@
     },
     "/api/deliverables/{id}/pr": {
       "patch": {
-        "description": "Writes a new title, body, or both to a pull request deliverable's pull request on GitHub, and records them on the deliverable once GitHub accepts them. A field the body leaves out keeps the value GitHub holds now, and a body naming neither field is refused.",
+        "description": "Writes a new title, body, or both to a pull request deliverable's pull request on GitHub, and records them on the deliverable once GitHub accepts them. A field the request leaves out keeps the value GitHub holds now, and a request naming neither field is refused.",
         "operationId": "update_deliverable_pr",
         "parameters": [
           {
@@ -5433,7 +5436,7 @@
     },
     "/api/deliverables/{id}/review": {
       "patch": {
-        "description": "Stages a new summary body, event, or both on a pending review deliverable, which reach GitHub only when the review is approved, or dismisses the review with state set to dismissed. Dismissing tells the run that prepared the review, and closes its task when this was the last deliverable awaiting a person on a run that completed. Nothing is sent to GitHub.",
+        "description": "Stages a new summary body, event, or both on a pending review deliverable; they reach GitHub only when the review is approved. Dismissing the review is POST /api/deliverables/{id}/dismiss.",
         "operationId": "update_deliverable_review",
         "parameters": [
           {
@@ -5472,7 +5475,7 @@
             "token": []
           }
         ],
-        "summary": "Edit or dismiss a pending review deliverable",
+        "summary": "Edit a pending review deliverable",
         "x-hints": {
           "destructiveHint": true,
           "idempotentHint": true,

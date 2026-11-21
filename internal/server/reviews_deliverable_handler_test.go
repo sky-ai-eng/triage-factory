@@ -482,17 +482,24 @@ func TestReviewDeliverableUpdate_InvalidEvent_400(t *testing.T) {
 	}
 }
 
-// TestReviewDeliverableDismiss: dismissing a staged review is a field write,
-// PATCH {state:"dismissed"}, because nothing happens on GitHub; it flips the
-// deliverable to dismissed and leaves the conversation alone.
+// TestReviewDeliverableDismiss: a staged review is dismissed through the same
+// verb as a draft pull request; it flips the deliverable to dismissed and
+// leaves the conversation alone.
 func TestReviewDeliverableDismiss(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 
 	artID, conversationID, _ := seedReviewDeliverableWithConversation(t, srv, "rdis", "acme", "api", 7, "COMMENT")
-	rec := doJSON(t, srv, http.MethodPatch, "/api/deliverables/"+artID+"/review", map[string]any{"state": "dismissed"})
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("dismiss = %d, want 204; body=%s", rec.Code, rec.Body.String())
+	rec := doJSON(t, srv, http.MethodPost, "/api/deliverables/"+artID+"/dismiss", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("dismiss = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode dismiss body %q: %v", rec.Body.String(), err)
+	}
+	if len(resp) != 1 || resp["state"] != domain.DeliverableStateReviewDismissed {
+		t.Errorf("dismiss body = %v, want only state dismissed", resp)
 	}
 	if got := getDeliverable(t, srv, artID).State; got != domain.DeliverableStateReviewDismissed {
 		t.Errorf("deliverable state = %q, want dismissed", got)
@@ -509,29 +516,31 @@ func TestReviewDeliverableDismiss_NonPending_409(t *testing.T) {
 	srv := newTestServer(t)
 	artID, _, _ := seedReviewDeliverableWithConversation(t, srv, "rdis409", "acme", "api", 7, "COMMENT")
 	execSQL(t, srv.db, `UPDATE deliverables SET state = ? WHERE id = ?`, domain.DeliverableStateReviewSubmitted, artID)
-	for _, body := range []map[string]any{{"state": "dismissed"}, {"body": "edit"}} {
-		rec := doJSON(t, srv, http.MethodPatch, "/api/deliverables/"+artID+"/review", body)
-		if rec.Code != http.StatusConflict {
-			t.Errorf("PATCH %v on a submitted review = %d, want 409; body=%s", body, rec.Code, rec.Body.String())
-		}
+	if rec := doJSON(t, srv, http.MethodPost, "/api/deliverables/"+artID+"/dismiss", nil); rec.Code != http.StatusConflict {
+		t.Errorf("dismiss on a submitted review = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	if rec := doJSON(t, srv, http.MethodPatch, "/api/deliverables/"+artID+"/review", map[string]any{"body": "edit"}); rec.Code != http.StatusConflict {
+		t.Errorf("PATCH on a submitted review = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
 	if d, _ := domain.ParseReviewDeliverableDetails(getDeliverable(t, srv, artID).DetailsJSON); d.ReviewBody != "## Review\nlgtm" {
 		t.Errorf("review_body = %q after the rejected PATCHes, want unchanged", d.ReviewBody)
 	}
 }
 
-// TestReviewDeliverablePatch_StateVocabulary pins what the state field accepts:
-// "dismissed" and nothing else, and never alongside a content edit. Submitting
-// is still POST /approve — a real GitHub write, not a field.
-func TestReviewDeliverablePatch_StateVocabulary(t *testing.T) {
+// TestReviewDeliverablePatch_RefusesWhatIsNotAnEdit pins that the review
+// PATCH only stages body and event: state is no field of it (dismissing is
+// POST …/dismiss, submitting POST …/approve), neither field can be cleared,
+// and a body naming no field is refused.
+func TestReviewDeliverablePatch_RefusesWhatIsNotAnEdit(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 	artID, _, _ := seedReviewDeliverableWithConversation(t, srv, "rstate", "acme", "api", 7, "COMMENT")
 
 	for name, body := range map[string]map[string]any{
+		"dismissing is not a field write": {"state": "dismissed"},
 		"submitting is not a field write": {"state": "submitted"},
-		"unknown state":                   {"state": "banana"},
-		"dismiss plus an edit":            {"state": "dismissed", "body": "one more thought"},
+		"clearing the body":               {"body": nil},
+		"clearing the event":              {"event": nil},
 		"no fields at all":                {},
 	} {
 		t.Run(name, func(t *testing.T) {

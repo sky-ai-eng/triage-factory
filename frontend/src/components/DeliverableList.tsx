@@ -114,7 +114,7 @@ export default function DeliverableList({
     if (dismissing[a.id]) return
     setDismissing((m) => ({ ...m, [a.id]: true }))
     try {
-      await dismissDeliverable(a.id, a.kind)
+      await dismissDeliverable(a.id)
       // Resolution is async + non-blocking: it touches only the GitHub object +
       // deliverable row, never the conversation. Reload in place (the row flips to its
       // resolved state) and let the owner re-derive the projection.

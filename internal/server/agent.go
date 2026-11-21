@@ -928,51 +928,35 @@ func artifactCountsOrEmpty(byKind map[string]int) map[string]int {
 	return byKind
 }
 
-// transcriptPageSize bounds one GET …/messages read. It is the route's
-// declared page size, not a clamp of a caller-supplied one: the transcript
-// takes no page_size, because it is a sync/tail read whose page is always
-// "as much recent history as is worth one request".
+// transcriptListRequest is the body of POST
+// /api/agent/conversations/{conversationID}/messages/list.
 //
-// 500 rows is far past any transcript a person scrolls in one sitting and far
-// short of a conversation that streamed for hours.
-const transcriptPageSize = 500
+// after_id is a watermark the client already holds: every row up to it is
+// on its screen, and it wants only what came after. The repair poll that
+// patches a transcript assembled from websocket frames sends it. It is a
+// filter on the list, never a cursor: the token only continues a walk, and
+// the walk runs one way whatever the filter, from the newest rows toward the
+// oldest.
+type transcriptListRequest struct {
+	AfterID int `json:"after_id" doc:"The id of the newest message the caller already holds, to list only the messages after it; absent or 0 lists every message."`
 
-// transcriptResponse is the transcript's wire shape: the rows plus the token
-// for the page BEFORE them.
-//
-// It is a GET, and deliberately not a POST /list. The transcript is followed,
-// not browsed: a client holds a watermark and asks for what came after it,
-// which is a cache-revalidating read of an append-only stream, and turning it
-// into a body-carrying POST would buy nothing but a second spelling. It does
-// take the list envelope's two paging keys so a client's loop looks the same.
-//
-// The two directions are separate on purpose:
-//
-//   - since_id walks FORWARD from a watermark the client already holds. It is
-//     the tail-follow, used to repair a transcript assembled from websocket
-//     frames.
-//   - next_page_token walks BACKWARD through history from the oldest row this
-//     response carries. It is how a client that opened on the tail reaches the
-//     beginning.
-//
-// A response never carries a total: counting a stream that is still being
-// appended to would be a number that is wrong by the time it renders.
-type transcriptResponse struct {
-	Items         []domain.MessageDTO `json:"items" doc:"The page's messages, oldest first."`
-	NextPageToken string              `json:"next_page_token,omitempty" doc:"The token that reads the messages before this page, as page_token, absent when the page reaches the start of the transcript or since_id was given."`
+	httpx.PageRequest
 }
 
-var opConversationMessages = httpx.NewJSONOp[httpx.NoBody, transcriptResponse](httpx.OpSpec{
-	Pattern:     "GET /api/agent/conversations/{conversationID}/messages",
+// transcriptFilterKey is what a transcript page token is fingerprinted
+// against: the conversation the path names and the watermark.
+type transcriptFilterKey struct {
+	ConversationID string `json:"conversation_id"`
+	AfterID        int    `json:"after_id"`
+}
+
+var opConversationMessages = httpx.NewListOp[transcriptListRequest, domain.MessageDTO](httpx.OpSpec{
+	Pattern:     "POST /api/agent/conversations/{conversationID}/messages/list",
 	ID:          "list_conversation_messages",
 	Summary:     "List a conversation's messages",
-	Description: "Returns up to 500 messages of the conversation's transcript, oldest first: the newest ones, the ones after since_id, or the ones before page_token. The response carries no total_count.",
+	Description: "Returns one page of the conversation's transcript, narrowed to the messages after after_id when it is given. The first page holds the newest messages and each next page older ones, and every page lists its messages oldest first; total_count counts every message the filter admits.",
 	PathParams:  map[string]string{"conversationID": "The conversation's id."},
-	Query: []httpx.QueryParam{
-		{Name: "since_id", Type: httpx.ParamInteger, Doc: "The id of the newest message the caller already holds, to read only the messages after it; absent or 0 reads the newest messages."},
-		{Name: "page_token", Type: httpx.ParamString, Doc: "The next_page_token of an earlier response, a message id, to read the messages before it; it cannot be combined with since_id."},
-	},
-	Hints: httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
 })
 
 func (ag *agentHandler) handleMessages(w http.ResponseWriter, r *http.Request) {
@@ -985,36 +969,45 @@ func (ag *agentHandler) handleMessages(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	query, ok := opConversationMessages.Query(w, r)
+	req, ok := opConversationMessages.Decode(w, r)
 	if !ok {
 		return
 	}
-	// since_id is an optional watermark: the caller already holds every row up
-	// to it and wants only what came after. A client repairing a transcript it
-	// built from websocket frames polls with it.
-	//
-	// Absent means no watermark — the newest page. Anything else must be a
-	// usable watermark: an unparseable or negative value is a 400 rather than a
-	// silent fall-back, because "give me what I'm missing" answered with
-	// something else is the widening a corrupt param must never buy. A negative
-	// one would also reach the store as `id > -N`, which selects the whole
-	// transcript today only because ids start at 1 — a coincidence, not a
-	// contract. Surrounding whitespace is trimmed first (the convention for
-	// query params here).
+	// A negative watermark would reach the store as `id > -N`, which selects
+	// the whole transcript only because ids start at 1 — a coincidence, not a
+	// contract — so it is refused rather than read as none.
 	var v httpx.Validation
-	sinceID := nonNegativeIntParam(&v, query, "since_id")
-	// page_token addresses older history. It is the opaque token the previous
-	// response minted; a client never constructs one.
-	beforeID := nonNegativeIntParam(&v, query, "page_token")
-	if sinceID > 0 && beforeID > 0 {
-		v.Param("page_token", "page_token walks history backward and since_id follows the tail; send one, not both")
+	if req.AfterID < 0 {
+		v.Invalid("after_id", "after_id must be a message id, or 0 for every message")
+	}
+	page := httpx.ResolveKeysetPage(&v, req.PageRequest, httpx.FilterFingerprint(transcriptFilterKey{
+		ConversationID: conversationID, AfterID: req.AfterID,
+	}), 0)
+	// The key is the oldest row of the page before, the ceiling this page
+	// reads below.
+	beforeID := 0
+	if len(page.After) > 0 {
+		n, err := strconv.Atoi(page.After[0])
+		if err != nil || n <= 0 || len(page.After) != 1 {
+			v.Param("page_token", "page_token does not address this list's ordering; restart from the first page")
+		}
+		beforeID = n
 	}
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
 
-	var conv *domain.Conversation
-	var messages []domain.Message
+	// One row past the window answers whether an older page follows, which
+	// a keyset page cannot derive from its total.
+	window := db.MessageWindow{SinceID: req.AfterID, BeforeID: beforeID, CountOnly: page.CountOnly}
+	if page.Limit > 0 {
+		window.Limit = page.Limit + 1
+	}
+	var (
+		conv     *domain.Conversation
+		messages []domain.Message
+		total    int
+	)
 	if err := ag.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		// The messages read alone cannot tell an invisible or nonexistent
@@ -1023,9 +1016,7 @@ func (ag *agentHandler) handleMessages(w http.ResponseWriter, r *http.Request) {
 		if e != nil || conv == nil {
 			return e
 		}
-		messages, e = tx.Conversations.MessagesWindow(r.Context(), orgID, conversationID, db.MessageWindow{
-			SinceID: sinceID, BeforeID: beforeID, Limit: transcriptPageSize,
-		})
+		messages, total, e = tx.Conversations.MessagesWindow(r.Context(), orgID, conversationID, window)
 		return e
 	}); err != nil {
 		internalError(w, "agent", err)
@@ -1036,34 +1027,13 @@ func (ag *agentHandler) handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := transcriptResponse{Items: domain.MessageDTOs(messages)}
-	if resp.Items == nil {
-		resp.Items = []domain.MessageDTO{}
+	// The window comes back oldest-first, so the row past it is the first.
+	var nextKey []string
+	if page.Limit > 0 && len(messages) > page.Limit {
+		messages = messages[1:]
+		nextKey = []string{strconv.Itoa(messages[0].ID)}
 	}
-	// A backward page exists only when this one is full AND we are not
-	// tail-following: a short page reached the beginning, and a caller walking
-	// forward from a watermark is not walking history at all. The token is the
-	// oldest row's id — the ceiling the next page reads below.
-	if sinceID == 0 && len(messages) == transcriptPageSize {
-		resp.NextPageToken = strconv.Itoa(messages[0].ID)
-	}
-	opConversationMessages.Write(w, resp)
-}
-
-// nonNegativeIntParam reads an optional non-negative integer query param,
-// recording a fault on v rather than falling back to the default — a corrupt
-// paging param must never widen the read it bounds. Absent yields 0.
-func nonNegativeIntParam(v *httpx.Validation, query httpx.QueryValues, name string) int {
-	raw := strings.TrimSpace(query.Get(name))
-	if raw == "" {
-		return 0
-	}
-	n, err := strconv.Atoi(raw)
-	if err != nil || n < 0 {
-		v.Param(name, name+" must be a non-negative integer")
-		return 0
-	}
-	return n
+	opConversationMessages.WriteKeyset(w, page, domain.MessageDTOs(messages), total, nextKey)
 }
 
 var opConversationStop = httpx.NewJSONOp[httpx.NoBody, conversationJSON](httpx.OpSpec{
@@ -1802,7 +1772,7 @@ var opConversationList = httpx.NewJSONOp[conversationListRequest, conversationLi
 	Pattern:     "POST /api/agent/conversations/list",
 	ID:          "list_conversations",
 	Summary:     "List conversations",
-	Description: "Returns one page of the conversations the caller can see, narrowed by the body's filters and grouped by task id in runs, with each task's newest first. page_size allows up to 500, and total_count counts conversations, not tasks. With include_messages, messages carries the transcript of each task's newest conversation on the page.",
+	Description: "Returns one page of the conversations the caller can see, narrowed by the body's filters and grouped by task id in runs, with each task's newest first. total_count counts conversations, not tasks. With include_messages, messages carries the transcript of each task's newest conversation on the page.",
 	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
 })
 
@@ -1867,7 +1837,7 @@ func (ag *agentHandler) handleConversations(w http.ResponseWriter, r *http.Reque
 	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(conversationListFilterKey{
 		TaskIDs: taskIDs, TeamIDs: teamIDs, EntityIDs: entityIDs, Statuses: statuses,
 		Attention: req.Attention, IncludeMessages: req.IncludeMessages,
-	}), maxBatchTaskIDs)
+	}), 0)
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}

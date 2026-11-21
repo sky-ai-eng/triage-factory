@@ -131,17 +131,23 @@ export interface Task {
   claim_team_ids?: string[]
 }
 
-// TranscriptPage is GET /api/agent/conversations/{id}/messages.
-//
-// The transcript stays a GET because it is followed, not browsed: `?since_id=`
-// walks FORWARD from a watermark the client holds (the tail-follow that
-// repairs a transcript assembled from websocket frames), while
-// `next_page_token` walks BACKWARD through history from the oldest row the
-// response carried. There is no total — counting a stream still being
-// appended to would be wrong by the time it rendered.
+// TranscriptListRequest is the body of POST
+// /api/agent/conversations/{id}/messages/list. after_id narrows to the rows
+// above a watermark the client holds, the tail-follow that repairs a transcript
+// assembled from websocket frames.
+export interface TranscriptListRequest {
+  after_id?: number
+  page_size?: number
+  page_token?: string
+}
+
+// TranscriptPage is one page of that list. The first page is the newest rows
+// and next_page_token walks toward the oldest, under after_id as well; each
+// page lists its rows oldest first.
 export interface TranscriptPage {
   items: Message[]
   next_page_token?: string
+  total_count: number
 }
 
 // TeamSummary is one row of POST /api/teams/list, POST
@@ -390,10 +396,10 @@ export interface Conversation {
   // draft PR first (in slice order), then every ready review — the per-item
   // resolve UI lists one card per id. Each is editable through its kind's
   // sub-resource (PATCH /api/deliverables/{id}/pr | /review) and approvable
-  // (POST /api/deliverables/{id}/approve); a draft PR is abandoned with
-  // POST /api/deliverables/{id}/dismiss (branch kept) or POST …/reject (branch
-  // deleted from the upstream too), a review with PATCH …/review
-  // {state:"dismissed"}. [] (not undefined) when nothing is unresolved but the
+  // (POST /api/deliverables/{id}/approve); either kind is abandoned with
+  // POST /api/deliverables/{id}/dismiss (a draft PR's branch kept), and a draft
+  // PR can instead be rejected with POST …/reject (branch deleted from the
+  // upstream too). [] (not undefined) when nothing is unresolved but the
   // set was read; undefined under the transient-failure guard.
   pending_deliverable_ids?: string[]
   // Per-kind counts of the unresolved set, for count-aware labels ("N ready",
