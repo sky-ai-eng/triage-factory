@@ -30,12 +30,28 @@ import (
 // present in both arms rather than omitempty so the route answers one
 // shape in every state.
 type orgCreateResponse struct {
-	ID                 string `json:"id"`
-	Name               string `json:"name"`
-	Slug               string `json:"slug"`
-	TeamID             string `json:"team_id"`
-	AlreadyProvisioned bool   `json:"already_provisioned"`
+	ID                 string `json:"id" doc:"The organization's id."`
+	Name               string `json:"name" doc:"The organization's display name."`
+	Slug               string `json:"slug" doc:"The organization's slug, derived from its name."`
+	TeamID             string `json:"team_id" doc:"The id of the organization's first team, which the caller is an admin of."`
+	AlreadyProvisioned bool   `json:"already_provisioned" doc:"Whether the organization already existed, so this call created nothing; only local mode answers true."`
 }
+
+// orgCreateRequest is the body of POST /api/orgs in multi mode. Local mode
+// reads no body.
+type orgCreateRequest struct {
+	Name string `json:"name" doc:"The new organization's display name, at most 200 characters, with at least one letter or number. Multi mode only; local mode reads no body."`
+}
+
+var opOrgCreate = httpx.NewJSONOp[orgCreateRequest, orgCreateResponse](httpx.OpSpec{
+	Pattern:       "POST /api/orgs",
+	ID:            "create_org",
+	Summary:       "Create an organization",
+	Description:   "In multi mode, creates an organization with its first team, makes the caller its owner and the team's admin, and makes it the session's current organization; it needs a session signed in with GitHub. In local mode it reads no body and creates the one local organization, answering 201 when it created it and 200 with already_provisioned true when it already existed.",
+	Status:        http.StatusCreated,
+	OtherStatuses: []int{http.StatusOK},
+	Hints:         httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintNo, Idempotent: httpx.HintNo, OpenWorld: httpx.HintNo},
+})
 
 // orgJSON is the org's canonical read shape, matching the rows /api/me carries
 // in its `orgs` list — the same three facts about the same object, so a client
@@ -43,10 +59,19 @@ type orgCreateResponse struct {
 //
 // Role is the CALLER's org role, named as the caller-relative annotation it is.
 type orgJSON struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	Role string `json:"role"`
+	ID   string `json:"id" doc:"The organization's id."`
+	Name string `json:"name" doc:"The organization's display name."`
+	Role string `json:"role" doc:"The caller's role in the organization: owner, admin, or member."`
 }
+
+var opOrgGet = httpx.NewJSONOp[httpx.NoBody, orgJSON](httpx.OpSpec{
+	Pattern:     "GET /api/orgs/{org_id}",
+	ID:          "get_org",
+	Summary:     "Get an organization",
+	Description: "Returns the organization's id and name, and the caller's role in it.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleOrgGet is the canonical single read for an org. Member-visible: any
 // member of the org may read it, and a non-member (or a nonexistent org) gets
@@ -82,7 +107,7 @@ func (s *Server) handleOrgGet(w http.ResponseWriter, r *http.Request) {
 		notFound(w, "org")
 		return
 	}
-	writeJSON(w, http.StatusOK, orgJSON{ID: org.ID, Name: org.Name, Role: role})
+	opOrgGet.Write(w, orgJSON{ID: org.ID, Name: org.Name, Role: role})
 }
 
 // The rules orgCreationBlocked reports, one per refusal POST /api/orgs makes
@@ -175,7 +200,7 @@ func (s *Server) handleOrgCreate(w http.ResponseWriter, r *http.Request) {
 	claims := ClaimsFrom(r.Context())
 	if claims == nil || claims.Subject == runmode.LocalDefaultUserID {
 		// Sentinel-claim caller is the local-mode shim; nothing to do
-		// here. 401 mirrors handleActiveOrgUpdate's gate.
+		// here. 401 mirrors handleMeUpdate's gate.
 		writeUnauth(w)
 		return
 	}
@@ -206,10 +231,8 @@ func (s *Server) handleOrgCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var body struct {
-		Name string `json:"name"`
-	}
-	if !httpx.DecodeJSONStrict(w, r, &body) {
+	body, ok := opOrgCreate.Decode(w, r)
+	if !ok {
 		return
 	}
 	name := strings.TrimSpace(body.Name)
@@ -263,7 +286,7 @@ func (s *Server) handleOrgCreate(w http.ResponseWriter, r *http.Request) {
 		orgsLog.Warn("set active org failed", "sid", sessions.LogID(sess.ID), "org", orgID, "error", err)
 	}
 
-	writeJSON(w, http.StatusCreated, orgCreateResponse{
+	opOrgCreate.Write(w, orgCreateResponse{
 		ID:     orgID.String(),
 		Name:   name,
 		Slug:   slug,
@@ -314,7 +337,7 @@ func (s *Server) createLocalOrg(w http.ResponseWriter, r *http.Request) {
 	if alreadyProvisioned {
 		status = http.StatusOK
 	}
-	writeJSON(w, status, orgCreateResponse{
+	opOrgCreate.WriteStatus(w, status, orgCreateResponse{
 		ID:                 org.ID,
 		Name:               org.Name,
 		Slug:               org.Slug,
@@ -328,10 +351,10 @@ func (s *Server) registerOrgRoutes() {
 	// both modes. Multi mints a net-new org (403 when org creation is
 	// disabled on the instance); local provisions its single synthetic
 	// tenant, idempotently.
-	s.apiMutating("POST /api/orgs", s.handleOrgCreate)
+	s.op(opOrgCreate, s.handleOrgCreate)
 	// The canonical single read for an org: the same {id, name, role} row
 	// /api/me carries per membership. Member-visible; a non-member 404s.
-	s.api("GET /api/orgs/{org_id}", s.handleOrgGet)
+	s.op(opOrgGet, s.handleOrgGet)
 
 	// Entitlements probe — the deployment's licensed EE feature set. CORE (it
 	// reports the entitlements checker's state and is NOT itself
@@ -340,11 +363,11 @@ func (s *Server) registerOrgRoutes() {
 	// The frontend's useEntitlements hook reads this once to decide which EE
 	// surfaces to render; [] in a community / unlicensed build. See
 	// entitlements_handler.go.
-	s.api("GET /api/entitlements", s.handleEntitlements)
+	s.op(opEntitlements, s.handleEntitlements)
 
 	// How much of each rate-limit budget the org's credentials have left, as
 	// the processes making its requests last saw it — member-gated like the
 	// sources read, since every member renders an integration's settings card.
 	// See rate_limits_handler.go.
-	s.api("GET /api/orgs/{org_id}/integrations/rate-limits", s.handleOrgRateLimits)
+	s.op(opOrgRateLimits, s.handleOrgRateLimits)
 }

@@ -78,13 +78,13 @@ type orgMembersHandler struct {
 // is_current_user lets the frontend swap the Remove control for Leave on the
 // caller's own row.
 type orgMemberRow struct {
-	UserID         string  `json:"user_id"`
-	DisplayName    string  `json:"display_name"`
-	GitHubUsername *string `json:"github_username"`
-	JiraAccountID  *string `json:"jira_account_id"`
-	LinearUserID   *string `json:"linear_user_id"`
-	Role           string  `json:"role"`
-	IsCurrentUser  bool    `json:"is_current_user"`
+	UserID         string  `json:"user_id" doc:"The member's user id."`
+	DisplayName    string  `json:"display_name" doc:"The member's display name."`
+	GitHubUsername *string `json:"github_username" doc:"The member's GitHub login on the organization's GitHub host, or null when they have none there."`
+	JiraAccountID  *string `json:"jira_account_id" doc:"The member's Jira account id on the organization's Jira site, or null when they have none there."`
+	LinearUserID   *string `json:"linear_user_id" doc:"The member's Linear user id in the organization's Linear workspace, or null when they have none there."`
+	Role           string  `json:"role" doc:"The member's role in the organization: owner, admin, or member."`
+	IsCurrentUser  bool    `json:"is_current_user" doc:"Whether the member is the caller."`
 }
 
 // orgMemberListRequest is the body of POST /api/orgs/{org_id}/members/list.
@@ -94,12 +94,21 @@ type orgMemberListRequest struct {
 	// Search keeps a member when it is a case-insensitive substring of their
 	// display name or of a verified email address of theirs
 	// (db.OrgMemberFilter).
-	Search string `json:"search"`
+	Search string `json:"search" doc:"Keeps a member when it is a case-insensitive substring of their display name or of one of their verified email addresses, at most 200 characters; empty keeps every member."`
 	// ExcludingTeamID keeps only the members who are not on this team: the
 	// people a team could add. A team id that is malformed is a 400; one that
 	// names no team in this org is a 422.
-	ExcludingTeamID string `json:"excluding_team_id"`
+	ExcludingTeamID string `json:"excluding_team_id" doc:"Keeps only the members who are not on this team, which must be one of the organization's teams; empty keeps every member."`
 }
+
+var opOrgMembersList = httpx.NewListOp[orgMemberListRequest, orgMemberRow](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/members/list",
+	ID:          "list_org_members",
+	Summary:     "List an organization's members",
+	Description: "Returns one page of the organization's members with their role and their GitHub, Jira, and Linear identities, ordered by display name, narrowed by search and excluding_team_id. Multi mode only.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // orgMemberListFilterKey is the filter set the org roster's page token is
 // fingerprinted against.
@@ -148,8 +157,8 @@ func (h *orgMembersHandler) handleOrgMembersList(w http.ResponseWriter, r *http.
 		return
 	}
 
-	var req orgMemberListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opOrgMembersList.Decode(w, r)
+	if !ok {
 		return
 	}
 	var v httpx.Validation
@@ -219,8 +228,25 @@ func (h *orgMembersHandler) handleOrgMembersList(w http.ResponseWriter, r *http.
 			IsCurrentUser:  m.UserID == userID,
 		}
 	}
-	httpx.WriteList(w, page, out, total)
+	opOrgMembersList.Write(w, page, out, total)
 }
+
+// orgMemberRoleRequest is the body of PATCH /api/orgs/{org_id}/members/{user_id}.
+type orgMemberRoleRequest struct {
+	Role httpx.Patch[string] `json:"role" doc:"The member's new role in the organization: owner, admin, or member. A member always has a role, so null is refused."`
+}
+
+var opOrgMemberRoleChange = httpx.NewNoContentOp[orgMemberRoleRequest](httpx.OpSpec{
+	Pattern:     "PATCH /api/orgs/{org_id}/members/{user_id}",
+	ID:          "update_org_member",
+	Summary:     "Change an organization member's role",
+	Description: "Sets the member's role in the organization. The organization's last owner cannot be demoted. Multi mode only.",
+	PathParams: map[string]string{
+		"org_id":  "The organization's id.",
+		"user_id": "The member's user id.",
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleOrgMemberRoleChange changes a member's org role. Org-admin only
 // (org_memberships_update RLS + the RequireOrgAdmin front gate, both
@@ -244,17 +270,12 @@ func (h *orgMembersHandler) handleOrgMemberRoleChange(w http.ResponseWriter, r *
 		return
 	}
 
-	var body struct {
-		Role string `json:"role"`
-	}
-	if !httpx.DecodeJSONStrict(w, r, &body) {
+	body, ok := opOrgMemberRoleChange.Decode(w, r)
+	if !ok {
 		return
 	}
-	role := strings.TrimSpace(body.Role)
-	if !orgRoles[role] {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-			Reason: httpx.ReasonInvalidField, Message: "role must be one of owner, admin, member", Field: "role",
-		})
+	role, ok := readMemberRole(w, body.Role, orgRoles, "owner, admin, member")
+	if !ok {
 		return
 	}
 
@@ -275,8 +296,20 @@ func (h *orgMembersHandler) handleOrgMemberRoleChange(w http.ResponseWriter, r *
 	if !writeOrgMemberMutationResult(w, "org-members", err) {
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	opOrgMemberRoleChange.Write(w)
 }
+
+var opOrgMemberRemove = httpx.NewNoContentOp[httpx.NoBody](httpx.OpSpec{
+	Pattern:     "DELETE /api/orgs/{org_id}/members/{user_id}",
+	ID:          "delete_org_member",
+	Summary:     "Remove an organization member",
+	Description: "Removes a person from the organization, ends their sessions and event streams in it, revokes their API tokens for it, and removes their Linear credential for its workspace, revoking it at Linear when it is an OAuth grant. A caller who names their own id leaves the organization, and its last owner cannot be removed. Multi mode only.",
+	PathParams: map[string]string{
+		"org_id":  "The organization's id.",
+		"user_id": "The id of the person to remove.",
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
+})
 
 // handleOrgMemberRemove removes a member from the org. An org admin may
 // remove anyone; any member may remove themselves (a self-leave) — the split
@@ -394,14 +427,23 @@ func (h *orgMembersHandler) handleOrgMemberRemove(w http.ResponseWriter, r *http
 				"user", targetID, "org", orgID, "error", err)
 		}
 	}
-	w.WriteHeader(http.StatusNoContent)
+	opOrgMemberRemove.Write(w)
 }
 
 // transferOwnershipRequest is the POST body for the ownership-transfer
 // endpoint: the user id of the member who becomes the new owner.
 type transferOwnershipRequest struct {
-	NewOwnerUserID string `json:"new_owner_user_id"`
+	NewOwnerUserID string `json:"new_owner_user_id" doc:"The user id of the member who becomes the organization's owner."`
 }
+
+var opOrgOwnershipTransfer = httpx.NewNoContentOp[transferOwnershipRequest](httpx.OpSpec{
+	Pattern:     "POST /api/orgs/{org_id}/transfer-ownership",
+	ID:          "transfer_org_ownership",
+	Summary:     "Transfer an organization's ownership",
+	Description: "Makes another member the organization's owner and makes the caller, its current owner, an admin. Only the owner may call it. Multi mode only.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleOrgOwnershipTransfer hands org ownership to another member. Owner-only:
 // the founder sentinel orgs.owner_user_id is the authority (checked up front
@@ -442,8 +484,8 @@ func (h *orgMembersHandler) handleOrgOwnershipTransfer(w http.ResponseWriter, r 
 		return
 	}
 
-	var body transferOwnershipRequest
-	if !httpx.DecodeJSONStrict(w, r, &body) {
+	body, ok := opOrgOwnershipTransfer.Decode(w, r)
+	if !ok {
 		return
 	}
 	newOwner := strings.TrimSpace(body.NewOwnerUserID)
@@ -494,7 +536,7 @@ func (h *orgMembersHandler) handleOrgOwnershipTransfer(w http.ResponseWriter, r 
 	})
 	switch {
 	case err == nil:
-		w.WriteHeader(http.StatusNoContent)
+		opOrgOwnershipTransfer.Write(w)
 	case errors.Is(err, db.ErrNotOrgOwner):
 		// The front gate caught the common case; this is the trigger's 42501
 		// surfacing through a between-check-and-write ownership race.
@@ -509,6 +551,31 @@ func (h *orgMembersHandler) handleOrgOwnershipTransfer(w http.ResponseWriter, r 
 	default:
 		internalError(w, "org-transfer", err)
 	}
+}
+
+// readMemberRole reads the role field of a membership PATCH, the org's and the
+// team's alike: absent names no field to write, null asks to clear a value a
+// membership cannot be without, and a value must be one of roles. On a fault
+// the error is already written and ok is false.
+func readMemberRole(w http.ResponseWriter, field httpx.Patch[string], roles map[string]bool, vocabulary string) (role string, ok bool) {
+	var v httpx.Validation
+	raw, state := field.ReadSet(&v, "role", "a member always has a role")
+	switch state {
+	case httpx.PatchAbsent:
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonMissingField, Message: "no fields to update: provide role", Field: "role",
+		})
+		return "", false
+	case httpx.PatchSet:
+		role = strings.TrimSpace(raw)
+		if !roles[role] {
+			v.Invalid("role", "role must be one of "+vocabulary)
+		}
+	}
+	if v.Flush(w, http.StatusBadRequest) {
+		return "", false
+	}
+	return role, true
 }
 
 // orgMemberPathID extracts and validates the {user_id} path value. A
@@ -577,11 +644,11 @@ func (s *Server) registerOrgMemberRoutes() {
 			}
 		},
 	}
-	s.apiMutating("POST /api/orgs/{org_id}/members/list", omh.handleOrgMembersList)
-	s.apiMutating("PATCH /api/orgs/{org_id}/members/{user_id}", omh.handleOrgMemberRoleChange)
-	s.apiMutating("DELETE /api/orgs/{org_id}/members/{user_id}", omh.handleOrgMemberRemove)
+	s.op(opOrgMembersList, omh.handleOrgMembersList)
+	s.op(opOrgMemberRoleChange, omh.handleOrgMemberRoleChange)
+	s.op(opOrgMemberRemove, omh.handleOrgMemberRemove)
 	// Ownership transfer: owner-only (gated on tf.user_owns_org + the
 	// guard_org_owner_transfer trigger). Promotes the target, repoints the
 	// owner sentinel, demotes the former owner — all in one tx as the owner.
-	s.apiMutating("POST /api/orgs/{org_id}/transfer-ownership", omh.handleOrgOwnershipTransfer)
+	s.op(opOrgOwnershipTransfer, omh.handleOrgOwnershipTransfer)
 }

@@ -26,8 +26,8 @@ export interface ArchiveResult {
   cancelled_runs: number
 }
 
-// ArchivedTeam is one row of POST /api/teams/archived/list — the org-admin restore
-// surface.
+// ArchivedTeam is one row of POST /api/orgs/{org_id}/teams/archived/list — the
+// org-admin restore surface.
 export interface ArchivedTeam {
   id: string
   name: string
@@ -61,11 +61,14 @@ export async function restoreTeam(teamId: string): Promise<void> {
   }
 }
 
-export async function fetchArchivedTeams(): Promise<ArchivedTeam[]> {
+export async function fetchArchivedTeams(orgId: string): Promise<ArchivedTeam[]> {
   try {
     // page_size at the route max: the restore surface renders the whole
     // archived set, which is bounded by how many teams an org ever had.
-    const page = await apiList<ArchivedTeam>('/api/teams/archived/list', { page_size: 200 })
+    const page = await apiList<ArchivedTeam>(
+      `/api/orgs/${encodeURIComponent(orgId)}/teams/archived/list`,
+      { page_size: 200 },
+    )
     return page.items
   } catch (e) {
     throw asError(e, 'Could not load the archived teams.')

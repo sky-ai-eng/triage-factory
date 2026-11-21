@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router'
 import { useAuthStatus } from '../hooks/useAuthStatus'
 import { apiFetch, httpErrorMessage } from '../lib/apiClient'
+import { LOCAL_DEFAULT_ORG_ID } from '../lib/githubApp'
 
 /**
  * StartFactory is the local-mode first-run landing — the local analog of
@@ -11,7 +12,7 @@ import { apiFetch, httpErrorMessage } from '../lib/apiClient'
  * fixed synthetic sentinel tenant, so the only input is the deliberate
  * "Start your factory" action that fires POST /api/orgs (idempotent — see
  * createLocalOrg). On success we route into the /setup wizard; the wizard
- * route's own LocalAuthGate re-reads /api/integrations/status and now sees
+ * route's own LocalAuthGate re-reads the local org's integrations status and now sees
  * configured=true.
  *
  * Local-mode only — multi mounts Onboarding instead, which posts the same
@@ -19,7 +20,7 @@ import { apiFetch, httpErrorMessage } from '../lib/apiClient'
  */
 export default function StartFactory() {
   const navigate = useNavigate()
-  const { configured, loading } = useAuthStatus()
+  const { configured, loading } = useAuthStatus(LOCAL_DEFAULT_ORG_ID)
   const [starting, setStarting] = useState(false)
   const [error, setError] = useState('')
 

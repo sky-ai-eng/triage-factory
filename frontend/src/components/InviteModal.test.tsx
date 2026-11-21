@@ -25,6 +25,11 @@ vi.mock('../hooks/useTeams', () => ({
   }),
 }))
 
+// The team picker offers the session org's teams only for an invite to that
+// org; the session is in org-1, the org every test invites to unless it says
+// otherwise.
+vi.mock('../hooks/useApiOrgId', () => ({ useSessionOrgId: () => 'org-1' }))
+
 describe('InviteModal', () => {
   beforeEach(() => {
     roleMock.role = 'admin'
@@ -36,7 +41,7 @@ describe('InviteModal', () => {
 
   it('caps the role select to the caller’s role and never offers owner', () => {
     roleMock.role = 'owner'
-    render(<InviteModal create={vi.fn()} onClose={vi.fn()} />)
+    render(<InviteModal orgId="org-1" create={vi.fn()} onClose={vi.fn()} />)
 
     const select = screen.getByLabelText(/role/i) as HTMLSelectElement
     const options = within(select)
@@ -55,7 +60,7 @@ describe('InviteModal', () => {
       accept_url: acceptUrl,
       expires_at: '2026-07-01T00:00:00Z',
     })
-    render(<InviteModal create={create} onClose={vi.fn()} />)
+    render(<InviteModal orgId="org-1" create={create} onClose={vi.fn()} />)
 
     fireEvent.change(screen.getByLabelText(/email/i), { target: { value: 'new@example.com' } })
     fireEvent.click(screen.getByRole('button', { name: /send invite/i }))
@@ -76,7 +81,7 @@ describe('InviteModal', () => {
       accept_url: 'https://tf.example.com/invite/accept?token=xyz',
       expires_at: '2026-07-01T00:00:00Z',
     })
-    render(<InviteModal create={create} onClose={vi.fn()} />)
+    render(<InviteModal orgId="org-1" create={create} onClose={vi.fn()} />)
 
     fireEvent.change(screen.getByLabelText(/email/i), { target: { value: 'lead@example.com' } })
     fireEvent.change(screen.getByLabelText(/role/i), { target: { value: 'admin' } })
@@ -84,6 +89,18 @@ describe('InviteModal', () => {
     fireEvent.click(screen.getByRole('button', { name: /send invite/i }))
 
     await waitFor(() => expect(create).toHaveBeenCalledWith('lead@example.com', 'admin', 'team-1'))
+  })
+
+  it("offers no team for an invite to an org other than the session's", () => {
+    // The teams list is the session org's (org-1); none of its teams can be
+    // the target of an invite to org-2.
+    render(<InviteModal orgId="org-2" create={vi.fn()} onClose={vi.fn()} />)
+
+    const select = screen.getByLabelText(/team/i) as HTMLSelectElement
+    const options = within(select)
+      .getAllByRole('option')
+      .map((o) => o.getAttribute('value'))
+    expect(options).toEqual([''])
   })
 
   it('surfaces the 409 already-pending conflict inline', async () => {
@@ -95,7 +112,7 @@ describe('InviteModal', () => {
         }),
       ),
     )
-    render(<InviteModal create={create} onClose={vi.fn()} />)
+    render(<InviteModal orgId="org-1" create={create} onClose={vi.fn()} />)
 
     fireEvent.change(screen.getByLabelText(/email/i), { target: { value: 'dupe@example.com' } })
     fireEvent.click(screen.getByRole('button', { name: /send invite/i }))
@@ -106,7 +123,7 @@ describe('InviteModal', () => {
   })
 
   it('traps Tab focus within the dialog (WCAG 2.1.2)', () => {
-    render(<InviteModal create={vi.fn()} onClose={vi.fn()} />)
+    render(<InviteModal orgId="org-1" create={vi.fn()} onClose={vi.fn()} />)
     const dialog = screen.getByRole('dialog')
 
     // Focus lands inside on open (the email field's autoFocus).

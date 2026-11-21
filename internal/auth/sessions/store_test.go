@@ -491,7 +491,7 @@ func TestStore_CreateLookupRoundtrip_NullActiveOrg(t *testing.T) {
 // TestStore_UpdateActiveOrg pins the switch path: a session created
 // with one active org can be swapped to a different org, and the next
 // Lookup reflects the change. This is the storage side of the
-// POST /api/me/active-org endpoint.
+// PATCH /api/me endpoint.
 func TestStore_UpdateActiveOrg(t *testing.T) {
 	store, h, uid := newStoreForTest(t)
 	ctx := context.Background()

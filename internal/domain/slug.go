@@ -11,6 +11,10 @@ import (
 // hyphens get trimmed.
 var slugAllowed = regexp.MustCompile(`[a-z0-9]+`)
 
+// MaxSlugLen is the longest slug Slugify returns. Slugs land in URLs, so a
+// weirdly long display name must not grow one without bound.
+const MaxSlugLen = 48
+
 // Slugify converts an arbitrary string into a URL-safe kebab-case
 // ASCII slug. Empty input or input that contains no [a-z0-9]
 // characters returns "" — callers substitute a default or reject.
@@ -21,10 +25,8 @@ func Slugify(in string) string {
 		return ""
 	}
 	out := strings.Join(parts, "-")
-	// Cap length at 48 chars — slugs land in URLs and we don't want
-	// unbounded growth from a weirdly-long display name.
-	if len(out) > 48 {
-		out = strings.TrimRight(out[:48], "-")
+	if len(out) > MaxSlugLen {
+		out = strings.TrimRight(out[:MaxSlugLen], "-")
 	}
 	return out
 }

@@ -407,7 +407,7 @@ func TestInviteCreate_CrossOrgTargetTeam_400(t *testing.T) {
 	_, teamB := r.seedOrg(ownerB, "create-orgb")
 	sid := r.signInAs(ownerA)
 
-	resp := r.postJSONWithSid(http.MethodPost, "/api/invites", sid, map[string]string{
+	resp := r.postJSONWithSid(http.MethodPost, "/api/orgs/"+orgA.String()+"/invites", sid, map[string]string{
 		"email": "x@example.com", "role": "member", "target_team_id": teamB.String(),
 	})
 	if resp.StatusCode != http.StatusBadRequest {
@@ -468,7 +468,7 @@ func TestInviteCreate_ExistingMemberGuard(t *testing.T) {
 			// downgrade the owner's seeded identity.
 			sid := r.signInAs(owner)
 
-			resp := r.postJSONWithSid(http.MethodPost, "/api/invites", sid,
+			resp := r.postJSONWithSid(http.MethodPost, "/api/orgs/"+orgID.String()+"/invites", sid,
 				map[string]string{"email": email, "role": "member"})
 			if resp.StatusCode != tc.wantStatus {
 				t.Fatalf("status = %d; want %d (body=%s)", resp.StatusCode, tc.wantStatus, readBody(resp))
@@ -505,15 +505,15 @@ func TestInviteCreate_PendingDup_409(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	r := newAuthRig(t)
 	owner := r.seedUser()
-	r.seedOrg(owner, "create-dup")
+	orgID, _ := r.seedOrg(owner, "create-dup")
 	sid := r.signInAs(owner)
 
-	first := r.postJSONWithSid(http.MethodPost, "/api/invites", sid,
+	first := r.postJSONWithSid(http.MethodPost, "/api/orgs/"+orgID.String()+"/invites", sid,
 		map[string]string{"email": "dup@example.com", "role": "member"})
 	if first.StatusCode != http.StatusCreated {
 		t.Fatalf("first create status = %d; want 201 (body=%s)", first.StatusCode, readBody(first))
 	}
-	second := r.postJSONWithSid(http.MethodPost, "/api/invites", sid,
+	second := r.postJSONWithSid(http.MethodPost, "/api/orgs/"+orgID.String()+"/invites", sid,
 		map[string]string{"email": "dup@example.com", "role": "admin"})
 	if second.StatusCode != http.StatusConflict {
 		t.Fatalf("second create status = %d; want 409 (body=%s)", second.StatusCode, readBody(second))
@@ -531,10 +531,36 @@ func TestInviteCreate_NonAdminIsForbidden(t *testing.T) {
 	pgtest.AddOrgMember(t, r.h, member.String(), orgID.String(), teamID.String(), "member", "member")
 	sid := r.signInAs(member)
 
-	resp := r.postJSONWithSid(http.MethodPost, "/api/invites", sid,
+	resp := r.postJSONWithSid(http.MethodPost, "/api/orgs/"+orgID.String()+"/invites", sid,
 		map[string]string{"email": "x@example.com", "role": "member"})
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("status = %d; want 403 (non-admin); body=%s", resp.StatusCode, readBody(resp))
+	}
+}
+
+// TestInviteCreate_OutsiderIsNotFound: the org is the one the path names, so a
+// caller who is not in it gets 404 for it, whatever org their own session is
+// in, and nothing is minted there.
+func TestInviteCreate_OutsiderIsNotFound(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	r := newAuthRig(t)
+	owner := r.seedUser()
+	orgID, _ := r.seedOrg(owner, "create-target")
+	outsider := r.seedUser()
+	r.seedOrg(outsider, "create-own")
+	sid := r.signInAs(outsider)
+
+	resp := r.postJSONWithSid(http.MethodPost, "/api/orgs/"+orgID.String()+"/invites", sid,
+		map[string]string{"email": "x@example.com", "role": "member"})
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d; want 404 (outside the org); body=%s", resp.StatusCode, readBody(resp))
+	}
+	var n int
+	if err := r.h.AdminDB.QueryRow(`SELECT count(*) FROM org_invites WHERE org_id=$1`, orgID).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("invites minted = %d; want 0", n)
 	}
 }
 
@@ -545,13 +571,13 @@ func TestInviteList_ReturnsActive(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	r := newAuthRig(t)
 	owner := r.seedUser()
-	r.seedOrg(owner, "list-active")
+	orgID, _ := r.seedOrg(owner, "list-active")
 	sid := r.signInAs(owner)
 
-	_ = r.postJSONWithSid(http.MethodPost, "/api/invites", sid,
+	_ = r.postJSONWithSid(http.MethodPost, "/api/orgs/"+orgID.String()+"/invites", sid,
 		map[string]string{"email": "Listed@Example.com", "role": "member"})
 
-	resp := r.postJSONWithSid(http.MethodPost, "/api/invites/list", sid, map[string]any{})
+	resp := r.postJSONWithSid(http.MethodPost, "/api/orgs/"+orgID.String()+"/invites/list", sid, map[string]any{})
 	raw := readBody(resp)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d; want 200 (body=%s)", resp.StatusCode, raw)
@@ -570,7 +596,7 @@ func TestInviteList_ReturnsActive(t *testing.T) {
 		t.Fatalf("list = %+v (total %d); want one entry for listed@example.com", page.Items, page.TotalCount)
 	}
 
-	single := r.postJSONWithSid(http.MethodGet, "/api/invites/"+page.Items[0].ID, sid, nil)
+	single := r.postJSONWithSid(http.MethodGet, "/api/orgs/"+orgID.String()+"/invites/"+page.Items[0].ID, sid, nil)
 	singleRaw := readBody(single)
 	if single.StatusCode != http.StatusOK {
 		t.Fatalf("single read status = %d; want 200 (body=%s)", single.StatusCode, singleRaw)
@@ -590,7 +616,7 @@ func TestInviteList_ReturnsActive(t *testing.T) {
 
 	// An invite id from another org, and a well-formed id that names nothing,
 	// are both 404 — the read is scoped to the same active set the list is.
-	if miss := r.postJSONWithSid(http.MethodGet, "/api/invites/11111111-1111-1111-1111-111111111111", sid, nil); miss.StatusCode != http.StatusNotFound {
+	if miss := r.postJSONWithSid(http.MethodGet, "/api/orgs/"+orgID.String()+"/invites/11111111-1111-1111-1111-111111111111", sid, nil); miss.StatusCode != http.StatusNotFound {
 		t.Errorf("unknown invite id = %d; want 404", miss.StatusCode)
 	}
 }
@@ -601,21 +627,21 @@ func TestInviteRevoke_RemovesFromList(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	r := newAuthRig(t)
 	owner := r.seedUser()
-	r.seedOrg(owner, "revoke-http")
+	orgID, _ := r.seedOrg(owner, "revoke-http")
 	sid := r.signInAs(owner)
 
-	createResp := r.postJSONWithSid(http.MethodPost, "/api/invites", sid,
+	createResp := r.postJSONWithSid(http.MethodPost, "/api/orgs/"+orgID.String()+"/invites", sid,
 		map[string]string{"email": "rev@example.com", "role": "member"})
 	var created struct {
 		ID string `json:"id"`
 	}
 	_ = json.Unmarshal([]byte(readBody(createResp)), &created)
 
-	revResp := r.postJSONWithSid(http.MethodPost, "/api/invites/"+created.ID+"/revoke", sid, nil)
+	revResp := r.postJSONWithSid(http.MethodPost, "/api/orgs/"+orgID.String()+"/invites/"+created.ID+"/revoke", sid, nil)
 	if revResp.StatusCode != http.StatusOK {
 		t.Fatalf("revoke status = %d; want 200 (body=%s)", revResp.StatusCode, readBody(revResp))
 	}
-	listResp := r.postJSONWithSid(http.MethodPost, "/api/invites/list", sid, map[string]any{})
+	listResp := r.postJSONWithSid(http.MethodPost, "/api/orgs/"+orgID.String()+"/invites/list", sid, map[string]any{})
 	var page struct {
 		Items      []json.RawMessage `json:"items"`
 		TotalCount int               `json:"total_count"`
@@ -625,7 +651,7 @@ func TestInviteRevoke_RemovesFromList(t *testing.T) {
 		t.Errorf("active invites after revoke = %d (total %d); want 0", len(page.Items), page.TotalCount)
 	}
 	// The single read drops it too: a revoked invite is not an active one.
-	if gone := r.postJSONWithSid(http.MethodGet, "/api/invites/"+created.ID, sid, nil); gone.StatusCode != http.StatusNotFound {
+	if gone := r.postJSONWithSid(http.MethodGet, "/api/orgs/"+orgID.String()+"/invites/"+created.ID, sid, nil); gone.StatusCode != http.StatusNotFound {
 		t.Errorf("single read of a revoked invite = %d; want 404", gone.StatusCode)
 	}
 }
@@ -637,10 +663,10 @@ func TestInvitePreview_ValidAndUnknown(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	r := newAuthRig(t)
 	owner := r.seedUser()
-	r.seedOrg(owner, "preview-http")
+	orgID, _ := r.seedOrg(owner, "preview-http")
 	sid := r.signInAs(owner)
 
-	createResp := r.postJSONWithSid(http.MethodPost, "/api/invites", sid,
+	createResp := r.postJSONWithSid(http.MethodPost, "/api/orgs/"+orgID.String()+"/invites", sid,
 		map[string]string{"email": "prev@example.com", "role": "member"})
 	var created struct {
 		AcceptURL string `json:"accept_url"`

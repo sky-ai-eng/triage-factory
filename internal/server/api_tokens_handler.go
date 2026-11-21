@@ -39,30 +39,30 @@ import (
 // only as MintSystem's return value, and only apiTokenCreateResponse carries a
 // field that could hold it.
 type apiTokenJSON struct {
-	ID    string `json:"id"`
-	Name  string `json:"name"`
-	OrgID string `json:"org_id"`
+	ID    string `json:"id" doc:"The token's id."`
+	Name  string `json:"name" doc:"The token's display name."`
+	OrgID string `json:"org_id" doc:"The id of the organization the token acts in, fixed when it was created."`
 	// TokenPrefix is the first eleven characters of the plaintext — enough for
 	// its owner to tell two of their own tokens apart, far short of a search.
-	TokenPrefix string     `json:"token_prefix"`
-	CreatedAt   time.Time  `json:"created_at"`
-	LastUsedAt  *time.Time `json:"last_used_at"`
+	TokenPrefix string     `json:"token_prefix" doc:"The first eleven characters of the token, which tell two tokens apart."`
+	CreatedAt   time.Time  `json:"created_at" doc:"When the token was created, as an RFC 3339 timestamp."`
+	LastUsedAt  *time.Time `json:"last_used_at" doc:"When the token last authenticated a request, as an RFC 3339 timestamp, or null when it never has."`
 	// ExpiresAt is what the minter asked for; EffectiveExpiresAt is when the
 	// token actually stops working, folding in the org's current max-age cap.
 	// Both are carried because they answer different questions, and a cap
 	// tightened after the mint makes them disagree.
-	ExpiresAt          *time.Time `json:"expires_at"`
-	EffectiveExpiresAt *time.Time `json:"effective_expires_at"`
+	ExpiresAt          *time.Time `json:"expires_at" doc:"The expiry asked for when the token was created, as an RFC 3339 timestamp, or null when none was."`
+	EffectiveExpiresAt *time.Time `json:"effective_expires_at" doc:"When the token stops working, as an RFC 3339 timestamp: the earlier of expires_at and the organization's current cap on token age, or null when neither applies."`
 	// AllowedCIDRs is never null — [] is the answer "no restriction", so a
 	// client iterates the field without a nil check, same contract as items.
-	AllowedCIDRs []string `json:"allowed_cidrs"`
+	AllowedCIDRs []string `json:"allowed_cidrs" doc:"The address ranges, in CIDR notation, that requests with the token must come from; empty when it is not restricted."`
 }
 
 // apiTokenCreateResponse is the mint answer: the row, plus the plaintext that
 // will never be returned again by anything.
 type apiTokenCreateResponse struct {
 	apiTokenJSON
-	Token string `json:"token"`
+	Token string `json:"token" doc:"The token itself, sent as a Bearer credential. It is returned only here, never by a later read."`
 }
 
 func apiTokenToJSON(t apitokens.Token) apiTokenJSON {
@@ -118,11 +118,21 @@ func (s *Server) meTokens(w http.ResponseWriter, r *http.Request) (*apitokens.St
 // field, and the one that survives a client clock being wrong is the deadline.
 // Day-style presets are display math the form does before it calls.
 type apiTokenCreateRequest struct {
-	Name         string   `json:"name"`
-	OrgID        string   `json:"org_id"`
-	ExpiresAt    string   `json:"expires_at"`
-	AllowedCIDRs []string `json:"allowed_cidrs"`
+	Name         string   `json:"name" doc:"The token's display name, required, at most 100 bytes."`
+	OrgID        string   `json:"org_id" doc:"The id of the organization the token acts in, which must be one the caller belongs to; a request made with an API token may name only that token's organization."`
+	ExpiresAt    string   `json:"expires_at" doc:"When the token stops working, as an RFC 3339 timestamp in the future and within the organization's cap on token age; absent or empty creates a token with no expiry of its own."`
+	AllowedCIDRs []string `json:"allowed_cidrs" doc:"Up to 20 address ranges in CIDR notation, a bare address meaning that one host, that requests with the token must come from; absent or empty leaves it unrestricted. A range with bits set below its prefix length is refused."`
 }
+
+var opAPITokenCreate = httpx.NewJSONOp[apiTokenCreateRequest, apiTokenCreateResponse](httpx.OpSpec{
+	Pattern:     "POST /api/me/tokens",
+	ID:          "create_api_token",
+	Summary:     "Create an API token",
+	Description: "Creates an API token that acts as the caller in one organization they belong to, and returns it with its secret, which is shown only in this response. A request made with an API token may create one only in that token's own organization. Multi mode only.",
+	Status:      http.StatusCreated,
+	BodyLimit:   4 << 10,
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintNo, Idempotent: httpx.HintNo, OpenWorld: httpx.HintNo},
+})
 
 // handleAPITokenCreate mints one token for the caller and returns the plaintext
 // exactly once.
@@ -142,9 +152,9 @@ func (s *Server) handleAPITokenCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req apiTokenCreateRequest
 	// 4 KiB: a name, an org id, a timestamp and up to twenty CIDR strings.
-	if !httpx.DecodeJSONStrictLimit(w, r, &req, 4<<10) {
+	req, ok := opAPITokenCreate.Decode(w, r)
+	if !ok {
 		return
 	}
 
@@ -233,7 +243,7 @@ func (s *Server) handleAPITokenCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, apiTokenCreateResponse{
+	opAPITokenCreate.Write(w, apiTokenCreateResponse{
 		apiTokenJSON: apiTokenToJSON(tokenRow),
 		Token:        plaintext,
 	})
@@ -322,8 +332,17 @@ func (s *Server) checkTokenAgeCap(w http.ResponseWriter, r *http.Request, orgID 
 // MaxAgeDays is null when the org sets no cap — null rather than 0, because
 // "no cap" is an answer and 0 is not a number of days a token may live.
 type apiTokenPolicyJSON struct {
-	MaxAgeDays *int `json:"max_age_days"`
+	MaxAgeDays *int `json:"max_age_days" doc:"The most days an API token in the organization may live, counted from its creation, or null when there is no cap."`
 }
+
+var opAPITokenPolicy = httpx.NewJSONOp[httpx.NoBody, apiTokenPolicyJSON](httpx.OpSpec{
+	Pattern:     "GET /api/orgs/{org_id}/api-token-policy",
+	ID:          "get_api_token_policy",
+	Summary:     "Get an organization's API token policy",
+	Description: "Returns the organization's cap on how long its API tokens may live, which binds every member's tokens. Multi mode only.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleAPITokenPolicy answers the org's token policy to any of its members.
 //
@@ -362,7 +381,7 @@ func (s *Server) handleAPITokenPolicy(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "api-token-policy", fmt.Errorf("org settings %s: %w", orgID, err))
 		return
 	}
-	writeJSON(w, http.StatusOK, apiTokenPolicyJSON{MaxAgeDays: maxAge})
+	opAPITokenPolicy.Write(w, apiTokenPolicyJSON{MaxAgeDays: maxAge})
 }
 
 // --------------------------------------------------------------------
@@ -375,15 +394,24 @@ func (s *Server) handleAPITokenPolicy(w http.ResponseWriter, r *http.Request) {
 type apiTokenListRequest struct {
 	// OrgID narrows to one org. Empty means every org the caller holds tokens
 	// in — except under a token, whose own org is the only set it may see.
-	OrgID string `json:"org_id"`
+	OrgID string `json:"org_id" doc:"Keeps only the tokens for this organization. Absent or empty keeps the tokens for every organization, except in a request made with an API token, which reads only its own organization's tokens."`
 	// SortKey/SortDir order the list (apiTokenListSortKeys); absent is newest
 	// first. A token never used sorts last under last_used_at in both
 	// directions.
-	SortKey string `json:"sort_key"`
-	SortDir string `json:"sort_dir"`
+	SortKey string `json:"sort_key" doc:"What to order by: last_used_at or created_at, newest first by default. A token never used sorts last under last_used_at in either direction. Absent orders by creation, newest first."`
+	SortDir string `json:"sort_dir" doc:"The order's direction, asc or desc; it needs sort_key."`
 
 	httpx.PageRequest
 }
+
+var opAPITokenList = httpx.NewListOp[apiTokenListRequest, apiTokenJSON](httpx.OpSpec{
+	Pattern:     "POST /api/me/tokens/list",
+	ID:          "list_api_tokens",
+	Summary:     "List the caller's API tokens",
+	Description: "Returns one page of the caller's API tokens, expired ones included and revoked ones left out, without their secrets. A request made with an API token reads only its own organization's tokens. Multi mode only.",
+	BodyLimit:   4 << 10,
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // apiTokenListSortKeys is the list's sort_key vocabulary. Each key's own
 // direction is most recent first, which is what a reader ranking tokens by
@@ -418,8 +446,8 @@ func (s *Server) handleAPITokenList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req apiTokenListRequest
-	if !httpx.DecodeJSONStrictLimit(w, r, &req, 4<<10) {
+	req, ok := opAPITokenList.Decode(w, r)
+	if !ok {
 		return
 	}
 
@@ -470,7 +498,7 @@ func (s *Server) handleAPITokenList(w http.ResponseWriter, r *http.Request) {
 	for i, t := range tokens {
 		items[i] = apiTokenToJSON(t)
 	}
-	httpx.WriteList(w, page, items, total)
+	opAPITokenList.Write(w, page, items, total)
 }
 
 // --------------------------------------------------------------------
@@ -482,8 +510,18 @@ func (s *Server) handleAPITokenList(w http.ResponseWriter, r *http.Request) {
 // credential: a different org, expiry or allowlist is a different token, and
 // rotation (mint, move, revoke) is how one gets it.
 type apiTokenRenameRequest struct {
-	Name *string `json:"name"`
+	Name httpx.Patch[string] `json:"name" doc:"The token's new display name, at most 100 bytes. A token always has a name, so null is refused."`
 }
+
+var opAPITokenRename = httpx.NewJSONOp[apiTokenRenameRequest, apiTokenJSON](httpx.OpSpec{
+	Pattern:     "PATCH /api/me/tokens/{id}",
+	ID:          "update_api_token",
+	Summary:     "Rename an API token",
+	Description: "Sets one of the caller's API tokens' display name and returns the token. A request made with an API token may rename only tokens in its own organization. Multi mode only.",
+	PathParams:  map[string]string{"id": "The API token's id."},
+	BodyLimit:   4 << 10,
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleAPITokenRename changes a token's display name in place.
 //
@@ -508,18 +546,26 @@ func (s *Server) handleAPITokenRename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req apiTokenRenameRequest
-	if !httpx.DecodeJSONStrictLimit(w, r, &req, 4<<10) {
+	req, ok := opAPITokenRename.Decode(w, r)
+	if !ok {
 		return
 	}
-	if req.Name == nil {
+	// A type fault, or a null on a field that cannot be cleared, is a
+	// malformed body, 400 like any other; what the value means is checked
+	// after it, at 422.
+	var types httpx.Validation
+	raw, state := req.Name.ReadSet(&types, "name", "a token always has a name")
+	if state == httpx.PatchAbsent {
 		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
 			Reason: httpx.ReasonMissingField, Message: "no fields to update: provide name", Field: "name",
 		})
 		return
 	}
+	if types.Flush(w, http.StatusBadRequest) {
+		return
+	}
 	var v httpx.Validation
-	name := strings.TrimSpace(*req.Name)
+	name := strings.TrimSpace(raw)
 	switch {
 	case name == "":
 		v.Invalid("name", "name is required")
@@ -555,12 +601,21 @@ func (s *Server) handleAPITokenRename(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "me/tokens", fmt.Errorf("rename api token %s: %w", id, err))
 		return
 	}
-	writeJSON(w, http.StatusOK, apiTokenToJSON(renamed))
+	opAPITokenRename.Write(w, apiTokenToJSON(renamed))
 }
 
 // --------------------------------------------------------------------
 // revoke
 // --------------------------------------------------------------------
+
+var opAPITokenRevoke = httpx.NewNoContentOp[httpx.NoBody](httpx.OpSpec{
+	Pattern:     "DELETE /api/me/tokens/{id}",
+	ID:          "delete_api_token",
+	Summary:     "Revoke an API token",
+	Description: "Revokes one of the caller's API tokens so it stops working at once, including the token that makes the request. A request made with an API token may revoke only tokens in its own organization. Multi mode only.",
+	PathParams:  map[string]string{"id": "The API token's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleAPITokenRevoke kills one of the caller's tokens.
 //
@@ -613,7 +668,7 @@ func (s *Server) handleAPITokenRevoke(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "me/tokens", fmt.Errorf("revoke api token %s: %w", id, err))
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	opAPITokenRevoke.Write(w)
 }
 
 func (s *Server) registerAPITokenRoutes() {
@@ -624,12 +679,12 @@ func (s *Server) registerAPITokenRoutes() {
 	// the route's scope, which is why create takes org_id in its body.
 	// Multi-mode only (404 in local). Both credentials reach these: a session
 	// mints the first token, and a token rotates itself within its own org.
-	s.apiMutating("POST /api/me/tokens", s.handleAPITokenCreate)
-	s.apiMutating("POST /api/me/tokens/list", s.handleAPITokenList)
-	s.apiMutating("PATCH /api/me/tokens/{id}", s.handleAPITokenRename)
-	s.apiMutating("DELETE /api/me/tokens/{id}", s.handleAPITokenRevoke)
+	s.op(opAPITokenCreate, s.handleAPITokenCreate)
+	s.op(opAPITokenList, s.handleAPITokenList)
+	s.op(opAPITokenRename, s.handleAPITokenRename)
+	s.op(opAPITokenRevoke, s.handleAPITokenRevoke)
 	// The policy those tokens live under is the org's, so it is addressed at
 	// the org and readable by any member — the cap binds everyone's tokens,
 	// and a member picking an expiry should learn it before the 422 does.
-	s.api("GET /api/orgs/{org_id}/api-token-policy", s.handleAPITokenPolicy)
+	s.op(opAPITokenPolicy, s.handleAPITokenPolicy)
 }

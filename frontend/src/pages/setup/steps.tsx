@@ -187,7 +187,7 @@ function intervalLabel(d: string): string {
 // endpoint. Best-effort: a failure leaves both false, and the org GET still
 // seeds the URL/PAT-presence fields, so the step degrades to "not connected"
 // rather than blocking the load.
-async function fetchIntegrationsState(): Promise<{
+async function fetchIntegrationsState(orgId: string): Promise<{
   githubReady: boolean
   jiraConnected: boolean
   jiraDeployment: JiraDeployment | null
@@ -199,7 +199,7 @@ async function fetchIntegrationsState(): Promise<{
       jira?: boolean
       jira_url?: string
       jira_deployment?: string
-    }>('/api/integrations/status')
+    }>(`/api/orgs/${encodeURIComponent(orgId)}/integrations/status`)
     return {
       githubReady: !!data.github_ready,
       jiraConnected: !!data.jira && !!data.jira_url,
@@ -239,7 +239,7 @@ export async function loadOrg(ctx: LoadContext): Promise<Partial<WizardState>> {
   if (!ctx.orgId) throw new Error('Could not load organization settings')
   const [org, integrations, linear] = await Promise.all([
     fetchOrgSettings(ctx.orgId),
-    fetchIntegrationsState(),
+    fetchIntegrationsState(ctx.orgId),
     // Not best-effort: a failure here would read as "not connected", which
     // hides a working connection, seeds the wrong tracker, and offers a
     // Connect form that binds over the stored key. Failing the load shows the
@@ -876,7 +876,8 @@ const githubPatStep: WizardStep = {
     // (Under the old bulk save, blank rode a "leave blank to keep current"
     // contract through the same request that could have rotated it.)
     if (typedPat === '') {
-      const { githubReady } = await fetchIntegrationsState()
+      if (!orgId) throw new Error('No organization context.')
+      const { githubReady } = await fetchIntegrationsState(orgId)
       if (!githubReady) {
         throw new Error('Couldn’t verify your stored GitHub token. Re-enter it to reconnect.')
       }

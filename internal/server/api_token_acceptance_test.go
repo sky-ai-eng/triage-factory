@@ -20,7 +20,7 @@ import (
 
 // TestBearerAuth_CursorScopedSurfaceNeedsNoActiveOrg: routes that resolve their
 // org from the session's active-org cursor answer a token from the org it carries,
-// with no cursor set and no POST /api/me/active-org ever made.
+// with no cursor set and no PATCH /api/me ever made.
 func TestBearerAuth_CursorScopedSurfaceNeedsNoActiveOrg(t *testing.T) {
 	r := newAuthRig(t)
 	userID := r.seedUser()

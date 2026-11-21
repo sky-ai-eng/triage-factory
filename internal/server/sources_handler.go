@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 
@@ -21,8 +20,17 @@ import (
 // same reason every other read here is: a list that is one day joined by a
 // sibling field must not have to change shape to get one.
 type orgSourcesResponse struct {
-	Sources eventsource.Availability `json:"sources"`
+	Sources eventsource.Availability `json:"sources" doc:"Every event source this deployment carries, each with its state for the organization."`
 }
+
+var opOrgSources = httpx.NewJSONOp[httpx.NoBody, orgSourcesResponse](httpx.OpSpec{
+	Pattern:     "GET /api/orgs/{org_id}/sources",
+	ID:          "list_org_sources",
+	Summary:     "List the organization's event sources",
+	Description: "Returns, as one unpaged list, every event source this deployment carries, such as GitHub, Jira, and Linear, with whether the organization can receive events from it and, when it cannot, why. It says nothing about the organization's credentials.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleOrgSources serves which event sources can reach this org, and when one
 // cannot, why not.
@@ -59,8 +67,20 @@ func (s *Server) handleOrgSources(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "sources", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, orgSourcesResponse{Sources: sources})
+	opOrgSources.Write(w, orgSourcesResponse{Sources: sources})
 }
+
+var opOrgSource = httpx.NewJSONOp[httpx.NoBody, eventsource.Source](httpx.OpSpec{
+	Pattern:     "GET /api/orgs/{org_id}/sources/{kind}",
+	ID:          "get_org_source",
+	Summary:     "Get one of the organization's event sources",
+	Description: "Returns one event source with whether the organization can receive events from it and, when it cannot, why. A kind this deployment does not carry is not found.",
+	PathParams: map[string]string{
+		"org_id": "The organization's id.",
+		"kind":   "The event source, such as github, jira, linear, or slack.",
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleOrgSource serves one source's answer — the same element the list
 // answers with, at its own address. It exists because the PATCH below does: a
@@ -95,15 +115,27 @@ func (s *Server) handleOrgSource(w http.ResponseWriter, r *http.Request) {
 		notFound(w, "source")
 		return
 	}
-	writeJSON(w, http.StatusOK, eventsource.NewSource(kind, state))
+	opOrgSource.Write(w, eventsource.NewSource(kind, state))
 }
 
-// orgSourcePatch is the PATCH body. json.RawMessage rather than *bool so an
-// absent field and an explicit null are distinguishable: absent means the
-// caller named no field to write, which must not answer "updated".
+// orgSourcePatch is the PATCH body. A Patch rather than *bool so an absent
+// field and an explicit null are distinguishable: absent means the caller
+// named no field to write, which must not answer "updated".
 type orgSourcePatch struct {
-	Disabled json.RawMessage `json:"disabled,omitempty"`
+	Disabled httpx.Patch[bool] `json:"disabled" doc:"Whether the source is turned off for the organization: true turns it off, and false or null turns it back on."`
 }
+
+var opOrgSourcePatch = httpx.NewJSONOp[orgSourcePatch, eventsource.Source](httpx.OpSpec{
+	Pattern:     "PATCH /api/orgs/{org_id}/sources/{kind}",
+	ID:          "update_org_source",
+	Summary:     "Turn an event source off or on",
+	Description: "Turns the source off or back on for the whole organization and returns its state. While it is off it is not polled, its events create no tasks, and no credential for it is used, but nothing is deleted: credentials, tasks, and event handlers stay as they are. Only an organization admin may call it, and GitHub cannot be turned off.",
+	PathParams: map[string]string{
+		"org_id": "The organization's id.",
+		"kind":   "The event source, such as jira, linear, or slack.",
+	},
+	Hints: httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleOrgSourcePatch turns one source off, or back on, for the whole org.
 //
@@ -170,11 +202,13 @@ func (s *Server) handleOrgSourcePatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req orgSourcePatch
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	req, ok := opOrgSourcePatch.Decode(w, r)
+	if !ok {
 		return
 	}
-	if req.Disabled == nil {
+	var v httpx.Validation
+	disabled, state := req.Disabled.Read(&v, "disabled")
+	if state == httpx.PatchAbsent {
 		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
 			Reason:  httpx.ReasonMissingField,
 			Message: "no fields to update: provide disabled",
@@ -182,15 +216,15 @@ func (s *Server) handleOrgSourcePatch(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	var disabled bool
-	if err := json.Unmarshal(req.Disabled, &disabled); err != nil {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-			Reason: httpx.ReasonInvalidField, Message: "disabled must be true or false", Field: "disabled",
-		})
+	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
+	// Null resets the policy to its default, which is on.
+	if state == httpx.PatchClear {
+		disabled = false
+	}
 
-	var state eventsource.State
+	var sourceState eventsource.State
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		if _, err := tx.OrgEventSources.SetDisabled(r.Context(), orgID, kind, disabled, userID); err != nil {
 			return fmt.Errorf("set event source policy: %w", err)
@@ -225,7 +259,7 @@ func (s *Server) handleOrgSourcePatch(w http.ResponseWriter, r *http.Request) {
 		// unlicensed — so echoing the request's own boolean back as a state
 		// would be a different answer than the next GET gives.
 		var e error
-		state, _, e = eventsource.StateFor(r.Context(), tx, orgID, kind)
+		sourceState, _, e = eventsource.StateFor(r.Context(), tx, orgID, kind)
 		return e
 	}); err != nil {
 		internalError(w, "sources", err)
@@ -246,7 +280,7 @@ func (s *Server) handleOrgSourcePatch(w http.ResponseWriter, r *http.Request) {
 	if s.ws != nil {
 		s.ws.Broadcast(websocket.Event{Type: "sources_updated", OrgID: orgID, Data: map[string]any{}})
 	}
-	writeJSON(w, http.StatusOK, eventsource.NewSource(kind, state))
+	opOrgSourcePatch.Write(w, eventsource.NewSource(kind, sourceState))
 }
 
 func (s *Server) registerSourceRoutes() {
@@ -254,11 +288,11 @@ func (s *Server) registerSourceRoutes() {
 	// stored, and member-gated like the org settings read: it is the signal
 	// the authoring surfaces and the source cards render from, and every
 	// member renders those. See sources_handler.go.
-	s.api("GET /api/orgs/{org_id}/sources", s.handleOrgSources)
+	s.op(opOrgSources, s.handleOrgSources)
 	// The same collection addressed one element at a time. The read is
 	// member-gated like the list; the write is org admin, because a source is
 	// in no team's tracked set and pausing one lands on every team in the org
 	// — and because unbinding its credential already takes an org admin.
-	s.api("GET /api/orgs/{org_id}/sources/{kind}", s.handleOrgSource)
-	s.apiMutating("PATCH /api/orgs/{org_id}/sources/{kind}", s.handleOrgSourcePatch)
+	s.op(opOrgSource, s.handleOrgSource)
+	s.op(opOrgSourcePatch, s.handleOrgSourcePatch)
 }

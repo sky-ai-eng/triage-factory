@@ -928,8 +928,8 @@ func (s *Server) routes() {
 	// wrapped routes have no such gate, so the limiter is outermost there.
 	s.mux.Handle("GET /api/auth/oauth/{provider}", s.preAuthRateLimit(http.HandlerFunc(s.handleOAuthStart)))
 	s.mux.HandleFunc("GET /api/auth/callback", s.handleOAuthCallback)
-	s.mux.Handle("POST /api/auth/logout", s.withCSRFOriginCheck(s.preAuthRateLimit(http.HandlerFunc(s.handleLogout))))
-	s.mux.HandleFunc("GET /api/config", s.handleConfig)
+	s.rawOp(opLogout, s.withCSRFOriginCheck(s.preAuthRateLimit(http.HandlerFunc(s.handleLogout))))
+	s.rawOp(opConfig, http.HandlerFunc(s.handleConfig))
 	// Liveness probe — pre-auth so platform healthchecks (Fly checks,
 	// compose healthcheck, k8s liveness) can hit it without a session.
 	// Plain 200 OK with a tiny JSON body. Don't expand this into a

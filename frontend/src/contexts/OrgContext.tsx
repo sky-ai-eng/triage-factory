@@ -18,7 +18,7 @@ import { useOptionalAuth } from './AuthContext'
  *
  * The URL is authoritative when present so deep links survive across
  * sessions. The server value beats localStorage so a switch made in
- * another tab (POST /api/me/active-org persists on the session row)
+ * another tab (PATCH /api/me persists on the session row)
  * wins over this tab's cached pick on the next /api/me load.
  *
  * Stale localStorage is silently ignored: if the stored org_id isn't

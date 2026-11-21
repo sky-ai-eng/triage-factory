@@ -558,6 +558,14 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, state.ReturnTo, http.StatusFound)
 }
 
+var opLogout = httpx.NewNoContentOp[httpx.NoBody](httpx.OpSpec{
+	Pattern:     "POST /api/auth/logout",
+	ID:          "logout",
+	Summary:     "Sign out of this session",
+	Description: "Ends the session the request's cookie names, closes that session's event streams, and clears the cookie. A request with no live session changes nothing and still succeeds, and an API token is refused because it has no session to end. Multi mode only.",
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
+
 // handleLogout invalidates the session both upstream (gotrue) and
 // locally (sessions row). Idempotent — repeated logouts don't 4xx.
 //
@@ -634,8 +642,16 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		Name: s.sidCookieName(), Value: "", Path: "/",
 		MaxAge: -1, HttpOnly: true, Secure: s.cookieSecure(r), SameSite: http.SameSiteLaxMode,
 	})
-	w.WriteHeader(http.StatusNoContent)
+	opLogout.Write(w)
 }
+
+var opLogoutAll = httpx.NewNoContentOp[httpx.NoBody](httpx.OpSpec{
+	Pattern:     "POST /api/auth/logout/all",
+	ID:          "logout_all",
+	Summary:     "Sign out of every session",
+	Description: "Ends every session the caller holds, on every device, closes all of their event streams, and clears this request's cookie. API tokens are not sessions: a token request is refused, and the caller's tokens keep working. Multi mode only.",
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleLogoutAll revokes every active session for the caller and
 // best-effort invalidates each one upstream at gotrue. Use case: "I
@@ -728,22 +744,36 @@ func (s *Server) handleLogoutAll(w http.ResponseWriter, r *http.Request) {
 		Name: s.sidCookieName(), Value: "", Path: "/",
 		MaxAge: -1, HttpOnly: true, Secure: s.cookieSecure(r), SameSite: http.SameSiteLaxMode,
 	})
-	w.WriteHeader(http.StatusNoContent)
+	opLogoutAll.Write(w)
 }
 
-// handleActiveOrgUpdate swaps the active org for the caller's session.
-// Wrapped at mount time in withCSRFOriginCheck + withSession.
+// meUpdateRequest is the body of PATCH /api/me.
+type meUpdateRequest struct {
+	ActiveOrgID httpx.Patch[string] `json:"active_org_id" doc:"The id of the organization the caller's session acts in, which must be one they belong to and whose single sign-on requirement the session meets. A session's organization cannot be cleared, so null is refused."`
+}
+
+var opMeUpdate = httpx.NewJSONOp[meUpdateRequest, meResponse](httpx.OpSpec{
+	Pattern:     "PATCH /api/me",
+	ID:          "update_me",
+	Summary:     "Switch the session's current organization",
+	Description: "Sets active_org_id, the organization the caller's session acts in, so the session's later requests act in it, and returns the caller's identity and memberships as GET /api/me does. An API token is refused, because its organization is fixed when it is created. Multi mode only.",
+	BodyLimit:   1 << 10,
+	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
+
+// handleMeUpdate writes the caller's session's active org, the one field of
+// the me resource a caller sets. Wrapped at mount time in
+// withCSRFOriginCheck + withSession.
 //
-// POST /api/me/active-org  body: { "org_id": "<uuid>" }
+// PATCH /api/me  body: { "active_org_id": "<uuid>" }
 //
-// The active-org primitive. We deliberately store the choice
-// on the session row (single source of truth across tabs) rather than
-// in the URL path. The next request's withSession reads the new value
-// into ctxKeyOrgID; tab B sees the switch on its next round trip.
+// The choice is stored on the session row (single source of truth across
+// tabs) rather than in the URL path. The next request's withSession reads the
+// new value into ctxKeyOrgID; tab B sees the switch on its next round trip.
 //
 // 404-on-non-member mirrors the org-membership gate's posture — don't disclose
 // whether the org exists to a user who isn't in it.
-func (s *Server) handleActiveOrgUpdate(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleMeUpdate(w http.ResponseWriter, r *http.Request) {
 	if s.authDeps == nil {
 		// The whole multi-mode auth surface is absent in local mode: a route that
 		// doesn't exist in this deployment mode answers 404.
@@ -765,24 +795,32 @@ func (s *Server) handleActiveOrgUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	sess := SessionFrom(r.Context())
 	if sess == nil {
-		authLog.Error("active-org update: no session in context, route missing withsession")
+		authLog.Error("me update: no session in context, route missing withsession")
 		writeUnauth(w)
 		return
 	}
 
-	var body struct {
-		OrgID string `json:"org_id"`
-	}
-	// Strict, capped decoding like every other body: the raw decoder here
-	// accepted trailing junk and unknown fields.
-	if !httpx.DecodeJSONStrictLimit(w, r, &body, 1<<10) {
+	body, decoded := opMeUpdate.Decode(w, r)
+	if !decoded {
 		return
 	}
-	orgUUID, err := uuid.Parse(body.OrgID)
-	if err != nil {
+	var v httpx.Validation
+	raw, state := body.ActiveOrgID.ReadSet(&v, "active_org_id", "name the organization to switch to")
+	var orgUUID uuid.UUID
+	switch state {
+	case httpx.PatchAbsent:
 		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-			Reason: httpx.ReasonInvalidField, Message: "org_id must be a valid org id", Field: "org_id",
+			Reason: httpx.ReasonMissingField, Message: "no fields to update: provide active_org_id", Field: "active_org_id",
 		})
+		return
+	case httpx.PatchSet:
+		parsed, err := uuid.Parse(raw)
+		if err != nil {
+			v.Invalid("active_org_id", "active_org_id must be a valid org id")
+		}
+		orgUUID = parsed
+	}
+	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
 
@@ -803,6 +841,15 @@ func (s *Server) handleActiveOrgUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The resource as the next GET reads it, built from the org the session is
+	// moving to (this request's context carries the org it arrived with), and
+	// built before the write so a failed read answers 500 for a switch that
+	// did not happen.
+	resp, err := s.buildMe(httpx.WithOrgID(r.Context(), orgUUID.String()), claims)
+	if err != nil {
+		internalError(w, "auth", err)
+		return
+	}
 	if err := s.authDeps.sessions.UpdateActiveOrgSystem(r.Context(), sess.ID, orgUUID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			// Session vanished between withSession's lookup and now
@@ -814,10 +861,92 @@ func (s *Server) handleActiveOrgUpdate(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "auth", fmt.Errorf("update active org for session %s: %w", sessions.LogID(sess.ID), err))
 		return
 	}
-
-	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write([]byte("{}"))
+	opMeUpdate.Write(w, resp)
 }
+
+// meOrgRow is one org in GET /api/me's orgs list.
+type meOrgRow struct {
+	ID   string `json:"id" doc:"The organization's id."`
+	Name string `json:"name" doc:"The organization's display name."`
+	Role string `json:"role" doc:"The caller's role in the organization: owner, admin, or member."`
+	// SSORequired reports that this org requires signing in through its
+	// own single sign-on and the credential behind this request was not,
+	// so every org-scoped call to it answers 403 SSO_REQUIRED. SSOStartURL
+	// is where that sign-in begins, present only when SSORequired is.
+	// Not omitempty — false is the answer for every org the caller can use.
+	SSORequired bool   `json:"sso_required" doc:"Whether the organization requires its own single sign-on and this request's credential did not come through it, in which case every request about the organization is refused with SSO_REQUIRED."`
+	SSOStartURL string `json:"sso_start_url,omitempty" doc:"Where the organization's single sign-on begins, present only when sso_required is true."`
+}
+
+// meTeamRow is one team membership in GET /api/me's teams list.
+type meTeamRow struct {
+	ID    string `json:"id" doc:"The team's id."`
+	Name  string `json:"name" doc:"The team's display name."`
+	OrgID string `json:"org_id" doc:"The id of the organization the team belongs to."`
+	Role  string `json:"role" doc:"The caller's role on the team: admin, member, or viewer."`
+}
+
+// meResponse is the body of GET /api/me.
+type meResponse struct {
+	ID             string `json:"id" doc:"The caller's user id."`
+	Email          string `json:"email" doc:"The email address the caller's sign-in carries, empty in local mode."`
+	DisplayName    string `json:"display_name,omitempty" doc:"The caller's display name, absent when none is recorded."`
+	AvatarURL      string `json:"avatar_url,omitempty" doc:"The URL of the caller's avatar image, absent when none is recorded."`
+	GitHubUsername string `json:"github_username,omitempty" doc:"The caller's GitHub login on the current organization's GitHub host, or on the GitHub they verified most recently, absent when they have none."`
+	// GitHubUserID is GitHub's id for the account behind GitHubUsername,
+	// the value a GitHub predicate's identity filters (author_id_in and
+	// its siblings) take. Absent when the binding recorded none.
+	GitHubUserID    string `json:"github_user_id,omitempty" doc:"GitHub's id for the account github_username names, the value event handler filters such as author_id_in take, absent when none is recorded."`
+	JiraAccountID   string `json:"jira_account_id,omitempty" doc:"The caller's Jira account id on the current organization's Jira site, or on the site they verified most recently, absent when they have none."`
+	JiraDisplayName string `json:"jira_display_name,omitempty" doc:"The name Jira gives the account jira_account_id names, absent when none is recorded."`
+	// LinearUserID / LinearDisplayName are the viewer's binding in the
+	// active org's Linear workspace, and absent when there is none — no
+	// active org, an org without Linear, or no binding in its workspace.
+	LinearUserID      string     `json:"linear_user_id,omitempty" doc:"The caller's Linear user id in the current organization's Linear workspace, absent when there is no current organization, it has no Linear workspace, or the caller has no account bound in it."`
+	LinearDisplayName string     `json:"linear_display_name,omitempty" doc:"The name Linear gives the user linear_user_id names, absent when none is recorded."`
+	Orgs              []meOrgRow `json:"orgs" doc:"Every organization the caller belongs to, ordered by name; empty when they belong to none."`
+	// Teams is the viewer's own team-membership rows, across every org
+	// they belong to — hence the org tag on each, since /me spans orgs
+	// where the teams list is scoped to one. Membership rows only: a team
+	// an org admin can see but never joined carries no role and is not
+	// here, which is the teams list's business. Archived teams are
+	// excluded, matching that list. It is what makes the viewer's team
+	// grants reachable without a session cursor: POST /api/teams/list
+	// resolves its org from the session's active org, so a caller holding
+	// no session state could not enumerate its teams at all.
+	//
+	// Not omitempty — [] is an answer ("no teams"), same contract as Orgs.
+	Teams       []meTeamRow `json:"teams" doc:"Every active team the caller is a member of, in every organization they belong to, ordered by organization id and then team name; empty when they are on none."`
+	ActiveOrgID string      `json:"active_org_id,omitempty" doc:"The id of the organization this request acts in: the session's current organization, or the one an API token was created for. Absent when there is none, or the caller no longer belongs to it."`
+	// OrgCreationEnabled surfaces the instance's TF_PREVENT_ORG_CREATION
+	// toggle (inverted) so the onboarding entry can tell an invite-only
+	// deployment ("ask your admin") from a caller who cannot create an
+	// org on one that allows it, without a second round trip. Not
+	// omitempty — false is a meaningful value the gate must see.
+	OrgCreationEnabled bool `json:"org_creation_enabled" doc:"Whether this deployment allows anyone to create an organization."`
+	// CanCreateOrg is whether THIS caller may create an org: the
+	// deployment setting above, a session rather than an API token, and
+	// a session signed in with GitHub rather than SSO. It is the answer
+	// POST /api/orgs gives (orgCreationBlocked), so the onboarding page
+	// offers the form exactly when the route would accept it. Not
+	// omitempty — false is meaningful.
+	CanCreateOrg bool `json:"can_create_org" doc:"Whether this caller may create an organization: the deployment allows it, the request comes from a session rather than an API token, and the session signed in with GitHub rather than single sign-on."`
+	// IsOperator reports whether this identity is a deployment operator —
+	// the org-less flag the fleet-console nav gate reads
+	// (together with the FeatureFleet entitlement). Deployment config, not
+	// tenant data, so it lives on identity here rather than a per-org role.
+	// Not omitempty — false is meaningful. Local mode: the single user is
+	// implicitly the operator.
+	IsOperator bool `json:"is_operator" doc:"Whether the caller is one of the deployment's operators; always true in local mode."`
+}
+
+var opMe = httpx.NewJSONOp[httpx.NoBody, meResponse](httpx.OpSpec{
+	Pattern:     "GET /api/me",
+	ID:          "get_me",
+	Summary:     "Get the caller's identity and memberships",
+	Description: "Returns the caller's user id, their GitHub, Jira, and Linear identities, the organizations and teams they belong to with their role in each, the organization this request acts in, and whether they may create an organization. In local mode it describes the one local user.",
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
 
 // handleMe returns the authenticated user's identity plus their org and team
 // memberships, each with the role the viewer holds.
@@ -830,76 +959,18 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		writeUnauth(w)
 		return
 	}
-	type orgRow struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
-		Role string `json:"role"`
-		// SSORequired reports that this org requires signing in through its
-		// own single sign-on and the credential behind this request was not,
-		// so every org-scoped call to it answers 403 SSO_REQUIRED. SSOStartURL
-		// is where that sign-in begins, present only when SSORequired is.
-		// Not omitempty — false is the answer for every org the caller can use.
-		SSORequired bool   `json:"sso_required"`
-		SSOStartURL string `json:"sso_start_url,omitempty"`
+	resp, err := s.buildMe(r.Context(), claims)
+	if err != nil {
+		internalError(w, "auth", err)
+		return
 	}
-	type teamRow struct {
-		ID    string `json:"id"`
-		Name  string `json:"name"`
-		OrgID string `json:"org_id"`
-		Role  string `json:"role"`
-	}
-	type response struct {
-		ID             string `json:"id"`
-		Email          string `json:"email"`
-		DisplayName    string `json:"display_name,omitempty"`
-		AvatarURL      string `json:"avatar_url,omitempty"`
-		GitHubUsername string `json:"github_username,omitempty"`
-		// GitHubUserID is GitHub's id for the account behind GitHubUsername,
-		// the value a GitHub predicate's identity filters (author_id_in and
-		// its siblings) take. Absent when the binding recorded none.
-		GitHubUserID    string `json:"github_user_id,omitempty"`
-		JiraAccountID   string `json:"jira_account_id,omitempty"`
-		JiraDisplayName string `json:"jira_display_name,omitempty"`
-		// LinearUserID / LinearDisplayName are the viewer's binding in the
-		// active org's Linear workspace, and absent when there is none — no
-		// active org, an org without Linear, or no binding in its workspace.
-		LinearUserID      string   `json:"linear_user_id,omitempty"`
-		LinearDisplayName string   `json:"linear_display_name,omitempty"`
-		Orgs              []orgRow `json:"orgs"`
-		// Teams is the viewer's own team-membership rows, across every org
-		// they belong to — hence the org tag on each, since /me spans orgs
-		// where the teams list is scoped to one. Membership rows only: a team
-		// an org admin can see but never joined carries no role and is not
-		// here, which is the teams list's business. Archived teams are
-		// excluded, matching that list. It is what makes the viewer's team
-		// grants reachable without a session cursor: POST /api/teams/list
-		// resolves its org from the session's active org, so a caller holding
-		// no session state could not enumerate its teams at all.
-		//
-		// Not omitempty — [] is an answer ("no teams"), same contract as Orgs.
-		Teams       []teamRow `json:"teams"`
-		ActiveOrgID string    `json:"active_org_id,omitempty"`
-		// OrgCreationEnabled surfaces the instance's TF_PREVENT_ORG_CREATION
-		// toggle (inverted) so the onboarding entry can tell an invite-only
-		// deployment ("ask your admin") from a caller who cannot create an
-		// org on one that allows it, without a second round trip. Not
-		// omitempty — false is a meaningful value the gate must see.
-		OrgCreationEnabled bool `json:"org_creation_enabled"`
-		// CanCreateOrg is whether THIS caller may create an org: the
-		// deployment setting above, a session rather than an API token, and
-		// a session signed in with GitHub rather than SSO. It is the answer
-		// POST /api/orgs gives (orgCreationBlocked), so the onboarding page
-		// offers the form exactly when the route would accept it. Not
-		// omitempty — false is meaningful.
-		CanCreateOrg bool `json:"can_create_org"`
-		// IsOperator reports whether this identity is a deployment operator
-		// (TFAC-589) — the org-less flag the fleet-console nav gate reads
-		// (together with the FeatureFleet entitlement). Deployment config, not
-		// tenant data, so it lives on identity here rather than a per-org role.
-		// Not omitempty — false is meaningful. Local mode: the single user is
-		// implicitly the operator.
-		IsOperator bool `json:"is_operator"`
-	}
+	opMe.Write(w, resp)
+}
+
+// buildMe assembles the me resource for claims, with the active org ctx
+// carries. GET /api/me answers it, and PATCH /api/me answers it after its
+// write, with the org it just set.
+func (s *Server) buildMe(ctx context.Context, claims *verify.Claims) (meResponse, error) {
 
 	// Local-mode shim path: withSession injects a synthetic claim
 	// carrying LocalDefaultUserID when authDeps is nil. The multi-mode
@@ -918,16 +989,16 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	// to the normal DB-backed path instead of receiving a fabricated
 	// Local org that doesn't match their real memberships.
 	if s.authDeps == nil && claims.Subject == runmode.LocalDefaultUserID {
-		resp := response{
+		resp := meResponse{
 			ID:          runmode.LocalDefaultUserID,
 			DisplayName: "Local",
-			Orgs: []orgRow{{
+			Orgs: []meOrgRow{{
 				ID:   runmode.LocalDefaultOrgID,
 				Name: "Local",
 				Role: "owner",
 			}},
 			ActiveOrgID: runmode.LocalDefaultOrgID,
-			Teams:       []teamRow{},
+			Teams:       []meTeamRow{},
 			// Local mode is N=1 with a pre-provisioned org and never
 			// renders the onboarding entry, so the value is moot; report
 			// the permissive default for shape consistency.
@@ -951,17 +1022,17 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 			// bare-rig test.
 			var ghHost, jiraHost, linearWorkspace string
 			if s.orgs != nil {
-				if orgSet, err := s.orgs.GetSettings(r.Context(), runmode.LocalDefaultOrgID); err == nil {
+				if orgSet, err := s.orgs.GetSettings(ctx, runmode.LocalDefaultOrgID); err == nil {
 					ghHost = orgSet.GitHubBaseURL
 					jiraHost = orgSet.JiraBaseURL
 					linearWorkspace = orgSet.LinearWorkspaceID
 				}
 			}
-			if identity, _ := s.users.GetGitHubIdentity(r.Context(), runmode.LocalDefaultUserID, ghHost); identity != nil {
+			if identity, _ := s.users.GetGitHubIdentity(ctx, runmode.LocalDefaultUserID, ghHost); identity != nil {
 				resp.GitHubUsername, resp.GitHubUserID = identity.Login, identity.GitHubUserID
 			}
-			resp.JiraAccountID, resp.JiraDisplayName, _ = s.users.GetJiraIdentity(r.Context(), runmode.LocalDefaultUserID, jiraHost)
-			resp.LinearUserID, resp.LinearDisplayName, _ = s.users.GetLinearIdentity(r.Context(), runmode.LocalDefaultUserID, linearWorkspace)
+			resp.JiraAccountID, resp.JiraDisplayName, _ = s.users.GetJiraIdentity(ctx, runmode.LocalDefaultUserID, jiraHost)
+			resp.LinearUserID, resp.LinearDisplayName, _ = s.users.GetLinearIdentity(ctx, runmode.LocalDefaultUserID, linearWorkspace)
 		}
 		// The sole local team, which local mode reports the single user as
 		// admin of — the same role the teams list gives the per-team gates, so
@@ -969,27 +1040,24 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		// nobody has provisioned yet and leaves the list empty, which is an
 		// answer rather than a fault; localDefaultTeam carries the reasoning
 		// for that and for the states it refuses instead.
-		localTeam, err := s.localDefaultTeam(r.Context())
+		localTeam, err := s.localDefaultTeam(ctx)
 		if err != nil {
-			internalError(w, "auth", err)
-			return
+			return meResponse{}, err
 		}
 		if localTeam != nil {
-			resp.Teams = append(resp.Teams, teamRow{
+			resp.Teams = append(resp.Teams, meTeamRow{
 				ID: localTeam.ID, Name: localTeam.Name, OrgID: localTeam.OrgID, Role: localTeam.Role,
 			})
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(resp)
-		return
+		return resp, nil
 	}
 
-	var resp response
-	resp.Orgs = []orgRow{}
-	resp.Teams = []teamRow{}
+	var resp meResponse
+	resp.Orgs = []meOrgRow{}
+	resp.Teams = []meTeamRow{}
 	resp.Email = claims.Email
 	resp.OrgCreationEnabled = runmode.OrgCreationEnabled()
-	resp.CanCreateOrg = orgCreationBlocked(r.Context()) == ""
+	resp.CanCreateOrg = orgCreationBlocked(ctx) == ""
 	// Deployment-operator flag: whether a grant is bound to the principal, or
 	// one of its login identities holds a pending grant's address verified —
 	// the same read the fleet gate makes, so the flag and the console agree.
@@ -998,7 +1066,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	// (operators has no RLS policy); best-effort — a lookup error leaves it
 	// false (fail closed, the console 404s), never fails the identity read.
 	if s.allStores.Operators != nil {
-		if ok, err := s.allStores.Operators.IsOperatorUserSystem(r.Context(), claims.Subject); err != nil {
+		if ok, err := s.allStores.Operators.IsOperatorUserSystem(ctx, claims.Subject); err != nil {
 			serverLog.Warn("operator lookup failed on /api/me", "error", err)
 		} else {
 			resp.IsOperator = ok
@@ -1009,7 +1077,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	// same place, so this answers for both credentials. Reaching into the
 	// session here would tell a Bearer caller they have no active org — on the
 	// one endpoint every client reads to find out.
-	resp.ActiveOrgID = OrgIDFrom(r.Context())
+	resp.ActiveOrgID = OrgIDFrom(ctx)
 
 	// Wrap both reads in a single transaction with request.jwt.claims
 	// populated, so the queries source the identity from
@@ -1024,7 +1092,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	// to the active org's GitHub host. A stale/empty active org
 	// is harmless: org_event_sources RLS filters it out and the lookup falls
 	// back to the most-recently-verified identity row.
-	err := tfdb.WithReadTx(r.Context(), s.db,
+	err := tfdb.WithReadTx(ctx, s.db,
 		tfdb.Claims{Sub: claims.Subject, OrgID: resp.ActiveOrgID},
 		func(tx *sql.Tx) error {
 			// Identity is host-scoped for GitHub and Jira: prefer the row
@@ -1041,7 +1109,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 			// membership EXISTS does.
 			//
 			// An absent row scans to "" for every provider.
-			if err := tx.QueryRowContext(r.Context(), `
+			if err := tx.QueryRowContext(ctx, `
 				SELECT u.id::text,
 				       COALESCE(u.display_name, ''),
 				       COALESCE(u.avatar_url, ''),
@@ -1094,7 +1162,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 			// transaction is one connection, and a still-open result set on it
 			// is a busy connection rather than a second cursor.
 			readOrgs := func() error {
-				rows, err := tx.QueryContext(r.Context(), `
+				rows, err := tx.QueryContext(ctx, `
 					SELECT o.id::text, o.name, om.role
 					  FROM org_memberships om
 					  JOIN orgs o ON o.id = om.org_id
@@ -1106,7 +1174,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 				}
 				defer rows.Close()
 				for rows.Next() {
-					var o orgRow
+					var o meOrgRow
 					if err := rows.Scan(&o.ID, &o.Name, &o.Role); err != nil {
 						return fmt.Errorf("org scan: %w", err)
 					}
@@ -1124,7 +1192,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 			// team from every selector. Ordered (org_id, name) with an id
 			// tiebreak so the shape is stable across reads.
 			readTeams := func() error {
-				rows, err := tx.QueryContext(r.Context(), `
+				rows, err := tx.QueryContext(ctx, `
 					SELECT t.id::text, t.name, t.org_id::text, m.role::text
 					  FROM memberships m
 					  JOIN teams t ON t.id = m.team_id
@@ -1137,7 +1205,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 				}
 				defer rows.Close()
 				for rows.Next() {
-					var tr teamRow
+					var tr meTeamRow
 					if err := rows.Scan(&tr.ID, &tr.Name, &tr.OrgID, &tr.Role); err != nil {
 						return fmt.Errorf("team scan: %w", err)
 					}
@@ -1153,8 +1221,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		},
 	)
 	if err != nil {
-		internalError(w, "auth", fmt.Errorf("/api/me for %s: %w", claims.Subject, err))
-		return
+		return meResponse{}, fmt.Errorf("/api/me for %s: %w", claims.Subject, err)
 	}
 
 	// Which of the caller's orgs this credential may not act in, so the client
@@ -1162,10 +1229,9 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	// The same per-request read every enforcement point makes; a failure fails
 	// the read rather than reporting an org as usable.
 	for i := range resp.Orgs {
-		gate, err := s.requestSSOGate(r.Context(), resp.Orgs[i].ID)
+		gate, err := s.requestSSOGate(ctx, resp.Orgs[i].ID)
 		if err != nil {
-			internalError(w, "auth", fmt.Errorf("/api/me sso gate for org %s: %w", resp.Orgs[i].ID, err))
-			return
+			return meResponse{}, fmt.Errorf("/api/me sso gate for org %s: %w", resp.Orgs[i].ID, err)
 		}
 		resp.Orgs[i].SSORequired = gate.Barred
 		resp.Orgs[i].SSOStartURL = gate.StartURL
@@ -1190,8 +1256,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(resp)
+	return resp, nil
 }
 
 // localDefaultTeam resolves the one team a local install has, for /api/me's
@@ -1232,6 +1297,40 @@ func (s *Server) localDefaultTeam(ctx context.Context) (*domain.Team, error) {
 	return team, nil
 }
 
+// loginMethod is one linked identity. Wire shape mirrored in the frontend
+// as LoginMethod (types.ts). No auth_user_id / provider_subject — see the
+// handler doc.
+type loginMethod struct {
+	Provider      string `json:"provider" doc:"How the person signs in with this identity: github, saml for single sign-on, or local for the one local-mode user."`
+	Email         string `json:"email,omitempty" doc:"The email address the identity carries, absent when it has none."`
+	EmailVerified bool   `json:"email_verified" doc:"Whether the identity's email address is verified."`
+	LinkedAt      string `json:"linked_at,omitempty" doc:"When the identity was linked to the person, as an RFC 3339 timestamp in UTC; absent in local mode."`
+	Current       bool   `json:"current" doc:"Whether this is the identity the request's session signed in with."`
+	// IdP names the identity-provider product behind a saml row (entra,
+	// okta, google, onelogin, ping, other), resolved through the login
+	// extension from the provider id stamped at login. Omitted for github
+	// rows, for a saml row stamped before the connection recorded its IdP,
+	// and in a build with no SSO extension — absent reads as plain SSO.
+	IdP string `json:"idp,omitempty" doc:"The identity provider behind a saml identity: entra, okta, google, onelogin, ping, or other. Absent for other providers and when it is not known."`
+	// Login is the handle a github row is known by at GitHub — the door a
+	// person came in by, distinct from the account the factory acts as.
+	// Omitted for saml rows and for a github row from before the stamp.
+	Login string `json:"login,omitempty" doc:"The GitHub login of a github identity, absent for other providers and when it is not recorded."`
+}
+
+// meIdentitiesResponse is the body of GET /api/me/identities.
+type meIdentitiesResponse struct {
+	Methods []loginMethod `json:"methods" doc:"Every identity linked to the caller, oldest first."`
+}
+
+var opMeIdentities = httpx.NewJSONOp[httpx.NoBody, meIdentitiesResponse](httpx.OpSpec{
+	Pattern:     "GET /api/me/identities",
+	ID:          "list_identities",
+	Summary:     "List the caller's sign-in identities",
+	Description: "Returns every identity the caller can sign in with, such as a GitHub account or a single sign-on login, oldest first, and marks the one this session signed in with. The list is not paged. In local mode it holds one identity with the provider local.",
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
+
 // handleMeIdentities returns the login identities linked to the signed-in
 // PRINCIPAL — one row per GoTrue login (a GitHub login + N SSO providers), all
 // resolving to the same public.users row via verified-email linking at login.
@@ -1263,36 +1362,12 @@ func (s *Server) handleMeIdentities(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// loginMethod is one linked identity. Wire shape mirrored in the frontend
-	// as LoginMethod (types.ts). No auth_user_id / provider_subject — see the
-	// handler doc.
-	type loginMethod struct {
-		Provider      string `json:"provider"`
-		Email         string `json:"email,omitempty"`
-		EmailVerified bool   `json:"email_verified"`
-		LinkedAt      string `json:"linked_at,omitempty"`
-		Current       bool   `json:"current"`
-		// IdP names the identity-provider product behind a saml row (entra,
-		// okta, google, onelogin, ping, other), resolved through the login
-		// extension from the provider id stamped at login. Omitted for github
-		// rows, for a saml row stamped before the connection recorded its IdP,
-		// and in a build with no SSO extension — absent reads as plain SSO.
-		IdP string `json:"idp,omitempty"`
-		// Login is the handle a github row is known by at GitHub — the door a
-		// person came in by, distinct from the account the factory acts as.
-		// Omitted for saml rows and for a github row from before the stamp.
-		Login string `json:"login,omitempty"`
-	}
-	type response struct {
-		Methods []loginMethod `json:"methods"`
-	}
-
 	// Local-mode shim: one synthetic "local" row. Gated on authDeps==nil (not
 	// just the sentinel Subject) so a multi-mode caller whose principal UUID
 	// collides with the sentinel still falls through to the DB path — same
 	// rationale as handleMe.
 	if s.authDeps == nil && claims.Subject == runmode.LocalDefaultUserID {
-		writeJSON(w, http.StatusOK, response{Methods: []loginMethod{{
+		opMeIdentities.Write(w, meIdentitiesResponse{Methods: []loginMethod{{
 			Provider: "local",
 			Current:  true,
 		}}})
@@ -1308,7 +1383,7 @@ func (s *Server) handleMeIdentities(w http.ResponseWriter, r *http.Request) {
 	// session's cursor or a token's sealed org alike.
 	activeOrg := OrgIDFrom(r.Context())
 
-	resp := response{Methods: []loginMethod{}}
+	resp := meIdentitiesResponse{Methods: []loginMethod{}}
 	// providerIDs is the sso_provider_id of each saml row, positionally
 	// aligned with resp.Methods ("" for a github row or an unstamped one), so
 	// the IdP lookup below can be one call and write back by index.
@@ -1373,7 +1448,7 @@ func (s *Server) handleMeIdentities(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	writeJSON(w, http.StatusOK, resp)
+	opMeIdentities.Write(w, resp)
 }
 
 // distinctNonEmpty is the set of non-empty strings in vs, in first-seen order.
@@ -2051,19 +2126,20 @@ func (s *Server) registerAuthRoutes() {
 	// login, which is why they sit outside /api/auth/*: that prefix means
 	// session authentication and nothing else. Wrapped via s.api/apiMutating —
 	// managing them requires a session.
-	s.api("GET /api/integrations/status", s.handleIntegrationsStatus)
+	s.op(opIntegrationsStatus, s.handleIntegrationsStatus)
 	// Logout-everywhere: must be authenticated to use it (you can only
 	// nuke your own sessions).
-	s.apiMutating("POST /api/auth/logout/all", s.handleLogoutAll)
+	s.op(opLogoutAll, s.handleLogoutAll)
 	// /api/me is the session-protected identity endpoint. In local mode
 	// the shim in withSession injects sentinel claims so the handler
 	// sees a non-nil claims value; in multi mode the handler 401s when
 	// no claims are seeded.
-	s.api("GET /api/me", s.handleMe)
+	s.op(opMe, s.handleMe)
 	// Linked login identities for the signed-in principal — the read-only
 	// "Login methods" view. Personal read keyed on the session principal, no
 	// org scoping. Both modes (local returns a single synthetic row).
-	s.api("GET /api/me/identities", s.handleMeIdentities)
-	// Switch the session's active org.
-	s.apiMutating("POST /api/me/active-org", s.handleActiveOrgUpdate)
+	s.op(opMeIdentities, s.handleMeIdentities)
+	// Switch the session's active org, the one field of /api/me a caller
+	// writes.
+	s.op(opMeUpdate, s.handleMeUpdate)
 }

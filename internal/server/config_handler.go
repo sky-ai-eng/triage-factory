@@ -25,12 +25,20 @@ import (
 // /api/me (the caller's identity + org list), or
 // POST /api/teams/{team_id}/members/list (the team roster).
 type configResponse struct {
-	DeploymentMode    string `json:"deployment_mode"`
-	DefaultGitHubHost string `json:"default_github_host"`
+	DeploymentMode    string `json:"deployment_mode" doc:"How this deployment runs: local for one person on their own machine, or multi for a shared deployment with sign-in."`
+	DefaultGitHubHost string `json:"default_github_host" doc:"The base URL of the GitHub that Sign in with GitHub uses, such as https://github.com."`
 }
 
+var opConfig = httpx.NewJSONOp[httpx.NoBody, configResponse](httpx.OpSpec{
+	Pattern:     "GET /api/config",
+	ID:          "get_config",
+	Summary:     "Get the deployment's configuration",
+	Description: "Returns the deployment facts a client needs before anyone signs in: whether it runs in local or multi mode, and which GitHub its sign-in uses. It needs no credential and says nothing about any person or organization.",
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
+
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, configResponse{
+	opConfig.Write(w, configResponse{
 		DeploymentMode:    string(runmode.Current()),
 		DefaultGitHubHost: ghbase.DefaultBaseURL(),
 	})

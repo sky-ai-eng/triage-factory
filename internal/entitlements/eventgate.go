@@ -54,7 +54,7 @@ func EventTypeAllowed(orgID, eventType string) bool {
 // event-source gates, sorted. It exists for the composition-root parity test
 // (feature_parity_test.go at the repo root): a feature wired into a seam but
 // missing from AllFeatures() gates correctly (Has is a plain map lookup) yet
-// never surfaces on the /api/entitlements probe, leaving every render-gated
+// never surfaces on the entitlements probe, leaving every render-gated
 // surface dark for licensed orgs. Registration-time validation can't do this
 // job — seam tests deliberately register synthetic features, and only the
 // composition root sees exactly the real registrations.

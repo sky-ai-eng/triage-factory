@@ -1,6 +1,7 @@
 import { useSyncExternalStore, useCallback, useEffect, useRef, useState } from 'react'
 import type { TeamSummary } from '../types'
 import { apiJSON, apiList, httpErrorMessage } from '../lib/apiClient'
+import { useSessionOrgId } from './useApiOrgId'
 
 // Shared store for POST /api/teams/list — the data source for the multi-team
 // selectors (the per-page read filter and the write-time picker) plus the
@@ -141,6 +142,7 @@ export interface UseTeams {
 
 export function useTeams(): UseTeams {
   const snap = useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
+  const orgId = useSessionOrgId()
 
   const refresh = useCallback(() => {
     // Supersede any in-flight fetch so a stale response can't land after
@@ -150,19 +152,25 @@ export function useTeams(): UseTeams {
     return load()
   }, [])
 
-  const createTeam = useCallback(async (name: string): Promise<TeamSummary> => {
-    const created = await apiJSON<TeamSummary>('/api/teams', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name }),
-    })
-    // Supersede so the reload reflects the just-created team rather than a
-    // pre-create fetch that may still be in flight.
-    supersedeInFlight()
-    state = { ...state, loaded: false }
-    await load()
-    return created
-  }, [])
+  // The team is created in the session's org: the org the list this store
+  // holds, and reloads below, comes from.
+  const createTeam = useCallback(
+    async (name: string): Promise<TeamSummary> => {
+      if (!orgId) throw new Error('No organization context.')
+      const created = await apiJSON<TeamSummary>(`/api/orgs/${encodeURIComponent(orgId)}/teams`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      })
+      // Supersede so the reload reflects the just-created team rather than a
+      // pre-create fetch that may still be in flight.
+      supersedeInFlight()
+      state = { ...state, loaded: false }
+      await load()
+      return created
+    },
+    [orgId],
+  )
 
   return {
     teams: snap.teams,

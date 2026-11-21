@@ -97,15 +97,15 @@ func TestActiveOrg_OAuthCallback_NoMembershipsStoresNull(t *testing.T) {
 	}
 }
 
-// postActiveOrg posts body to POST /api/me/active-org with the given sid and a
-// same-origin Origin header, so the CSRF guard passes.
-func (r *authRig) postActiveOrg(t *testing.T, sid string, body any) *http.Response {
+// patchMe sends body as PATCH /api/me with the given sid and a same-origin
+// Origin header, so the CSRF guard passes.
+func (r *authRig) patchMe(t *testing.T, sid string, body any) *http.Response {
 	t.Helper()
 	raw, err := json.Marshal(body)
 	if err != nil {
 		t.Fatalf("marshal body: %v", err)
 	}
-	req := httptest.NewRequest("POST", "/api/me/active-org", bytes.NewReader(raw))
+	req := httptest.NewRequest("PATCH", "/api/me", bytes.NewReader(raw))
 	if sid != "" {
 		req.AddCookie(&http.Cookie{Name: r.srv.sidCookieName(), Value: sid})
 	}
@@ -129,10 +129,19 @@ func TestActiveOrg_Update_SwitchToMemberOrg_Succeeds(t *testing.T) {
 	resp, _ := r.driveCallback(userID)
 	sid := r.sidFromResp(resp)
 
-	// Switch to orgB.
-	got := r.postActiveOrg(t, sid, map[string]string{"org_id": orgB.String()})
+	// Switch to orgB. The answer is the me resource with the org just set.
+	got := r.patchMe(t, sid, map[string]string{"active_org_id": orgB.String()})
 	if got.StatusCode != http.StatusOK {
-		t.Fatalf("active-org status=%d, want 200", got.StatusCode)
+		t.Fatalf("PATCH /api/me status=%d, want 200", got.StatusCode)
+	}
+	var me struct {
+		ActiveOrgID string `json:"active_org_id"`
+	}
+	if err := json.NewDecoder(got.Body).Decode(&me); err != nil {
+		t.Fatalf("decode PATCH /api/me: %v", err)
+	}
+	if me.ActiveOrgID != orgB.String() {
+		t.Errorf("PATCH /api/me active_org_id = %q, want %q", me.ActiveOrgID, orgB)
 	}
 
 	// Next request surfaces orgB via OrgIDFrom.
@@ -161,7 +170,7 @@ func TestActiveOrg_Update_NonMemberOrg_Returns404(t *testing.T) {
 	resp, _ := r.driveCallback(userA)
 	sid := r.sidFromResp(resp)
 
-	got := r.postActiveOrg(t, sid, map[string]string{"org_id": orgB.String()})
+	got := r.patchMe(t, sid, map[string]string{"active_org_id": orgB.String()})
 	if got.StatusCode != http.StatusNotFound {
 		t.Errorf("non-member switch status=%d, want 404 (don't leak existence)", got.StatusCode)
 	}
@@ -179,9 +188,11 @@ func TestActiveOrg_Update_NonMemberOrg_Returns404(t *testing.T) {
 	}
 }
 
-// TestActiveOrg_Update_MalformedOrgID_Returns400: a non-UUID org_id is a 400,
-// distinct from the 404 for a well-formed id the caller is not a member of.
-func TestActiveOrg_Update_MalformedOrgID_Returns400(t *testing.T) {
+// TestActiveOrg_Update_BadBodies_Return400: a non-UUID active_org_id is a 400,
+// distinct from the 404 for a well-formed id the caller is not a member of; so
+// is a body that names no field, and a null, which asks to clear the session's
+// org.
+func TestActiveOrg_Update_BadBodies_Return400(t *testing.T) {
 	r := newAuthRig(t)
 	userID := r.seedUser()
 	r.seedOrg(userID, "alice-org")
@@ -189,9 +200,30 @@ func TestActiveOrg_Update_MalformedOrgID_Returns400(t *testing.T) {
 	resp, _ := r.driveCallback(userID)
 	sid := r.sidFromResp(resp)
 
-	got := r.postActiveOrg(t, sid, map[string]string{"org_id": "not-a-uuid"})
-	if got.StatusCode != http.StatusBadRequest {
-		t.Errorf("malformed org_id status=%d, want 400", got.StatusCode)
+	for _, tc := range []struct {
+		what   string
+		body   map[string]any
+		reason string
+	}{
+		{"malformed", map[string]any{"active_org_id": "not-a-uuid"}, httpx.ReasonInvalidField},
+		{"absent", map[string]any{}, httpx.ReasonMissingField},
+		{"null", map[string]any{"active_org_id": nil}, httpx.ReasonInvalidField},
+	} {
+		t.Run(tc.what, func(t *testing.T) {
+			got := r.patchMe(t, sid, tc.body)
+			if got.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status=%d, want 400", got.StatusCode)
+			}
+			var env struct {
+				Errors []httpx.ErrorItem `json:"errors"`
+			}
+			if err := json.NewDecoder(got.Body).Decode(&env); err != nil || len(env.Errors) == 0 {
+				t.Fatalf("decode errors: %v", err)
+			}
+			if e := env.Errors[0]; e.Reason != tc.reason || e.Field != "active_org_id" {
+				t.Errorf("error = %+v, want %s on active_org_id", e, tc.reason)
+			}
+		})
 	}
 }
 
@@ -199,7 +231,7 @@ func TestActiveOrg_Update_MalformedOrgID_Returns400(t *testing.T) {
 // refused by withSession before the handler runs.
 func TestActiveOrg_Update_NoSession_Returns401(t *testing.T) {
 	r := newAuthRig(t)
-	got := r.postActiveOrg(t, "", map[string]string{"org_id": uuid.New().String()})
+	got := r.patchMe(t, "", map[string]string{"active_org_id": uuid.New().String()})
 	if got.StatusCode != http.StatusUnauthorized {
 		t.Errorf("no sid status=%d, want 401", got.StatusCode)
 	}
@@ -213,13 +245,13 @@ func TestActiveOrg_Update_SentinelClaim_Returns401(t *testing.T) {
 	orgID, _ := r.seedOrg(userID, "alice-org")
 
 	// Call the handler directly with the sentinel claim, bypassing withSession.
-	body := bytes.NewBufferString(`{"org_id":"` + orgID.String() + `"}`)
-	req := httptest.NewRequest("POST", "/api/me/active-org", body)
+	body := bytes.NewBufferString(`{"active_org_id":"` + orgID.String() + `"}`)
+	req := httptest.NewRequest("PATCH", "/api/me", body)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", r.srv.deployCfg.publicURL)
 	ctx := httpx.WithClaims(req.Context(), &verify.Claims{Subject: runmode.LocalDefaultUserID})
 	rec := httptest.NewRecorder()
-	r.srv.handleActiveOrgUpdate(rec, req.WithContext(ctx))
+	r.srv.handleMeUpdate(rec, req.WithContext(ctx))
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("sentinel claim status=%d, want 401", rec.Code)
@@ -227,7 +259,7 @@ func TestActiveOrg_Update_SentinelClaim_Returns401(t *testing.T) {
 }
 
 // TestActiveOrg_Update_CrossOriginRejected pins the CSRF guard: a cross-origin
-// POST carrying a valid sid cookie is refused with 403.
+// PATCH carrying a valid sid cookie is refused with 403.
 func TestActiveOrg_Update_CrossOriginRejected(t *testing.T) {
 	r := newAuthRig(t)
 	userID := r.seedUser()
@@ -236,8 +268,8 @@ func TestActiveOrg_Update_CrossOriginRejected(t *testing.T) {
 	resp, _ := r.driveCallback(userID)
 	sid := r.sidFromResp(resp)
 
-	body := bytes.NewBufferString(`{"org_id":"` + orgID.String() + `"}`)
-	req := httptest.NewRequest("POST", "/api/me/active-org", body)
+	body := bytes.NewBufferString(`{"active_org_id":"` + orgID.String() + `"}`)
+	req := httptest.NewRequest("PATCH", "/api/me", body)
 	req.AddCookie(&http.Cookie{Name: r.srv.sidCookieName(), Value: sid})
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", "https://evil.example")

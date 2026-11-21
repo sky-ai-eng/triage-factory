@@ -657,7 +657,7 @@ describe('setup — the Linear tracker', () => {
               ...jsonBody({ connected: linear, workspace_url_key: linear ? 'acme' : '' }),
             }
           }
-          if (url === '/api/integrations/status') {
+          if (url === `/api/orgs/${ORG_ID}/integrations/status`) {
             return {
               ok: true,
               status: 200,
@@ -695,7 +695,7 @@ describe('setup — the Linear tracker', () => {
             }),
           }
         }
-        if (url === '/api/integrations/status') {
+        if (url === `/api/orgs/${ORG_ID}/integrations/status`) {
           return { ok: true, status: 200, ...jsonBody({ jira: false }) }
         }
         return { ok: true, status: 200, ...jsonBody({ version: 1, github_base_url: '' }) }
@@ -717,7 +717,7 @@ describe('setup — the Linear tracker', () => {
         if (url.endsWith('/linear/access')) {
           return { ok: false, status: 503, ...jsonBody({}) }
         }
-        if (url === '/api/integrations/status') {
+        if (url === `/api/orgs/${ORG_ID}/integrations/status`) {
           return { ok: true, status: 200, ...jsonBody({ jira: false }) }
         }
         return { ok: true, status: 200, ...jsonBody({ version: 1, github_base_url: '' }) }
@@ -764,7 +764,7 @@ describe('setup — GitHub access method by mode', () => {
         if (url.endsWith('/linear/access')) {
           return { ok: true, status: 200, ...jsonBody({ connected: false }) }
         }
-        if (url === '/api/integrations/status') {
+        if (url === `/api/orgs/${ORG_ID}/integrations/status`) {
           return { ok: true, status: 200, ...jsonBody({ github_ready: true }) }
         }
         return {

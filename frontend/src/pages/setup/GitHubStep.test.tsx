@@ -95,7 +95,7 @@ describe('the connect step in the wizard', () => {
       if (url === `/api/orgs/${ORG}/settings`) {
         return { ok: true, status: 200, ...jsonBody({ version: 1, github_base_url: '' }) }
       }
-      if (url === '/api/integrations/status') {
+      if (url === `/api/orgs/${ORG}/integrations/status`) {
         return { ok: true, status: 200, ...jsonBody({ github_ready: false }) }
       }
       if (url === `/api/orgs/${ORG}/linear/access`) {

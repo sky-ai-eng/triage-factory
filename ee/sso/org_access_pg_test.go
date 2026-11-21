@@ -217,7 +217,7 @@ func TestOrgAccess_GitHubMemberIsBarred(t *testing.T) {
 	}
 
 	wantSSORequired(t, "switch to the org",
-		doReq(r, http.MethodPost, "/api/me/active-org", sid, map[string]string{"org_id": orgX.String()}))
+		doReq(r, http.MethodPatch, "/api/me", sid, map[string]string{"active_org_id": orgX.String()}))
 	wantSSORequired(t, "mint a token for the org",
 		doReq(r, http.MethodPost, "/api/me/tokens", sid, map[string]string{"name": "ci", "org_id": orgX.String()}))
 }
@@ -244,7 +244,7 @@ func TestOrgAccess_SSOSignInIsAdmitted(t *testing.T) {
 		t.Error("/api/me flags the org as requiring SSO for a session signed in through it")
 	}
 	wantStatus(t, "switch to the org",
-		doReq(r, http.MethodPost, "/api/me/active-org", sid, map[string]string{"org_id": orgX.String()}), http.StatusOK)
+		doReq(r, http.MethodPatch, "/api/me", sid, map[string]string{"active_org_id": orgX.String()}), http.StatusOK)
 	mintToken(r, sid, orgX)
 }
 

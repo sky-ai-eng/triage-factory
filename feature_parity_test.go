@@ -44,7 +44,7 @@ func TestAllDomainEventTypesRegistered_CompositionRoot(t *testing.T) {
 // (a membership panic would outlaw that synthetic-feature test pattern).
 //
 // Why membership matters: gating works either way (Has is a plain map
-// lookup), but /api/entitlements answers by iterating AllFeatures() — a
+// lookup), but the entitlements probe answers by iterating AllFeatures() — a
 // feature missing from it never reaches the frontend probe, so every
 // render-gated surface stays dark even for licensed orgs.
 func TestRegisteredFeaturesAreDeclared(t *testing.T) {
@@ -56,7 +56,7 @@ func TestRegisteredFeaturesAreDeclared(t *testing.T) {
 	check := func(source string, features []entitlements.Feature) {
 		for _, f := range features {
 			if !declared[f] {
-				t.Errorf("%s references feature %q, which is not in entitlements.AllFeatures() — add it to allFeatures (and mirror it in useEntitlements.ts) or the /api/entitlements probe will never surface it", source, f)
+				t.Errorf("%s references feature %q, which is not in entitlements.AllFeatures() — add it to allFeatures (and mirror it in useEntitlements.ts) or the entitlements probe will never surface it", source, f)
 			}
 		}
 	}

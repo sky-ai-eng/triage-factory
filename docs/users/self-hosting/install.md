@@ -152,7 +152,7 @@ Enterprise license: Acme Corp (features: [sso slack governance fleet]) valid unt
 ```
 
 A missing, invalid or expired token leaves every Enterprise feature off.
-`GET /api/entitlements` shows which features are on.
+`GET /api/orgs/{org_id}/entitlements` shows which features are on for an organization.
 
 ## Changing a database password
 

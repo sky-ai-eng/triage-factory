@@ -275,7 +275,7 @@ func TestLinearCredentialPut_Binds(t *testing.T) {
 	if st := readOrgSources(t, r.s)[eventsource.KindLinear]; st != string(eventsource.StateAvailable) {
 		t.Errorf("linear source = %q after a bind, want available", st)
 	}
-	status := doJSON(t, r.s, http.MethodGet, "/api/integrations/status", nil)
+	status := doJSON(t, r.s, http.MethodGet, "/api/orgs/"+runmode.LocalDefaultOrgID+"/integrations/status", nil)
 	var integ map[string]any
 	if err := json.Unmarshal(status.Body.Bytes(), &integ); err != nil {
 		t.Fatalf("decode integrations status: %v", err)

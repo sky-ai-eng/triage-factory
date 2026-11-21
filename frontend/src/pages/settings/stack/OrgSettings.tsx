@@ -1349,7 +1349,7 @@ export default function OrgSettings({
         <ModelAvailabilityPanel orgId={orgId} />
       </SettingsSection>
 
-      {/* Add-team is multi-only (POST /api/teams 404s in local). */}
+      {/* Add-team is multi-only (POST /api/orgs/{org_id}/teams 404s in local). */}
       {!isLocal && (
         <SettingsSection title="Teams" summary="Add or review teams">
           <TeamManagementSection />

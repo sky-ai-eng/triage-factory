@@ -85,7 +85,7 @@ beforeEach(() => {
   apiMocks.apiFetch.mockReset()
   apiMocks.apiList.mockReset()
   apiMocks.apiJSON.mockImplementation(async (path: string, opts?: { method?: string }) => {
-    if (path === '/api/invites' && opts?.method === 'POST') {
+    if (path === '/api/orgs/org-1/invites' && opts?.method === 'POST') {
       return {
         id: 'inv-new',
         accept_url: 'https://tf.example.com/invite/accept?token=fresh',
@@ -96,7 +96,7 @@ beforeEach(() => {
   })
   apiMocks.apiList.mockImplementation(async (path: string) => {
     if (path === '/api/orgs/org-1/members/list') return page([OWNER_ROW])
-    if (path === '/api/invites/list') return page(invitesState)
+    if (path === '/api/orgs/org-1/invites/list') return page(invitesState)
     throw new Error('unexpected apiList path: ' + path)
   })
   apiMocks.apiFetch.mockResolvedValue(undefined as unknown as Response)
@@ -121,13 +121,13 @@ describe('OrgPage — pending invites', () => {
     expect(await screen.findByText('bob@example.com')).toBeInTheDocument()
   })
 
-  it('Revoke hits POST /api/invites/{id}/revoke', async () => {
+  it('Revoke hits POST /api/orgs/{org_id}/invites/{id}/revoke', async () => {
     renderPage()
     await screen.findByText('bob@example.com')
 
     fireEvent.click(screen.getByRole('button', { name: /revoke/i }))
     await waitFor(() =>
-      expect(apiMocks.apiFetch).toHaveBeenCalledWith('/api/invites/inv-1/revoke', {
+      expect(apiMocks.apiFetch).toHaveBeenCalledWith('/api/orgs/org-1/invites/inv-1/revoke', {
         method: 'POST',
       }),
     )
@@ -140,12 +140,12 @@ describe('OrgPage — pending invites', () => {
     fireEvent.click(screen.getByRole('button', { name: /resend/i }))
 
     await waitFor(() =>
-      expect(apiMocks.apiFetch).toHaveBeenCalledWith('/api/invites/inv-1/revoke', {
+      expect(apiMocks.apiFetch).toHaveBeenCalledWith('/api/orgs/org-1/invites/inv-1/revoke', {
         method: 'POST',
       }),
     )
     expect(apiMocks.apiJSON).toHaveBeenCalledWith(
-      '/api/invites',
+      '/api/orgs/org-1/invites',
       expect.objectContaining({ method: 'POST' }),
     )
   })
@@ -155,13 +155,13 @@ describe('OrgPage — pending invites', () => {
     // the follow-up create throws. The list must still reconcile (load() runs in
     // `finally`) so the stale ghost row doesn't linger as falsely "pending".
     apiMocks.apiFetch.mockImplementation(async (path: string) => {
-      if (path === '/api/invites/inv-1/revoke') {
+      if (path === '/api/orgs/org-1/invites/inv-1/revoke') {
         invitesState = [] // revoked server-side
       }
       return undefined as unknown as Response
     })
     apiMocks.apiJSON.mockImplementation(async (path: string, opts?: { method?: string }) => {
-      if (path === '/api/invites' && opts?.method === 'POST') {
+      if (path === '/api/orgs/org-1/invites' && opts?.method === 'POST') {
         throw new HttpError(500, 'boom') // re-create fails
       }
       throw new Error('unexpected apiJSON path: ' + path)
@@ -173,7 +173,9 @@ describe('OrgPage — pending invites', () => {
     fireEvent.click(screen.getByRole('button', { name: /resend/i }))
 
     await waitFor(() => expect(screen.queryByText('bob@example.com')).not.toBeInTheDocument())
-    expect(apiMocks.apiFetch).toHaveBeenCalledWith('/api/invites/inv-1/revoke', { method: 'POST' })
+    expect(apiMocks.apiFetch).toHaveBeenCalledWith('/api/orgs/org-1/invites/inv-1/revoke', {
+      method: 'POST',
+    })
   })
 
   it('opens the invite modal from the + Invite affordance', async () => {

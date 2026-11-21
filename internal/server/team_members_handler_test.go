@@ -12,6 +12,7 @@ import (
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // teamMembersRig is a Postgres-backed team roster handler, with RLS and the
@@ -298,6 +299,31 @@ func TestTeamMemberRoleChange_InvalidRoleIs400(t *testing.T) {
 	}
 }
 
+// TestTeamMemberRoleChange_NullOrAbsentRoleIs400: a body that names no role
+// writes nothing, and a null role asks to clear what a membership cannot be
+// without; each is refused on the role field.
+func TestTeamMemberRoleChange_NullOrAbsentRoleIs400(t *testing.T) {
+	r := newTeamMembersRig(t)
+
+	for _, tc := range []struct {
+		what   string
+		body   map[string]any
+		reason string
+	}{
+		{"absent", map[string]any{}, httpx.ReasonMissingField},
+		{"null", map[string]any{"role": nil}, httpx.ReasonInvalidField},
+	} {
+		t.Run(tc.what, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			r.tmh.handleTeamMemberRoleChange(rec, r.req(http.MethodPatch, r.admin, r.memb, tc.body))
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+			}
+			httpxtest.AssertFirstError(t, rec, tc.reason, "role")
+		})
+	}
+}
+
 // TestTeamMemberRoleChange_LastAdminIs409: demoting the team's sole admin trips
 // the guard_team_admins trigger; the handler surfaces a friendly 409, not a
 // 500, and the admin keeps their role.
@@ -376,7 +402,7 @@ func TestTeamMemberRemove_NonManagerCantRemoveOther(t *testing.T) {
 }
 
 // TestTeamMemberAdd_AdminAddsOrgMember: a team admin adds an existing org member
-// (not yet on the team) with a role — 201, and the membership round-trips.
+// (not yet on the team) with a role — 204, and the membership round-trips.
 func TestTeamMemberAdd_AdminAddsOrgMember(t *testing.T) {
 	r := newTeamMembersRig(t)
 
@@ -389,8 +415,11 @@ func TestTeamMemberAdd_AdminAddsOrgMember(t *testing.T) {
 	r.tmh.handleTeamMemberAdd(rec, r.req(http.MethodPost, r.admin, "", map[string]string{
 		"user_id": newcomer, "role": "member",
 	}))
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("body = %q, want empty", rec.Body.String())
 	}
 	if got := r.teamRoleOf(t, newcomer); got != "member" {
 		t.Errorf("newcomer role = %q after add, want member", got)

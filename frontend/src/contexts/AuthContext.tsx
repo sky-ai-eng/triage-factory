@@ -50,7 +50,7 @@ interface AuthContextValue {
   orgs: AuthOrg[]
   /** Session's active org id as reported by /api/me. Null when absent
    *  from the response. OrgContext prefers this over localStorage so
-   *  a cross-tab switch (POST /api/me/active-org) wins over stale
+   *  a cross-tab switch (PATCH /api/me) wins over stale
    *  client state. */
   serverActiveOrgId: string | null
   error: string | null

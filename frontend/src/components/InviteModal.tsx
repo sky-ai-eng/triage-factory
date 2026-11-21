@@ -4,9 +4,12 @@ import { httpErrorMessage } from '../lib/apiClient'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { useOrgRole } from '../hooks/useOrgRole'
 import { useTeams } from '../hooks/useTeams'
+import { useSessionOrgId } from '../hooks/useApiOrgId'
 import type { CreateInviteResponse } from '../types'
 
 interface Props {
+  // The org the invite is for, which `create` posts to.
+  orgId: string
   // create comes from the parent's useInvites so the pending-rows list and the
   // modal share one data lifecycle (a successful create reloads the list).
   create: (email: string, role: string, targetTeamId: string) => Promise<CreateInviteResponse>
@@ -29,16 +32,20 @@ function assignableRoles(callerRole: string | null): string[] {
 }
 
 // InviteModal is the org People roster's "+ Invite" affordance: email + role
-// (capped to the caller's role) + an optional team, POSTed to /api/invites.
+// (capped to the caller's role) + an optional team, POSTed to the org's invites.
 // On success it reveals the one-time accept link with a Copy button — no email
 // is sent in v1, so copy/paste IS the delivery.
-export default function InviteModal({ create, onClose }: Props) {
+export default function InviteModal({ orgId, create, onClose }: Props) {
   const { role: callerRole } = useOrgRole()
-  // The team picker offers the admin's own teams (GET /api/teams is
+  // The team picker offers the admin's own teams (POST /api/teams/list is
   // member-scoped); "No team" is the default. An admin inviting to a team they
   // don't belong to isn't reachable here in v1 — the common case is the
-  // founder's Default team, which they're in.
-  const { teams } = useTeams()
+  // founder's Default team, which they're in. That list is the session org's,
+  // so it is offered only when the invite is for that org: a team from another
+  // org would fail the create.
+  const { teams: sessionTeams } = useTeams()
+  const sessionOrgId = useSessionOrgId()
+  const teams = sessionOrgId === orgId ? sessionTeams : []
   const roles = assignableRoles(callerRole)
 
   const [email, setEmail] = useState('')

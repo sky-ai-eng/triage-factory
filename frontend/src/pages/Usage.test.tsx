@@ -57,7 +57,7 @@ vi.mock('../hooks/useApiOrgId', () => ({ useApiOrgId: () => orgIdMock.id }))
 // (TFAC-484/471). Mock it like the other hooks so each test toggles governance
 // on/off; default off so the spend-only tests never render or fetch those
 // surfaces. loaded is always true here — the real hook's pre-resolve flash isn't
-// under test, and a stubbed fetch never serves /api/entitlements.
+// under test, and a stubbed fetch never serves the entitlements read.
 const entMock = vi.hoisted(() => ({ governance: false }))
 vi.mock('../hooks/useEntitlements', () => ({
   FeatureGovernance: 'governance',

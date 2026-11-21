@@ -224,8 +224,8 @@ function subscribe(handler: Handler) {
 /**
  * Force the singleton websocket to close and re-open so the next
  * handshake captures fresh server-side identity (cookies, session,
- * active_org_id). Called by the org-switcher after `POST
- * /api/me/active-org` lands a 200, so the hub re-registers the
+ * active_org_id). Called by the org-switcher after `PATCH /api/me`
+ * lands a 200, so the hub re-registers the
  * connection with the new active org and the per-(user, org) Broadcast
  * filter routes the user to events from the just-selected tenant
  * rather than the previous one.

@@ -51,7 +51,7 @@ func TestIntegrationsStatus_TenantlessNotConfigured(t *testing.T) {
 		t.Fatalf("tenant-less server has %d orgs rows; want 0", n)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/api/integrations/status", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/orgs/"+runmode.LocalDefaultOrgID+"/integrations/status", nil)
 	rec := httptest.NewRecorder()
 	s.mux.ServeHTTP(rec, req)
 
@@ -110,7 +110,7 @@ func TestLocalOrgCreate_ProvisionsAndSeeds(t *testing.T) {
 	}
 
 	// Status now reports configured.
-	statusRec := doJSON(t, s, http.MethodGet, "/api/integrations/status", nil)
+	statusRec := doJSON(t, s, http.MethodGet, "/api/orgs/"+runmode.LocalDefaultOrgID+"/integrations/status", nil)
 	var status map[string]any
 	if err := json.Unmarshal(statusRec.Body.Bytes(), &status); err != nil {
 		t.Fatalf("decode status: %v", err)

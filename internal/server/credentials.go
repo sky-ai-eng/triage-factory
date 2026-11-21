@@ -12,6 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/promptseed"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // persistOrgGitHubIdentity records the org credential's OWN GitHub login,
@@ -91,24 +92,55 @@ func setupModelPicks(ctx context.Context, tx db.TxStores, orgID string) (orgPick
 	return orgPick, strings.TrimSpace(teamSet.DefaultModel) != "", nil
 }
 
+// integrationsStatusResponse is the body of GET
+// /api/orgs/{org_id}/integrations/status.
+// The trailing fields are omitempty because each is reported only when the
+// org holds the value it names.
+type integrationsStatusResponse struct {
+	Configured    bool   `json:"configured" doc:"Whether the organization exists; false in local mode until it is created, and always true in multi mode."`
+	GitHub        bool   `json:"github" doc:"Whether the organization holds a GitHub personal access token."`
+	GitHubReady   bool   `json:"github_ready" doc:"Whether the organization has GitHub access it can use, through a personal access token or a GitHub App."`
+	Jira          bool   `json:"jira" doc:"Whether the organization holds a usable Jira credential."`
+	Linear        bool   `json:"linear" doc:"Whether the organization holds a usable Linear credential."`
+	GitHubRepos   int    `json:"github_repos" doc:"How many repositories on the organization's GitHub host at least one of its teams tracks."`
+	SetupComplete bool   `json:"setup_complete" doc:"Whether setup is finished: GitHub access is configured, a team tracks at least one repository, and in multi mode the background-jobs model and the default team's model are chosen."`
+	SetupStep     string `json:"setup_step" doc:"Where an unfinished setup resumes: org for the organization's GitHub access or background-jobs model, team for the default team's repositories or model, or done."`
+	GitHubURL     string `json:"github_url,omitempty" doc:"The base URL of the organization's GitHub, absent when none is set."`
+	JiraURL       string `json:"jira_url,omitempty" doc:"The base URL of the organization's Jira site, absent when none is set."`
+	// JiraDeployment is the stored auth-method marker's answer, so a client
+	// seeds its deployment picker without guessing from the host's shape.
+	JiraDeployment        string `json:"jira_deployment,omitempty" doc:"Which kind of Jira the organization's credential is for, cloud or data_center, present only when jira is true."`
+	LinearWorkspaceURLKey string `json:"linear_workspace_url_key,omitempty" doc:"The URL key of the Linear workspace the organization's credential belongs to, absent when none is recorded."`
+}
+
+var opIntegrationsStatus = httpx.NewJSONOp[httpx.NoBody, integrationsStatusResponse](httpx.OpSpec{
+	Pattern:     "GET /api/orgs/{org_id}/integrations/status",
+	ID:          "get_integrations_status",
+	Summary:     "Get an organization's setup status",
+	Description: "Reports which of GitHub, Jira, and Linear the organization has credentials for, how many repositories its teams track, and whether setup is complete and where it resumes. In local mode it answers configured false until the local organization is created. It reads stored state and calls none of those services.",
+	PathParams:  map[string]string{"org_id": "The organization's id."},
+	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
+})
+
 func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+	// Local mode's sentinel org passes the member gate before its row exists,
+	// which is what lets this answer configured=false on a first run.
+	orgID, userID, ok := s.az.RequireOrgMember(w, r)
 	if !ok {
 		return
 	}
-	userID := ClaimsFrom(r.Context()).Subject
 
 	// First-run detection keys on tenant existence, not GitHub creds.
-	// "configured" now means "a provisioned tenant exists" — the local
-	// shim hands every request the LocalDefault* org id regardless of
-	// whether that org row actually exists, so probe the row directly.
+	// "configured" now means "a provisioned tenant exists" — the member
+	// gate admits local mode's LocalDefault* org id whether or not that org
+	// row exists, so probe the row directly.
 	// No tenant ⇒ the user hasn't run "Start your factory" yet and
 	// the AuthGate routes them to the first-run screen; GitHub-creds-
 	// present is now a later config step, surfaced via the github/jira
 	// fields below rather than gating first-run. GetOrgSystem reads org
-	// metadata without claims (a cheap existence probe); in multi mode an
-	// active org always exists, so configured is always true there and
-	// the field is unused (multi gates via AuthContext).
+	// metadata without claims (a cheap existence probe); in multi mode the
+	// member gate already proved the org exists, so configured is always
+	// true there and the field is unused (multi gates via AuthContext).
 	// A probe fault is a 500, never configured=false: the gate keeps its
 	// last known status on a non-2xx, whereas a 200 that says "no tenant"
 	// would bounce a founder back to the first-run screen over a hiccup.
@@ -124,16 +156,7 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 	// only needs configured=false. Short-circuit before touching the
 	// keychain + repo query — the first-run screen may poll this on a loop.
 	if !tenantExists {
-		writeJSON(w, http.StatusOK, map[string]any{
-			"configured":     false,
-			"github":         false,
-			"github_ready":   false,
-			"jira":           false,
-			"linear":         false,
-			"github_repos":   0,
-			"setup_complete": false,
-			"setup_step":     "org",
-		})
+		opIntegrationsStatus.Write(w, integrationsStatusResponse{SetupStep: "org"})
 		return
 	}
 
@@ -227,33 +250,26 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 	// re-guessing from the host shape (which is wrong for Cloud custom domains).
 	jiraCfg, jiraConnected := integrations.JiraSystemConfig(creds, orgSet.JiraBaseURL)
 
-	result := map[string]any{
-		"configured":     tenantExists,
-		"github":         creds.GitHubPAT != "",
-		"github_ready":   githubReady,
-		"jira":           jiraConnected,
-		"linear":         integrations.LinearSystemConfigured(creds),
-		"github_repos":   repoCount,
-		"setup_complete": setupComplete,
-		"setup_step":     setupStep,
-	}
-
-	if orgSet.GitHubBaseURL != "" {
-		result["github_url"] = orgSet.GitHubBaseURL
-	}
-	if orgSet.JiraBaseURL != "" {
-		result["jira_url"] = orgSet.JiraBaseURL
+	result := integrationsStatusResponse{
+		Configured:    tenantExists,
+		GitHub:        creds.GitHubPAT != "",
+		GitHubReady:   githubReady,
+		Jira:          jiraConnected,
+		Linear:        integrations.LinearSystemConfigured(creds),
+		GitHubRepos:   repoCount,
+		SetupComplete: setupComplete,
+		SetupStep:     setupStep,
+		GitHubURL:     orgSet.GitHubBaseURL,
+		JiraURL:       orgSet.JiraBaseURL,
+		// Linear has no host to report; the workspace its credential belongs
+		// to is what the client shows instead, learned by the credential bind.
+		LinearWorkspaceURLKey: orgSet.LinearWorkspaceURLKey,
 	}
 	if jiraConnected {
-		result["jira_deployment"] = string(jiraCfg.Deployment)
-	}
-	// Linear has no host to report; the workspace its credential belongs to is
-	// what the client shows instead, learned by the credential bind.
-	if orgSet.LinearWorkspaceURLKey != "" {
-		result["linear_workspace_url_key"] = orgSet.LinearWorkspaceURLKey
+		result.JiraDeployment = string(jiraCfg.Deployment)
 	}
 
-	writeJSON(w, http.StatusOK, result)
+	opIntegrationsStatus.Write(w, result)
 }
 
 // ensureLocalOrgProvisioned idempotently provisions the local-mode tenant —

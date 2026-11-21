@@ -58,7 +58,10 @@ beforeEach(() => {
 })
 
 function activeOrgCalls() {
-  return fetchMock.mock.calls.filter(([url]) => String(url) === '/api/me/active-org')
+  return fetchMock.mock.calls.filter(
+    ([url, init]) =>
+      String(url) === '/api/me' && (init as RequestInit | undefined)?.method === 'PATCH',
+  )
 }
 
 function Where() {
@@ -115,7 +118,10 @@ describe('SSO-required interstitial', () => {
 
     await waitFor(() => expect(activeOrgCalls()).toHaveLength(1))
     expect(activeOrgCalls()[0][1]).toEqual(
-      expect.objectContaining({ method: 'POST', body: JSON.stringify({ org_id: 'org-y' }) }),
+      expect.objectContaining({
+        method: 'PATCH',
+        body: JSON.stringify({ active_org_id: 'org-y' }),
+      }),
     )
     expect(await screen.findByText('at /orgs/org-y/board')).toBeInTheDocument()
   })
@@ -164,9 +170,9 @@ describe('SSO-required interstitial', () => {
 
   it('re-reads /api/me before landing on an org that started requiring SSO since the last read', async () => {
     authMock.orgs = [barred, open]
-    fetchMock.mockImplementation((url: unknown) =>
+    fetchMock.mockImplementation((url: unknown, init?: RequestInit) =>
       Promise.resolve(
-        String(url) === '/api/me/active-org'
+        String(url) === '/api/me' && init?.method === 'PATCH'
           ? {
               ok: false,
               status: 403,
@@ -212,7 +218,7 @@ describe('OrgPicker with an SSO-required org', () => {
     )
   }
 
-  it("offers the org's sign-in and never calls /api/me/active-org for it", () => {
+  it("offers the org's sign-in and never moves the session to it", () => {
     authMock.orgs = [barred, open]
     renderPicker()
 
