@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -307,6 +308,21 @@ func TestUsageEndpoints_Local(t *testing.T) {
 		rec := doJSON(t, s, "GET", "/api/me/usage?since=not-a-date", nil)
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("/me?since=not-a-date = %d, want 400; body=%s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("malformed_query_400", func(t *testing.T) {
+		// A pair that does not parse is refused rather than dropped: a dropped
+		// until would leave the window open-ended and widen the read.
+		for _, path := range []string{
+			"/api/me/usage?since=2000-01-01&until=2026-01-01;x",
+			"/api/teams/" + runmode.LocalDefaultTeamID + "/usage?since=2000-01-01&until=%zz",
+			"/api/orgs/" + runmode.LocalDefaultOrgID + "/usage?since=2000-01-01&until=2026-01-01;x",
+		} {
+			rec := doJSON(t, s, "GET", path, nil)
+			if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), `"reason":"INVALID_PARAM","message":"until`) {
+				t.Errorf("%s = %d %s, want 400 INVALID_PARAM on until", path, rec.Code, rec.Body.String())
+			}
 		}
 	})
 

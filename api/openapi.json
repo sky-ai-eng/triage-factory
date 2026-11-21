@@ -175,7 +175,7 @@
             "type": "string"
           },
           "clone_status": {
-            "description": "The state of the repository's clone: ok, failed, or pending, absent before the first clone.",
+            "description": "The state of the repository's clone: pending until a clone attempt finishes, then ok or failed.",
             "type": "string"
           },
           "default_branch": {
@@ -1159,9 +1159,9 @@
     },
     "securitySchemes": {
       "session": {
-        "description": "The session cookie a browser sign-in sets.",
+        "description": "The session cookie a browser sign-in sets. A deployment served over plain HTTP names it sid.",
         "in": "cookie",
-        "name": "sid",
+        "name": "__Host-sid",
         "type": "apiKey"
       },
       "token": {
@@ -1243,7 +1243,7 @@
     },
     "/api/health": {
       "get": {
-        "description": "Answers 200 with status ok once the server accepts requests. It needs no credential and checks no database or integration, so it reports only that the process is serving.",
+        "description": "Reports status ok once the server accepts requests. It needs no credential and checks no database or integration, so it says only that the process is serving.",
         "operationId": "get_health",
         "responses": {
           "200": {

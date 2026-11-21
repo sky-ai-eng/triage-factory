@@ -43,6 +43,10 @@ on:
       - 'go.mod'
       - 'go.sum'
       - 'e2e/**'
+      # The suite's dependencies are locked in the root workspace.
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
       - '.github/workflows/sso-e2e.yml'
   push:
     branches: [main]

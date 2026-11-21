@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -88,6 +89,9 @@ func TestNewOp_RefusesMalformedSpecs(t *testing.T) {
 		{"bytes status not 2xx", func() {
 			NewBytesOp[NoBody](with("GET /api/files", func(s *OpSpec) { s.Status = http.StatusFound }), "image/png")
 		}, "status 302 is not a 2xx"},
+		{"bytes status 204", func() {
+			NewBytesOp[NoBody](with("GET /api/files", func(s *OpSpec) { s.Status = http.StatusNoContent }), "image/png")
+		}, "status 204 is not a 2xx that carries a body"},
 		{"bytes with no content type", func() { NewBytesOp[NoBody](with("GET /api/files", func(*OpSpec) {})) }, "at least one content type"},
 		{"websocket with a status", func() {
 			NewWebSocketOp(with("GET /api/stream", func(s *OpSpec) { s.Status = http.StatusSwitchingProtocols }))
@@ -133,6 +137,14 @@ func TestOp_MethodsRefuseWhatTheSpecDoesNotDeclare(t *testing.T) {
 		OtherStatuses: []int{http.StatusCreated},
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/things?q=1&other=2", nil)
+	query := func() QueryValues {
+		q, ok := noBody.Query(httptest.NewRecorder(), req)
+		if !ok {
+			t.Fatal("Query refused a well-formed query string")
+		}
+		return q
+	}
+	limited := NewJSONOp[opTestBody, opTestBody](OpSpec{Pattern: "POST /api/things", ID: "do_thing", Hints: writeHints, BodyLimit: 1 << 20})
 	cases := []struct {
 		name string
 		call func()
@@ -140,9 +152,10 @@ func TestOp_MethodsRefuseWhatTheSpecDoesNotDeclare(t *testing.T) {
 	}{
 		{"Decode with NoBody", func() { noBody.Decode(httptest.NewRecorder(), req) }, "calls Decode, but its Req is NoBody"},
 		{"DecodeBytes with NoBody", func() { noBody.DecodeBytes(httptest.NewRecorder(), nil) }, "calls DecodeBytes, but its Req is NoBody"},
-		{"Query.Get of an undeclared name", func() { noBody.Query(req).Get("other") }, `reads query parameter "other"`},
-		{"Query.Has of an undeclared name", func() { noBody.Query(req).Has("other") }, `reads query parameter "other"`},
-		{"Query.All of an undeclared name", func() { noBody.Query(req).All("other") }, `reads query parameter "other"`},
+		{"DecodeBytes with a BodyLimit", func() { limited.DecodeBytes(httptest.NewRecorder(), []byte(`{}`)) }, "its BodyLimit applies only to Decode"},
+		{"Query.Get of an undeclared name", func() { query().Get("other") }, `reads query parameter "other"`},
+		{"Query.Has of an undeclared name", func() { query().Has("other") }, `reads query parameter "other"`},
+		{"Query.All of an undeclared name", func() { query().All("other") }, `reads query parameter "other"`},
 		{"WriteStatus of an undeclared status", func() { noBody.WriteStatus(httptest.NewRecorder(), http.StatusAccepted, opTestBody{}) }, "writes status 202"},
 	}
 	for _, tc := range cases {
@@ -157,13 +170,53 @@ func TestOp_MethodsRefuseWhatTheSpecDoesNotDeclare(t *testing.T) {
 		})
 	}
 
-	if got := noBody.Query(req).Get("q"); got != "1" {
+	if got := query().Get("q"); got != "1" {
 		t.Errorf(`Query.Get("q") = %q, want "1"`, got)
 	}
 	rec := httptest.NewRecorder()
 	noBody.WriteStatus(rec, http.StatusCreated, opTestBody{Name: "x"})
 	if rec.Code != http.StatusCreated {
 		t.Errorf("WriteStatus(201) wrote %d", rec.Code)
+	}
+}
+
+// TestOp_QueryRefusesAPairItCannotRead pins that a malformed pair is a 400
+// naming the parameter, where url.Values would drop it and widen the read.
+func TestOp_QueryRefusesAPairItCannotRead(t *testing.T) {
+	op := NewJSONOp[NoBody, opTestBody](OpSpec{
+		Pattern: "GET /api/things", ID: "get_things", Hints: Hints{ReadOnly: HintYes, OpenWorld: HintNo},
+		Query: WindowQuery(),
+	})
+	cases := []struct {
+		query string
+		want  []ErrorItem
+	}{
+		{"since=2026-01-01&until=2026-02-01;x", []ErrorItem{{Reason: ReasonInvalidParam, Field: "until",
+			Message: "until contains a semicolon; parameters are joined with &, and a semicolon in a value is written %3B"}}},
+		{"since=%zz&until=2026-02-01", []ErrorItem{{Reason: ReasonInvalidParam, Field: "since", Message: "since is not percent-encoded correctly"}}},
+		{"%zz=1&since=%zz", []ErrorItem{
+			{Reason: ReasonInvalidParam, Message: `the query string's pair "%zz=1" has a name that is not percent-encoded, or contains a semicolon; parameters are joined with &`},
+			{Reason: ReasonInvalidParam, Field: "since", Message: "since is not percent-encoded correctly"},
+		}},
+	}
+	for _, tc := range cases {
+		rec := httptest.NewRecorder()
+		if _, ok := op.Query(rec, httptest.NewRequest(http.MethodGet, "/api/things?"+tc.query, nil)); ok {
+			t.Errorf("%s: Query accepted it", tc.query)
+			continue
+		}
+		var body errorEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("%s: decode the error body: %v", tc.query, err)
+		}
+		if rec.Code != http.StatusBadRequest || !slices.Equal(body.Errors, tc.want) {
+			t.Errorf("%s: %d %+v, want 400 %+v", tc.query, rec.Code, body.Errors, tc.want)
+		}
+	}
+
+	q, ok := op.Query(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/things?since=2026-01-01&&until=a+b%2Bc", nil))
+	if !ok || q.Get("since") != "2026-01-01" || q.Get("until") != "a b+c" {
+		t.Errorf("Query of a well-formed string = (%+v, %v)", q, ok)
 	}
 }
 
@@ -204,6 +257,10 @@ func TestPatch_Read(t *testing.T) {
 			wantFault: &ErrorItem{Reason: ReasonInvalidField, Message: "n must be a whole number, or null", Field: "n"}},
 		{body: `{"p": {"a": 1, "b": 2}}`, read: readP, wantValue: pair{}, wantState: patchInvalid,
 			wantFault: &ErrorItem{Reason: ReasonInvalidField, Message: `p has no field "b"`, Field: "p"}},
+		{body: `{"p": {"a": "x"}}`, read: readP, wantValue: pair{}, wantState: patchInvalid,
+			wantFault: &ErrorItem{Reason: ReasonInvalidField, Message: "p.a must be a whole number", Field: "p.a"}},
+		{body: `{"p": "x"}`, read: readP, wantValue: pair{}, wantState: patchInvalid,
+			wantFault: &ErrorItem{Reason: ReasonInvalidField, Message: "p must be an object, or null", Field: "p"}},
 	}
 	for _, tc := range cases {
 		var b body

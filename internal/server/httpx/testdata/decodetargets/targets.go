@@ -44,6 +44,7 @@ type body struct {
 	ByRef  map[textRef]int        `json:"by_ref"`
 	Raw    json.RawMessage        `json:"raw"`
 	Patch  httpx.Patch[time.Time] `json:"patch"`
+	Names  httpx.Patch[[]string]  `json:"names"`
 	Blob   []byte                 `json:"blob"`
 	N      json.Number            `json:"n"`
 	Fine   string                 `json:"fine"`

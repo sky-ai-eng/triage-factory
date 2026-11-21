@@ -45,7 +45,7 @@ var opHealth = httpx.NewJSONOp[httpx.NoBody, healthResponse](httpx.OpSpec{
 	Pattern:     "GET /api/health",
 	ID:          "get_health",
 	Summary:     "Check that the server is up",
-	Description: "Answers 200 with status ok once the server accepts requests. It needs no credential and checks no database or integration, so it reports only that the process is serving.",
+	Description: "Reports status ok once the server accepts requests. It needs no credential and checks no database or integration, so it says only that the process is serving.",
 	Hints:       httpx.Hints{ReadOnly: httpx.HintYes, OpenWorld: httpx.HintNo},
 })
 

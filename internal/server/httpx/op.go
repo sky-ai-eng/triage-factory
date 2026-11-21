@@ -143,10 +143,44 @@ type opCore struct {
 // default where the declaration left it 0.
 func (o *opCore) Spec() OpSpec { return o.spec }
 
-// Query returns the request's query parameters, readable only by the names
-// the spec declares.
-func (o *opCore) Query(r *http.Request) QueryValues {
-	return QueryValues{values: r.URL.Query(), declared: o.query, pattern: o.spec.Pattern}
+// Query reads the request's query parameters, readable only by the names the
+// spec declares. A query string with a pair that does not parse is refused,
+// rather than read without that pair as URL.Query reads it: a filter
+// dropped that way widens the read. On a refusal the error is already
+// written and ok is false.
+func (o *opCore) Query(w http.ResponseWriter, r *http.Request) (q QueryValues, ok bool) {
+	values, v := parseQueryStrict(r.URL.RawQuery)
+	if v.Flush(w, http.StatusBadRequest) {
+		return QueryValues{}, false
+	}
+	return QueryValues{values: values, declared: o.query, pattern: o.spec.Pattern}, true
+}
+
+// parseQueryStrict parses a raw query string as url.ParseQuery does, and
+// records every pair it cannot read instead of skipping it.
+func parseQueryStrict(raw string) (url.Values, *Validation) {
+	values := url.Values{}
+	v := &Validation{}
+	for _, pair := range strings.Split(raw, "&") {
+		if pair == "" {
+			continue
+		}
+		rawName, rawValue, _ := strings.Cut(pair, "=")
+		name, nameErr := url.QueryUnescape(rawName)
+		value, valueErr := url.QueryUnescape(rawValue)
+		switch {
+		case nameErr != nil || strings.Contains(rawName, ";"):
+			v.Add(ErrorItem{Reason: ReasonInvalidParam, Message: fmt.Sprintf(
+				"the query string's pair %q has a name that is not percent-encoded, or contains a semicolon; parameters are joined with &", pair)})
+		case strings.Contains(rawValue, ";"):
+			v.Param(name, fmt.Sprintf("%s contains a semicolon; parameters are joined with &, and a semicolon in a value is written %%3B", name))
+		case valueErr != nil:
+			v.Param(name, fmt.Sprintf("%s is not percent-encoded correctly", name))
+		default:
+			values[name] = append(values[name], value)
+		}
+	}
+	return values, v
 }
 
 // QueryValues is a request's query string, read through the names its op
@@ -192,17 +226,26 @@ type bodyOp[Req any] struct {
 // is already written and ok is false.
 func (o *bodyOp[Req]) Decode(w http.ResponseWriter, r *http.Request) (req Req, ok bool) {
 	o.mustRead("Decode")
+	// The decode is its own statement: in `return req, f(&req)` the spec
+	// leaves unordered whether req is read before f writes it.
 	if o.spec.BodyLimit > 0 {
-		return req, DecodeJSONStrictLimit(w, r, &req, o.spec.BodyLimit)
+		ok = DecodeJSONStrictLimit(w, r, &req, o.spec.BodyLimit)
+	} else {
+		ok = DecodeJSONStrict(w, r, &req)
 	}
-	return req, DecodeJSONStrict(w, r, &req)
+	return req, ok
 }
 
 // DecodeBytes strictly decodes a body already read into a Req, as
-// DecodeJSONStrictBytes does.
+// DecodeJSONStrictBytes does. The body was read under BodyBytes's default
+// cap, so an op that declares a BodyLimit decodes with Decode.
 func (o *bodyOp[Req]) DecodeBytes(w http.ResponseWriter, body []byte) (req Req, ok bool) {
 	o.mustRead("DecodeBytes")
-	return req, DecodeJSONStrictBytes(w, body, &req)
+	if o.spec.BodyLimit > 0 {
+		panic(fmt.Sprintf("httpx: %s calls DecodeBytes, but its BodyLimit applies only to Decode", o.spec.Pattern))
+	}
+	ok = DecodeJSONStrictBytes(w, body, &req)
+	return req, ok
 }
 
 func (o *bodyOp[Req]) mustRead(method string) {
@@ -415,7 +458,7 @@ func newCore(spec OpSpec, kind opKind, req reflect.Type, contentTypes int) opCor
 		}
 		seen := map[int]bool{}
 		for _, status := range append([]int{spec.Status}, spec.OtherStatuses...) {
-			if status < 200 || status > 299 || status == http.StatusNoContent {
+			if !carriesBody(status) {
 				fail("status %d is not a 2xx that carries a body; a 204 is a NoContent op", status)
 			}
 			if seen[status] {
@@ -437,8 +480,8 @@ func newCore(spec OpSpec, kind opKind, req reflect.Type, contentTypes int) opCor
 		if spec.Status == 0 {
 			spec.Status = http.StatusOK
 		}
-		if spec.Status < 200 || spec.Status > 299 {
-			fail("status %d is not a 2xx", spec.Status)
+		if !carriesBody(spec.Status) {
+			fail("status %d is not a 2xx that carries a body", spec.Status)
 		}
 		if contentTypes == 0 {
 			fail("a bytes op declares at least one content type")
@@ -452,6 +495,12 @@ func newCore(spec OpSpec, kind opKind, req reflect.Type, contentTypes int) opCor
 		}
 	}
 	return opCore{spec: spec, query: query}
+}
+
+// carriesBody reports whether status is a 2xx a response body may follow:
+// 204 and 205 carry none.
+func carriesBody(status int) bool {
+	return status >= 200 && status <= 299 && status != http.StatusNoContent && status != http.StatusResetContent
 }
 
 // pathParams returns the names of path's {name} and {name...} segments, in

@@ -24,9 +24,19 @@ type SpecEntry struct {
 func OpenAPI(entries []SpecEntry) (doc []byte, problems []string) {
 	schemas := newSchemaSet()
 	paths := map[string]map[string]any{}
+	// rendered maps each OpenAPI method and path to the pattern that took
+	// it: {name...} renders as {name} and {$} is dropped, so two mux
+	// patterns can meet at one.
+	rendered := map[string]string{}
 	for _, e := range entries {
 		spec, shape := e.Op.Spec(), e.Op.shape()
 		method, path, _ := strings.Cut(spec.Pattern, " ")
+		key := openAPIPath(path)
+		if prev, taken := rendered[method+" "+key]; taken {
+			schemas.problem("%s and %s both render as %s %s in the spec", prev, spec.Pattern, method, key)
+			continue
+		}
+		rendered[method+" "+key] = spec.Pattern
 		op := map[string]any{
 			"operationId": spec.ID,
 			"summary":     spec.Summary,
@@ -76,7 +86,6 @@ func OpenAPI(entries []SpecEntry) (doc []byte, problems []string) {
 				map[string]any{"token": []any{}},
 			}
 		}
-		key := openAPIPath(path)
 		if paths[key] == nil {
 			paths[key] = map[string]any{}
 		}
@@ -96,8 +105,8 @@ func OpenAPI(entries []SpecEntry) (doc []byte, problems []string) {
 		},
 		"securitySchemes": map[string]any{
 			"session": map[string]any{
-				"type": "apiKey", "in": "cookie", "name": "sid",
-				"description": "The session cookie a browser sign-in sets.",
+				"type": "apiKey", "in": "cookie", "name": "__Host-sid",
+				"description": "The session cookie a browser sign-in sets. A deployment served over plain HTTP names it sid.",
 			},
 			"token": map[string]any{
 				"type": "http", "scheme": "bearer",

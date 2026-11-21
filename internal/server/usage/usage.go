@@ -188,7 +188,11 @@ func (h *Handler) handleUsageMe(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	since, until, errMsg := httpx.ParseWindow(opUsageMe.Query(r), time.Now().UTC())
+	q, ok := opUsageMe.Query(w, r)
+	if !ok {
+		return
+	}
+	since, until, errMsg := httpx.ParseWindow(q, time.Now().UTC())
 	if errMsg != "" {
 		httpx.BadRequest(w, errMsg)
 		return
@@ -276,7 +280,11 @@ func (h *Handler) handleUsageTeam(w http.ResponseWriter, r *http.Request) {
 		httpx.InternalError(w, "usage", err)
 		return
 	}
-	since, until, errMsg := httpx.ParseWindow(opUsageTeam.Query(r), time.Now().UTC())
+	q, ok := opUsageTeam.Query(w, r)
+	if !ok {
+		return
+	}
+	since, until, errMsg := httpx.ParseWindow(q, time.Now().UTC())
 	if errMsg != "" {
 		httpx.BadRequest(w, errMsg)
 		return
@@ -365,7 +373,11 @@ func (h *Handler) handleUsageOrg(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	since, until, errMsg := httpx.ParseWindow(opUsageOrg.Query(r), time.Now().UTC())
+	q, ok := opUsageOrg.Query(w, r)
+	if !ok {
+		return
+	}
+	since, until, errMsg := httpx.ParseWindow(q, time.Now().UTC())
 	if errMsg != "" {
 		httpx.BadRequest(w, errMsg)
 		return

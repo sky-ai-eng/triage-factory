@@ -489,7 +489,7 @@ type repoJSON struct {
 	DefaultBranch  string  `json:"default_branch,omitempty" doc:"The repository's default branch on GitHub, absent before it is profiled."`
 	BaseBranch     string  `json:"base_branch,omitempty" doc:"The branch agents base their work on, absent when they use the default branch."`
 	ProfiledAt     *string `json:"profiled_at,omitempty" doc:"When the repository was last profiled, as an RFC 3339 timestamp, absent before then."`
-	CloneStatus    string  `json:"clone_status,omitempty" doc:"The state of the repository's clone: ok, failed, or pending, absent before the first clone."`
+	CloneStatus    string  `json:"clone_status,omitempty" doc:"The state of the repository's clone: pending until a clone attempt finishes, then ok or failed."`
 	CloneError     string  `json:"clone_error,omitempty" doc:"The output of the failed clone, present only when clone_status is failed."`
 	CloneErrorKind string  `json:"clone_error_kind,omitempty" doc:"What kind of failure the clone hit, ssh or other, present only when clone_status is failed."`
 	CanEdit        bool    `json:"can_edit" doc:"Whether the caller may change the repository's settings."`

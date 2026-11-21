@@ -100,6 +100,7 @@ func TestDecodeTargets_FixtureFindings(t *testing.T) {
 		"items is a type parameter, whose fields cannot be checked here; decode into a concrete type",
 		"items.when is a time.Time, which decodes itself through UnmarshalJSON",
 		"n is a json.Number, which refuses a string that is not a number without naming its field",
+		"patch is a time.Time, which decodes itself through UnmarshalJSON",
 		"ref is a decodetargets.textRef, which decodes itself through UnmarshalText",
 		"the body embeds *decodetargets.hidden, a pointer to an unexported struct, which encoding/json cannot allocate",
 		"the body is a decodetargets.stamped, which decodes itself through UnmarshalJSON",
@@ -229,9 +230,15 @@ func isHTTPXType(t types.Type, name string) bool {
 // walkDecodeTarget reports each refused shape in t, which decodes at path,
 // following encoding/json's rules for which fields it decodes.
 func walkDecodeTarget(t types.Type, path string, seen map[types.Type]bool, report func(path, reason string)) {
-	// A Patch keeps its bytes without failing, and Read reports a fault in
-	// the value under the field's name, whatever its T.
-	if isJSONType(t, "RawMessage") || isHTTPXType(t, "Patch") {
+	if isJSONType(t, "RawMessage") {
+		return
+	}
+	// A Patch keeps its bytes without failing, and Read decodes them as its
+	// T, so T is held to the same shapes as any field.
+	if isHTTPXType(t, "Patch") {
+		if named, ok := t.(*types.Named); ok && named.TypeArgs().Len() == 1 {
+			walkDecodeTarget(named.TypeArgs().At(0), path, seen, report)
+		}
 		return
 	}
 	if isJSONType(t, "Number") {

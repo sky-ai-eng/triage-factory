@@ -11,9 +11,10 @@ import (
 // The PATCH field vocabulary. A partial update has to distinguish three things
 // a client can say about one field — leave it alone, clear it, set it to this —
 // and a typed pointer can only express two: both `absent` and `null` decode to
-// nil. So a PATCH body declares its fields as json.RawMessage and reads them
-// through the helpers here, which is the convention PATCH /api/repos/{id}
-// established and every settings PATCH now follows.
+// nil. So a PATCH body keeps each field's raw bytes: as a Patch[T], which also
+// names the type the field takes (PATCH /api/repos/{id} is the reference), or
+// as a json.RawMessage read through the helpers here, as the settings PATCHes
+// do.
 //
 // The helpers all take the request's Validation, so a body with several bad
 // fields reports all of them at once instead of the first one hit.
@@ -105,6 +106,23 @@ func patchValue[T any](v *Validation, raw json.RawMessage, field string) (T, Pat
 		}
 		var typeErr *json.UnmarshalTypeError
 		errors.As(err, &typeErr)
+		// A fault inside a struct or map T is reported on the member at
+		// fault, as the body decode reports one, rather than on the whole
+		// value.
+		if typeErr != nil {
+			if sub, subType := jsonFieldPath(reflect.TypeFor[T](), typeErr.Field); sub != "" {
+				if subType == nil {
+					subType = typeErr.Type
+				}
+				path := field + "." + sub
+				message := path + " has the wrong type"
+				if want, _ := jsonType(subType, typeErr); want != "" {
+					message = path + " must be " + want
+				}
+				v.Invalid(path, message)
+				return zero, patchInvalid
+			}
+		}
 		want, _ := jsonType(reflect.TypeFor[T](), typeErr)
 		v.Invalid(field, fmt.Sprintf("%s must be %s, or null", field, want))
 		return zero, patchInvalid

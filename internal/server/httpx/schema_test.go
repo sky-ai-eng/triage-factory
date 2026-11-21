@@ -40,8 +40,24 @@ type schemaFields struct {
 	} `json:"inline" doc:"An anonymous struct."`
 	Wrapped  schemaGeneric[int] `json:"wrapped" doc:"A generic struct."`
 	Skipped  string             `json:"-"`
-	Refused  *int               `json:"refused" spec:"-"`
 	unexport string
+}
+
+type schemaShadowed struct {
+	Refused string `json:"refused" doc:"Shadowed by the outer field of its name."`
+}
+
+// schemaRefusing decodes a field only so its route can refuse it.
+type schemaRefusing struct {
+	schemaShadowed
+	Name    string `json:"name" doc:"The name."`
+	Refused *int   `json:"refused" spec:"-"`
+}
+
+// schemaTree is a generic struct that refers to itself.
+type schemaTree[T any] struct {
+	Value    T               `json:"value" doc:"The value."`
+	Children []schemaTree[T] `json:"children" doc:"The subtrees."`
 }
 
 // schemaSelfEncoding encodes itself and describes its own schema.
@@ -141,6 +157,25 @@ func TestSchema_FollowsEncodingJSON(t *testing.T) {
 			problems:   []string{httpxPath + `.schemaUndocumented.Bare (json "bare") has no doc tag`},
 		},
 		{
+			name: "spec:\"-\" in a request", t: reflect.TypeFor[schemaRefusing](), dir: dirRequest,
+			want:       `{"$ref":"#/components/schemas/SchemaRefusing"}`,
+			components: `{"SchemaRefusing":{"type":"object","properties":{"name":{"type":"string","description":"The name."}}}}`,
+		},
+		{
+			name: "spec:\"-\" in a response", t: reflect.TypeFor[schemaRefusing](),
+			want:       `{"$ref":"#/components/schemas/SchemaRefusing"}`,
+			components: `{"SchemaRefusing":{"type":"object","properties":{"name":{"type":"string","description":"The name."}},"required":["name"]}}`,
+			problems:   []string{httpxPath + `.schemaRefusing.Refused (json "refused") is tagged spec:"-", which a response field may not be: encoding/json still writes it`},
+		},
+		{
+			name: "generic struct that refers to itself", t: reflect.TypeFor[schemaTree[int]](),
+			want: `{"type":"object","properties":{
+				"value":{"type":"integer","description":"The value."},
+				"children":{"type":["array","null"],"items":{},"description":"The subtrees."}
+			},"required":["value","children"]}`,
+			problems: []string{httpxPath + ".schemaTree[int] refers to itself, which a generic struct cannot do here: it renders in place, with no component to refer to"},
+		},
+		{
 			name: "two types of one name", t: reflect.TypeFor[schemaBothLocations](),
 			want: `{"$ref":"#/components/schemas/SchemaBothLocations"}`,
 			components: `{
@@ -183,6 +218,21 @@ func TestSchema_RequestAndResponseRenderApart(t *testing.T) {
 		"SchemaLeaf":{"type":"object","properties":{"name":{"type":"string","description":"The leaf's name."}},"required":["name"]},
 		"SchemaLeafInput":{"type":"object","properties":{"name":{"type":"string","description":"The leaf's name."}}}
 	}`)
+}
+
+// TestOpenAPI_RefusesTwoPatternsAtOnePath: {name...} renders as {name}, so
+// two patterns the mux tells apart can meet at one OpenAPI path.
+func TestOpenAPI_RefusesTwoPatternsAtOnePath(t *testing.T) {
+	read := Hints{ReadOnly: HintYes, OpenWorld: HintNo}
+	path := map[string]string{"path": "The path."}
+	_, problems := OpenAPI([]SpecEntry{
+		{Op: NewBytesOp[NoBody](OpSpec{Pattern: "GET /api/files/{path}", ID: "get_file", PathParams: path, Hints: read}, "image/png")},
+		{Op: NewBytesOp[NoBody](OpSpec{Pattern: "GET /api/files/{path...}", ID: "get_files", PathParams: path, Hints: read}, "image/png")},
+	})
+	want := []string{"GET /api/files/{path} and GET /api/files/{path...} both render as GET /api/files/{path} in the spec"}
+	if !slices.Equal(problems, want) {
+		t.Errorf("problems = %q, want %q", problems, want)
+	}
 }
 
 type renderListRequest struct {
@@ -273,7 +323,7 @@ func TestOpenAPI_RendersEachKind(t *testing.T) {
 		}}}}}`},
 		{"error response", lookup(spec, "components", "responses", "Error", "content"), `{"application/json":{"schema":{"$ref":"#/components/schemas/ErrorEnvelope"}}}`},
 		{"security schemes", lookup(spec, "components", "securitySchemes"), `{
-			"session":{"type":"apiKey","in":"cookie","name":"sid","description":"The session cookie a browser sign-in sets."},
+			"session":{"type":"apiKey","in":"cookie","name":"__Host-sid","description":"The session cookie a browser sign-in sets. A deployment served over plain HTTP names it sid."},
 			"token":{"type":"http","scheme":"bearer","description":"An API token, sent as Authorization: Bearer tf_…."}}`},
 	}
 	for _, c := range checks {

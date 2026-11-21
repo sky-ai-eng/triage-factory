@@ -74,10 +74,14 @@ type schemaSet struct {
 	bodies   map[schemaKey]map[string]any
 	refs     []refSite
 	problems map[string]bool
+	// inline holds the structs being rendered in place on the current
+	// path. Such a struct has no component to refer back to, so reaching it
+	// again would never end.
+	inline map[reflect.Type]bool
 }
 
 func newSchemaSet() *schemaSet {
-	return &schemaSet{bodies: map[schemaKey]map[string]any{}, problems: map[string]bool{}}
+	return &schemaSet{bodies: map[schemaKey]map[string]any{}, problems: map[string]bool{}, inline: map[reflect.Type]bool{}}
 }
 
 func (s *schemaSet) problem(format string, args ...any) {
@@ -133,6 +137,12 @@ func (s *schemaSet) schema(t reflect.Type, dir direction, where string) map[stri
 		return map[string]any{"type": []string{"object", "null"}, "additionalProperties": s.schema(t.Elem(), dir, where)}
 	case reflect.Struct:
 		if t.Name() == "" || strings.Contains(t.Name(), "[") {
+			if s.inline[t] {
+				s.problem("%s refers to itself, which a generic struct cannot do here: it renders in place, with no component to refer to", typeLabel(t, where))
+				return map[string]any{}
+			}
+			s.inline[t] = true
+			defer delete(s.inline, t)
 			return s.object(t, dir, where)
 		}
 		key := schemaKey{t, dir}
@@ -162,6 +172,12 @@ func (s *schemaSet) object(t reflect.Type, dir direction, where string) map[stri
 		owner := label
 		if f.owner != t {
 			owner = typeLabel(f.owner, where)
+		}
+		if f.hidden {
+			if dir == dirResponse {
+				s.problem("%s.%s (json %q) is tagged spec:\"-\", which a response field may not be: encoding/json still writes it", owner, f.goName, f.name)
+			}
+			continue
 		}
 		if f.doc == "" {
 			s.problem("%s.%s (json %q) has no doc tag", owner, f.goName, f.name)
@@ -354,7 +370,11 @@ type jsonField struct {
 	// viaPointer is whether the field is promoted through an embedded
 	// pointer, which encoding/json leaves out entirely when it is nil.
 	viaPointer bool
-	index      []int
+	// hidden is whether the field, or the embedded struct it is promoted
+	// from, is tagged spec:"-". It still takes part in choosing which field
+	// a name goes to, as encoding/json sees it.
+	hidden bool
+	index  []int
 }
 
 // jsonFields returns the fields encoding/json encodes for struct t, in its
@@ -366,6 +386,7 @@ func jsonFields(t reflect.Type) []jsonField {
 		typ        reflect.Type
 		index      []int
 		viaPointer bool
+		hidden     bool
 	}
 	current := []level{}
 	next := []level{{typ: t}}
@@ -394,16 +415,17 @@ func jsonFields(t reflect.Type) []jsonField {
 				} else if !sf.IsExported() {
 					continue
 				}
-				// spec:"-" leaves out a field the body decodes only so its
-				// route can refuse it by name; it is no part of what a
-				// caller sends.
 				tag := sf.Tag.Get("json")
-				if tag == "-" || sf.Tag.Get("spec") == "-" {
+				if tag == "-" {
 					continue
 				}
 				name, opts, _ := strings.Cut(tag, ",")
 				index := append(slices.Clone(lv.index), i)
 				viaPointer := lv.viaPointer
+				// spec:"-" marks a field the body decodes only so its route
+				// can refuse it by name; it is no part of what a caller
+				// sends.
+				hidden := lv.hidden || sf.Tag.Get("spec") == "-"
 				if name != "" || !sf.Anonymous || ft.Kind() != reflect.Struct {
 					optList := strings.Split(opts, ",")
 					f := jsonField{
@@ -416,6 +438,7 @@ func jsonFields(t reflect.Type) []jsonField {
 						omit:       slices.Contains(optList, "omitempty") || slices.Contains(optList, "omitzero"),
 						quoted:     slices.Contains(optList, "string"),
 						viaPointer: viaPointer,
+						hidden:     hidden,
 						index:      index,
 					}
 					if f.name == "" {
@@ -432,7 +455,7 @@ func jsonFields(t reflect.Type) []jsonField {
 				}
 				nextCount[ft]++
 				if nextCount[ft] == 1 {
-					next = append(next, level{typ: ft, index: index, viaPointer: viaPointer || sf.Type.Kind() == reflect.Pointer})
+					next = append(next, level{typ: ft, index: index, viaPointer: viaPointer || sf.Type.Kind() == reflect.Pointer, hidden: hidden})
 				}
 			}
 		}
