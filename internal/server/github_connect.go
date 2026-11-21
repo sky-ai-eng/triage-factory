@@ -746,9 +746,8 @@ func (s *Server) handleGitHubIdentityPAT(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	pat := strings.TrimSpace(req.PAT)
-	if pat == "" {
-		badRequest(w, "A GitHub personal access token is required.")
+	pat, ok := requiredGitHubPAT(w, req.PAT)
+	if !ok {
 		return
 	}
 

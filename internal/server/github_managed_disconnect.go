@@ -175,7 +175,7 @@ func (s *Server) handleGitHubManagedInstallationDisconnect(w http.ResponseWriter
 	raw := strings.TrimSpace(r.PathValue("installation_id"))
 	id, err := strconv.ParseInt(raw, 10, 64)
 	if err != nil || id <= 0 {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidField,
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidID,
 			Message: "installation_id must be a positive integer", Field: "installation_id"})
 		return
 	}

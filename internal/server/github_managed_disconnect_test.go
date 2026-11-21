@@ -18,6 +18,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // Leaving the managed class against the bind rig: the disconnect verbs and the
@@ -321,6 +322,8 @@ func TestManagedDisconnect_PerInstallation(t *testing.T) {
 	}
 	if rec := rig.disconnect(t, "not-a-number"); rec.Code != http.StatusBadRequest {
 		t.Errorf("unbind with a malformed id status=%d, want 400", rec.Code)
+	} else if got := errorItems(t, rec)[0]; got.Reason != httpx.ReasonInvalidID || got.Field != "installation_id" {
+		t.Errorf("unbind with a malformed id error = %+v, want INVALID_ID on installation_id", got)
 	}
 	if live := rig.liveInstallations(t); fmt.Sprint(live) != "[4242]" {
 		t.Errorf("refused unbinds touched the rows: %v", live)

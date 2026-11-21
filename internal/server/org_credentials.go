@@ -78,6 +78,20 @@ var opGitHubPATPut = httpx.NewJSONOp[githubPATRequest, githubPATBindResponse](ht
 	Hints:       httpx.Hints{ReadOnly: httpx.HintNo, Destructive: httpx.HintYes, Idempotent: httpx.HintYes, OpenWorld: httpx.HintYes},
 })
 
+// requiredGitHubPAT is a GitHub token from a request body, trimmed, or a 400
+// MISSING_FIELD naming pat when nothing is left. Every route that takes one
+// calls it, so a blank token is refused the same way on all of them.
+func requiredGitHubPAT(w http.ResponseWriter, raw string) (string, bool) {
+	pat := strings.TrimSpace(raw)
+	if pat == "" {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonMissingField, Message: "A GitHub personal access token is required.", Field: "pat",
+		})
+		return "", false
+	}
+	return pat, true
+}
+
 // refuseOrgTokenInMulti answers 404 for a route that puts an org
 // GitHub token in place, when this is multi mode, and reports whether it did.
 // A multi org's GitHub access is a GitHub App, the deployment's or its
@@ -126,9 +140,8 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	pat := strings.TrimSpace(req.PAT)
-	if pat == "" {
-		badRequestField(w, "A GitHub personal access token is required.", "pat")
+	pat, ok := requiredGitHubPAT(w, req.PAT)
+	if !ok {
 		return
 	}
 
@@ -494,11 +507,4 @@ func (s *Server) kickJiraChanged(r *http.Request, orgID string) {
 	}
 	s.MarkJiraRestarted(r.Context(), orgID)
 	go s.onJiraChanged(orgID)
-}
-
-// badRequestField is a 400 that names the offending input, matching the
-// {error, field} shape the credential surfaces already return on a 422 so the
-// frontend can highlight one control either way.
-func badRequestField(w http.ResponseWriter, msg, field string) {
-	httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidBody, Message: msg, Field: field})
 }

@@ -21,6 +21,7 @@ import (
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // --- test fixtures -------------------------------------------------------
@@ -1184,4 +1185,30 @@ func orgGitHubHost(t *testing.T, s *Server) string {
 		t.Fatalf("decode org settings: %v", err)
 	}
 	return out.GitHubBaseURL
+}
+
+// TestGitHubTokenRoutes_RefuseABlankToken: every route that takes a GitHub
+// token in its body refuses a blank one the same way, as a missing pat.
+func TestGitHubTokenRoutes_RefuseABlankToken(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+
+	github := "/api/orgs/" + runmode.LocalDefaultOrgID + "/github"
+	for _, route := range []struct{ name, method, path string }{
+		{"bind", http.MethodPut, github + "/pat"},
+		{"preflight", http.MethodPost, github + "/pat/preflight"},
+		{"switch", http.MethodPost, github + "/pat/switch-to"},
+		{"identity", http.MethodPost, github + "/identity/pat"},
+	} {
+		t.Run(route.name, func(t *testing.T) {
+			rec := doJSON(t, s, route.method, route.path, map[string]any{"pat": "   "})
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+			}
+			if got := errorItems(t, rec)[0]; got.Reason != httpx.ReasonMissingField || got.Field != "pat" {
+				t.Errorf("error = %+v, want MISSING_FIELD on pat", got)
+			}
+		})
+	}
 }

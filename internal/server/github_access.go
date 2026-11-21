@@ -448,9 +448,8 @@ func (s *Server) handleGitHubAccessSwitchToPAT(w http.ResponseWriter, r *http.Re
 	if !ok {
 		return
 	}
-	pat := strings.TrimSpace(req.PAT)
-	if pat == "" {
-		badRequest(w, "A GitHub personal access token is required.")
+	pat, ok := requiredGitHubPAT(w, req.PAT)
+	if !ok {
 		return
 	}
 
@@ -1054,9 +1053,8 @@ func (s *Server) handleGitHubAccessPATPreflight(w http.ResponseWriter, r *http.R
 	if !ok {
 		return
 	}
-	pat := strings.TrimSpace(req.PAT)
-	if pat == "" {
-		badRequest(w, "A GitHub personal access token is required.")
+	pat, ok := requiredGitHubPAT(w, req.PAT)
+	if !ok {
 		return
 	}
 
