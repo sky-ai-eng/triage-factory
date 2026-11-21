@@ -79,12 +79,13 @@ func (r stepWriteRig) merge(host, source string) <-chan *httptest.ResponseRecord
 	return r.send(http.MethodPost, "/api/blueprints/"+host+"/merge", map[string]any{"source_blueprint_id": source})
 }
 
-func (r stepWriteRig) putSteps(id string, prompts []string) <-chan *httptest.ResponseRecorder {
+// putSteps sends a steps PUT naming version, with brief on every step.
+func (r stepWriteRig) putSteps(id string, version int64, brief string, prompts []string) <-chan *httptest.ResponseRecorder {
 	steps := make([]map[string]any, len(prompts))
 	for i, p := range prompts {
-		steps[i] = map[string]any{"step_prompt_id": p, "brief": "edited"}
+		steps[i] = map[string]any{"step_prompt_id": p, "brief": brief}
 	}
-	return r.send(http.MethodPut, "/api/blueprints/"+id+"/steps", map[string]any{"steps": steps})
+	return r.send(http.MethodPut, "/api/blueprints/"+id+"/steps", map[string]any{"steps": steps, "version": version})
 }
 
 // firstHolds sends first, holds it right after its blueprint hold, sends
@@ -124,6 +125,51 @@ func (r *viewerRig) stepPrompts(t *testing.T, blueprintID string) []string {
 	return out
 }
 
+// version reads a blueprint's version, past RLS.
+func (r *viewerRig) version(t *testing.T, blueprintID string) int64 {
+	t.Helper()
+	var v int64
+	if err := r.h.AdminDB.QueryRow(`SELECT version FROM blueprints WHERE id = $1`, blueprintID).Scan(&v); err != nil {
+		t.Fatalf("read the version of %s: %v", blueprintID, err)
+	}
+	return v
+}
+
+// briefs reads a blueprint's step briefs in step order, past RLS.
+func (r *viewerRig) briefs(t *testing.T, blueprintID string) []string {
+	t.Helper()
+	rows, err := r.h.AdminDB.Query(
+		`SELECT brief FROM blueprint_steps WHERE blueprint_id = $1 ORDER BY step_index`, blueprintID)
+	if err != nil {
+		t.Fatalf("read the briefs of %s: %v", blueprintID, err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var b string
+		if err := rows.Scan(&b); err != nil {
+			t.Fatalf("scan a brief of %s: %v", blueprintID, err)
+		}
+		out = append(out, b)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read the briefs of %s: %v", blueprintID, err)
+	}
+	return out
+}
+
+// wantRefusal fails unless rec is a 409 with one error of reason on field.
+func wantRefusal(t *testing.T, what string, rec *httptest.ResponseRecorder, reason, field string) {
+	t.Helper()
+	if rec.Code != http.StatusConflict {
+		t.Errorf("%s = %d %s, want 409", what, rec.Code, rec.Body.String())
+		return
+	}
+	if items := decodeErrorItems(t, rec); len(items) != 1 || items[0].Reason != reason || items[0].Field != field {
+		t.Errorf("%s: errors = %+v; want one %s on %s", what, items, reason, field)
+	}
+}
+
 // wantSteps fails unless blueprintID is live as wanted and holds want, in
 // order.
 func (r *viewerRig) wantSteps(t *testing.T, what, blueprintID string, live bool, want []string) {
@@ -155,7 +201,7 @@ func TestBlueprints_StepWritesRaceAMergeThatRetiresTheirBlueprint_Postgres(t *te
 	type write struct {
 		// send sends the write on A. B is the blueprint a merge or a
 		// reconnect absorbs into A.
-		send func(r stepWriteRig, a, b string, aSteps []string) <-chan *httptest.ResponseRecorder
+		send func(r stepWriteRig, a, b string, aSteps []string, aVersion int64) <-chan *httptest.ResponseRecorder
 		ok   int
 		// after is A's steps once the write commits.
 		after   func(aSteps, bSteps []string) []string
@@ -163,7 +209,7 @@ func TestBlueprints_StepWritesRaceAMergeThatRetiresTheirBlueprint_Postgres(t *te
 	}
 	writes := map[string]write{
 		"merge": {
-			send: func(r stepWriteRig, a, b string, _ []string) <-chan *httptest.ResponseRecorder {
+			send: func(r stepWriteRig, a, b string, _ []string, _ int64) <-chan *httptest.ResponseRecorder {
 				return r.merge(a, b)
 			},
 			ok:      http.StatusOK,
@@ -171,7 +217,7 @@ func TestBlueprints_StepWritesRaceAMergeThatRetiresTheirBlueprint_Postgres(t *te
 			absorbs: true,
 		},
 		"reconnect": {
-			send: func(r stepWriteRig, a, b string, _ []string) <-chan *httptest.ResponseRecorder {
+			send: func(r stepWriteRig, a, b string, _ []string, _ int64) <-chan *httptest.ResponseRecorder {
 				return r.send(http.MethodPost, "/api/blueprints/"+a+"/reconnect", map[string]any{"at_step_index": 1, "target_blueprint_id": b})
 			},
 			ok:      http.StatusOK,
@@ -179,17 +225,17 @@ func TestBlueprints_StepWritesRaceAMergeThatRetiresTheirBlueprint_Postgres(t *te
 			absorbs: true,
 		},
 		"split": {
-			send: func(r stepWriteRig, a, _ string, _ []string) <-chan *httptest.ResponseRecorder {
+			send: func(r stepWriteRig, a, _ string, _ []string, _ int64) <-chan *httptest.ResponseRecorder {
 				return r.send(http.MethodPost, "/api/blueprints/"+a+"/split", map[string]any{"at_step_index": 1})
 			},
 			ok:    http.StatusOK,
 			after: func(a, _ []string) []string { return a[:1] },
 		},
 		"steps_put": {
-			send: func(r stepWriteRig, a, _ string, aSteps []string) <-chan *httptest.ResponseRecorder {
-				return r.putSteps(a, []string{aSteps[1], aSteps[0]})
+			send: func(r stepWriteRig, a, _ string, aSteps []string, aVersion int64) <-chan *httptest.ResponseRecorder {
+				return r.putSteps(a, aVersion, "edited", []string{aSteps[1], aSteps[0]})
 			},
-			ok:    http.StatusNoContent,
+			ok:    http.StatusOK,
 			after: func(a, _ []string) []string { return []string{a[1], a[0]} },
 		},
 	}
@@ -205,7 +251,7 @@ func TestBlueprints_StepWritesRaceAMergeThatRetiresTheirBlueprint_Postgres(t *te
 			r, x, a, b, xSteps, aSteps, bSteps := setup(t)
 			merged, written := r.firstHolds(t, [2]string{"merge of A into X", name + " on A"},
 				func() <-chan *httptest.ResponseRecorder { return r.merge(x, a) },
-				func() <-chan *httptest.ResponseRecorder { return w.send(r, a, b, aSteps) })
+				func() <-chan *httptest.ResponseRecorder { return w.send(r, a, b, aSteps, r.version(t, a)) })
 			if merged.Code != http.StatusOK {
 				t.Fatalf("merge of A into X = %d %s, want 200", merged.Code, merged.Body.String())
 			}
@@ -222,7 +268,7 @@ func TestBlueprints_StepWritesRaceAMergeThatRetiresTheirBlueprint_Postgres(t *te
 		t.Run(name+"_holds_first", func(t *testing.T) {
 			r, x, a, b, xSteps, aSteps, bSteps := setup(t)
 			written, merged := r.firstHolds(t, [2]string{name + " on A", "merge of A into X"},
-				func() <-chan *httptest.ResponseRecorder { return w.send(r, a, b, aSteps) },
+				func() <-chan *httptest.ResponseRecorder { return w.send(r, a, b, aSteps, r.version(t, a)) },
 				func() <-chan *httptest.ResponseRecorder { return r.merge(x, a) })
 			if written.Code != w.ok {
 				t.Fatalf("%s on A = %d %s, want %d", name, written.Code, written.Body.String(), w.ok)
@@ -240,27 +286,27 @@ func TestBlueprints_StepWritesRaceAMergeThatRetiresTheirBlueprint_Postgres(t *te
 }
 
 // TestBlueprints_StepsPutRacesAMergeIntoItsBlueprint_Postgres runs a steps
-// PUT on X, sending the list read before the merge, against a merge of A into
-// X, in both orders. The merge holds X before it moves a step and the PUT
-// holds X before it reads or writes one, so neither can hold a step row while
-// it waits for X's row, and the two do not deadlock. A PUT ahead of the merge
-// rewrites the list it was read from, and the merge appends A's steps to it.
-// A PUT behind the merge reads the steps the merge appended, finds its list
-// leaves them out, and is refused, so they stay on X.
+// PUT on X, sending the list and the version read before the merge, against a
+// merge of A into X, in both orders. The merge holds X before it moves a step
+// and the PUT holds X before it reads or writes one, so neither can hold a
+// step row while it waits for X's row, and the two do not deadlock. A PUT
+// ahead of the merge rewrites the list it was read from, and the merge
+// appends A's steps to it. A PUT behind the merge finds X past the version
+// its list was read at, and is refused, so the merged steps stay on X.
 func TestBlueprints_StepsPutRacesAMergeIntoItsBlueprint_Postgres(t *testing.T) {
-	setup := func(t *testing.T) (r stepWriteRig, x, a string, xSteps, aSteps []string) {
+	setup := func(t *testing.T) (r stepWriteRig, x, a string, xSteps, aSteps []string, xVersion int64) {
 		r = newStepWriteRig(t)
 		x, a = r.seedChain(t, "x", 1), r.seedChain(t, "a", 2)
-		return r, x, a, r.stepPrompts(t, x), r.stepPrompts(t, a)
+		return r, x, a, r.stepPrompts(t, x), r.stepPrompts(t, a), r.version(t, x)
 	}
 
 	t.Run("put_holds_first", func(t *testing.T) {
-		r, x, a, xSteps, aSteps := setup(t)
+		r, x, a, xSteps, aSteps, xVersion := setup(t)
 		put, merged := r.firstHolds(t, [2]string{"steps PUT on X", "merge of A into X"},
-			func() <-chan *httptest.ResponseRecorder { return r.putSteps(x, xSteps) },
+			func() <-chan *httptest.ResponseRecorder { return r.putSteps(x, xVersion, "edited", xSteps) },
 			func() <-chan *httptest.ResponseRecorder { return r.merge(x, a) })
-		if put.Code != http.StatusNoContent {
-			t.Fatalf("steps PUT = %d %s, want 204", put.Code, put.Body.String())
+		if put.Code != http.StatusOK {
+			t.Fatalf("steps PUT = %d %s, want 200", put.Code, put.Body.String())
 		}
 		if merged.Code != http.StatusOK {
 			t.Errorf("merge behind the PUT = %d %s, want 200", merged.Code, merged.Body.String())
@@ -270,18 +316,14 @@ func TestBlueprints_StepsPutRacesAMergeIntoItsBlueprint_Postgres(t *testing.T) {
 	})
 
 	t.Run("merge_holds_first", func(t *testing.T) {
-		r, x, a, xSteps, aSteps := setup(t)
+		r, x, a, xSteps, aSteps, xVersion := setup(t)
 		merged, put := r.firstHolds(t, [2]string{"merge of A into X", "steps PUT on X"},
 			func() <-chan *httptest.ResponseRecorder { return r.merge(x, a) },
-			func() <-chan *httptest.ResponseRecorder { return r.putSteps(x, xSteps) })
+			func() <-chan *httptest.ResponseRecorder { return r.putSteps(x, xVersion, "edited", xSteps) })
 		if merged.Code != http.StatusOK {
 			t.Fatalf("merge = %d %s, want 200", merged.Code, merged.Body.String())
 		}
-		if put.Code != http.StatusConflict {
-			t.Errorf("steps PUT sent X's steps from before the merge, behind it = %d %s, want 409", put.Code, put.Body.String())
-		} else if items := decodeErrorItems(t, put); len(items) != 1 || items[0].Reason != httpx.ReasonConflict || items[0].Field != "steps" {
-			t.Errorf("steps PUT behind the merge: errors = %+v; want one CONFLICT on steps", items)
-		}
+		wantRefusal(t, "steps PUT sent X's steps from before the merge, behind it", put, httpx.ReasonVersionConflict, "version")
 		r.wantSteps(t, "X", x, true, concat(xSteps, aSteps))
 		r.wantSteps(t, "A", a, false, nil)
 	})
@@ -290,14 +332,14 @@ func TestBlueprints_StepsPutRacesAMergeIntoItsBlueprint_Postgres(t *testing.T) {
 // TestBlueprints_StepsPutRacesAPromptDelete_Postgres runs a steps PUT on a
 // blueprint against a delete of one of its middle prompts, in both orders.
 // The delete holds the blueprint before it moves a step and so does the PUT,
-// so the two do not deadlock: a PUT behind the delete finds the prompt it
-// names deleted and answers 422, and a delete behind the PUT deletes from the
-// list the PUT wrote.
+// so the two do not deadlock: a PUT behind the delete finds the blueprint
+// past the version it read and answers 409, and a delete behind the PUT
+// deletes from the list the PUT wrote.
 func TestBlueprints_StepsPutRacesAPromptDelete_Postgres(t *testing.T) {
-	setup := func(t *testing.T) (r stepWriteRig, a string, aSteps []string) {
+	setup := func(t *testing.T) (r stepWriteRig, a string, aSteps []string, aVersion int64) {
 		r = newStepWriteRig(t)
 		a = r.seedChain(t, "a", 3)
-		return r, a, r.stepPrompts(t, a)
+		return r, a, r.stepPrompts(t, a), r.version(t, a)
 	}
 	deletePrompt := func(r stepWriteRig, id string) func() <-chan *httptest.ResponseRecorder {
 		return func() <-chan *httptest.ResponseRecorder {
@@ -306,12 +348,12 @@ func TestBlueprints_StepsPutRacesAPromptDelete_Postgres(t *testing.T) {
 	}
 
 	t.Run("put_holds_first", func(t *testing.T) {
-		r, a, aSteps := setup(t)
+		r, a, aSteps, aVersion := setup(t)
 		put, deleted := r.firstHolds(t, [2]string{"steps PUT", "prompt delete"},
-			func() <-chan *httptest.ResponseRecorder { return r.putSteps(a, aSteps) },
+			func() <-chan *httptest.ResponseRecorder { return r.putSteps(a, aVersion, "edited", aSteps) },
 			deletePrompt(r, aSteps[1]))
-		if put.Code != http.StatusNoContent {
-			t.Fatalf("steps PUT = %d %s, want 204", put.Code, put.Body.String())
+		if put.Code != http.StatusOK {
+			t.Fatalf("steps PUT = %d %s, want 200", put.Code, put.Body.String())
 		}
 		if deleted.Code != http.StatusOK {
 			t.Errorf("prompt delete behind the PUT = %d %s, want 200", deleted.Code, deleted.Body.String())
@@ -320,18 +362,44 @@ func TestBlueprints_StepsPutRacesAPromptDelete_Postgres(t *testing.T) {
 	})
 
 	t.Run("delete_holds_first", func(t *testing.T) {
-		r, a, aSteps := setup(t)
+		r, a, aSteps, aVersion := setup(t)
 		deleted, put := r.firstHolds(t, [2]string{"prompt delete", "steps PUT"},
 			deletePrompt(r, aSteps[1]),
-			func() <-chan *httptest.ResponseRecorder { return r.putSteps(a, aSteps) })
+			func() <-chan *httptest.ResponseRecorder { return r.putSteps(a, aVersion, "edited", aSteps) })
 		if deleted.Code != http.StatusOK {
 			t.Fatalf("prompt delete = %d %s, want 200", deleted.Code, deleted.Body.String())
 		}
-		if put.Code != http.StatusUnprocessableEntity {
-			t.Errorf("steps PUT naming the deleted prompt behind the delete = %d %s, want 422", put.Code, put.Body.String())
-		}
+		wantRefusal(t, "steps PUT naming the deleted prompt behind the delete", put, httpx.ReasonVersionConflict, "version")
 		r.wantSteps(t, "the blueprint", a, true, aSteps[:1])
 	})
+}
+
+// TestBlueprints_StepsPutRacesAnotherStepsPut_Postgres runs two steps PUTs on
+// one blueprint, both sent with the version and the steps read before either.
+// They name the same steps, so only the version tells the second it was
+// decided against steps the first changed: the second waits for the first's
+// hold, finds the blueprint past the version it read, and is refused, so the
+// first's order and briefs stay.
+func TestBlueprints_StepsPutRacesAnotherStepsPut_Postgres(t *testing.T) {
+	r := newStepWriteRig(t)
+	a := r.seedChain(t, "a", 2)
+	aSteps, aVersion := r.stepPrompts(t, a), r.version(t, a)
+	reordered := []string{aSteps[1], aSteps[0]}
+
+	first, second := r.firstHolds(t, [2]string{"first steps PUT", "second steps PUT"},
+		func() <-chan *httptest.ResponseRecorder { return r.putSteps(a, aVersion, "first", reordered) },
+		func() <-chan *httptest.ResponseRecorder { return r.putSteps(a, aVersion, "second", aSteps) })
+	if first.Code != http.StatusOK {
+		t.Fatalf("first steps PUT = %d %s, want 200", first.Code, first.Body.String())
+	}
+	wantRefusal(t, "second steps PUT, sent the same version, behind the first", second, httpx.ReasonVersionConflict, "version")
+	r.wantSteps(t, "the blueprint", a, true, reordered)
+	if got := r.briefs(t, a); !slices.Equal(got, []string{"first", "first"}) {
+		t.Errorf("briefs = %v, want the first PUT's", got)
+	}
+	if v := r.version(t, a); v != aVersion+1 {
+		t.Errorf("version = %d, want %d: the first PUT's raise alone", v, aVersion+1)
+	}
 }
 
 // TestBlueprints_Postgres_AbsorbingAnotherTeamsBlueprintIs422: a merge or a

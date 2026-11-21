@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
@@ -239,10 +240,35 @@ func createChainBlueprint(t *testing.T, s *Server, name string, n int) (blueprin
 		promptIDs = append(promptIDs, p)
 		steps = append(steps, map[string]any{"step_prompt_id": p})
 	}
-	if put := doJSON(t, s, http.MethodPut, "/api/blueprints/"+bp+"/steps", map[string]any{"steps": steps}); put.Code != http.StatusNoContent {
+	if put := putBlueprintSteps(t, s, bp, steps); put.Code != http.StatusOK {
 		t.Fatalf("createChainBlueprint %s steps PUT: %d: %s", name, put.Code, put.Body.String())
 	}
 	return bp, promptIDs
+}
+
+// blueprintVersion reads a blueprint's version through its point read.
+func blueprintVersion(t *testing.T, s *Server, blueprintID string) int64 {
+	t.Helper()
+	rec := doJSON(t, s, http.MethodGet, "/api/blueprints/"+blueprintID, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("read blueprint %s: %d: %s", blueprintID, rec.Code, rec.Body.String())
+	}
+	var b struct {
+		Version int64 `json:"version"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &b); err != nil || b.Version < 1 {
+		t.Fatalf("read blueprint %s: version %d, %v (body=%s)", blueprintID, b.Version, err, rec.Body.String())
+	}
+	return b.Version
+}
+
+// putBlueprintSteps sends a steps PUT on blueprintID naming the version the
+// blueprint is at now.
+func putBlueprintSteps(t *testing.T, s *Server, blueprintID string, steps []map[string]any) *httptest.ResponseRecorder {
+	t.Helper()
+	return doJSON(t, s, http.MethodPut, "/api/blueprints/"+blueprintID+"/steps", map[string]any{
+		"steps": steps, "version": blueprintVersion(t, s, blueprintID),
+	})
 }
 
 // attachHandler creates a handler in automate on blueprintID for eventType

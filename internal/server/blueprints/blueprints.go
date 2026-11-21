@@ -579,16 +579,32 @@ type blueprintStepInput struct {
 
 type blueprintStepsPutRequest struct {
 	Steps []blueprintStepInput `json:"steps"`
+	// Version is the blueprint version the list was decided against: the
+	// blueprint_version the caller's read of the steps returned, or the
+	// blueprint's own version when it has no steps to carry one. Reading the
+	// two apart is safe there, because the only write that moves an empty
+	// blueprint's steps adds some, and a list that leaves them out is refused
+	// whatever version it names. Not part of the list: it cannot be cleared,
+	// and it says which steps the list replaces.
+	Version *int64 `json:"version"`
 }
 
 // handleBlueprintStepsPut replaces the blueprint's step list: the order of its
-// steps, their briefs, and the prompts it adds. The list must name every step
-// the blueprint holds when the PUT lands, so a list read before another write
-// added a step is refused instead of dropping that step, and a PUT never
-// leaves a prompt in no blueprint, where no screen shows it. Removing a step
-// is a prompt delete, and moving one is a split and a merge. Validates that
-// the blueprint exists and that every step references a prompt the
-// blueprint's own team owns (same-team guard).
+// steps, their briefs, and the prompts it adds. It answers the blueprint and
+// the steps it wrote, as merge and split do, so the caller holds the version
+// its next PUT names.
+//
+// Two rules keep it from losing a write it never saw. The body names the
+// version of the steps it was decided against, and a blueprint any write has
+// moved past that version since is refused (409 VERSION_CONFLICT): the
+// caller's list was built from steps the blueprint no longer has, so the only
+// honest answer is to read them again. And the list must name every step the
+// blueprint holds (409 CONFLICT), so a PUT never leaves a prompt in no
+// blueprint, where no screen shows it. Removing a step is a prompt delete,
+// and moving one is a split and a merge.
+//
+// Validates that the blueprint exists and that every step references a
+// prompt the blueprint's own team owns (same-team guard).
 func (h *Handler) handleBlueprintStepsPut(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
@@ -624,34 +640,51 @@ func (h *Handler) handleBlueprintStepsPut(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	stepIDs := make([]string, 0, len(req.Steps))
+	briefs := make([]string, 0, len(req.Steps))
+	for _, step := range req.Steps {
+		stepIDs = append(stepIDs, step.StepPromptID)
+		briefs = append(briefs, step.Brief)
+	}
+	var shape httpx.Validation
+	switch {
+	case req.Version == nil:
+		shape.Add(httpx.ErrorItem{
+			Reason:  httpx.ReasonMissingField,
+			Message: "version is required: send the blueprint_version your read of the steps returned, or the blueprint's version if it has no steps",
+			Field:   "version",
+		})
+	case *req.Version < 1:
+		// Versions start at 1 and only rise, so anything below names no read.
+		shape.Invalid("version", "version must be the blueprint_version your read of the steps returned, or the blueprint's version if it has no steps: a positive integer")
+	}
+	if slices.Contains(stepIDs, "") {
+		shape.Add(httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "step_prompt_id is required for every step", Field: "steps"})
+	}
+	if shape.Flush(w, http.StatusBadRequest) {
+		return
+	}
 	if len(req.Steps) > maxBlueprintSteps {
 		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonOutOfRange, Message: "blueprint may not exceed " + strconv.Itoa(maxBlueprintSteps) + " steps", Field: "steps"})
 		return
 	}
 
-	stepIDs := make([]string, 0, len(req.Steps))
-	briefs := make([]string, 0, len(req.Steps))
-	for _, step := range req.Steps {
-		if step.StepPromptID == "" {
-			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "step_prompt_id is required for every step", Field: "steps"})
-			return
-		}
-		stepIDs = append(stepIDs, step.StepPromptID)
-		briefs = append(briefs, step.Brief)
-	}
-
 	// Validate each step's prompt exists + is same-team, then replace in one
 	// tx so all lookups and the final write share claims.
 	var (
-		fault blueprintFault
-		gone  bool
+		fault   blueprintFault
+		gone    bool
+		written blueprintWithSteps
 	)
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		// Held until commit, before the checks below read the blueprint's
-		// steps and which blueprint owns each prompt, so they read what a
-		// merge, split, reconnect, prompt delete or steps PUT that held this
-		// blueprint first committed (BlueprintStore.GetAllForUpdate). A
-		// blueprint retired meanwhile is answered 404.
+		// version, its steps, and which blueprint owns each prompt, so they
+		// read what a merge, split, reconnect, prompt delete or steps PUT
+		// that held this blueprint first committed
+		// (BlueprintStore.GetAllForUpdate). Every write that raises the
+		// version holds the row too, so the version cannot move between this
+		// check and the replace. A blueprint retired meanwhile is answered
+		// 404.
 		held, e := tx.Blueprints.GetForUpdate(r.Context(), orgID, id)
 		if e != nil {
 			return e
@@ -660,9 +693,15 @@ func (h *Handler) handleBlueprintStepsPut(w http.ResponseWriter, r *http.Request
 			gone = true
 			return nil
 		}
-		// First, because a list that leaves out a step the blueprint holds
-		// was decided against steps the blueprint no longer has, and every
-		// check after this one would judge that list.
+		// First, because every check after it would judge a list decided
+		// against steps the blueprint no longer has.
+		if held.Version != *req.Version {
+			fault.raise(http.StatusConflict, httpx.ReasonVersionConflict,
+				"this blueprint changed since you read its steps; read them again and decide again", "version")
+			return nil
+		}
+		// A step the list leaves out would lose its row, and its prompt would
+		// be in no blueprint.
 		current, e := tx.Blueprints.ListSteps(r.Context(), orgID, id)
 		if e != nil {
 			return e
@@ -675,8 +714,8 @@ func (h *Handler) handleBlueprintStepsPut(w http.ResponseWriter, r *http.Request
 		}
 		if len(missing) > 0 {
 			fault.raise(http.StatusConflict, httpx.ReasonConflict,
-				"the blueprint holds steps this list leaves out (step prompts "+strings.Join(missing, ", ")+
-					"): read its steps again and send a list that names every one. To remove a step, delete its prompt.", "steps")
+				"the list leaves out steps the blueprint holds (step prompts "+strings.Join(missing, ", ")+
+					"): a steps PUT may reorder, re-brief, and add steps, but must name every one. To remove a step, delete its prompt.", "steps")
 			return nil
 		}
 		for i, sid := range stepIDs {
@@ -714,8 +753,16 @@ func (h *Handler) handleBlueprintStepsPut(w http.ResponseWriter, r *http.Request
 		if fault.status != 0 {
 			return nil
 		}
-		_, e = tx.Blueprints.ReplaceSteps(r.Context(), orgID, id, stepIDs, briefs)
-		return e
+		stamped, e := tx.Blueprints.ReplaceSteps(r.Context(), orgID, id, stepIDs, briefs)
+		if e != nil {
+			return e
+		}
+		steps, e := tx.Blueprints.ListSteps(r.Context(), orgID, id)
+		if e != nil {
+			return e
+		}
+		written = blueprintWithSteps{Blueprint: &stamped, Steps: steps}
+		return nil
 	}); err != nil {
 		httpx.InternalError(w, "blueprints", err)
 		return
@@ -727,8 +774,10 @@ func (h *Handler) handleBlueprintStepsPut(w http.ResponseWriter, r *http.Request
 	if fault.write(w) {
 		return
 	}
-
-	w.WriteHeader(http.StatusNoContent)
+	if written.Steps == nil {
+		written.Steps = []domain.BlueprintStep{}
+	}
+	httpx.WriteJSON(w, http.StatusOK, written)
 }
 
 // blueprintFault is a validation refusal raised inside a WithTx closure and

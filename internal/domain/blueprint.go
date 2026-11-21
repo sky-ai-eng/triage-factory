@@ -86,6 +86,10 @@ type Blueprint struct {
 	UserModified bool      `json:"user_modified"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
+	// Version starts at 1 and rises with every write that changes the
+	// blueprint's name or its steps. A steps write names the version it read,
+	// and lands only on a blueprint still at it.
+	Version int64 `json:"version"`
 }
 
 // SeedBlueprint is a shipped blueprint definition used by the boot seeder:
@@ -110,6 +114,12 @@ type BlueprintStep struct {
 	StepPromptID string    `json:"step_prompt_id"`
 	Brief        string    `json:"brief"`
 	CreatedAt    time.Time `json:"created_at"`
+	// BlueprintVersion is the step's blueprint's Version, read in the same
+	// statement as the step. The step list carries it so a steps PUT can name
+	// the version of the steps it was decided against, whatever order the
+	// caller read the blueprint and its steps in. Reads that return the
+	// blueprint beside its steps leave it zero, and it is omitted.
+	BlueprintVersion int64 `json:"blueprint_version,omitempty"`
 }
 
 // BlueprintPlanStep is one step of the resolved plan frozen onto a

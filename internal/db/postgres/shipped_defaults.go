@@ -492,7 +492,7 @@ func pgExecuteUnitPlan(ctx context.Context, q queryer, orgID, teamID string, b d
 
 	if plan.Action == db.UnitApply && (plan.RenameHeader || plan.ReplaceSteps) {
 		if _, err := q.ExecContext(ctx,
-			`UPDATE blueprints SET name = $1, updated_at = $2 WHERE org_id = $3 AND id = $4`,
+			`UPDATE blueprints SET name = $1, updated_at = $2, version = version + 1 WHERE org_id = $3 AND id = $4`,
 			plan.HeaderName, now, orgID, blueprintID,
 		); err != nil {
 			return fmt.Errorf("update blueprint header: %w", err)

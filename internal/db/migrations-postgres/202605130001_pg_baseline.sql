@@ -3857,6 +3857,12 @@ CREATE TABLE public.blueprints (
     deleted_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    -- The blueprint's optimistic-concurrency token. A write that changes its
+    -- name or its steps raises it in the same UPDATE; a write to any other
+    -- column (usage_count, hidden, user_modified alone, a plain soft delete)
+    -- leaves it. A steps PUT names the version it read and lands only on a
+    -- blueprint still at it.
+    version bigint DEFAULT 1 NOT NULL,
     -- source is app-validated, not CHECK-constrained.
     CONSTRAINT blueprints_system_has_no_creator CHECK ((((source = 'system'::text) AND (creator_user_id IS NULL)) OR ((source <> 'system'::text) AND (creator_user_id IS NOT NULL))))
 );

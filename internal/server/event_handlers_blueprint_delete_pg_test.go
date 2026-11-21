@@ -90,9 +90,11 @@ func (r *blueprintRaceRig) chainBlueprint(t *testing.T) (blueprintID, head, tail
 	blueprintID = r.mustCreate(t, "/api/blueprints", map[string]any{"name": "Chain"}, "id")
 	head = r.mustCreate(t, "/api/prompts", map[string]any{"name": "head", "body": "b"}, "id")
 	tail = r.mustCreate(t, "/api/prompts", map[string]any{"name": "tail", "body": "b"}, "id")
+	// A new blueprint is at version 1.
 	if rec := r.do(http.MethodPut, "/api/blueprints/"+blueprintID+"/steps", map[string]any{
-		"steps": []map[string]any{{"step_prompt_id": head}, {"step_prompt_id": tail}},
-	}); rec.Code != http.StatusNoContent {
+		"steps":   []map[string]any{{"step_prompt_id": head}, {"step_prompt_id": tail}},
+		"version": 1,
+	}); rec.Code != http.StatusOK {
 		t.Fatalf("PUT steps = %d: %s", rec.Code, rec.Body.String())
 	}
 	return blueprintID, head, tail

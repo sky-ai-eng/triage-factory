@@ -21,9 +21,9 @@ func TestBlueprintRunGet_StepNamesFromFrozenPlan(t *testing.T) {
 
 	bpID, p0 := createWrappedBlueprint(t, s, "Reproduce")
 	p1 := createBarePrompt(t, s, "Patch")
-	if put := doJSON(t, s, http.MethodPut, "/api/blueprints/"+bpID+"/steps", map[string]any{
-		"steps": []map[string]any{{"step_prompt_id": p0}, {"step_prompt_id": p1, "brief": "land the fix"}},
-	}); put.Code != http.StatusNoContent {
+	if put := putBlueprintSteps(t, s, bpID, []map[string]any{
+		{"step_prompt_id": p0}, {"step_prompt_id": p1, "brief": "land the fix"},
+	}); put.Code != http.StatusOK {
 		t.Fatalf("set blueprint steps: %d: %s", put.Code, put.Body.String())
 	}
 
@@ -93,9 +93,9 @@ func TestBlueprintRunGet_StepNamesFromFrozenPlan(t *testing.T) {
 	// Growing the live blueprint after the run was minted does not grow the
 	// run's rendered step count: the board derives its step pips from it.
 	p2 := createBarePrompt(t, s, "Appended")
-	if put := doJSON(t, s, http.MethodPut, "/api/blueprints/"+bpID+"/steps", map[string]any{
-		"steps": []map[string]any{{"step_prompt_id": p0}, {"step_prompt_id": p1}, {"step_prompt_id": p2}},
-	}); put.Code != http.StatusNoContent {
+	if put := putBlueprintSteps(t, s, bpID, []map[string]any{
+		{"step_prompt_id": p0}, {"step_prompt_id": p1}, {"step_prompt_id": p2},
+	}); put.Code != http.StatusOK {
 		t.Fatalf("grow live blueprint: %d: %s", put.Code, put.Body.String())
 	}
 	if got := getBlueprintRunSteps(t, s, plannedID); len(got) != 2 {

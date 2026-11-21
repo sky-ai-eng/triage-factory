@@ -81,7 +81,7 @@ func (s *blueprintStore) List(ctx context.Context, orgID string, f db.BlueprintL
 		return []domain.Blueprint{}, total, nil
 	}
 
-	q := `SELECT id, name, source, usage_count, user_modified, team_id, system_slug, created_at, updated_at
+	q := `SELECT ` + pgBlueprintColumns + `
 		FROM blueprints` + where + ` ORDER BY updated_at DESC, id`
 	pageArgs := args
 	if opts.Limit > 0 {
@@ -208,7 +208,7 @@ func holdLiveBlueprintsPG(ctx context.Context, q queryer, orgID string, ids ...s
 // order scanBlueprintRowPG reads them. Every point read SELECTs it and every
 // single-row write RETURNs it, so the write shape cannot drift from the read
 // shape as columns are added.
-const pgBlueprintColumns = `id, name, source, usage_count, user_modified, team_id, system_slug, created_at, updated_at`
+const pgBlueprintColumns = `id, name, source, usage_count, user_modified, team_id, system_slug, created_at, updated_at, version`
 
 // scanUpdatedBlueprintPG decodes an id-keyed UPDATE … RETURNING on blueprints.
 // No row scanned means the id named no live blueprint — or that RLS hides
@@ -252,7 +252,7 @@ func getBlueprint(ctx context.Context, q queryer, orgID, id string, includeDelet
 func scanBlueprintRowPG(scanFn func(dst ...any) error) (domain.Blueprint, error) {
 	var b domain.Blueprint
 	var systemSlug sql.NullString
-	if err := scanFn(&b.ID, &b.Name, &b.Source, &b.UsageCount, &b.UserModified, &b.TeamID, &systemSlug, &b.CreatedAt, &b.UpdatedAt); err != nil {
+	if err := scanFn(&b.ID, &b.Name, &b.Source, &b.UsageCount, &b.UserModified, &b.TeamID, &systemSlug, &b.CreatedAt, &b.UpdatedAt, &b.Version); err != nil {
 		return b, err
 	}
 	if systemSlug.Valid {
@@ -289,7 +289,7 @@ func (s *blueprintStore) Rename(ctx context.Context, orgID, id, name string) (do
 		return domain.Blueprint{}, db.ErrNoSuchBlueprint
 	}
 	return scanUpdatedBlueprintPG(s.app.QueryRowContext(ctx, `
-		UPDATE blueprints SET name = $1, updated_at = now(), user_modified = TRUE
+		UPDATE blueprints SET name = $1, updated_at = now(), user_modified = TRUE, version = version + 1
 		WHERE org_id = $2 AND id = $3 AND deleted_at IS NULL
 		RETURNING `+pgBlueprintColumns,
 		name, orgID, id))
@@ -416,7 +416,7 @@ func (s *blueprintStore) ListAllSteps(ctx context.Context, orgID string, f db.Bl
 	}
 
 	q := `
-		SELECT bs.blueprint_id, bs.step_index, bs.step_prompt_id, bs.brief, bs.created_at` +
+		SELECT bs.blueprint_id, bs.step_index, bs.step_prompt_id, bs.brief, bs.created_at, b.version` +
 		where + ` ORDER BY bs.blueprint_id, bs.step_index`
 	pageArgs := args
 	if opts.Limit > 0 {
@@ -431,7 +431,7 @@ func (s *blueprintStore) ListAllSteps(ctx context.Context, orgID string, f db.Bl
 	var out []domain.BlueprintStep
 	for rows.Next() {
 		var st domain.BlueprintStep
-		if err := rows.Scan(&st.BlueprintID, &st.StepIndex, &st.StepPromptID, &st.Brief, &st.CreatedAt); err != nil {
+		if err := rows.Scan(&st.BlueprintID, &st.StepIndex, &st.StepPromptID, &st.Brief, &st.CreatedAt, &st.BlueprintVersion); err != nil {
 			return nil, 0, err
 		}
 		out = append(out, st)
@@ -476,7 +476,7 @@ func (s *blueprintStore) ReplaceSteps(ctx context.Context, orgID, blueprintID st
 		// set with no row to name; this stamp is the single-row write, and its
 		// RETURNING is what the caller renders after the replace.
 		b, err := scanUpdatedBlueprintPG(tx.QueryRowContext(ctx,
-			`UPDATE blueprints SET updated_at = now(), user_modified = TRUE WHERE org_id = $1 AND id = $2
+			`UPDATE blueprints SET updated_at = now(), user_modified = TRUE, version = version + 1 WHERE org_id = $1 AND id = $2
 			 RETURNING `+pgBlueprintColumns,
 			orgID, blueprintID))
 		if err != nil {
@@ -522,7 +522,7 @@ func (s *blueprintStore) MergeInto(ctx context.Context, orgID, hostID, sourceID 
 			return fmt.Errorf("reparent source steps: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE blueprints SET deleted_at = now() WHERE org_id = $1 AND id = $2`,
+			`UPDATE blueprints SET deleted_at = now(), version = version + 1 WHERE org_id = $1 AND id = $2`,
 			orgID, sourceID); err != nil {
 			return fmt.Errorf("soft-delete source: %w", err)
 		}
@@ -530,7 +530,7 @@ func (s *blueprintStore) MergeInto(ctx context.Context, orgID, hostID, sourceID 
 		// the row must be touched for the trigger to fire) and stamp
 		// user_modified true (the source is retired, not stamped).
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE blueprints SET updated_at = now(), user_modified = TRUE WHERE org_id = $1 AND id = $2`, orgID, hostID); err != nil {
+			`UPDATE blueprints SET updated_at = now(), user_modified = TRUE, version = version + 1 WHERE org_id = $1 AND id = $2`, orgID, hostID); err != nil {
 			return fmt.Errorf("bump host updated_at: %w", err)
 		}
 		return nil
@@ -573,7 +573,7 @@ func insertTriggerlessBlueprintPG(ctx context.Context, q queryer, orgID, id, nam
 // caller) inside an open tx. Errors when the row is missing or already deleted.
 func softDeleteBlueprintTxPG(ctx context.Context, q queryer, orgID, id string) error {
 	res, err := q.ExecContext(ctx,
-		`UPDATE blueprints SET deleted_at = now(), user_modified = TRUE WHERE org_id = $1 AND id = $2 AND deleted_at IS NULL`, orgID, id)
+		`UPDATE blueprints SET deleted_at = now(), user_modified = TRUE, version = version + 1 WHERE org_id = $1 AND id = $2 AND deleted_at IS NULL`, orgID, id)
 	if err != nil {
 		return err
 	}
@@ -633,7 +633,7 @@ func (s *blueprintStore) SplitAt(ctx context.Context, orgID, id string, atIndex 
 			return fmt.Errorf("reparent tail steps: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE blueprints SET updated_at = now(), user_modified = TRUE WHERE org_id = $1 AND id = $2`, orgID, id); err != nil {
+			`UPDATE blueprints SET updated_at = now(), user_modified = TRUE, version = version + 1 WHERE org_id = $1 AND id = $2`, orgID, id); err != nil {
 			return fmt.Errorf("bump upstream updated_at: %w", err)
 		}
 		return nil
@@ -688,7 +688,7 @@ func (s *blueprintStore) DeleteStep(ctx context.Context, orgID, blueprintID stri
 				return fmt.Errorf("isolate deleted step: %w", err)
 			}
 			if _, err := tx.ExecContext(ctx,
-				`UPDATE blueprints SET updated_at = now(), user_modified = TRUE WHERE org_id = $1 AND id = $2`, orgID, blueprintID); err != nil {
+				`UPDATE blueprints SET updated_at = now(), user_modified = TRUE, version = version + 1 WHERE org_id = $1 AND id = $2`, orgID, blueprintID); err != nil {
 				return fmt.Errorf("bump upstream updated_at: %w", err)
 			}
 		default:
@@ -710,7 +710,7 @@ func (s *blueprintStore) DeleteStep(ctx context.Context, orgID, blueprintID stri
 				return fmt.Errorf("isolate deleted step: %w", err)
 			}
 			if _, err := tx.ExecContext(ctx,
-				`UPDATE blueprints SET updated_at = now(), user_modified = TRUE WHERE org_id = $1 AND id = $2`, orgID, blueprintID); err != nil {
+				`UPDATE blueprints SET updated_at = now(), user_modified = TRUE, version = version + 1 WHERE org_id = $1 AND id = $2`, orgID, blueprintID); err != nil {
 				return fmt.Errorf("bump upstream updated_at: %w", err)
 			}
 		}
