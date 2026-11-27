@@ -1,0 +1,38 @@
+# Grafana dashboard provider for the bundled observability stack — the
+# dashboards half of the same file-is-source-of-truth posture as
+# grafana-datasources.yaml.
+#
+# Mounted read-only into /etc/grafana/provisioning/dashboards/, pointing at
+# the dashboards/ folder next to this file, mounted read-only at the path
+# below. Grafana loads every *.json under it at start and re-reads the
+# directory on a timer (10s by default), so editing a checked-in dashboard
+# and saving shows up without restarting the container.
+#
+# Why the dashboards live in their own subdirectory rather than beside this
+# file: Grafana walks `options.path` recursively looking for dashboard JSON.
+# Pointing it at the provisioning directory itself would work today only
+# because this file is YAML, and would break the moment anything else with a
+# .json extension lands there.
+
+apiVersion: 1
+
+providers:
+  - name: Triage Factory
+    orgId: 1
+    # Top level of the dashboard list, not a folder — there is one dashboard
+    # and it is also the home page. A folder would add a click.
+    folder: ''
+    type: file
+    # Read-only in the UI, which is the point of checking the JSON in: the
+    # file is the source of truth, so a fresh grafana volume reproduces the
+    # dashboards exactly and nothing here depends on somebody's saved state.
+    #
+    # `allowUiUpdates: false` is what makes Grafana refuse a save-in-place
+    # ("Cannot save provisioned dashboard"); `disableDeletion: true` stops
+    # the UI removing a dashboard that would reappear on the next scan
+    # anyway. Neither blocks Export → Save as copy, which is how you take a
+    # provisioned dashboard somewhere mutable and experiment on it.
+    allowUiUpdates: false
+    disableDeletion: true
+    options:
+      path: /etc/grafana/provisioning/dashboards/triage-factory

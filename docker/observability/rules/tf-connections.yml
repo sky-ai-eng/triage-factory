@@ -1,0 +1,192 @@
+# Alerting rules for TF's connections to the systems it connects to (GitHub,
+# Jira, Slack's Web API, and the LLM providers), read from
+# tf_upstream_requests_total, tf_upstream_up, tf_conversations_deferred and
+# tf_github_scope_drift_repos. Loaded by the bundled Prometheus through the
+# rule_files glob in prometheus.yml.
+#
+# Every critical alert in this file is fleet-wide on purpose. Each org connects with
+# its own credentials, and often to its own host: a GitHub Enterprise Server
+# or Jira Data Center that may be reachable only through that org's VPN. When
+# one of those hosts is down, or an org's credential has been revoked, the
+# problem belongs to that org and nothing an operator does will fix it, so it
+# must never page one. What an operator can act on is many orgs failing
+# against the same upstream at once: an outage of a service they share
+# (github.com, Atlassian's cloud, Slack, an LLM provider), or a fault in this
+# deployment's network or in TF. So each rule compares the number of failing
+# orgs with the number of orgs it has a value for, and never looks at one org:
+# it needs at least two orgs before it can fire, so a single-org deployment
+# gets no page from either and reads the dashboard's "Orgs with failing
+# requests" and "Orgs down" panels instead. Two warnings, not pages, can fire
+# on one org's reading: ConversationsDeferred and GitHubScopeDrift.
+#
+# Delivery is not configured in this repo. The bundled stack runs no
+# Alertmanager and prometheus.yml has no `alerting:` block, so a firing alert
+# appears on Prometheus's /alerts page and as an ALERTS series, and is sent
+# nowhere. Where it goes (a pager, chat, email) is a per-deployment choice:
+# add an `alerting:` block that points at your Alertmanager, or load this file
+# into the Prometheus you already run.
+
+groups:
+  - name: tf-connections
+    rules:
+      # More than half of the orgs sending requests to one upstream are
+      # failing against it, sustained for 10 minutes, with at least two orgs
+      # sending requests. An org is failing when more than half of its
+      # attempts in the last 5 minutes ended transient or auth, so the
+      # occasional 5xx among an org's healthy requests does not count it.
+      #
+      # transient|auth are the outcomes that mean the upstream could not be
+      # reached or would not accept the credential. rate_limited is the
+      # upstream asking TF to wait, which the clients handle; rejected is a
+      # request TF built wrong, which no org's connection explains.
+      #
+      # org_id!="" throughout: a request made for no org records an empty
+      # org_id, which is not an org and must not be counted as one.
+      - alert: UpstreamFailingFleetWide
+        expr: |
+          (
+            count by (upstream) (
+              (
+                sum by (upstream, org_id) (rate(tf_upstream_requests_total{org_id!="",outcome=~"transient|auth"}[5m]))
+                /
+                sum by (upstream, org_id) (rate(tf_upstream_requests_total{org_id!=""}[5m]))
+              ) > 0.5
+            )
+            /
+            count by (upstream) (sum by (upstream, org_id) (rate(tf_upstream_requests_total{org_id!=""}[5m])) > 0)
+          ) > 0.5
+          and on (upstream)
+          count by (upstream) (sum by (upstream, org_id) (rate(tf_upstream_requests_total{org_id!=""}[5m])) > 0) >= 2
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Most orgs' requests to {{ $labels.upstream }} are failing"
+          description: >-
+            {{ $value | humanizePercentage }} of the orgs sending requests to
+            {{ $labels.upstream }} had more than half of their attempts end
+            transient or auth in the last 5 minutes, sustained for 10 minutes. Many orgs failing at once points
+            at {{ $labels.upstream }} itself or at this deployment's network,
+            not at one org's configuration. Break it down with
+            sum by (org_id, outcome) (rate(tf_upstream_requests_total{upstream="{{ $labels.upstream }}"}[5m])).
+
+      # More than half of the orgs with a recorded connection state for one
+      # upstream are down against it, sustained for 5 minutes. tf_upstream_up
+      # is the state each org's GitHub and Jira poll cycles store at their
+      # end: 0 when every request the cycle made failed in transit or was
+      # refused for its credential, 1 when the upstream answered at all. It
+      # is exported by the one pod holding the background brain, so the
+      # counts below are not multiplied by the number of pods.
+      #
+      # The same floor as UpstreamFailingFleetWide: at least two orgs with a
+      # recorded state, so one org down in a single-org deployment, which is
+      # 100% of it, does not page. With two orgs, one down is 50% and does
+      # not fire either.
+      - alert: UpstreamDownFleetWide
+        expr: |
+          (
+            count by (upstream) (tf_upstream_up == 0)
+            /
+            count by (upstream) (tf_upstream_up)
+          ) > 0.5
+          and on (upstream)
+          count by (upstream) (tf_upstream_up) >= 2
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Most orgs' connections to {{ $labels.upstream }} are down"
+          description: >-
+            {{ $value | humanizePercentage }} of the orgs with a recorded
+            connection state for {{ $labels.upstream }} are down: their last
+            poll cycle got no answer from it. More than half have been down
+            throughout the last 5 minutes, though not necessarily the same
+            orgs. Many orgs
+            down at once points at {{ $labels.upstream }} itself or at this
+            deployment's network, not at one org's configuration. List them
+            with tf_upstream_up{upstream="{{ $labels.upstream }}"} == 0, and
+            read the pod's WARN "connection lost" lines for each org's
+            failure class.
+
+      # Delegated runs have been waiting out an unavailable upstream for half
+      # an hour. A run whose provider call fails through its own retries, or
+      # whose workspace setup cannot reach GitHub, hands its claim back and is
+      # tried again on a backoff (30s, 1m, 2m, 5m, then every 10m) rather
+      # than failing; tf_conversations_deferred counts the conversations
+      # waiting for their next attempt. Zero is the steady state. A brief
+      # nonzero is an upstream blip the backoff rode out; a sustained one
+      # means an upstream the runs depend on has been unavailable for half an
+      # hour, and after about four hours each waiting run parks as
+      # upstream_unavailable until someone messages it.
+      #
+      # A warning, not a page, and not fleet-wide: one org's own upstream (its
+      # Bedrock account, its GitHub Enterprise Server, a regional outage) can
+      # be the whole of it, and nothing is lost while it waits. The gauge is
+      # exported by the one pod holding the background brain, so the sum is
+      # not multiplied by the number of pods.
+      #
+      # The rule reads each org's maximum over the last 15 minutes, not the
+      # gauge as sampled. A run still retrying leaves the count between two
+      # waits, while it is due and while an engagement makes its own five
+      # attempts, and an org with only that run has no series then. Sampled
+      # in that gap, the plain gauge would restart the 30-minute timer, so
+      # one run could spend its whole four-hour budget without the rule
+      # firing. 15 minutes spans that gap and is shorter than the 30, so a
+      # single blip the backoff rode out still cannot fire it alone.
+      - alert: ConversationsDeferred
+        expr: sum(max_over_time(tf_conversations_deferred[15m])) > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Delegated runs have been waiting on an unavailable upstream for 30 minutes"
+          description: >-
+            Conversations have been waiting to retry because an upstream they
+            depend on was unavailable: their model provider, or GitHub while
+            the run set up its workspace. There has been no 15-minute stretch
+            free of them for 30 minutes, though not necessarily the same
+            conversations; up to {{ $value }} in the last 15 minutes, summing
+            each org's peak. Break it down with sum by (org_id)
+            (tf_conversations_deferred), and read
+            sum by (upstream, org_id, outcome) (rate(tf_upstream_requests_total{upstream=~"anthropic|bedrock|github"}[5m]))
+            for what the providers and GitHub's API are answering. A clone or
+            fetch that could not reach the git host is not a request counted
+            there; the executor's log line for the hand-back names it.
+
+      # A team in an org tracks a repository that the org's GitHub App grant
+      # does not contain, so the poll skips it: its pull requests produce no
+      # events, tasks or runs. The count is the one the org's GitHub access
+      # settings list, read from the grant mirror each GitHub poll cycle
+      # refreshes, so it trails GitHub by at most a poll interval and a
+      # minute. It counts repositories on an account the App was uninstalled
+      # from as well as ones a selective grant leaves out. An org connected
+      # with a token has no series, nor does one whose grant mirror has never
+      # been refreshed, so a missing series is not a zero.
+      #
+      # A warning, not a page: the fault is one org's configuration, which the
+      # org's admin fixes on GitHub, and nothing an operator does changes it.
+      # The hour keeps it from firing while someone is still editing the grant
+      # or the tracked set.
+      #
+      # The gauge is exported by the one pod holding the background brain.
+      # When the lease moves, the series moves to another pod and is missing
+      # for a minute or two while the new holder takes its first reading, so
+      # the rule reads each org's maximum over 5 minutes across pods, which
+      # carries the hour over the handoff.
+      - alert: GitHubScopeDrift
+        expr: max by (org_id) (max_over_time(tf_github_scope_drift_repos[5m])) > 0
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Org {{ $labels.org_id }} tracks repositories outside its GitHub App grant"
+          description: >-
+            For an hour, teams in org {{ $labels.org_id }} have tracked
+            repositories that the org's GitHub App grant does not contain,
+            {{ $value }} in the last 5 minutes. Triage Factory does not poll
+            them, so their pull requests produce no tasks or runs. An admin of
+            the org fixes it: add the repositories to the App's installation
+            on GitHub (installing the App on their account if it has none
+            there), or untrack them. The org's GitHub access settings
+            (Organization → Settings → GitHub access) list them, with a link
+            to each installation's settings page on GitHub.
