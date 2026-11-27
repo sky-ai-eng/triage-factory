@@ -22,10 +22,6 @@ Release archives, checksums and signatures are on the [releases page](https://gi
 - [Security](https://docs.triagefactory.com/security/): the isolation model, for evaluating a deployment
 - [Verifying releases](https://docs.triagefactory.com/security/verifying-releases/)
 
-## Files here
-
-`.env.example` and `docker/observability/` are the self-hosting configuration the documentation links to, as of the latest release. The same files ship in each release's compose bundle.
-
 ## Reporting a problem
 
 Open an [issue](https://github.com/sky-ai-eng/triage-factory/issues).
