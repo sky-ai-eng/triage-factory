@@ -28,4 +28,4 @@ Open an [issue](https://github.com/sky-ai-eng/triage-factory/issues).
 
 ## License
 
-Triage Factory is distributed under the [Triage Factory License 1.0](LICENSE): free to use for your own internal business purposes, but not to redistribute or offer as a hosted service. Enterprise features are gated behind a commercial license key.
+Triage Factory is distributed under the [Triage Factory License](LICENSE): free to use for your own purposes, but not to redistribute or offer to others as a hosted service. The license file has the full terms, and it is the license of the latest release. Enterprise features are gated behind a commercial license key.
